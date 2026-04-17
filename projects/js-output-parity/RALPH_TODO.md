@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 64 output diffs
+**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **593 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **64**
+- Output diffs: **76**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,72 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **593 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **64**
+- Output diffs: **76**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep OCaml's alias-preservation boundaries in the repeated
+  JS-backend lambda simplifier so named direct-wrapper callees and
+  allocating-constant apply arguments survive the `lam_pass_remove_alias`-style
+  sweeps instead of being substituted away too early in Rust
+- Active backend focus shifts back to **Phase 3 / Phase 4** from `PLAN.md`
+  rather than Phase 5, because the verified lambda-side fix exposed a deeper
+  lowering / JS-cleanup mismatch instead of a final-dumper issue; the active
+  change stays in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose alias pass does not erase
+    single-use direct-wrapper callees or allocating constant arguments when
+    doing so would change later backend behavior
+  - `compiler/core/lam_pass_collect.ml`, whose named-function metadata only
+    marks exact `Lfunction` bindings and not `PjsFnMake` wrappers, so later
+    backend inlining sees wrapper functions as callable values but not as
+    literal named-function bodies
+  - direct OCaml `-drawlambda` repro for `tests/tests/src/update_record_test`
+    showing the temp bindings `v`, `val0`, and `fff` still present after the
+    lambda backend cleanup, which proves that the checked-in snapshot removes
+    them later in JS lowering / cleanup rather than in the lambda simplifier
+- Rust change:
+  - added `SimplifyEnv::without_value_substitutions()` and stopped propagating
+    general value substitutions into apply arguments, matching OCaml's more
+    conservative alias behavior for call sites
+  - preserved single-use aliases that are used as direct-wrapper callees or as
+    allocating constant apply arguments via
+    `alias_occurs_as_apply_callee(...)` and
+    `alias_occurs_as_apply_argument(...)`
+  - restricted named-function inlining metadata to exact `Lambda::Lfunction`
+    bindings with `inlineable_named_function(...)`, while leaving
+    `known_functions` on the broader `inlineable_local_function(...)` path so
+    direct-wrapper / eta cleanup still works
+  - added focused regression coverage in
+    `named_function_inlining_does_not_treat_alias_bound_record_constants_as_literal_args`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml named_function_inlining_does_not_treat_alias_bound_record_constants_as_literal_args -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml simplifies_named_nested_pjs_fn_make_application_chain_from_ari_regress_shape -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml reruns_backend_cleanup_after_lets_dce_beta_reduces_uncurried_pjs_fn_make_calls -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh update_record_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ExternalShadow.res` remained exact after the same
+    simplify change, so the change is not reopening the earlier external
+    shadow/import-shape cluster
+  - `tests/tests/src/update_record_test.res` now reproduces the OCaml
+    lambda-side temp bindings (`v`, `val0`, `fff`) in Rust as well, which
+    aligns the simplify stage but regresses final emitted JS because the later
+    Rust backend still fails to collapse those temporaries back out
+  - reading `compiler/core/js_pass_flatten_and_mark_dead.ml` confirmed this is
+    not the pass that removes the `update_record_test` temps: OCaml only
+    substitutes immutable `Caml_block` aliases there, matching the existing
+    Rust behavior
+  - the remaining root cause for this cluster is therefore earlier JS lowering
+    or later JS-call cleanup before printing, not another lambda alias tweak
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **592 / 657** -> **581 / 657** (**-11**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **65** -> **76** (**+11**)
 
 Latest iteration on **2026-04-17**:
 

@@ -117,6 +117,12 @@ impl SimplifyEnv {
         next.allow_dead_binding_direct_wrapper_cleanup = true;
         next
     }
+
+    fn without_value_substitutions(&self) -> Self {
+        let mut next = self.clone();
+        next.substitutions.clear();
+        next
+    }
 }
 
 fn collect_mutated_idents(lam: &Lambda) -> HashSet<Ident> {
@@ -1225,7 +1231,9 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if kind != LetKind::Variable {
                 if let Some(func) = inlineable_local_function(&value) {
                     body_env.known_functions.insert(id.clone(), func.clone());
-                    if analysis::lfunction_can_be_inlined(&func) {
+                    if inlineable_named_function(&value).is_some()
+                        && analysis::lfunction_can_be_inlined(&func)
+                    {
                         body_env.functions.insert(id.clone(), func);
                     }
                 }
@@ -1269,7 +1277,16 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 && !env.preserved_export_bindings.contains(id)
             {
                 let use_info = alias_use_info(id, &body);
+                let preserve_single_use_direct_wrapper_callee_alias =
+                    inlineable_direct_wrapper_function(&value).is_some()
+                        && alias_occurs_as_apply_callee(id, &body);
+                let preserve_single_use_allocating_constant_apply_arg = matches!(
+                    &value,
+                    Lambda::Lconst(constant) if constant.is_allocating()
+                ) && alias_occurs_as_apply_argument(id, &body);
                 if use_info.times == 1
+                    && !preserve_single_use_direct_wrapper_callee_alias
+                    && !preserve_single_use_allocating_constant_apply_arg
                     && !preserve_single_use_switch_scrutinee_alias
                     && !substitution_hits_assigned_free_variable(&value, &body)
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
@@ -1313,6 +1330,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             for (id, expr) in bindings {
                 if let Some(func) = inlineable_local_function(expr) {
                     recursive_env.known_functions.insert(id.clone(), func);
+                }
+                if let Some(func) = inlineable_named_function(expr) {
+                    if analysis::lfunction_can_be_inlined(&func) {
+                        recursive_env.functions.insert(id.clone(), func);
+                    }
                 }
             }
             let bindings = bindings
@@ -1671,6 +1693,207 @@ fn alias_occurs_as_switch_scrutinee(target: &Ident, lam: &Lambda) -> bool {
                 || alias_occurs_as_switch_scrutinee(target, body)
         }
         Lambda::Lassign(_, value) => alias_occurs_as_switch_scrutinee(target, value),
+    }
+}
+
+fn alias_occurs_as_apply_callee(target: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            matches!(apply.ap_func.as_ref(), Lambda::Lvar(id) if id.same(target))
+                || alias_occurs_as_apply_callee(target, &apply.ap_func)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| alias_occurs_as_apply_callee(target, arg))
+        }
+        Lambda::Lfunction(func) => alias_occurs_as_apply_callee(target, &func.body),
+        Lambda::Llet(_, id, value, body) => {
+            alias_occurs_as_apply_callee(target, value)
+                || if id.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_callee(target, body)
+                }
+        }
+        Lambda::Lletrec(bindings, body) => {
+            if bindings.iter().any(|(id, _)| id.same(target)) {
+                false
+            } else {
+                bindings
+                    .iter()
+                    .any(|(_, binding)| alias_occurs_as_apply_callee(target, binding))
+                    || alias_occurs_as_apply_callee(target, body)
+            }
+        }
+        Lambda::Lprim(info) => info
+            .args
+            .iter()
+            .any(|arg| alias_occurs_as_apply_callee(target, arg)),
+        Lambda::Lswitch(scrutinee, switch) => {
+            alias_occurs_as_apply_callee(target, scrutinee)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_callee(target, body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_callee(target, body))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_apply_callee(target, body))
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            alias_occurs_as_apply_callee(target, scrutinee)
+                || cases
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_callee(target, body))
+                || default
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_apply_callee(target, body))
+        }
+        Lambda::LstaticRaise(_, args) => args
+            .iter()
+            .any(|arg| alias_occurs_as_apply_callee(target, arg)),
+        Lambda::LstaticCatch(body, ids, handler) => {
+            alias_occurs_as_apply_callee(target, body)
+                || if ids.1.iter().any(|id| id.same(target)) {
+                    false
+                } else {
+                    alias_occurs_as_apply_callee(target, handler)
+                }
+        }
+        Lambda::LtryWith(body, exn, handler) => {
+            alias_occurs_as_apply_callee(target, body)
+                || if exn.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_callee(target, handler)
+                }
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            alias_occurs_as_apply_callee(target, cond)
+                || alias_occurs_as_apply_callee(target, then_)
+                || alias_occurs_as_apply_callee(target, else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            alias_occurs_as_apply_callee(target, first)
+                || alias_occurs_as_apply_callee(target, second)
+        }
+        Lambda::Lfor(id, from, to, _, body) => {
+            alias_occurs_as_apply_callee(target, from)
+                || alias_occurs_as_apply_callee(target, to)
+                || if id.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_callee(target, body)
+                }
+        }
+        Lambda::Lassign(_, value) => alias_occurs_as_apply_callee(target, value),
+    }
+}
+
+fn alias_occurs_as_apply_argument(target: &Ident, lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            apply
+                .ap_args
+                .iter()
+                .any(|arg| matches!(arg, Lambda::Lvar(id) if id.same(target)))
+                || alias_occurs_as_apply_argument(target, &apply.ap_func)
+                || apply
+                    .ap_args
+                    .iter()
+                    .any(|arg| alias_occurs_as_apply_argument(target, arg))
+        }
+        Lambda::Lfunction(func) => alias_occurs_as_apply_argument(target, &func.body),
+        Lambda::Llet(_, id, value, body) => {
+            alias_occurs_as_apply_argument(target, value)
+                || if id.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_argument(target, body)
+                }
+        }
+        Lambda::Lletrec(bindings, body) => {
+            if bindings.iter().any(|(id, _)| id.same(target)) {
+                false
+            } else {
+                bindings
+                    .iter()
+                    .any(|(_, binding)| alias_occurs_as_apply_argument(target, binding))
+                    || alias_occurs_as_apply_argument(target, body)
+            }
+        }
+        Lambda::Lprim(info) => info
+            .args
+            .iter()
+            .any(|arg| alias_occurs_as_apply_argument(target, arg)),
+        Lambda::Lswitch(scrutinee, switch) => {
+            alias_occurs_as_apply_argument(target, scrutinee)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_argument(target, body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_argument(target, body))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_apply_argument(target, body))
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            alias_occurs_as_apply_argument(target, scrutinee)
+                || cases
+                    .iter()
+                    .any(|(_, body)| alias_occurs_as_apply_argument(target, body))
+                || default
+                    .as_deref()
+                    .is_some_and(|body| alias_occurs_as_apply_argument(target, body))
+        }
+        Lambda::LstaticRaise(_, args) => args
+            .iter()
+            .any(|arg| alias_occurs_as_apply_argument(target, arg)),
+        Lambda::LstaticCatch(body, ids, handler) => {
+            alias_occurs_as_apply_argument(target, body)
+                || if ids.1.iter().any(|id| id.same(target)) {
+                    false
+                } else {
+                    alias_occurs_as_apply_argument(target, handler)
+                }
+        }
+        Lambda::LtryWith(body, exn, handler) => {
+            alias_occurs_as_apply_argument(target, body)
+                || if exn.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_argument(target, handler)
+                }
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            alias_occurs_as_apply_argument(target, cond)
+                || alias_occurs_as_apply_argument(target, then_)
+                || alias_occurs_as_apply_argument(target, else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            alias_occurs_as_apply_argument(target, first)
+                || alias_occurs_as_apply_argument(target, second)
+        }
+        Lambda::Lfor(id, from, to, _, body) => {
+            alias_occurs_as_apply_argument(target, from)
+                || alias_occurs_as_apply_argument(target, to)
+                || if id.same(target) {
+                    false
+                } else {
+                    alias_occurs_as_apply_argument(target, body)
+                }
+        }
+        Lambda::Lassign(_, value) => alias_occurs_as_apply_argument(target, value),
     }
 }
 
@@ -3005,6 +3228,13 @@ fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
     }
 }
 
+fn inlineable_named_function(value: &Lambda) -> Option<LFunction> {
+    match value {
+        Lambda::Lfunction(func) => Some(func.clone()),
+        _ => None,
+    }
+}
+
 fn inlineable_direct_wrapper_function(value: &Lambda) -> Option<LFunction> {
     match value {
         Lambda::Lprim(crate::lambda::PrimInfo {
@@ -3179,10 +3409,11 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
         }
     }
 
+    let arg_env = env.without_value_substitutions();
     let args: Vec<_> = apply
         .ap_args
         .iter()
-        .map(|arg| simplify_with_env(arg, env, exports))
+        .map(|arg| simplify_with_env(arg, &arg_env, exports))
         .collect();
 
     if let Lambda::Lvar(id) = &*apply.ap_func {
@@ -4160,7 +4391,7 @@ fn collect_inlineable_functions(lam: &Lambda) -> HashMap<Ident, LFunction> {
             Lambda::Llet(kind, id, value, body) => {
                 collect_into(value, functions);
                 if *kind != LetKind::Variable {
-                    if let Some(func) = inlineable_local_function(value) {
+                    if let Some(func) = inlineable_named_function(value) {
                         if analysis::lfunction_can_be_inlined(&func) {
                             functions.insert(id.clone(), func);
                         }
@@ -4769,7 +5000,8 @@ mod tests {
     use crate::location::Location;
 
     use super::{
-        simplify_for_js_backend, simplify_for_js_backend_with_jsx_preserve, substitute_alias_use,
+        inlineable_local_function, simplify_for_js_backend,
+        simplify_for_js_backend_with_jsx_preserve, substitute_alias_use,
     };
 
     fn transformed_jsx_tag_arg<'a>(lam: &'a Lambda) -> Option<&'a Lambda> {
@@ -6710,6 +6942,128 @@ mod tests {
             ),
             "expected the arity_deopt-style uncurry chain to collapse to nested integer adds, got {simplified:?}"
         );
+    }
+
+    #[test]
+    fn named_function_inlining_does_not_treat_alias_bound_record_constants_as_literal_args() {
+        let val0 = Ident::create_local("val0");
+        let fff = Ident::create_local("fff");
+        let val1 = Ident::create_local("val1");
+        let x = Ident::create_local("x");
+        let init = Ident::create_local("init");
+        let invalid_record = TagInfo::record(
+            vec![
+                ("invalid_js_id'".to_string(), false),
+                ("x".to_string(), false),
+            ],
+            crate::parser::ast::MutableFlag::Immutable,
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            val0.clone(),
+            Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: invalid_record.clone(),
+                elements: vec![Constant::int(3), Constant::int(2)],
+            }),
+            Lambda::let_(
+                LetKind::Strict,
+                fff.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        1,
+                        vec![x.clone()],
+                        Lambda::let_(
+                            LetKind::Strict,
+                            init.clone(),
+                            Lambda::var(x.clone()),
+                            Lambda::prim(
+                                Primitive::Pmakeblock(
+                                    0,
+                                    invalid_record,
+                                    Mutable::Immutable,
+                                ),
+                                vec![
+                                    Lambda::prim(
+                                        Primitive::Paddint,
+                                        vec![
+                                            Lambda::prim(
+                                                Primitive::Pfield(
+                                                    0,
+                                                    crate::lambda::compat::FieldDbgInfo::Record {
+                                                        name: "invalid_js_id'".to_string(),
+                                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                                    },
+                                                ),
+                                                vec![Lambda::var(x.clone())],
+                                                Location::none(),
+                                            ),
+                                            Lambda::const_(Constant::int(2)),
+                                        ],
+                                        Location::none(),
+                                    ),
+                                    Lambda::prim(
+                                        Primitive::Pfield(
+                                            1,
+                                            crate::lambda::compat::FieldDbgInfo::Record {
+                                                name: "x".to_string(),
+                                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                            },
+                                        ),
+                                        vec![Lambda::var(init.clone())],
+                                        Location::none(),
+                                    ),
+                                ],
+                                Location::none(),
+                            ),
+                        ),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    val1.clone(),
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(fff.clone())),
+                        ap_args: vec![Lambda::var(val0.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    Lambda::var(val1.clone()),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Llet(_, kept_val0, _, body) = &simplified else {
+            panic!("expected the record constant binding to remain outermost, got {simplified:?}");
+        };
+        assert!(kept_val0.same(&val0));
+
+        let Lambda::Llet(_, kept_fff, fff_value, body) = body.as_ref() else {
+            panic!("expected the wrapper function binding to remain after val0, got {simplified:?}");
+        };
+        assert!(kept_fff.same(&fff));
+        assert!(
+            inlineable_local_function(fff_value).is_some(),
+            "expected the wrapper binding to remain callable, got {fff_value:?}"
+        );
+
+        let Lambda::Lapply(Apply { ap_func, ap_args, .. }) = body.as_ref() else {
+            panic!("expected the final body to stay as a named call, got {simplified:?}");
+        };
+        assert!(matches!(
+            ap_func.as_ref(),
+            Lambda::Lvar(id) if id.same(&fff)
+        ));
+        assert!(matches!(ap_args.as_slice(), [Lambda::Lvar(id)] if id.same(&val0)));
     }
 
     #[test]
