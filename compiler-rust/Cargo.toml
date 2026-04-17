@@ -68,7 +68,7 @@ tempfile = "3"
 [features]
 default = ["native", "comptime-inline"]
 native = ["rayon", "dashmap", "env_logger", "clap"]
-wasm = ["wasm-bindgen"]
+wasm = ["wasm-bindgen", "comptime-inline"]
 comptime-inline = ["boa_engine"]
 
 [profile.release]
