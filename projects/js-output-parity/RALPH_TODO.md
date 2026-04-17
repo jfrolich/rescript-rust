@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
+**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 69 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,65 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep the recursive-module projected-field fix from
+  `recursive_module_test` without reopening the global-module-field alias
+  regressions in `test_pervasive` and `test_pervasives3`
+- Active backend focus stayed in **Phase 4** late lambda / JS-backend cleanup
+  from `PLAN.md`: the verified change is in
+  `compiler-rust/src/lambda/simplify.rs`, not in the printer
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose alias cleanup keeps the
+    recursive-module field materialized when the projected local-module field is
+    reused outside the module block
+  - checked-in `tests/tests/src/test_pervasive.mjs` and
+    `tests/tests/src/test_pervasives3.mjs`, which show OCaml does **not**
+    materialize a separate top-level `$at` alias when the projected field comes
+    from a global module read
+- Rust change:
+  - narrowed the projected-field preservation path in
+    `preserve_local_module_materialized_alias_binding(...)` so it only keeps
+    aliases materialized when the simplified module field read comes from a
+    local module variable (`Pfield(..., [Lvar _])`), not from a global module
+    read
+  - added focused simplifier coverage in
+    `local_module_blocks_keep_field_aliases_materialized_when_projected_outside_like_recursive_module_test`
+    and
+    `local_module_blocks_inline_direct_global_field_aliases_projected_back_outside_like_test_pervasive`
+  - updated the `module_parameter_test` compile assertion to match current
+    OCaml output (`"abc".length`), which remains a checked-in snapshot
+    mismatch rather than a backend regression
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_inline_direct_global_field_aliases_projected_back_outside_like_test_pervasive -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_keep_field_aliases_materialized_when_projected_outside_like_recursive_module_test -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_keep_simplified_global_module_aliases_materialized_like_module_parameter_test -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_keep_simplified_module_field_aliases_materialized_like_uncurried_cast -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh recursive_module_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_pervasive --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_pervasives3 --diff`
+  - `timeout 30 ./scripts/test_js_single.sh module_parameter_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh uncurried_cast --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/recursive_module_test.res` is exact again and stays exact;
+    the recursive local-module field alias still remains materialized at the
+    projected call site
+  - `tests/tests/src/test_pervasive.res` and
+    `tests/tests/src/test_pervasives3.res` are exact again; Rust no longer
+    emits the extra hoisted `let $at = Pervasives.$at;` alias
+  - `tests/tests/src/module_parameter_test.res` still differs only because the
+    checked-in snapshot expects `v("abc")` while current OCaml emits
+    `"abc".length`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **587 / 657** -> **588 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **70** -> **69** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

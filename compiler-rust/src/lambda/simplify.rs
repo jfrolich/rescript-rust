@@ -5356,6 +5356,17 @@ fn safe_aliasable_module_field_read(lam: &Lambda) -> bool {
     }
 }
 
+fn safe_aliasable_local_module_field_read(lam: &Lambda) -> bool {
+    matches!(
+        lam,
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
+    )
+}
+
 fn materialized_local_module_alias_value(lam: &Lambda) -> bool {
     matches!(lam, Lambda::LglobalModule(_, _)) || safe_aliasable_module_field_read(lam)
 }
@@ -5366,10 +5377,14 @@ fn preserve_local_module_materialized_alias_binding(
     simplified_value: &Lambda,
     body: &Lambda,
 ) -> bool {
+    let projected_field_outside_local_module = safe_aliasable_local_module_field_read(
+        simplified_value,
+    ) && local_module_block_using_ident_has_projected_field(body, id);
     lambda_uses_ident_in_local_module_block(body, id)
         && materialized_local_module_alias_value(simplified_value)
         && (!materialized_local_module_alias_value(original_value)
-            || lambda_uses_ident_outside_local_module_block(body, id))
+            || lambda_uses_ident_outside_local_module_block(body, id)
+            || projected_field_outside_local_module)
 }
 
 fn preserve_local_module_materialized_alias_binding_in_alias_cleanup(
@@ -10776,16 +10791,21 @@ mod tests {
         let module_binding = Ident::create_local("N");
         let field_binding = Ident::create_local("s");
         let param = Ident::create_local("v");
+        let module_alias_marker = Ident::create_local("let");
         let stdlib_string = Ident::create_persistent("Stdlib_String");
 
         let simplified = simplify_for_js_backend(&Lambda::let_(
             LetKind::Strict,
             identity.clone(),
-            Lambda::function_(
-                1,
-                vec![param.clone()],
-                Lambda::var(param),
-                FunctionAttribute::default(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![param.clone()],
+                    Lambda::var(param),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
             ),
             Lambda::let_(
                 LetKind::Strict,
@@ -10795,7 +10815,12 @@ mod tests {
                     field_binding.clone(),
                     Lambda::Lapply(Apply {
                         ap_func: Box::new(Lambda::var(identity)),
-                        ap_args: vec![Lambda::LglobalModule(stdlib_string.clone(), false)],
+                        ap_args: vec![Lambda::let_(
+                            LetKind::Alias,
+                            module_alias_marker,
+                            Lambda::const_(Constant::ModuleAlias),
+                            Lambda::LglobalModule(stdlib_string.clone(), false),
+                        )],
                         ap_info: ApInfo {
                             loc: Location::none(),
                             inlined: InlineAttribute::Default,
@@ -10977,6 +11002,142 @@ mod tests {
     }
 
     #[test]
+    fn local_module_blocks_keep_field_aliases_materialized_when_projected_outside_like_recursive_module_test()
+     {
+        let recursive_module = Ident::create_local("M");
+        let field_binding = Ident::create_local("fact");
+        let module_binding = Ident::create_local("Fact");
+        let call_result = Ident::create_local("result");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            recursive_module.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Module(vec!["fact".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::function_(
+                    1,
+                    vec![Ident::create_local("n")],
+                    Lambda::const_(Constant::int(1)),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                field_binding.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "fact".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(recursive_module.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    module_binding.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["M".to_string(), "fact".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![
+                            Lambda::var(recursive_module.clone()),
+                            Lambda::var(field_binding.clone()),
+                        ],
+                        Location::none(),
+                    ),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        call_result.clone(),
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::prim(
+                                Primitive::Pfield(
+                                    1,
+                                    FieldDbgInfo::Module {
+                                        name: "fact".to_string(),
+                                    },
+                                ),
+                                vec![Lambda::var(module_binding.clone())],
+                                Location::none(),
+                            )),
+                            ap_args: vec![Lambda::const_(Constant::int(5))],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                        Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::Tuple,
+                                Mutable::Immutable,
+                            ),
+                            vec![
+                                Lambda::var(module_binding.clone()),
+                                Lambda::var(call_result.clone()),
+                            ],
+                            Location::none(),
+                        ),
+                    ),
+                ),
+            ),
+        ));
+
+        let Some(field_value) = find_binding_value(&simplified, &field_binding) else {
+            panic!("expected the projected local-module field alias to remain materialized");
+        };
+        assert!(matches!(
+            field_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                args,
+                ..
+            }) if name == "fact"
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&recursive_module))
+        ));
+
+        let Some(module_value) = find_binding_value(&simplified, &module_binding) else {
+            panic!("expected the local module binding to remain");
+        };
+        assert!(matches!(
+            module_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+                args,
+                ..
+            }) if matches!(fields.as_slice(), [first, second] if first == "M" && second == "fact")
+                && matches!(
+                    args.as_slice(),
+                    [Lambda::Lvar(module_id), Lambda::Lvar(field_id)]
+                        if module_id.same(&recursive_module) && field_id.same(&field_binding)
+                )
+        ));
+
+        let Some(call_value) = find_binding_value(&simplified, &call_result) else {
+            panic!("expected the projected field call to remain bound");
+        };
+        assert!(matches!(
+            call_value,
+            Lambda::Lapply(Apply { ap_func, ap_args, .. })
+                if matches!(ap_func.as_ref(), Lambda::Lvar(id) if id.same(&field_binding))
+                    && matches!(
+                        ap_args.as_slice(),
+                        [Lambda::Lconst(Constant::Int { i: 5, .. })]
+                    )
+        ));
+    }
+
+    #[test]
     fn local_module_blocks_inline_direct_global_field_aliases_used_only_for_module_construction_like_exception_alias()
      {
         let belt_list = Ident::create_persistent("Belt_List");
@@ -11086,6 +11247,72 @@ mod tests {
                         && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&module_param))
                 )
         ));
+    }
+
+    #[test]
+    fn local_module_blocks_inline_direct_global_field_aliases_projected_back_outside_like_test_pervasive(
+    ) {
+        let pervasives = Ident::create_persistent("Pervasives");
+        let field_binding = Ident::create_local("$at");
+        let module_binding = Ident::create_local("Pervasives");
+        let projected = Ident::create_local("v");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Alias,
+            field_binding.clone(),
+            Lambda::prim(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "@".to_string(),
+                    },
+                ),
+                vec![Lambda::LglobalModule(pervasives.clone(), false)],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                module_binding.clone(),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::module(vec!["@".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(field_binding.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    projected.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            0,
+                            FieldDbgInfo::Module {
+                                name: "@".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(module_binding.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![module_binding.clone(), projected.clone()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(module_binding.clone()), Lambda::var(projected.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        ));
+
+        assert!(
+            find_binding_value(&simplified, &field_binding).is_none(),
+            "global module field aliases projected back out of a local module should inline away",
+        );
+        let _ = (module_binding, pervasives);
     }
 
     #[test]

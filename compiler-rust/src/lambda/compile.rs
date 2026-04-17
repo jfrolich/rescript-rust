@@ -20568,12 +20568,12 @@ mod tests {
             "expected module_parameter_test to keep the local module alias binding materialized, got:\n{output}"
         );
         assert!(
-            output.contains("3, v(\"abc\")"),
-            "expected module_parameter_test to keep the exported function call at the snapshot site, got:\n{output}"
+            output.contains("3, \"abc\".length"),
+            "expected module_parameter_test to match current OCaml by reducing the exported wrapper call at the checked site, got:\n{output}"
         );
         assert!(
-            !output.contains("s: Stdlib_String") && !output.contains("3, \"abc\".length"),
-            "unexpected inlined local-module alias or exported-call body in module_parameter_test:\n{output}"
+            !output.contains("s: Stdlib_String") && !output.contains("3, v(\"abc\")"),
+            "unexpected inlined local-module field or stale snapshot-era wrapper call remained in module_parameter_test:\n{output}"
         );
     }
 
