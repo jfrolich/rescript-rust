@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
+**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,54 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's direct-return lowering for the
+  `Lstaticcatch (Ltrywith (Lstaticraise ...))` identity-handler case so Rust
+  stops materializing a temporary `let y; try { y = g(x); } ... return y;`
+  shape in `test_match_exception` and instead keeps the checked-in
+  `try { return g(x); } catch ...` form
+- Active backend focus stayed in **Phase 4** JS-pass / return-shape cleanup
+  from `PLAN.md`: the verified change is in
+  `compiler-rust/src/lambda/compile.rs`, not in the printer
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, whose `compile_lambda` return-position path
+    resolves bound static exits directly back into the enclosing `try` return
+    when the staticcatch handler is just the bound identity variable
+  - checked-in `tests/tests/src/test_match_exception.mjs`, which proves OCaml
+    does not peel this identity handler out into a temporary assignment
+- Rust change:
+  - added `staticcatch_handler_is_identity_binding(...)` in
+    `compiler-rust/src/lambda/compile.rs`
+  - narrowed `uses_fallthrough_staticcatch_return(...)` so `LtryWith` bodies no
+    longer take the fallthrough temp-assignment path when the bound staticcatch
+    handler is only the identity variable
+  - added focused regression coverage in
+    `staticcatch_wrapped_trywith_identity_handler_returns_directly_like_ocaml`
+    and `test_match_exception_keeps_direct_try_return_like_ocaml`
+- Verified focused guards for this slice:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release staticcatch_wrapped_trywith_identity_handler_returns_directly_like_ocaml`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release test_match_exception_keeps_direct_try_return_like_ocaml`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh test_match_exception --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_2316_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_match_exception.res` is exact again; Rust now keeps
+    the direct `try`-body return shape OCaml checks in for the identity
+    staticcatch handler
+  - `tests/tests/src/gpr_2316_test.res` stayed on its pre-existing diff, so the
+    narrower staticcatch-return change did not reopen the broader exit-flag
+    cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **585 / 657** -> **586 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **72** -> **71** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

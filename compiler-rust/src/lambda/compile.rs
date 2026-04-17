@@ -1515,6 +1515,13 @@ impl LambdaCompiler {
         }
     }
 
+    fn staticcatch_handler_is_identity_binding(&self, bindings: &[Ident], handler: &Lambda) -> bool {
+        matches!(
+            (bindings, handler),
+            ([binding], Lambda::Lvar(id)) if id.same(binding)
+        )
+    }
+
     fn compile_fallthrough_static_raise_return_block(
         &mut self,
         label: i32,
@@ -1728,6 +1735,7 @@ impl LambdaCompiler {
             Lambda::LtryWith(try_body, _, _)
                 if !inside_enclosing_staticcatch_chain
                     && !bindings.is_empty()
+                    && !self.staticcatch_handler_is_identity_binding(bindings, handler)
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
@@ -17090,6 +17098,78 @@ mod tests {
     }
 
     #[test]
+    fn staticcatch_wrapped_trywith_identity_handler_returns_directly_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let g = Ident::create_local("g");
+        let x = Ident::create_local("x");
+        let exn = Ident::create_local("exn");
+        let y = Ident::create_local("y");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LtryWith(
+                Box::new(Lambda::LstaticRaise(
+                    -1,
+                    vec![Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(g.clone())),
+                        ap_args: vec![Lambda::var(x.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })],
+                )),
+                exn.clone(),
+                Box::new(Lambda::const_(Constant::int(3))),
+            )),
+            (-1, vec![y.clone()]),
+            Box::new(Lambda::var(y)),
+        ));
+
+        let [try_stmt] = block.as_slice() else {
+            panic!("expected the identity staticcatch wrapper to collapse to one try statement, got {block:?}");
+        };
+        let StatementDesc::Try(body, Some((caught, handler)), None) = &try_stmt.desc else {
+            panic!("expected the collapsed block to stay a try statement, got {try_stmt:?}");
+        };
+        assert!(caught.same(&exn));
+        assert!(matches!(
+            body.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Call(func, args, _),
+                    ..
+                }),
+                ..
+            }] if args.len() == 1
+                && matches!(
+                    func.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    } if id.same(&g)
+                )
+                && matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                        ..
+                    }] if id.same(&x)
+                )
+        ));
+        assert!(matches!(
+            handler.as_slice(),
+            [Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                    ..
+                }),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
     fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml() {
         let mut compiler = LambdaCompiler::new();
         let loop_ = Ident::create_local("loop");
@@ -20243,6 +20323,23 @@ mod tests {
         assert!(
             !output.contains("v: 33"),
             "unexpected inlined local-module wrapper call result in pr6726:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_match_exception_keeps_direct_try_return_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("test_match_exception");
+        assert!(
+            output.contains("function f(g, x) {\n  try {\n    return g(x);"),
+            "expected test_match_exception to keep the try body in direct return position, got:\n{output}"
+        );
+        assert!(
+            output.contains("if (exn.RE_EXN_ID === \"Not_found\") {\n      return 3;\n    }"),
+            "expected test_match_exception to keep the catch return shape, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let y;") && !output.contains("y = g(x);") && !output.contains("return y;"),
+            "unexpected staticcatch temp assignment shape remained in test_match_exception:\n{output}"
         );
     }
 
