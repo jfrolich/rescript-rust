@@ -4,10 +4,13 @@ use crate::helpers;
 use ahash::AHashSet;
 use rayon::prelude::*;
 
-/// Read raw dependency module names from a binary .ast/.iast file on disk.
-fn read_raw_deps_from_file(
+fn get_dep_modules(
     ast_file: &str,
+    namespace: Option<String>,
+    package_modules: &AHashSet<String>,
+    valid_modules: &AHashSet<String>,
     package: &packages::Package,
+    build_state: &BuildState,
 ) -> AHashSet<String> {
     let mut deps = AHashSet::new();
     let ast_file = package.get_build_path().join(ast_file);
@@ -30,18 +33,7 @@ fn read_raw_deps_from_file(
             panic!("Could not read file {}", ast_file.to_string_lossy());
         }
     }
-    deps
-}
 
-/// Resolve raw dependency names through namespace mapping and package filtering.
-fn resolve_dep_modules(
-    raw_deps: &AHashSet<String>,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
-    valid_modules: &AHashSet<String>,
-    package: &packages::Package,
-    build_state: &BuildState,
-) -> AHashSet<String> {
     // Get the list of allowed dependency packages for this package
     let allowed_dependencies: AHashSet<String> = package
         .config
@@ -53,8 +45,7 @@ fn resolve_dep_modules(
         .cloned()
         .collect();
 
-    raw_deps
-        .iter()
+    deps.iter()
         .map(|dep| {
             let dep_first = dep.split('.').next().unwrap();
             let dep_second = dep.split('.').nth(1);
@@ -105,94 +96,39 @@ fn resolve_dep_modules(
         .collect::<AHashSet<String>>()
 }
 
-fn get_dep_modules(
-    ast_file: &str,
-    namespace: Option<String>,
-    package_modules: &AHashSet<String>,
-    valid_modules: &AHashSet<String>,
-    package: &packages::Package,
-    build_state: &BuildState,
-) -> AHashSet<String> {
-    let raw_deps = read_raw_deps_from_file(ast_file, package);
-    resolve_dep_modules(&raw_deps, namespace, package_modules, valid_modules, package, build_state)
-}
-
-pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
-    let in_process = build_state.build_mode().is_in_process();
-    // Snapshot in-memory deps before parallel iteration (avoids locking per-iteration).
-    let in_memory_deps_snapshot = if in_process {
-        Some(build_state.in_memory_deps.lock().unwrap().clone())
-    } else {
-        None
-    };
-
+pub fn get_deps(build_state: &mut BuildState, deleted_modules: &AHashSet<String>) {
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
     build_state
-        .build_state
         .modules
         .par_iter()
         .map(|(module_name, module)| match &module.source_type {
             SourceType::MlMap(_) => (module_name.to_string(), module.deps.to_owned()),
             SourceType::SourceFile(source_file) => {
                 let package = build_state
-                    .build_state
                     .get_package(&module.package_name)
                     .expect("Package not found");
                 let ast_path = helpers::get_ast_path(&source_file.implementation.path);
-                if module.deps_dirty || !build_state.build_state.deps_initialized {
-                    let mut deps = if let Some(ref mem_deps) = in_memory_deps_snapshot {
-                        // In --in-process mode: use pre-extracted deps from parse phase
-                        let key = format!("{module_name}:impl");
-                        let raw_deps: AHashSet<String> = mem_deps
-                            .get(&key)
-                            .map(|d| d.iter().cloned().collect())
-                            .unwrap_or_default();
-                        resolve_dep_modules(
-                            &raw_deps,
-                            package.namespace.to_suffix(),
-                            package.modules.as_ref().unwrap(),
-                            all_mod,
-                            package,
-                            &build_state.build_state,
-                        )
-                    } else {
-                        get_dep_modules(
-                            &ast_path.to_string_lossy(),
-                            package.namespace.to_suffix(),
-                            package.modules.as_ref().unwrap(),
-                            all_mod,
-                            package,
-                            &build_state.build_state,
-                        )
-                    };
+                if module.deps_dirty || !build_state.deps_initialized {
+                    let mut deps = get_dep_modules(
+                        &ast_path.to_string_lossy(),
+                        package.namespace.to_suffix(),
+                        package.modules.as_ref().unwrap(),
+                        all_mod,
+                        package,
+                        build_state,
+                    );
 
                     if let Some(interface) = &source_file.interface {
-                        if let Some(ref mem_deps) = in_memory_deps_snapshot {
-                            // In --in-process mode: use pre-extracted deps from parse phase
-                            let key = format!("{module_name}:intf");
-                            let raw_deps: AHashSet<String> = mem_deps
-                                .get(&key)
-                                .map(|d| d.iter().cloned().collect())
-                                .unwrap_or_default();
-                            deps.extend(resolve_dep_modules(
-                                &raw_deps,
-                                package.namespace.to_suffix(),
-                                package.modules.as_ref().unwrap(),
-                                all_mod,
-                                package,
-                                &build_state.build_state,
-                            ));
-                        } else {
-                            let iast_path = helpers::get_ast_path(&interface.path);
-                            deps.extend(get_dep_modules(
-                                &iast_path.to_string_lossy(),
-                                package.namespace.to_suffix(),
-                                package.modules.as_ref().unwrap(),
-                                all_mod,
-                                package,
-                                &build_state.build_state,
-                            ));
-                        }
+                        let iast_path = helpers::get_ast_path(&interface.path);
+
+                        deps.extend(get_dep_modules(
+                            &iast_path.to_string_lossy(),
+                            package.namespace.to_suffix(),
+                            package.modules.as_ref().unwrap(),
+                            all_mod,
+                            package,
+                            build_state,
+                        ))
                     }
                     match &package.namespace {
                         packages::Namespace::NamespaceWithEntry { namespace: _, entry }
@@ -212,15 +148,15 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
         .collect::<Vec<(String, AHashSet<String>)>>()
         .into_iter()
         .for_each(|(module_name, deps)| {
-            if let Some(module) = build_state.build_state.modules.get_mut(&module_name) {
+            if let Some(module) = build_state.modules.get_mut(&module_name) {
                 module.deps = deps.clone();
                 module.deps_dirty = false;
             }
             deps.iter().for_each(|dep_name| {
-                if let Some(module) = build_state.build_state.modules.get_mut(dep_name) {
+                if let Some(module) = build_state.modules.get_mut(dep_name) {
                     module.dependents.insert(module_name.to_string());
                 }
             });
         });
-    build_state.build_state.deps_initialized = true;
+    build_state.deps_initialized = true;
 }

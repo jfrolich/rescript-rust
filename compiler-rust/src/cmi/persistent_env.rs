@@ -291,25 +291,6 @@ impl PersistentEnv {
         (portable, new_rewrites)
     }
 
-    /// Serialize all cached modules to portable form and return them along
-    /// with alias rewrites. Used to populate a `ModuleRegistry` for reuse
-    /// across compilations (e.g. in the playground).
-    pub fn extract_all_cached_modules(
-        &self,
-        ctx: &TypeContext<'_>,
-    ) -> (HashMap<String, PortablePersStruct>, HashMap<String, Path>) {
-        let mut portables = HashMap::new();
-        for (name, loaded) in &self.cache {
-            if let Some(ps) = loaded.as_ref() {
-                portables.insert(
-                    name.clone(),
-                    portable_types::serialize_pers_struct(ps, ctx),
-                );
-            }
-        }
-        (portables, self.alias_prefix_rewrites.clone())
-    }
-
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
         self.load_path = paths;
@@ -553,15 +534,8 @@ impl PersistentEnv {
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::wasm_vfs::read_file(&path.to_string_lossy())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let bytes = fs::read(path).ok()?;
-            Some(bytes.iter().map(|&b| b as char).collect())
-        }
+        let bytes = fs::read(path).ok()?;
+        Some(bytes.iter().map(|&b| b as char).collect())
     }
 
     /// Maximum recursion depth for source-fallback type checking.
@@ -1345,7 +1319,7 @@ fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident
 }
 
 #[cfg(test)]
-mod tests_cmj {
+mod tests {
     use super::*;
 
     #[test]

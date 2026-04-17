@@ -334,7 +334,7 @@ pub fn cleanup_after_build(build_state: &BuildCommandState) {
 
 pub fn clean(path: &Path, show_progress: bool, plain_output: bool) -> Result<()> {
     let project_context = ProjectContext::new(path)?;
-    let compiler_info = build::get_compiler_info(&project_context, BuildMode::Default)?;
+    let compiler_info = build::get_compiler_info(&project_context)?;
     let packages = packages::make(&None, &project_context, show_progress)?;
 
     let timing_clean_compiler_assets = Instant::now();
@@ -366,7 +366,7 @@ pub fn clean(path: &Path, show_progress: bool, plain_output: bool) -> Result<()>
 
     let timing_clean_mjs = Instant::now();
     let mut build_state = BuildState::new(project_context, packages, compiler_info);
-    packages::parse_packages(&mut build_state, false)?;
+    packages::parse_packages(&mut build_state)?;
     let root_config = build_state.get_root_config();
     let suffix_for_print = match root_config.package_specs {
         None => match &root_config.suffix {

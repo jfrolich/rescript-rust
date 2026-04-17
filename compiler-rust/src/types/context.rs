@@ -54,24 +54,7 @@ impl TypeArena {
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
         unsafe {
             let types = &*self.types.get();
-            if r.0 < types.len() {
-                types[r.0].as_ref()
-            } else {
-                // Out-of-bounds TypeExprRef — likely from a stale cross-compilation
-                // registry cache. Create a fresh Tvar to prevent panics.
-                // This is a known correctness issue: the right fix is cross-context
-                // type re-internalization.
-                let ty = super::type_expr::TypeExpr::new(
-                    super::type_expr::TypeDesc::Tvar(None),
-                    super::type_expr::GENERIC_LEVEL,
-                    0,
-                );
-                let types = &mut *self.types.get();
-                let idx = types.len();
-                types.push(Box::new(ty));
-                // Re-borrow after push (the Vec may have reallocated)
-                types[idx].as_ref()
-            }
+            types[r.0].as_ref()
         }
     }
 
@@ -1690,57 +1673,5 @@ mod tests {
             TypeDesc::Ttuple(types) => assert_eq!(types.len(), 2),
             _ => panic!("Expected tuple"),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Global recursion depth guard for the type-checker
-// ---------------------------------------------------------------------------
-//
-// The type-checker has mutually recursive functions (type_expect,
-// type_module_expr, type_structure_item, etc.) that can loop infinitely on
-// certain functor-heavy input. A stack overflow in a Rayon worker kills the
-// entire process (SIGABRT), so we track recursion depth in a thread-local
-// and bail out with a panic *before* the OS kills us. The panic is caught by
-// `catch_unwind` in the in-process compile path.
-
-thread_local! {
-    static TYPECHECKER_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Maximum recursion depth for the type-checker. Each guarded function call
-/// adds ~10-50KB of stack frame. At 2000 depth * 50KB = 100MB, this stays
-/// well within 512MB thread stacks while being sufficient for real-world code.
-const MAX_TYPECHECKER_DEPTH: usize = 2000;
-
-/// RAII guard that increments the thread-local depth counter on creation
-/// and decrements it on drop.
-pub struct TypecheckerDepthGuard {
-    _priv: (),
-}
-
-impl TypecheckerDepthGuard {
-    /// Increment the depth counter. Returns `Ok(guard)` if within limits,
-    /// `Err(msg)` if the limit is exceeded.
-    #[inline]
-    pub fn enter() -> Result<Self, String> {
-        TYPECHECKER_DEPTH.with(|d| {
-            let depth = d.get();
-            if depth >= MAX_TYPECHECKER_DEPTH {
-                Err(format!(
-                    "Type-checker recursion depth exceeded ({MAX_TYPECHECKER_DEPTH})"
-                ))
-            } else {
-                d.set(depth + 1);
-                Ok(TypecheckerDepthGuard { _priv: () })
-            }
-        })
-    }
-}
-
-impl Drop for TypecheckerDepthGuard {
-    #[inline]
-    fn drop(&mut self) {
-        TYPECHECKER_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }

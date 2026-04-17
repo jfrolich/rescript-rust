@@ -243,7 +243,9 @@ fn run() -> Result<()> {
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
-        ..Default::default()
+        check_div_by_zero: true,
+        nopervasives: false,
+        module_name: opts.module_name.clone(),
     };
 
     if is_interface {

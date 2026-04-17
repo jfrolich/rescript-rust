@@ -13,7 +13,6 @@
 
 use std::{env, ffi::OsString, ops::Deref};
 
-use crate::build::build_types::BuildMode;
 use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use clap_verbosity_flag::InfoLevel;
 use regex::Regex;
@@ -226,29 +225,10 @@ pub struct RustParserArg {
 }
 
 #[derive(Args, Debug, Clone, Copy)]
-pub struct InProcessArg {
-    /// Run the Rust compiler fully in-process with no disk-based compiler artifacts.
-    /// Mutually exclusive with --rust.
-    #[arg(long)]
-    pub in_process: bool,
-}
-
-#[derive(Args, Debug, Clone, Copy)]
 pub struct SubprocessArg {
     /// Run bsc as a subprocess with timeout (use with --rust). Default is in-process.
     #[arg(long)]
     pub subprocess: bool,
-}
-
-/// Derive the build mode from CLI flags.
-/// Errors if --rust and --in-process are both set.
-pub fn resolve_build_mode(rust: bool, in_process: bool) -> Result<BuildMode, String> {
-    match (rust, in_process) {
-        (true, true) => Err("--rust and --in-process are mutually exclusive".to_string()),
-        (_, true) => Ok(BuildMode::InProcess),
-        (true, false) => Ok(BuildMode::Rust),
-        (false, false) => Ok(BuildMode::Default),
-    }
 }
 
 #[derive(Args, Debug, Clone, Copy)]
@@ -280,9 +260,6 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub rust: RustParserArg,
-
-    #[command(flatten)]
-    pub in_process: InProcessArg,
 
     #[command(flatten)]
     pub subprocess: SubprocessArg,
@@ -481,9 +458,6 @@ pub struct WatchArgs {
     pub rust: RustParserArg,
 
     #[command(flatten)]
-    pub in_process: InProcessArg,
-
-    #[command(flatten)]
     pub subprocess: SubprocessArg,
 
     #[command(flatten)]
@@ -500,7 +474,6 @@ impl From<BuildArgs> for WatchArgs {
             dev: build_args.dev,
             warn_error: build_args.warn_error,
             rust: build_args.rust,
-            in_process: build_args.in_process,
             subprocess: build_args.subprocess,
             dump_typed_sexp_arg: build_args.dump_typed_sexp_arg,
         }

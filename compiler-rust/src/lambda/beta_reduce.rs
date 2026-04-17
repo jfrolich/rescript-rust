@@ -25,6 +25,7 @@ use crate::lambda::compat::LetKind;
 use crate::lambda::primitive::Primitive;
 use crate::lambda::subst::Subst;
 use crate::lambda::{Apply, Lambda, PrimInfo};
+use crate::location::Location;
 
 /// Tracking state for simple beta reduction.
 struct ArgUsage {
@@ -209,8 +210,11 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
             }
             _ => {
                 let new_param = param.rename(&id_gen);
-                rest_bindings.push((new_param.clone(), arg.clone()));
-                substitution.insert(param.clone(), Lambda::var(new_param));
+                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
+                substitution.insert(
+                    param.clone(),
+                    bound_param_substitution(new_param, arg),
+                );
             }
         }
     }
@@ -273,8 +277,11 @@ pub fn propagate_beta_reduce_with_map(
                 }
                 // Bind to a new variable
                 let new_param = param.rename(&id_gen);
-                rest_bindings.push((new_param.clone(), arg.clone()));
-                substitution.insert(param.clone(), Lambda::var(new_param));
+                rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
+                substitution.insert(
+                    param.clone(),
+                    bound_param_substitution(new_param, arg),
+                );
             }
         }
     }
@@ -306,6 +313,36 @@ fn refine_let(kind: LetKind, id: Ident, value: Lambda, body: Lambda) -> Lambda {
     // For now, just create the let binding
     // More optimizations can be added here
     Lambda::let_(kind, id, value, body)
+}
+
+fn bound_param_substitution(new_param: Ident, arg: &Lambda) -> Lambda {
+    if is_boxed_optional_binding(arg) {
+        Lambda::prim(
+            Primitive::Pidentity,
+            vec![Lambda::var(new_param)],
+            Location::none(),
+        )
+    } else {
+        Lambda::var(new_param)
+    }
+}
+
+fn bound_param_binding(arg: &Lambda) -> Lambda {
+    if is_boxed_optional_binding(arg) {
+        Lambda::prim(Primitive::Pidentity, vec![arg.clone()], Location::none())
+    } else {
+        arg.clone()
+    }
+}
+
+fn is_boxed_optional_binding(arg: &Lambda) -> bool {
+    matches!(
+        arg,
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt,
+            ..
+        })
+    )
 }
 
 fn max_ident_stamp(params: &[Ident], body: &Lambda, args: &[Lambda]) -> i32 {
@@ -705,6 +742,100 @@ mod tests {
             panic!("expected returned function to remain wrapped by the let");
         };
         assert_eq!(func.params, vec![inner]);
+    }
+
+    #[test]
+    fn test_propagate_beta_reduce_marks_boxed_nullable_bindings_with_identity() {
+        let x = Ident::create_local("x");
+        let params = vec![x.clone()];
+        let body = Lambda::if_(
+            Lambda::prim(
+                Primitive::PisNotNone,
+                vec![Lambda::var(x.clone())],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::PvalFromOption,
+                vec![Lambda::var(x.clone())],
+                Location::none(),
+            ),
+            Lambda::const_(Constant::JsUndefined { is_unit: false }),
+        );
+        let args = vec![Lambda::prim(
+            Primitive::PnullToOpt,
+            vec![Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "exec".to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::primitive::ExternalFfiSpec {
+                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper:
+                            crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![Lambda::const_(Constant::string("subject"))],
+                Location::none(),
+            )],
+            Location::none(),
+        )];
+
+        let reduced = propagate_beta_reduce(&params, &body, &args);
+        let Lambda::Llet(kind, fresh, value, body) = reduced else {
+            panic!("expected boxed nullable beta reduction to introduce a fresh let");
+        };
+        assert_eq!(kind, LetKind::Strict);
+        assert!(matches!(
+            *value,
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pidentity,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PnullToOpt,
+                    ..
+                })]
+            )
+        ));
+        let Lambda::LifThenElse(cond, then_, _) = *body else {
+            panic!("expected the reduced body to stay as an if");
+        };
+        assert!(matches!(
+            cond.as_ref(),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PisNotNone,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pidentity,
+                    args: inner_args,
+                    ..
+                })] if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh))
+            )
+        ));
+        assert!(matches!(
+            then_.as_ref(),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PvalFromOption,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pidentity,
+                    args: inner_args,
+                    ..
+                })] if matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(&fresh))
+            )
+        ));
     }
 
     #[test]

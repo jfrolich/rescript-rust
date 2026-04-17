@@ -15,7 +15,6 @@ use anyhow::{Result, anyhow};
 use console::style;
 use log::{debug, trace};
 use rayon::prelude::*;
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -208,7 +207,6 @@ pub fn compile(
         );
 
         let current_in_progres_modules = in_progress_modules.clone();
-        let is_in_process = build_state.build_mode().is_in_process();
 
         let results: Vec<(String, Result<Option<String>>, Option<Result<Option<String>>>, bool, bool)> = if is_in_process {
             // --in-process: parallel compilation using the Rust compiler directly.
@@ -397,8 +395,7 @@ pub fn compile(
                     }
                 })
             })
-            .collect::<Vec<_>>()
-        };
+            .collect::<Vec<_>>();
 
         for result in results.iter() {
             let (module_name, result, interface_result, is_clean, is_compiled) = result;
@@ -510,29 +507,20 @@ pub fn compile(
             };
 
             // Handle logging outside the mutable borrow
-            // In --in-process mode, skip writing to .compiler.log (no lib/bs directory)
             if let Some(warning) = compile_warning {
-                if !is_in_process {
-                    logs::append(package, &warning);
-                }
+                logs::append(package, &warning);
                 compile_warnings.push_str(&warning);
             }
             if let Some(error) = compile_error {
-                if !is_in_process {
-                    logs::append(package, &error);
-                }
+                logs::append(package, &error);
                 compile_errors.push_str(&error);
             }
             if let Some(warning) = interface_warning {
-                if !is_in_process {
-                    logs::append(package, &warning);
-                }
+                logs::append(package, &warning);
                 compile_warnings.push_str(&warning);
             }
             if let Some(error) = interface_error {
-                if !is_in_process {
-                    logs::append(package, &error);
-                }
+                logs::append(package, &error);
                 compile_errors.push_str(&error);
             }
         }
@@ -561,15 +549,13 @@ pub fn compile(
 
             // Append the error to the logs of all packages involved in the cycle,
             // so editor tooling can surface it from .compiler.log
-            if !is_in_process {
-                let mut touched_packages = AHashSet::<String>::new();
-                for module_name in cycle.iter() {
-                    if let Some(module) = build_state.get_module(module_name)
-                        && touched_packages.insert(module.package_name.clone())
-                        && let Some(package) = build_state.get_package(&module.package_name)
-                    {
-                        logs::append(package, &message);
-                    }
+            let mut touched_packages = AHashSet::<String>::new();
+            for module_name in cycle.iter() {
+                if let Some(module) = build_state.get_module(module_name)
+                    && touched_packages.insert(module.package_name.clone())
+                    && let Some(package) = build_state.get_package(&module.package_name)
+                {
+                    logs::append(package, &message);
                 }
             }
 
@@ -1580,7 +1566,7 @@ fn compile_file(
             None
         };
 
-        match Command::new(compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
+        match Command::new(&compiler_info.bsc_path)
             .current_dir(&cwd)
             .args(&to_mjs_args)
             .stdout(std::process::Stdio::null())
@@ -1647,7 +1633,7 @@ fn compile_file(
         None
     };
 
-    let to_mjs = Command::new(compiler_info.bsc_path.as_ref().expect("bsc_path required for file-based mode"))
+    let to_mjs = Command::new(&compiler_info.bsc_path)
         .current_dir(&cwd)
         .args(to_mjs_args)
         .stderr(match sexp_file {

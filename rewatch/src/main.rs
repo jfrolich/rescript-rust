@@ -6,15 +6,6 @@ use std::{io::Write, path::Path};
 use rescript::{build, cli, cmd, format, lock, watcher};
 
 fn main() -> Result<()> {
-    // Temporary workaround: the in-process path still hits very deep compiler
-    // recursion in some dependency graphs. Give Rayon workers a huge reserved
-    // stack so the build can progress while the recursion/stack-shape issues
-    // are fixed elsewhere.
-    rayon::ThreadPoolBuilder::new()
-        .stack_size(10 * 1024 * 1024 * 1024)
-        .build_global()
-        .expect("failed to initialize Rayon thread pool");
-
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 
     let log_level_filter = cli.verbose.log_level_filter();
@@ -74,15 +65,6 @@ fn main() -> Result<()> {
                 );
             }
 
-            let build_mode = cli::resolve_build_mode(
-                *build_args.rust,
-                build_args.in_process.in_process,
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            });
-
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -91,7 +73,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*build_args.warn_error).clone(),
-                build_mode,
+                *build_args.rust,
                 build_args.subprocess.subprocess,
                 build_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {
@@ -122,15 +104,6 @@ fn main() -> Result<()> {
                 );
             }
 
-            let build_mode = cli::resolve_build_mode(
-                *watch_args.rust,
-                watch_args.in_process.in_process,
-            )
-            .unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            });
-
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -139,7 +112,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*watch_args.warn_error).clone(),
-                build_mode,
+                *watch_args.rust,
                 watch_args.subprocess.subprocess,
                 watch_args.dump_typed_sexp_arg.dump_typed_sexp,
             ) {

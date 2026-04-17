@@ -825,7 +825,6 @@ fn simplify_with_env(lam: &Lambda, env: &mut SimplifyEnv, exports: &HashSet<Iden
         Lambda::Lprim(info) => simplify_primitive(info, env, exports),
         Lambda::Lswitch(scrutinee, switch) => {
             let simplified_scrutinee = simplify_with_env(scrutinee, env, exports);
-            // Constant folding: if scrutinee is a known constant, pick the matching branch
             match &simplified_scrutinee {
                 Lambda::Lconst(Constant::Int { i: tag, .. }) => {
                     if let Some((_, body)) = switch.sw_consts.iter().find(|(t, _)| t == tag) {
