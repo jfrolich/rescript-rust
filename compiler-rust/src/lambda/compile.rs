@@ -20714,6 +20714,26 @@ mod tests {
     }
 
     #[test]
+    fn gpr_977_keeps_exported_constant_name_while_inlining_non_export_uses_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("gpr_977_test");
+        assert!(
+            output.contains("let u = f(-2147483648);"),
+            "expected gpr_977_test to inline the non-export call argument to the literal, got:\n{output}"
+        );
+        assert!(
+            output.contains("Test_utils.eq(\"File \\\"gpr_977_test.res\\\", line 15, characters 39-46\", -2147483648, u)")
+                && output.contains("let min_32_int = -2147483648;"),
+            "expected gpr_977_test to keep the exported constant name only at the export binding site, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let min_32_int$1 = -2147483648;")
+                && !output.contains("f(min_32_int)")
+                && !output.contains("Test_utils.eq(\"File \\\"gpr_977_test.res\\\", line 15, characters 39-46\", min_32_int, u)"),
+            "unexpected retained internal exported-constant alias uses remained in gpr_977_test:\n{output}"
+        );
+    }
+
+    #[test]
     fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("uncurried_cast");
         assert!(

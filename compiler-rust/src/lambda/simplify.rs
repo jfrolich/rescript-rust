@@ -29,6 +29,7 @@ struct SimplifyEnv {
     known_functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     plain_strings: HashMap<Ident, String>,
+    preserved_export_payload_bindings: HashSet<Ident>,
     string_switch_constants: HashMap<Ident, Constant>,
     preserved_export_bindings: HashSet<Ident>,
     preserved_local_module_materialized_alias_bindings: HashSet<Ident>,
@@ -201,7 +202,12 @@ impl SimplifyEnv {
 
     fn without_value_substitutions(&self) -> Self {
         let mut next = self.clone();
-        next.substitutions.clear();
+        next.substitutions.retain(|_, value| {
+            matches!(
+                value,
+                Lambda::Lconst(constant) if can_substitute_constant_unconditionally(constant)
+            )
+        });
         next
     }
 }
@@ -314,6 +320,8 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
+    let preserved_export_payload_bindings =
+        collect_exported_constant_payload_bindings(&flattened, &exports);
     let preserved_local_module_module_field_call_bindings =
         collect_local_module_module_field_call_bindings(&flattened);
     let mut preserved_local_module_module_alias_bindings =
@@ -327,6 +335,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let first = simplify_for_js_backend_once(
         &flattened,
         &preserved_export_bindings,
+        &preserved_export_payload_bindings,
         &preserved_local_module_materialized_alias_bindings,
         &preserved_local_module_module_field_call_bindings,
         &preserved_local_module_module_alias_bindings,
@@ -348,6 +357,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let second = simplify_for_js_backend_once(
         &first,
         &preserved_export_bindings_after_first,
+        &preserved_export_payload_bindings,
         &preserved_local_module_materialized_alias_bindings_after_first,
         &preserved_local_module_module_field_call_bindings,
         &preserved_local_module_module_alias_bindings,
@@ -367,6 +377,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     simplify_for_js_backend_once(
         &lets_dce_aliases,
         &preserved_export_bindings_after_first,
+        &preserved_export_payload_bindings,
         &preserved_local_module_materialized_alias_bindings_after_first,
         &preserved_local_module_module_field_call_bindings,
         &preserved_local_module_module_alias_bindings,
@@ -380,6 +391,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
 fn simplify_for_js_backend_once(
     lam: &Lambda,
     preserved_export_bindings: &HashSet<Ident>,
+    preserved_export_payload_bindings: &HashSet<Ident>,
     preserved_local_module_materialized_alias_bindings: &HashSet<Ident>,
     preserved_local_module_module_field_call_bindings: &HashSet<Ident>,
     preserved_local_module_module_alias_bindings: &HashSet<Ident>,
@@ -396,6 +408,7 @@ fn simplify_for_js_backend_once(
         functions: collect_inlineable_functions(&flattened),
         known_functions: collect_known_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
+        preserved_export_payload_bindings: preserved_export_payload_bindings.clone(),
         preserved_local_module_materialized_alias_bindings:
             preserved_local_module_materialized_alias_bindings.clone(),
         preserved_local_module_module_field_call_bindings:
@@ -2981,7 +2994,16 @@ fn simplify_primitive(
         let args = info
             .args
             .iter()
-            .map(|arg| simplify_with_env(arg, env, exports))
+            .zip(export_ids.iter())
+            .map(|(arg, export_id)| {
+                if env.preserved_export_payload_bindings.contains(export_id)
+                    && matches!(arg, Lambda::Lvar(id) if id.same(export_id))
+                {
+                    arg.clone()
+                } else {
+                    simplify_with_env(arg, env, exports)
+                }
+            })
             .collect();
         return Lambda::prim(info.primitive.clone(), args, info.loc.clone());
     }
@@ -5763,6 +5785,97 @@ fn collect_exported_apply_bindings(lam: &Lambda, exports: &HashSet<Ident>) -> Ha
 fn collect_exported_var_alias_bindings(lam: &Lambda, exports: &HashSet<Ident>) -> HashSet<Ident> {
     let mut preserved = HashSet::new();
     collect_exported_var_alias_bindings_into(lam, exports, &mut preserved);
+    preserved
+}
+
+fn collect_exported_constant_payload_bindings(
+    lam: &Lambda,
+    exports: &HashSet<Ident>,
+) -> HashSet<Ident> {
+    fn collect_into(lam: &Lambda, exports: &HashSet<Ident>, preserved: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect_into(&apply.ap_func, exports, preserved);
+                for arg in &apply.ap_args {
+                    collect_into(arg, exports, preserved);
+                }
+            }
+            Lambda::Lfunction(func) => collect_into(&func.body, exports, preserved),
+            Lambda::Llet(_, id, value, body) => {
+                if exports.contains(id)
+                    && matches!(
+                        value.as_ref(),
+                        Lambda::Lconst(constant) if can_substitute_constant_unconditionally(constant)
+                    )
+                    && !used_only_in_module_export_payload(id, body)
+                {
+                    preserved.insert(id.clone());
+                }
+                collect_into(value, exports, preserved);
+                collect_into(body, exports, preserved);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, expr) in bindings {
+                    collect_into(expr, exports, preserved);
+                }
+                collect_into(body, exports, preserved);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect_into(arg, exports, preserved);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect_into(scrutinee, exports, preserved);
+                for (_, lam) in &switch.sw_consts {
+                    collect_into(lam, exports, preserved);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect_into(lam, exports, preserved);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect_into(failaction, exports, preserved);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect_into(scrutinee, exports, preserved);
+                for (_, lam) in cases {
+                    collect_into(lam, exports, preserved);
+                }
+                if let Some(default) = default {
+                    collect_into(default, exports, preserved);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect_into(arg, exports, preserved);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect_into(body, exports, preserved);
+                collect_into(handler, exports, preserved);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect_into(cond, exports, preserved);
+                collect_into(then_, exports, preserved);
+                collect_into(else_, exports, preserved);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect_into(first, exports, preserved);
+                collect_into(second, exports, preserved);
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect_into(start, exports, preserved);
+                collect_into(end, exports, preserved);
+                collect_into(body, exports, preserved);
+            }
+            Lambda::Lassign(_, value) => collect_into(value, exports, preserved),
+        }
+    }
+
+    let mut preserved = HashSet::new();
+    collect_into(lam, exports, &mut preserved);
     preserved
 }
 

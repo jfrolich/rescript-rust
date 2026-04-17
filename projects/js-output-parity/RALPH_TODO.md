@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 591 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 66 output diffs
+**Status:** 594 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 63 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **591 / 657**
+- JS snapshot parity: **594 / 657**
 - Compile errors: **0**
-- Output diffs: **66**
+- Output diffs: **63**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,56 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **591 / 657**
+- JS snapshot parity: **594 / 657**
 - Compile errors: **0**
-- Output diffs: **66**
+- Output diffs: **63**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: inline exported non-allocating constants into non-export call
+  sites while still keeping the original binding name alive for the final
+  module export payload, which is the checked-in `gpr_977_test` snapshot shape
+- Active backend focus stayed in **Phase 4** late lambda/backend cleanup from
+  `PLAN.md`: the fix is still in `compiler-rust/src/lambda/simplify.rs`, with
+  checked-in JS coverage in `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, whose alias-removal pipeline keeps
+    propagating safe constant values through uses after simplification instead
+    of treating call arguments as a blanket substitution stop-zone
+  - checked-in `tests/tests/src/gpr_977_test.mjs`, which keeps the literal
+    `-2147483648` in the internal call and assertion while still re-exporting
+    `min_32_int` under its original name
+- Rust change:
+  - added `preserved_export_payload_bindings` in
+    `compiler-rust/src/lambda/simplify.rs` so exported constant bindings with
+    non-export uses keep their original identifier in the final
+    `ModuleExport` payload instead of being rebound to a renamed trailing temp
+  - narrowed `SimplifyEnv::without_value_substitutions()` so apply-argument
+    simplification still retains unconditional constant substitutions, which
+    lets safe literals flow into internal call sites and test assertions like
+    OCaml
+  - added a checked-in JS regression in
+    `gpr_977_keeps_exported_constant_name_while_inlining_non_export_uses_like_snapshot`
+    under `compiler-rust/src/lambda/compile.rs`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_977_keeps_exported_constant_name_while_inlining_non_export_uses_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_977_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_977_test.res` is exact again; Rust now keeps the
+    exported constant name only where the export payload needs it, while the
+    internal call and assertion inline the literal like the checked-in snapshot
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the narrower
+    apply-argument substitution change did not perturb the broader stable guard
+  - `tests/tests/src/gpr_4900_test.res` and `tests/tests/src/gpr_4924_test.res`
+    still differ, confirming the remaining higher-order callback inlining
+    family is a separate cluster from this exported-constant fix
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **591 / 657** -> **594 / 657** (**+3**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **66** -> **63** (**-3**)
 
 Latest iteration on **2026-04-17**:
 
