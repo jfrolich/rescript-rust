@@ -9,7 +9,9 @@ use super::{
     JsRawInfo, ModulePathResolver, Program, Statement, StatementDesc, StringClause, VIdent,
     VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
 };
-use crate::binary_ast::ppx::{JsExpClassification, classify_js_exp};
+use crate::binary_ast::ppx::{
+    JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+};
 use crate::ident::Ident;
 use crate::lambda::SwitchCaseTag;
 use std::borrow::Cow;
@@ -341,10 +343,20 @@ impl JsPrinter {
             self.newline();
             return;
         }
-        self.at_least_two_lines();
+        let (file_comments, block_start) = split_leading_file_comments(&program.program.block);
+        if file_comments.is_empty() {
+            self.at_least_two_lines();
+        } else {
+            for comment in file_comments {
+                self.write_decoded_internal_string(comment);
+                self.newline();
+            }
+            self.at_least_two_lines();
+        }
         let _printed_imports = self.print_module_imports(&program.modules);
         self.at_least_two_lines();
-        self.print_statements(&program.program.block, true);
+        let remaining_block = program.program.block[block_start..].to_vec();
+        self.print_statements(&remaining_block, true);
 
         self.at_least_two_lines();
         if !program.program.exports.is_empty() {
@@ -464,7 +476,7 @@ impl JsPrinter {
                     .is_some_and(|value| !matches!(value.desc, ExpressionDesc::Var(_))),
                 _ => true,
             },
-            StatementDesc::Exp(expr) => !matches!(expr.desc, ExpressionDesc::Var(_)),
+            StatementDesc::Exp(expr) => expression_statement_prints_anything(expr),
             _ => true,
         }
     }
@@ -734,6 +746,15 @@ impl JsPrinter {
     fn print_expression_statement(&mut self, expr: &Expression) {
         // OCaml's js_dump suppresses dead pure bindings entirely and prints dead
         // impure bindings as plain expression statements.
+        match classify_raw_js_expression_statement(expr) {
+            RawJsExpressionStatement::Omit => return,
+            RawJsExpressionStatement::Comment(comment) => {
+                self.write(&comment);
+                return;
+            }
+            RawJsExpressionStatement::Normal => {}
+        }
+
         if matches!(expr.desc, ExpressionDesc::Var(_)) {
             return;
         }
@@ -3336,11 +3357,68 @@ fn raw_snippet_exp_simple_enough(s: &str) -> bool {
 
 fn raw_js_expression_needs_paren(code: &str) -> bool {
     match classify_js_exp(code) {
-        JsExpClassification::JsLiteral => false,
+        JsExpClassification::JsLiteral { .. } => false,
         JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
             !raw_snippet_exp_simple_enough(code)
         }
     }
+}
+
+enum RawJsExpressionStatement {
+    Omit,
+    Comment(String),
+    Normal,
+}
+
+fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionStatement {
+    match &expr.desc {
+        ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } => RawJsExpressionStatement::Omit,
+        ExpressionDesc::RawJsCode(info) if info.is_stmt => {
+            if matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment) {
+                RawJsExpressionStatement::Comment(decode_internal_utf8_string(&info.code).into())
+            } else {
+                RawJsExpressionStatement::Normal
+            }
+        }
+        ExpressionDesc::RawJsCode(info) => match classify_js_exp(&info.code) {
+            JsExpClassification::JsLiteral { comment: Some(comment) } => {
+                RawJsExpressionStatement::Comment(comment)
+            }
+            JsExpClassification::JsLiteral { comment: None } => RawJsExpressionStatement::Omit,
+            JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
+                RawJsExpressionStatement::Normal
+            }
+        },
+        _ => RawJsExpressionStatement::Normal,
+    }
+}
+
+fn expression_statement_prints_anything(expr: &Expression) -> bool {
+    !matches!(classify_raw_js_expression_statement(expr), RawJsExpressionStatement::Omit)
+}
+
+fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
+    let mut index = 0;
+    let mut comments = Vec::new();
+
+    while let Some(Statement {
+        desc:
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::RawJsCode(info),
+                ..
+            }),
+        ..
+    }) = block.get(index)
+    {
+        if !info.is_stmt || !matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+        {
+            break;
+        }
+        comments.push(info.code.as_str());
+        index += 1;
+    }
+
+    (comments, index)
 }
 
 fn member_target_needs_extra_group_indent(expr: &Expression) -> bool {
@@ -4595,6 +4673,32 @@ mod tests {
             print_block(&block),
             "(((_)=> console.log('should works'))());"
         );
+    }
+
+    #[test]
+    fn test_print_block_preserves_raw_js_comment_literal_statements_like_ocaml() {
+        let block = vec![
+            Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+                code: "//eslint-disable\n0".to_string(),
+                is_stmt: false,
+            }))),
+            Statement::return_(Expression::var(Ident::create_local("x"))),
+        ];
+
+        assert_eq!(print_block(&block), "//eslint-disable\nreturn x;");
+    }
+
+    #[test]
+    fn test_print_block_preserves_comment_only_raw_js_statements_without_semicolon_like_ocaml() {
+        let block = vec![
+            Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+                code: "/* comment */".to_string(),
+                is_stmt: true,
+            }))),
+            Statement::return_(Expression::number(Number::int(1))),
+        ];
+
+        assert_eq!(print_block(&block), "/* comment */\nreturn 1;");
     }
 
     #[test]
@@ -7151,6 +7255,51 @@ mod tests {
         assert!(
             rendered.starts_with("// Generated by ReScript, PLEASE EDIT WITH CARE\n\n\nlet x = 1;")
         );
+    }
+
+    #[test]
+    fn test_print_deps_program_hoists_leading_raw_js_comment_statements_before_imports() {
+        let import_id = Ident::create_local("Belt_List");
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(Path::new("/tmp/raw_pure_test.mjs")),
+            None,
+            None,
+        );
+        let rendered = print_deps_program(
+            &DepsProgram {
+                program: Program::new(
+                    vec![
+                        Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+                            code: "/**\n * copyright\n*/".to_string(),
+                            is_stmt: true,
+                        }))),
+                        Statement::exp(Expression::new(ExpressionDesc::RawJsCode(JsRawInfo {
+                            code: "// hello".to_string(),
+                            is_stmt: true,
+                        }))),
+                        Statement::variable(VariableDeclaration {
+                            ident: Ident::create_local("x"),
+                            value: Some(Expression::number(Number::int(1))),
+                            property: crate::lambda::compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                    ],
+                    vec![],
+                ),
+                modules: vec![ModuleId {
+                    id: import_id,
+                    kind: Kind::Runtime,
+                    dynamic_import: false,
+                }],
+                side_effect: None,
+            },
+            Some(&resolver),
+        );
+
+        assert!(rendered.starts_with(
+            "// Generated by ReScript, PLEASE EDIT WITH CARE\n/**\n * copyright\n*/\n// hello\n\nimport * as Belt_List from \"@rescript/runtime/lib/es6/Belt_List.js\";"
+        ));
     }
 
     #[test]

@@ -193,7 +193,7 @@ pub enum JsExpClassification {
     /// A function expression (regular or arrow)
     JsFunction { arity: usize, arrow: bool },
     /// A literal value (string, number, bool, null, undefined, object literal, array literal)
-    JsLiteral,
+    JsLiteral { comment: Option<String> },
     /// Unknown expression type
     JsExpUnknown,
 }
@@ -251,6 +251,36 @@ fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
     }
 }
 
+fn extract_raw_js_literal_comment(s: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::CommentKind;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parser_return = Parser::new(&allocator, s, SourceType::default()).parse();
+    if !parser_return.errors.is_empty() {
+        return None;
+    }
+
+    let mut leading_comments = parser_return
+        .program
+        .comments
+        .iter()
+        .copied()
+        .filter(|comment| comment.is_leading());
+    let comment = leading_comments.next()?;
+    if leading_comments.next().is_some() {
+        return None;
+    }
+
+    let comment_text = comment.content_span().source_text(s);
+    Some(match comment.kind {
+        CommentKind::Block => format!("/*{comment_text}*/"),
+        CommentKind::Line => format!("//{comment_text}"),
+    })
+}
+
 /// Classify a JavaScript expression string.
 /// This mirrors OCaml's `classify_exp` function which uses the Flow parser.
 /// We use OXC (Oxidation Compiler) for parsing.
@@ -302,13 +332,15 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
                 | Expression::NullLiteral(_)
                 | Expression::NumericLiteral(_)
                 | Expression::BigIntLiteral(_)
-                | Expression::RegExpLiteral(_) => JsExpClassification::JsLiteral,
+                | Expression::RegExpLiteral(_) => JsExpClassification::JsLiteral {
+                    comment: extract_raw_js_literal_comment(s),
+                },
                 // undefined identifier
                 Expression::Identifier(id) if id.name == "undefined" => {
-                    JsExpClassification::JsLiteral
+                    JsExpClassification::JsLiteral { comment: None }
                 }
                 // Object/array literals (checked recursively)
-                _ if is_obj_literal(&expr) => JsExpClassification::JsLiteral,
+                _ if is_obj_literal(&expr) => JsExpClassification::JsLiteral { comment: None },
                 // Unknown
                 _ => JsExpClassification::JsExpUnknown,
             }
@@ -11342,5 +11374,29 @@ mod tests {
         assert!(prims_to_be_encoded(&[console_log], &arena));
         assert!(!prims_to_be_encoded(&[foo], &arena));
         assert!(!prims_to_be_encoded(&[], &arena));
+    }
+
+    #[test]
+    fn test_classify_js_exp_preserves_single_leading_literal_comment_like_ocaml() {
+        assert_eq!(
+            classify_js_exp("/*hello*/ 0"),
+            JsExpClassification::JsLiteral {
+                comment: Some("/*hello*/".to_string()),
+            }
+        );
+        assert_eq!(
+            classify_js_exp("//eslint-disable\n0"),
+            JsExpClassification::JsLiteral {
+                comment: Some("//eslint-disable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_js_exp_discards_multiple_leading_literal_comments_like_ocaml() {
+        assert_eq!(
+            classify_js_exp("/*a*/ /*b*/ 0"),
+            JsExpClassification::JsLiteral { comment: None }
+        );
     }
 }

@@ -2,6 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::binary_ast::ppx::{
+    JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+};
 use crate::ident::Ident;
 use crate::lambda::analysis;
 use crate::lambda::beta_reduce;
@@ -75,6 +78,81 @@ enum FlattenGroup {
     Single(LetKind, Ident, Lambda),
     Recursive(Vec<(Ident, Lambda)>),
     Nop(Lambda),
+}
+
+fn raw_js_lambda_can_emit_comment(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::PrawJsCode(info),
+            ..
+        }) => {
+            if info.is_stmt {
+                matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+            } else {
+                matches!(
+                    classify_js_exp(&info.code),
+                    JsExpClassification::JsLiteral { comment: Some(_) }
+                )
+            }
+        }
+        Lambda::Llet(_, _, value, body) => {
+            raw_js_lambda_can_emit_comment(value) || raw_js_lambda_can_emit_comment(body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, value)| raw_js_lambda_can_emit_comment(value))
+                || raw_js_lambda_can_emit_comment(body)
+        }
+        Lambda::Lapply(apply) => {
+            raw_js_lambda_can_emit_comment(&apply.ap_func)
+                || apply.ap_args.iter().any(raw_js_lambda_can_emit_comment)
+        }
+        Lambda::Lswitch(scrutinee, switch) => {
+            raw_js_lambda_can_emit_comment(scrutinee)
+                || switch
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| raw_js_lambda_can_emit_comment(body))
+                || switch
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| raw_js_lambda_can_emit_comment(body))
+                || switch
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(raw_js_lambda_can_emit_comment)
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            raw_js_lambda_can_emit_comment(scrutinee)
+                || cases
+                    .iter()
+                    .any(|(_, body)| raw_js_lambda_can_emit_comment(body))
+                || default
+                    .as_deref()
+                    .is_some_and(raw_js_lambda_can_emit_comment)
+        }
+        Lambda::LstaticRaise(_, args) => args.iter().any(raw_js_lambda_can_emit_comment),
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            raw_js_lambda_can_emit_comment(body) || raw_js_lambda_can_emit_comment(handler)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            raw_js_lambda_can_emit_comment(cond)
+                || raw_js_lambda_can_emit_comment(then_)
+                || raw_js_lambda_can_emit_comment(else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            raw_js_lambda_can_emit_comment(first) || raw_js_lambda_can_emit_comment(second)
+        }
+        Lambda::Lfor(_, from, to, _, body) => {
+            raw_js_lambda_can_emit_comment(from)
+                || raw_js_lambda_can_emit_comment(to)
+                || raw_js_lambda_can_emit_comment(body)
+        }
+        Lambda::Lassign(_, value) => raw_js_lambda_can_emit_comment(value),
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) | Lambda::Lfunction(_) => false,
+        _ => false,
+    }
 }
 
 impl SimplifyEnv {
@@ -1587,7 +1665,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
         Lambda::Lsequence(first, second) => {
             let first = simplify_with_env(first, env, exports);
             let second = simplify_with_env(second, env, exports);
-            if analysis::no_side_effects(&first) {
+            if analysis::no_side_effects(&first) && !raw_js_lambda_can_emit_comment(&first) {
                 second
             } else {
                 Lambda::seq(first, second)
@@ -5237,6 +5315,68 @@ mod tests {
             Lambda::Lassign(_, value) => transformed_jsx_tag_arg(value),
             Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => None,
             _ => None,
+        }
+    }
+
+    fn contains_raw_js_comment(lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::PrawJsCode(_),
+                ..
+            }) => super::raw_js_lambda_can_emit_comment(lam),
+            Lambda::Llet(_, _, value, body) => {
+                contains_raw_js_comment(value) || contains_raw_js_comment(body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .any(|(_, value)| contains_raw_js_comment(value))
+                    || contains_raw_js_comment(body)
+            }
+            Lambda::Lapply(apply) => {
+                contains_raw_js_comment(&apply.ap_func)
+                    || apply.ap_args.iter().any(contains_raw_js_comment)
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                contains_raw_js_comment(scrutinee)
+                    || switch
+                        .sw_consts
+                        .iter()
+                        .any(|(_, body)| contains_raw_js_comment(body))
+                    || switch
+                        .sw_blocks
+                        .iter()
+                        .any(|(_, body)| contains_raw_js_comment(body))
+                    || switch
+                        .sw_failaction
+                        .as_deref()
+                        .is_some_and(contains_raw_js_comment)
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                contains_raw_js_comment(scrutinee)
+                    || cases.iter().any(|(_, body)| contains_raw_js_comment(body))
+                    || default.as_deref().is_some_and(contains_raw_js_comment)
+            }
+            Lambda::LstaticRaise(_, args) => args.iter().any(contains_raw_js_comment),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                contains_raw_js_comment(body) || contains_raw_js_comment(handler)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                contains_raw_js_comment(cond)
+                    || contains_raw_js_comment(then_)
+                    || contains_raw_js_comment(else_)
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                contains_raw_js_comment(first) || contains_raw_js_comment(second)
+            }
+            Lambda::Lfor(_, from, to, _, body) => {
+                contains_raw_js_comment(from)
+                    || contains_raw_js_comment(to)
+                    || contains_raw_js_comment(body)
+            }
+            Lambda::Lassign(_, value) => contains_raw_js_comment(value),
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) | Lambda::Lfunction(_) => false,
+            _ => false,
         }
     }
 
@@ -10858,6 +10998,76 @@ mod tests {
         };
         assert_eq!(func.params, vec![param]);
         assert!(func.attr.one_unit_arg);
+    }
+
+    #[test]
+    fn preserves_comment_only_raw_js_sequence_prefixes_for_js_backend() {
+        let wrapper = Ident::create_local("J");
+        let lambda = Lambda::seq(
+            Lambda::let_(
+                LetKind::Strict,
+                wrapper,
+                Lambda::prim(
+                    Primitive::Pmakeblock(0, TagInfo::Module(vec![]), Mutable::Immutable),
+                    vec![],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                        code: "
+// hello
+
+".to_string(),
+                        is_stmt: true,
+                    }),
+                    vec![],
+                    Location::none(),
+                ),
+            ),
+            Lambda::unit(),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            contains_raw_js_comment(&simplified),
+            "expected raw JS comment statement to survive JS-backend simplification, got {simplified:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_literal_comment_raw_js_sequence_prefixes_for_js_backend() {
+        let wrapper = Ident::create_local("J");
+        let value = Ident::create_local("value");
+        let lambda = Lambda::Lsequence(
+            Box::new(Lambda::Lsequence(
+                Box::new(Lambda::let_(
+                    LetKind::Strict,
+                    wrapper,
+                    Lambda::prim(
+                        Primitive::Pmakeblock(0, TagInfo::Module(vec![]), Mutable::Immutable),
+                        vec![],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                            code: "//eslint-disable
+  0".to_string(),
+                            is_stmt: false,
+                        }),
+                        vec![],
+                        Location::none(),
+                    ),
+                )),
+                Box::new(Lambda::unit()),
+            )),
+            Box::new(Lambda::var(value)),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            contains_raw_js_comment(&simplified),
+            "expected literal-leading raw JS comment to survive JS-backend simplification, got {simplified:?}"
+        );
     }
 
     #[test]

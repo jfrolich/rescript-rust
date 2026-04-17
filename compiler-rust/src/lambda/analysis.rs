@@ -5,10 +5,10 @@
 //! - Size analysis: estimates the size of an expression for inlining decisions
 //! - Inlining hints: determines if a function is safe/profitable to inline
 
-use crate::ident::Ident;
 use crate::binary_ast::ppx::{
-    classify_js_exp, classify_js_stmt, JsExpClassification, JsStmtClassification,
+    JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
 };
+use crate::ident::Ident;
 use crate::lambda::compat::FieldDbgInfo;
 use crate::lambda::constant::Constant;
 use crate::lambda::primitive::Primitive;
@@ -274,11 +274,14 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
 
 fn raw_js_is_pure(info: &crate::lambda::primitive::JsRawInfo) -> bool {
     if info.is_stmt {
-        matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+        matches!(
+            classify_js_stmt(&info.code),
+            JsStmtClassification::JsStmtComment
+        )
     } else {
         matches!(
             classify_js_exp(&info.code),
-            JsExpClassification::JsFunction { .. } | JsExpClassification::JsLiteral
+            JsExpClassification::JsFunction { .. } | JsExpClassification::JsLiteral { .. }
         )
     }
 }

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
+**Status:** 584 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 73 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **73**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,64 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **584 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **73**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: preserve OCaml's raw-JS comment semantics through the JS backend
+  so Rust stops dropping top-level `%%raw` comment blocks and comment-only
+  `ignore(%raw(...))` statements from `raw_pure_test`, and instead prints the
+  checked-in file-header and function-body comments byte-for-byte
+- Active backend focus moved upstream of the printer into the Rust-only
+  JS-backend simplifier path: the verified changes are in
+  `compiler-rust/src/lambda/simplify.rs`,
+  `compiler-rust/src/binary_ast/ppx.rs`,
+  `compiler-rust/src/lambda/analysis.rs`, and
+  `compiler-rust/src/js_ir/printer.rs`
+- OCaml reference:
+  - `compiler/ml/classify_function.ml`, which keeps a single leading comment on
+    raw literal expressions
+  - `compiler/core/js_dump.ml`, which prints comment-only raw statements and
+    literal-leading raw comments without rewriting them into normal expressions
+  - `compiler/core/js_dump_program.ml` plus
+    `compiler/core/js_dump_import_export.ml`, whose file-comment extraction and
+    import printing keep the checked-in blank-line boundary before imports
+- Rust change:
+  - extended `JsExpClassification::JsLiteral` in
+    `compiler-rust/src/binary_ast/ppx.rs` to preserve the OCaml-relevant
+    leading comment on raw literal snippets and added focused classifier tests
+  - taught `compiler-rust/src/lambda/simplify.rs` not to drop no-side-effect
+    raw JS fragments when they can still emit comments, with focused regression
+    coverage for statement and literal comment cases
+  - updated `compiler-rust/src/js_ir/printer.rs` to print comment-only raw
+    statements, print literal-leading raw comments, and hoist leading raw
+    comment statements ahead of imports with the same separator shape the
+    checked-in snapshots expect
+  - adjusted `compiler-rust/src/lambda/analysis.rs` to match the richer raw
+    literal classification shape
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release raw_js_sequence_prefixes_for_js_backend -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_deps_program_hoists_leading_raw_js_comment_statements_before_imports -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/raw_pure_test.res -o /tmp/raw_pure_test.mjs`
+  - `diff -u tests/tests/src/raw_pure_test.mjs /tmp/raw_pure_test.mjs`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/raw_pure_test.res` is exact again; Rust now preserves the
+    same hoisted file comments and function-body raw comment statements that
+    the checked-in OCaml snapshot contains
+  - `tests/tests/src/ExternalShadow.res` stayed exact after the same change, so
+    the raw-comment fix did not reopen the import/export guard slice
+  - the verified improvement is not a string rewrite: the backend now keeps
+    OCaml's raw-comment-carrying nodes alive through simplification and prints
+    them with the same top-level hoist behavior
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **582 / 657** -> **584 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **75** -> **73** (**-2**)
 
 Latest iteration on **2026-04-17**:
 
