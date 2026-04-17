@@ -840,6 +840,37 @@ let aliceJson = encode(alice)
 }
 
 #[test]
+fn playground_variant_of_primitive() {
+    // @variantOf(value) is a comptime primitive that decomposes a variant
+    // at runtime into (name, args_array). No user-written %raw needed.
+    let source = r#"
+type shape = Circle(float) | Square(float, float) | Point
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | Float => JSON.Encode.float(value)
+  | Variant(_) =>
+    let (ctor, args) = @variantOf(value)
+    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
+  | _ => @compileError("unsupported")
+  }
+}
+
+let j1 = encode(Circle(5.0))
+let j2 = encode(Square(3.0, 4.0))
+let j3 = encode(Point)
+"#;
+    match compile_with_stdlib(source, "variant_of.res") {
+        Ok(o) => {
+            eprintln!("VARIANT OF OUTPUT:\n{o}");
+            assert!(o.contains("encode$shape"), "Expected encode$shape:\n{o}");
+        }
+        Err(e) => panic!("@variantOf should compile: {e}"),
+    }
+}
+
+#[test]
 fn playground_variants_with_payloads() {
     // Variants with payloads: encode as [name, ...payloads].
     // Uses %raw helpers to inspect the runtime tag/arg since ReScript
@@ -1316,13 +1347,6 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-let getTag: 'a => string = %raw(`function(v) {
-  return typeof v === "string" ? v : v.TAG;
-}`)
-let getArg: ('a, int) => JSON.t = %raw(`function(v, i) {
-  return v["_" + i];
-}`)
-
 @comptime
 let rec encode = (value): JSON.t => {
   switch @typeInfo(value) {
@@ -1335,21 +1359,9 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant({constructors}) =>
-    let tag = getTag(value)
-    let result = ref(JSON.Null)
-    inline for c in constructors {
-      if tag == c.name {
-        let arr = [JSON.Encode.string(c.name)]
-        let idx = ref(0)
-        inline for _argType in c.args {
-          Array.push(arr, getArg(value, idx.contents))
-          idx := idx.contents + 1
-        }
-        result := JSON.Encode.array(arr)
-      }
-    }
-    result.contents
+  | Variant(_) =>
+    let (ctor, args) = @variantOf(value)
+    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }

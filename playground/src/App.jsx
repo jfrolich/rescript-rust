@@ -24,18 +24,11 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-// Variants encode as [name, ...constructor_arguments]. For enum-style
-// variants the arguments list is empty, so the JSON is just [name].
-// getTag reads the tag regardless of whether the value has arguments
-// (ReScript compiles payload-free variants to a plain string, and
-// payload-carrying variants to {TAG: name, _0, _1, ...}).
-let getTag: 'a => string = %raw(`function(v) {
-  return typeof v === "string" ? v : v.TAG;
-}`)
-
-let getArg: ('a, int) => JSON.t = %raw(`function(v, i) {
-  return v["_" + i];
-}`)
+// @variantOf(v) is a comptime primitive that decomposes any variant value
+// into (constructor_name, arguments_array) at runtime — regardless of
+// whether the variant has constructor arguments or not. It handles both
+// payload-free variants (compiled to bare strings) and argument-carrying
+// variants (compiled to {TAG: name, _0, _1, ...}).
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
 // encode(alice) produces a specialized encode$user function. Since the
@@ -54,21 +47,9 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant({constructors}) =>
-    let tag = getTag(value)
-    let result = ref(JSON.Null)
-    inline for c in constructors {
-      if tag == c.name {
-        let arr = [JSON.Encode.string(c.name)]
-        let idx = ref(0)
-        inline for _argType in c.args {
-          Array.push(arr, getArg(value, idx.contents))
-          idx := idx.contents + 1
-        }
-        result := JSON.Encode.array(arr)
-      }
-    }
-    result.contents
+  | Variant(_) =>
+    let (ctor, args) = @variantOf(value)
+    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }
