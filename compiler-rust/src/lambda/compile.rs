@@ -4076,6 +4076,19 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
+        if complete
+            && default.is_none()
+            && expression_has_no_side_effects(&test)
+            && cases
+                .split_first()
+                .is_some_and(|((_, first_body), rest)| {
+                    rest.iter()
+                        .all(|(_, body)| super::lambda_eq_approx(first_body, body))
+                })
+        {
+            return self.compile_return_block(cases[0].1);
+        }
+
         if allow_small {
             if let Some(block) =
                 self.compile_small_string_switch_return(test.clone(), cases, default, complete)
@@ -18739,6 +18752,93 @@ mod tests {
     }
 
     #[test]
+    fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_3609() {
+        let mut compiler = LambdaCompiler::new();
+        let state = Ident::create_local("state");
+        let int_value = Ident::create_local("intValue");
+        let int_func = Ident::create_local("intFunc");
+        let int_param = Ident::create_local("intParam");
+        let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+            Box::new(Lambda::LstaticCatch(
+                Box::new(Lambda::Lswitch(
+                    Box::new(Lambda::var(state.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![
+                            (0, Lambda::static_raise(2, Vec::new())),
+                            (1, Lambda::static_raise(2, Vec::new())),
+                        ],
+                        sw_failaction: None,
+                        sw_names: Some(SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag::named("Empty")],
+                            blocks: vec![
+                                crate::lambda::SwitchBlock::named("Int1"),
+                                crate::lambda::SwitchBlock::named("Int2"),
+                            ],
+                        }),
+                    },
+                )),
+                (2, vec![]),
+                Box::new(Lambda::let_(
+                    LetKind::Alias,
+                    int_value.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(0, FieldDbgInfo::Variant),
+                        vec![Lambda::var(state.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::static_raise(1, vec![Lambda::var(int_value.clone())]),
+                )),
+            )),
+            (1, vec![int_value.clone()]),
+            Box::new(Lambda::let_(
+                LetKind::Strict,
+                int_func.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMake(1),
+                    vec![Lambda::function_(
+                        1,
+                        vec![int_param.clone()],
+                        Lambda::prim(
+                            Primitive::Paddint,
+                            vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                            Location::none(),
+                        ),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+                Lambda::apply(
+                    Lambda::var(int_func),
+                    vec![Lambda::const_(Constant::int(0))],
+                    ApInfo {
+                        loc: Location::none(),
+                        inlined: InlineAttribute::Default,
+                        status: ApplyStatus::Uncurry,
+                    },
+                    false,
+                ),
+            )),
+        ));
+
+        let rendered = print_block(&block);
+        assert!(
+            rendered.contains("if (typeof state !== \"object\") {"),
+            "expected the outer object split to stay materialized:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("state.TAG ==="),
+            "gpr_3609-style shared payload handlers should not reintroduce a tag split:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("return intFunc(0);"),
+            "expected the shared payload tail to stay forwarded through the outer handler:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn unit_return_staticcatch_bindings_without_handler_exits_share_fallthrough_tail() {
         let mut compiler = LambdaCompiler::new();
         let cond1 = Ident::create_local("cond1");
@@ -21776,6 +21876,47 @@ mod tests {
         assert!(
             rendered.contains("return action.TAG === \"Ok\" ? 1 : 2;"),
             "expected the all-payload switch to lower directly over TAG without an object split:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_tag_split_like_gpr_3609()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let state = Ident::create_local("state");
+        let payload = Lambda::prim(
+            Primitive::Paddint,
+            vec![
+                Lambda::const_(Constant::int(0)),
+                Lambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Variant),
+                    vec![Lambda::var(state.clone())],
+                    Location::none(),
+                ),
+            ],
+            Location::none(),
+        );
+        let block = compiler.compile_return_block(&Lambda::Lswitch(
+            Box::new(Lambda::var(state.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                sw_blocks_full: true,
+                sw_blocks: vec![(0, payload.clone()), (1, payload)],
+                sw_failaction: None,
+                sw_names: Some(SwitchNames {
+                    consts: vec![crate::lambda::SwitchTag::named("Empty")],
+                    blocks: vec![
+                        crate::lambda::SwitchBlock::named("Int1"),
+                        crate::lambda::SwitchBlock::named("Int2"),
+                    ],
+                }),
+            },
+        ));
+
+        assert_eq!(
+            print_block(&block),
+            "return typeof state !== \"object\" ? 0 : 0 + state._0 | 0;"
         );
     }
 

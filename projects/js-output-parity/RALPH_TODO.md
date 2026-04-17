@@ -69,6 +69,60 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-17**:
 
+- Active slice: keep `gpr_3609_test` on the shared nested-staticcatch payload
+  return path by collapsing identical named payload handlers before the object
+  dispatch re-splits them by tag, then restore the checked-in explicit
+  `if/else` tail shape for the remaining guard-plus-fallthrough render
+- Active backend focus moved from **Phase 4** return-shape cleanup into a
+  narrow **Phase 5** byte-exact dump follow-up once the backend-side redundant
+  tag split was gone
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, whose named-variant switch lowering keeps
+    identical payload handlers shared instead of recompiling a per-tag payload
+    split after nested staticcatch forwarding
+  - `compiler/core/js_stmt_make.ml`, which explains why the remaining drift was
+    down at the final function-tail shape rather than in the handler-sharing
+    logic itself
+  - checked-in `tests/tests/src/gpr_3609_test.mjs`, which keeps the outer
+    `typeof state !== "object"` split as an explicit `if/else` once the shared
+    payload tail is restored
+- Rust change:
+  - added an early pure/complete identical-branch collapse in
+    `compile_named_string_switch_return_with_strategy(...)` in
+    `compiler-rust/src/lambda/compile.rs` so complete named-string return
+    switches with identical lambdas compile the shared return block once
+  - added a final function-body printer rewrite in
+    `compiler-rust/src/js_ir/printer.rs` for the checked-in snapshot shape
+    `if (guard) { return fallback; } else { return success; }` when Rust had
+    already lowered it to `if (guard) { return fallback; } return success;`
+  - added focused regression coverage in
+    `nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_3609`,
+    `named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_tag_split_like_gpr_3609`,
+    and
+    `test_print_function_body_reconstructs_else_from_guard_return_fallthrough_tail`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3609 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_function_body_reconstructs_else_from_guard_return_fallthrough_tail -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3609_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3609_test.res` is exact again in the current dirty
+    worktree; Rust no longer reintroduces the payload-side `state.TAG ===`
+    split and the final emitted function body matches the checked-in explicit
+    `if/else`
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the function-tail
+    printer rewrite did not perturb the stable external-shadow guard
+  - the authoritative wrapper stayed flat, so this was a verified guard
+    restoration with no net suite movement
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **588 / 657** -> **588 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **69** -> **69** (**no change**)
+
+Latest iteration on **2026-04-17**:
+
 - Active slice: keep the recursive-module projected-field fix from
   `recursive_module_test` without reopening the global-module-field alias
   regressions in `test_pervasive` and `test_pervasives3`

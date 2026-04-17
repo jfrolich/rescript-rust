@@ -2444,6 +2444,12 @@ impl JsPrinter {
             return;
         }
 
+        if let Some(rewritten) = try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts)
+        {
+            self.print_function_body(&rewritten, return_unit);
+            return;
+        }
+
         if return_unit {
             if let Some(merged) = try_unit_function_body_single_clean_negative_guard_merge(stmts) {
                 self.print_function_tail_statement(&merged, return_unit);
@@ -3073,6 +3079,45 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     for start in 0..stmts.len() - 1 {
         let suffix = stmts[start..].to_vec();
         if let Some(merged) = try_function_body_shared_return_guard_chain_merge(&suffix) {
+            let mut rewritten = stmts[..start].to_vec();
+            rewritten.push(merged);
+            return Some(rewritten);
+        }
+    }
+
+    None
+}
+
+fn try_function_body_guard_return_fallthrough_else_merge(stmts: &Block) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+        return None;
+    };
+
+    let StatementDesc::If(test, then_, else_) = &unwrap_single_block_stmt(guard_stmt).desc else {
+        return None;
+    };
+    if !else_.is_empty() || single_wrapped_return_expr(then_).is_none() {
+        return None;
+    }
+
+    if !matches!(unwrap_single_block_stmt(success_stmt).desc, StatementDesc::Return(_)) {
+        return None;
+    }
+
+    Some(Statement {
+        desc: StatementDesc::If(test.clone(), then_.clone(), vec![success_stmt.clone()]),
+        comment: guard_stmt.comment.clone(),
+    })
+}
+
+fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block) -> Option<Block> {
+    if stmts.len() < 2 {
+        return None;
+    }
+
+    for start in 0..stmts.len() - 1 {
+        let suffix = stmts[start..].to_vec();
+        if let Some(merged) = try_function_body_guard_return_fallthrough_else_merge(&suffix) {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(merged);
             return Some(rewritten);
@@ -5085,6 +5130,45 @@ mod tests {
         assert_eq!(
             print_block(&vec![stmt]),
             "if (true) {\n  return 1;\n} else if (false) {\n  return 2;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_function_body_reconstructs_else_from_guard_return_fallthrough_tail() {
+        let state = Ident::create_local("state");
+        let block = vec![
+            Statement::new(StatementDesc::If(
+                Expression::bin(
+                    BinOp::NotEqEq,
+                    Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                        state.clone(),
+                    )))),
+                    Expression::string("object".to_string()),
+                ),
+                vec![Statement::return_(Expression::number(Number::int(0)))],
+                vec![],
+            )),
+            Statement::return_(Expression::bin(
+                BinOp::Bor,
+                Expression::bin(
+                    BinOp::Plus,
+                    Expression::number(Number::int(0)),
+                    Expression::new(ExpressionDesc::StaticIndex(
+                        Box::new(Expression::var(state)),
+                        "_0".to_string(),
+                        None,
+                    )),
+                ),
+                Expression::number(Number::int(0)),
+            )),
+        ];
+
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&block, false);
+
+        assert_eq!(
+            printer.into_output(),
+            "if (typeof state !== \"object\") {\n  return 0;\n} else {\n  return 0 + state._0 | 0;\n}"
         );
     }
 
