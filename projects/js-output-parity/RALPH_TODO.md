@@ -69,6 +69,67 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-17**:
 
+- Active slice: restore OCaml-style named-function inlining for exported
+  helpers whose lowered bindings are wrapped in `Pjs_fn_make` /
+  `Pjs_fn_make_unit`, which was the live `async_await` /
+  `PartialApplicationNoRuntimeCurry` function/app-lowering cluster rather than
+  a printer issue
+- Active backend focus stayed on the loop’s **function/app lowering** cluster:
+  the correction is in post-lowering lambda simplification before JS IR, even
+  though the broader project frontier remains late-backend cleanup
+- OCaml / snapshot reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, especially the named-function
+    `Lapply {ap_func = Lvar v; ...}` path that beta-reduces closed helpers when
+    `Lam_analysis.ok_to_inline_fun_when_app` allows it, and
+    `compiler/core/lam_pass_lets_dce.ml` for the direct-wrapper cleanup that
+    keeps the helper body visible to later backend passes
+  - checked-in snapshots `tests/tests/src/async_await.mjs` and
+    `tests/tests/src/PartialApplicationNoRuntimeCurry.mjs`, which both inline
+    the wrapped exported helpers at non-export call sites while still keeping
+    the helper bindings materialized for export
+- Rust change:
+  - changed
+    `compiler-rust/src/lambda/simplify.rs::inlineable_named_function` to accept
+    the same wrapped JS-function shapes as `inlineable_local_function`, so the
+    post-lowering simplifier now registers `Pjs_fn_make` /
+    `Pjs_fn_make_unit` bindings like `next` and `add` for named-function
+    inlining instead of skipping them
+  - added a focused simplifier regression
+    `still_inlines_exported_closed_pjs_fn_make_function_applications`
+    covering the exported wrapped-helper shape directly
+  - added a checked-in snapshot guard
+    `async_await_inlines_exported_wrapped_named_helper_calls_like_snapshot` in
+    `compiler-rust/src/lambda/compile.rs`
+- Verified focused guards for this slice:
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release still_inlines_exported_closed_pjs_fn_make_function_applications -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo test --manifest-path compiler-rust/Cargo.toml --release async_await_inlines_exported_wrapped_named_helper_calls_like_snapshot -- --nocapture`
+  - `timeout 600 env RUSTFLAGS='-Awarnings' cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/async_await.res -o /tmp/async_await.mjs`
+  - `diff -u tests/tests/src/async_await.mjs /tmp/async_await.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/PartialApplicationNoRuntimeCurry.res -o /tmp/PartialApplicationNoRuntimeCurry.mjs`
+  - `diff -u tests/tests/src/PartialApplicationNoRuntimeCurry.mjs /tmp/PartialApplicationNoRuntimeCurry.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/async_await.res` is exact again; Rust now lowers
+    `useNext()` to `return 4;` instead of leaving `return next(3);`
+  - `tests/tests/src/PartialApplicationNoRuntimeCurry.res` is exact again;
+    Rust now inlines the wrapped exported `add` helper at `add5` instead of
+    leaving `return add$1(5, extra);`
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the wrapped-helper
+    change did not perturb the stable import/export shadowing guard
+  - the refreshed authoritative diff set no longer contains
+    `async_await.res`, `PartialApplicationNoRuntimeCurry.res`, or
+    `ExternalShadow.res`; the correction is real even though other existing
+    mismatches kept the topline flat
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **592 / 657** -> **592 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **65** -> **65** (**no change**)
+
+Latest iteration on **2026-04-17**:
+
 - Active slice: keep the `Import.res` nested local-module field aliases
   materialized only for the dynamic-import-backed local-module shape that OCaml
   preserves, instead of preserving every direct module-field alias and

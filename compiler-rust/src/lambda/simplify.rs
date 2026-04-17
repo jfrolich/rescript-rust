@@ -3684,10 +3684,7 @@ fn inlineable_local_function(value: &Lambda) -> Option<LFunction> {
 }
 
 fn inlineable_named_function(value: &Lambda) -> Option<LFunction> {
-    match value {
-        Lambda::Lfunction(func) => Some(func.clone()),
-        _ => None,
-    }
+    inlineable_local_function(value)
 }
 
 fn inlineable_direct_wrapper_function(value: &Lambda) -> Option<LFunction> {
@@ -10852,6 +10849,100 @@ mod tests {
         assert!(
             !contains_apply_to(&helper, &consumer_func.body),
             "exported closed helpers should still inline at call sites"
+        );
+    }
+
+    #[test]
+    fn still_inlines_exported_closed_pjs_fn_make_function_applications() {
+        let helper = Ident::create_local("next");
+        let helper_param = Ident::create_local("n");
+        let consumer = Ident::create_local("useNext");
+        let unit_param = Ident::create_local("param");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![helper.clone(), consumer.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(helper.clone()), Lambda::var(consumer.clone())],
+            Location::none(),
+        );
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            helper.clone(),
+            Lambda::prim(
+                Primitive::PjsFnMake(1),
+                vec![Lambda::function_(
+                    1,
+                    vec![helper_param.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(helper_param), Lambda::const_(Constant::int(1))],
+                        Location::none(),
+                    ),
+                    FunctionAttribute::default(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                consumer.clone(),
+                Lambda::prim(
+                    Primitive::PjsFnMakeUnit,
+                    vec![Lambda::function_(
+                        1,
+                        vec![unit_param],
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(helper.clone())),
+                            ap_args: vec![Lambda::const_(Constant::int(3))],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                        FunctionAttribute::default(),
+                    )],
+                    Location::none(),
+                ),
+                export_block,
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let helper_value =
+            find_binding_value(&simplified, &helper).expect("expected exported helper binding");
+        assert!(
+            inlineable_local_function(helper_value).is_some(),
+            "expected the exported helper binding to stay materialized as an inlineable function"
+        );
+
+        let consumer_value =
+            find_binding_value(&simplified, &consumer).expect("expected consumer binding");
+        let consumer_func =
+            inlineable_local_function(consumer_value).expect("expected consumer wrapper function");
+        assert!(
+            !contains_apply_to(&helper, &consumer_func.body),
+            "exported closed wrapped helpers should still inline at call sites"
+        );
+        assert!(
+            matches!(
+                *consumer_func.body,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Paddint,
+                    ref args,
+                    ..
+                }) if matches!(
+                    args.as_slice(),
+                    [
+                        Lambda::Lconst(Constant::Int { i: 3, .. }),
+                        Lambda::Lconst(Constant::Int { i: 1, .. }),
+                    ]
+                )
+            ),
+            "expected the wrapped helper call to inline to the helper body, got {simplified:?}"
         );
     }
 

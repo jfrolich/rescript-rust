@@ -22269,6 +22269,19 @@ mod tests {
     }
 
     #[test]
+    fn async_await_inlines_exported_wrapped_named_helper_calls_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("async_await");
+        assert!(
+            output.contains("function next(n) {\n  return n + 1 | 0;\n}\n\nasync function useNext() {\n  return 4;\n}"),
+            "expected async_await to inline the exported wrapped helper call to the constant result, got:\n{output}"
+        );
+        assert!(
+            !output.contains("async function useNext() {\n  return next(3);\n}"),
+            "unexpected retained wrapped helper call remained in async_await:\n{output}"
+        );
+    }
+
+    #[test]
     fn gpr_4900_inlines_local_matcher_calls_to_constants_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("gpr_4900_test");
         assert!(
