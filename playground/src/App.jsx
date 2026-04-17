@@ -24,11 +24,13 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-// @variantOf(v) is a comptime primitive that decomposes any variant value
-// into (constructor_name, arguments_array) at runtime — regardless of
-// whether the variant has constructor arguments or not. It handles both
-// payload-free variants (compiled to bare strings) and argument-carrying
-// variants (compiled to {TAG: name, _0, _1, ...}).
+// Variant primitives:
+//   @hasTag(v, "Name")      — runtime check: is `v` constructor "Name"?
+//   @argAt(v, i, argType)   — runtime `v._<i>` typed as argType (comptime).
+// Together with `inline for c in constructors { inline for argType in c.args }`,
+// they let the encoder recursively call `encode` on each argument with its
+// real type — so `encode$float`, `encode$address`, etc. are emitted, not a
+// uniform array<JSON.t>.
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
 // encode(alice) produces a specialized encode$user function. Since the
@@ -47,9 +49,20 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant(_) =>
-    let (ctor, args) = @variantOf(value)
-    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
+  | Variant({constructors}) =>
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if @hasTag(value, c.name) {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for argType in c.args {
+          Array.push(arr, encode(@argAt(value, idx.contents, argType)))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }

@@ -1370,6 +1370,31 @@ fn transl_type_inner(
             let (ref lid, ref args) = **inner;
             // Type constructor: int, string, list<'a>, etc.
             let longident = tctx.arena.get_longident(lid.txt);
+
+            // If the name is a simple ident bound to a comptime Type value
+            // (e.g. `argType` from `inline for argType in c.args`), resolve
+            // the bound TypeInfo back to a concrete type. This lets users
+            // write `(expr : argType)` inside comptime-unrolled loops.
+            if longident.is_simple() && args.is_empty() {
+                let name = tctx.arena.get_string(longident.last_idx());
+                if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
+                    tctx.comptime_bindings.get(name).cloned()
+                {
+                    if let Some(ty) = crate::types::comptime::type_info_to_type_expr(
+                        tctx.type_ctx, env, &ti,
+                    ) {
+                        let typed = crate::types::typedtree::TypedCoreType {
+                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
+                            ctyp_type: ty,
+                            ctyp_env: crate::types::typedtree::EnvRef(0),
+                            ctyp_loc: loc,
+                            ctyp_attributes: crate::parser::ast::Attributes::new(),
+                        };
+                        return Ok((typed, ty));
+                    }
+                }
+            }
+
             let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
 
             let mut parsed_args: Vec<_> = args

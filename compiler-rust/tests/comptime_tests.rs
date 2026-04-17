@@ -840,6 +840,53 @@ let aliceJson = encode(alice)
 }
 
 #[test]
+fn playground_has_tag_arg_at() {
+    // Recursive typed variant encoding via @hasTag + @argAt.
+    // Each constructor argument keeps its original type (float, int,
+    // record, etc.), so the encode() recursion dispatches correctly
+    // through @typeInfo — no uniform array<JSON.t> fallback.
+    let source = r#"
+type shape = Circle(float) | Square(float, float) | Point
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | Float => JSON.Encode.float(value)
+  | Int => JSON.Encode.int(value)
+  | Variant({constructors}) =>
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if @hasTag(value, c.name) {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for argType in c.args {
+          Array.push(arr, encode(@argAt(value, idx.contents, argType)))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
+  | _ => @compileError("unsupported")
+  }
+}
+
+let j1 = encode(Circle(5.0))
+let j2 = encode(Square(3.0, 4.0))
+let j3 = encode(Point)
+"#;
+    match compile_with_stdlib(source, "has_tag_arg_at.res") {
+        Ok(o) => {
+            eprintln!("HAS_TAG ARG_AT OUTPUT:\n{o}");
+            assert!(o.contains("encode$shape"), "Expected encode$shape:\n{o}");
+            // Float-specialized encoder should exist since args are typed
+            assert!(o.contains("encode$float"), "Expected encode$float (args recursed):\n{o}");
+        }
+        Err(e) => panic!("@hasTag + @argAt should compile: {e}"),
+    }
+}
+
+#[test]
 fn playground_variant_of_primitive() {
     // @variantOf(value) is a comptime primitive that decomposes a variant
     // at runtime into (name, args_array). No user-written %raw needed.
@@ -850,9 +897,20 @@ type shape = Circle(float) | Square(float, float) | Point
 let rec encode = (value): JSON.t => {
   switch @typeInfo(value) {
   | Float => JSON.Encode.float(value)
-  | Variant(_) =>
-    let (ctor, args) = @variantOf(value)
-    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
+  | Variant({constructors}) =>
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if @hasTag(value, c.name) {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for argType in c.args {
+          Array.push(arr, encode(@argAt(value, idx.contents, argType)))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
   | _ => @compileError("unsupported")
   }
 }
@@ -1359,9 +1417,20 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant(_) =>
-    let (ctor, args) = @variantOf(value)
-    JSON.Encode.array(Array.concat([JSON.Encode.string(ctor)], args))
+  | Variant({constructors}) =>
+    let result = ref(JSON.Null)
+    inline for c in constructors {
+      if @hasTag(value, c.name) {
+        let arr = [JSON.Encode.string(c.name)]
+        let idx = ref(0)
+        inline for argType in c.args {
+          Array.push(arr, encode(@argAt(value, idx.contents, argType)))
+          idx := idx.contents + 1
+        }
+        result := JSON.Encode.array(arr)
+      }
+    }
+    result.contents
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }

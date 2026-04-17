@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -6152,6 +6152,122 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
                 partial: false,
                 transformed_jsx: false,
             }))
+        }
+        "hasTag" => {
+            // @hasTag(value, "CtorName") — runtime check whether `value` is
+            // the given constructor. Works for both no-arg variants (bare
+            // strings) and arg-carrying variants ({TAG, _0, ...} objects).
+            let value_expr = parse_expr(p);
+            p.expect(Token::Comma);
+            let name_expr = parse_expr(p);
+            p.expect(Token::Rparen);
+            let value_idx = p.arena_mut().push_expr(value_expr);
+            let name_idx = p.arena_mut().push_expr(name_expr);
+
+            const JS_BODY: &str = "function(v, n) { return (typeof v === \"string\" ? v : v.TAG) === n; }";
+            let loc = LocIdx::none();
+
+            let js_str_expr = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                    Constant::String(std::borrow::Cow::Owned(JS_BODY.to_string()), None),
+                ))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let js_str_idx = p.arena_mut().push_expr(js_str_expr);
+
+            let eval_item = StructureItem {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    js_str_idx,
+                    Attributes::new(),
+                )))),
+                pstr_loc: loc,
+            };
+            let payload = Payload::PStr(Box::new(vec![eval_item]));
+
+            let raw_name_idx = p.arena_mut().push_string("raw");
+            let ext_name = Located { txt: raw_name_idx, loc };
+            let raw_ext = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((ext_name, payload)))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let raw_ext_idx = p.arena_mut().push_expr(raw_ext);
+
+            ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                funct: raw_ext_idx,
+                args: vec![
+                    (ArgLabel::Nolabel, value_idx),
+                    (ArgLabel::Nolabel, name_idx),
+                ],
+                partial: false,
+                transformed_jsx: false,
+            }))
+        }
+        "argAt" => {
+            // @argAt(value, index, argType) — runtime access to the i-th
+            // constructor argument, statically typed as `argType` so the
+            // result can be passed to type-directed @comptime functions
+            // (e.g. recursively to `encode`). Emits `value["_" + i]` as
+            // the runtime expression; the type constraint forces the
+            // typechecker to unify the polymorphic %raw return with the
+            // caller-supplied argType.
+            let value_expr = parse_expr(p);
+            p.expect(Token::Comma);
+            let idx_expr = parse_expr(p);
+            p.expect(Token::Comma);
+            let arg_core_type = super::typ::parse_typ_expr(p);
+            p.expect(Token::Rparen);
+            let value_idx = p.arena_mut().push_expr(value_expr);
+            let i_idx = p.arena_mut().push_expr(idx_expr);
+            let ct_idx = p.arena_mut().push_core_type(arg_core_type);
+
+            const JS_BODY: &str = "function(v, i) { return v[\"_\" + i]; }";
+            let loc = LocIdx::none();
+
+            let js_str_expr = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
+                    Constant::String(std::borrow::Cow::Owned(JS_BODY.to_string()), None),
+                ))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let js_str_idx = p.arena_mut().push_expr(js_str_expr);
+
+            let eval_item = StructureItem {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+                    js_str_idx,
+                    Attributes::new(),
+                )))),
+                pstr_loc: loc,
+            };
+            let payload = Payload::PStr(Box::new(vec![eval_item]));
+
+            let raw_name_idx = p.arena_mut().push_string("raw");
+            let ext_name = Located { txt: raw_name_idx, loc };
+            let raw_ext = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((ext_name, payload)))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let raw_ext_idx = p.arena_mut().push_expr(raw_ext);
+
+            let apply_expr = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+                    funct: raw_ext_idx,
+                    args: vec![
+                        (ArgLabel::Nolabel, value_idx),
+                        (ArgLabel::Nolabel, i_idx),
+                    ],
+                    partial: false,
+                    transformed_jsx: false,
+                }))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            };
+            let apply_idx = p.arena_mut().push_expr(apply_expr);
+
+            ExpressionDesc::Pexp_constraint(Box::new((apply_idx, ct_idx)))
         }
         "variant" | "constructor" => {
             // @variant / @constructor(TypeName, "CtorName", payload?) —
