@@ -345,7 +345,7 @@ impl LambdaCompiler {
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
-        let mut deps = apply_js_shake_pass(apply_js_flatten_and_mark_dead_pass(
+        let mut deps = apply_js_flatten_and_mark_dead_pass(
             apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
                 DepsProgram {
                     program: Program::new(block, exports),
@@ -354,7 +354,8 @@ impl LambdaCompiler {
                 },
             ))),
             self.jsx_preserve,
-        ));
+        );
+        deps = apply_js_shake_pass(deps);
         let mut required_modules = self.collect_required_module_set(&deps.program.block);
         populate_required_modules(
             self.module_path_resolver.as_ref(),
@@ -394,6 +395,18 @@ impl LambdaCompiler {
         let mut rebound_exports = Vec::new();
 
         for (export, value) in extracted.exports.into_iter().zip(extracted.values) {
+            if let Some((late_value, property)) =
+                move_same_name_export_alias_to_export_tail(block, &export, &value)
+            {
+                exports.push(export.clone());
+                rebound_exports.push(Statement::variable(VariableDeclaration {
+                    ident: export,
+                    value: Some(late_value),
+                    property,
+                    ident_info: IdentInfo::default(),
+                }));
+                continue;
+            }
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
                     if declared.contains(&export) {
@@ -412,6 +425,18 @@ impl LambdaCompiler {
                     || block_ended)
             {
                 exports.push(export);
+                continue;
+            }
+            if let Some((late_value, property)) =
+                move_reused_same_name_export_binding_to_export_tail(block, &export, &value)
+            {
+                exports.push(export.clone());
+                rebound_exports.push(Statement::variable(VariableDeclaration {
+                    ident: export,
+                    value: Some(late_value),
+                    property,
+                    ident_info: IdentInfo::default(),
+                }));
                 continue;
             }
             if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
@@ -13797,6 +13822,474 @@ fn apply_js_shake_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
+fn move_same_name_export_alias_to_export_tail(
+    block: &mut Block,
+    export: &Ident,
+    value: &Expression,
+) -> Option<(Expression, LetKind)> {
+    let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc else {
+        return None;
+    };
+    if target.name() != export.name() {
+        return None;
+    }
+
+    let mut flattened = flatten_toplevel_block(block);
+    let Some((index, initializer, property)) =
+        same_name_export_alias_binding(&flattened, target)
+    else {
+        return None;
+    };
+    if property != LetKind::Alias
+        || !matches!(
+            initializer.desc,
+            ExpressionDesc::Var(_) | ExpressionDesc::StaticIndex(_, _, _)
+        )
+        || !js_expr_no_side_effects(&initializer)
+        || expression_mentions_ident_anywhere(&initializer, target)
+        || flattened[..index]
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        || !flattened[index + 1..]
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+    {
+        return None;
+    }
+
+    for stmt in &mut flattened[index + 1..] {
+        substitute_export_alias_use_in_statement(stmt, target, &initializer);
+    }
+    flattened.remove(index);
+    *block = flattened;
+    Some((initializer, property))
+}
+
+fn move_reused_same_name_export_binding_to_export_tail(
+    block: &mut Block,
+    export: &Ident,
+    value: &Expression,
+) -> Option<(Expression, LetKind)> {
+    let mut flattened = flatten_toplevel_block(block);
+    let Some((index, reused, property)) =
+        direct_reused_same_name_export_alias_binding(&flattened, export, value)
+    else {
+        return None;
+    };
+    if property != LetKind::Alias
+        || !js_expr_no_side_effects(value)
+        || flattened[..index]
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
+        || !flattened[index + 1..]
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
+    {
+        return None;
+    }
+
+    for stmt in &mut flattened[index + 1..] {
+        substitute_export_alias_use_in_statement(stmt, &reused, value);
+    }
+    flattened.remove(index);
+    *block = flattened;
+    Some((value.clone(), property))
+}
+
+fn same_name_export_alias_binding(
+    block: &Block,
+    target: &Ident,
+) -> Option<(usize, Expression, LetKind)> {
+    block
+        .iter()
+        .enumerate()
+        .find_map(|(index, stmt)| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                property,
+                ..
+            }) if ident.same(target) => Some((index, initializer.clone(), *property)),
+            _ => None,
+        })
+}
+
+fn direct_reused_same_name_export_alias_binding(
+    block: &Block,
+    export: &Ident,
+    value: &Expression,
+) -> Option<(usize, Ident, LetKind)> {
+    block
+        .iter()
+        .enumerate()
+        .find_map(|(index, stmt)| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                property,
+                ..
+            }) if ident.name() == export.name()
+                && same_reusable_export_value(initializer, value) =>
+            {
+                Some((index, ident.clone(), *property))
+            }
+            _ => None,
+        })
+}
+
+fn substitute_export_alias_use_in_statement(
+    stmt: &mut Statement,
+    target: &Ident,
+    replacement: &Expression,
+) {
+    match &mut stmt.desc {
+        StatementDesc::Block(block) => {
+            for stmt in block {
+                substitute_export_alias_use_in_statement(stmt, target, replacement);
+            }
+        }
+        StatementDesc::Variable(decl) => {
+            if let Some(value) = &mut decl.value {
+                substitute_export_alias_use_in_expression(value, target, replacement);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            substitute_export_alias_use_in_expression(expr, target, replacement);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            substitute_export_alias_use_in_expression(cond, target, replacement);
+            for stmt in then_block {
+                substitute_export_alias_use_in_statement(stmt, target, replacement);
+            }
+            for stmt in else_block {
+                substitute_export_alias_use_in_statement(stmt, target, replacement);
+            }
+        }
+        StatementDesc::While(cond, body) => {
+            substitute_export_alias_use_in_expression(cond, target, replacement);
+            for stmt in body {
+                substitute_export_alias_use_in_statement(stmt, target, replacement);
+            }
+        }
+        StatementDesc::ForRange(start, finish, ident, _, body) => {
+            if !ident.same(target) {
+                if let Some(start) = start {
+                    substitute_export_alias_use_in_expression(start, target, replacement);
+                }
+                substitute_export_alias_use_in_expression(finish, target, replacement);
+                for stmt in body {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            substitute_export_alias_use_in_expression(test, target, replacement);
+            for (_, clause) in clauses {
+                for stmt in &mut clause.body {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+            if let Some(default) = default {
+                for stmt in default {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            substitute_export_alias_use_in_expression(test, target, replacement);
+            for clause in clauses {
+                for stmt in &mut clause.clause.body {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+            if let Some(default) = default {
+                for stmt in default {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            for stmt in body {
+                substitute_export_alias_use_in_statement(stmt, target, replacement);
+            }
+            if let Some((catch_ident, block)) = catch {
+                if !catch_ident.same(target) {
+                    for stmt in block {
+                        substitute_export_alias_use_in_statement(stmt, target, replacement);
+                    }
+                }
+            }
+            if let Some(block) = finally {
+                for stmt in block {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn substitute_export_alias_use_in_expression(
+    expr: &mut Expression,
+    target: &Ident,
+    replacement: &Expression,
+) {
+    match &mut expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) if ident.same(target) => {
+            *expr = replacement.clone();
+        }
+        ExpressionDesc::Var(VIdent::Id(_))
+        | ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::New(inner, None) => {
+            substitute_export_alias_use_in_expression(inner, target, replacement);
+        }
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            substitute_export_alias_use_in_expression(left, target, replacement);
+            substitute_export_alias_use_in_expression(right, target, replacement);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            substitute_export_alias_use_in_expression(test, target, replacement);
+            substitute_export_alias_use_in_expression(consequent, target, replacement);
+            substitute_export_alias_use_in_expression(alternate, target, replacement);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            substitute_export_alias_use_in_expression(func, target, replacement);
+            for arg in args {
+                substitute_export_alias_use_in_expression(arg, target, replacement);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            substitute_export_alias_use_in_expression(tag, target, replacement);
+            for string in strings {
+                substitute_export_alias_use_in_expression(string, target, replacement);
+            }
+            for value in values {
+                substitute_export_alias_use_in_expression(value, target, replacement);
+            }
+        }
+        ExpressionDesc::New(func, Some(args)) => {
+            substitute_export_alias_use_in_expression(func, target, replacement);
+            for arg in args {
+                substitute_export_alias_use_in_expression(arg, target, replacement);
+            }
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            if !params.iter().any(|param| param.same(target)) {
+                for stmt in body {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                substitute_export_alias_use_in_expression(item, target, replacement);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                substitute_export_alias_use_in_expression(item, target, replacement);
+            }
+            substitute_export_alias_use_in_expression(tag, target, replacement);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                substitute_export_alias_use_in_expression(dup, target, replacement);
+            }
+            for (_, value) in props {
+                substitute_export_alias_use_in_expression(value, target, replacement);
+            }
+        }
+    }
+}
+
+fn statement_mentions_ident_anywhere(stmt: &Statement, target: &Ident) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(block) => block
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, target)),
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => value
+            .as_ref()
+            .is_some_and(|value| expression_mentions_ident_anywhere(value, target)),
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            expression_mentions_ident_anywhere(expr, target)
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            expression_mentions_ident_anywhere(cond, target)
+                || then_block
+                    .iter()
+                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                || else_block
+                    .iter()
+                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        }
+        StatementDesc::While(cond, body) => {
+            expression_mentions_ident_anywhere(cond, target)
+                || body
+                    .iter()
+                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        }
+        StatementDesc::ForRange(start, finish, ident, _, body) => {
+            !ident.same(target)
+                && (start
+                    .as_ref()
+                    .is_some_and(|start| expression_mentions_ident_anywhere(start, target))
+                    || expression_mentions_ident_anywhere(finish, target)
+                    || body
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target)))
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            expression_mentions_ident_anywhere(test, target)
+                || clauses.iter().any(|(_, clause)| {
+                    clause
+                        .body
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+                || default.as_ref().is_some_and(|block| {
+                    block
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            expression_mentions_ident_anywhere(test, target)
+                || clauses.iter().any(|clause| {
+                    clause
+                        .clause
+                        .body
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+                || default.as_ref().is_some_and(|block| {
+                    block
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            body.iter()
+                .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                || catch.as_ref().is_some_and(|(ident, block)| {
+                    !ident.same(target)
+                        && block
+                            .iter()
+                            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+                || finally.as_ref().is_some_and(|block| {
+                    block
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+                })
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+    }
+}
+
+fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => ident.same(target),
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => false,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::New(inner, None) => expression_mentions_ident_anywhere(inner, target),
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_mentions_ident_anywhere(left, target)
+                || expression_mentions_ident_anywhere(right, target)
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_mentions_ident_anywhere(test, target)
+                || expression_mentions_ident_anywhere(consequent, target)
+                || expression_mentions_ident_anywhere(alternate, target)
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            expression_mentions_ident_anywhere(func, target)
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident_anywhere(arg, target))
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_mentions_ident_anywhere(tag, target)
+                || strings
+                    .iter()
+                    .any(|expr| expression_mentions_ident_anywhere(expr, target))
+                || values
+                    .iter()
+                    .any(|expr| expression_mentions_ident_anywhere(expr, target))
+        }
+        ExpressionDesc::New(func, Some(args)) => {
+            expression_mentions_ident_anywhere(func, target)
+                || args
+                    .iter()
+                    .any(|arg| expression_mentions_ident_anywhere(arg, target))
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            !params.iter().any(|param| param.same(target))
+                && body
+                    .iter()
+                    .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+        }
+        ExpressionDesc::Array(items, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_anywhere(item, target)),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            expression_mentions_ident_anywhere(tag, target)
+                || items
+                    .iter()
+                    .any(|item| expression_mentions_ident_anywhere(item, target))
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_deref()
+                .is_some_and(|dup| expression_mentions_ident_anywhere(dup, target))
+                || props
+                    .iter()
+                    .any(|(_, value)| expression_mentions_ident_anywhere(value, target))
+        }
+    }
+}
+
 fn shake_program(mut program: Program) -> Program {
     program.block = shake_block(&program.block, &program.export_set);
     program
@@ -16907,6 +17400,77 @@ mod tests {
                 assert!(ident.same(&declared_alias));
             }
             other => panic!("expected the original same-name alias binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_export_alias_binding_to_tail_when_reused() {
+        let mut compiler = LambdaCompiler::new();
+        let target = Ident::create_persistent("tToJs");
+        let declared_alias = Ident::create_local("v");
+        let exported = Ident::create_local("v");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: declared_alias.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(declared_alias.clone()),
+                vec![Expression::string("a")],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(declared_alias)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the internal use plus the late export alias binding");
+        };
+        match &first.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the internal call to keep a single argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                    other => panic!("expected the internal call argument to stay as \"a\", got {other:?}"),
+                }
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
+                    other => panic!("expected the call to use the underlying target directly, got {other:?}"),
+                }
+            }
+            other => panic!("expected the internal call to remain first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(rebound_target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(rebound_target.same(&target));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late export alias binding second, got {other:?}"),
         }
     }
 
@@ -20930,19 +21494,23 @@ mod tests {
     fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("gpr_3142_test");
         assert!(
-            output.contains("let v = tToJs;\n\nlet u = tFromJs;"),
-            "expected gpr_3142_test to keep the shared same-name aliases materialized once, got:\n{output}"
+            output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 18, characters 7-14\", tToJs(\"a\"), \"x\")")
+                && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 23, characters 7-14\", tFromJs(\"x\"), \"a\")"),
+            "expected gpr_3142_test to inline the exported aliases back to direct converter calls at the checked internal sites, got:\n{output}"
         );
         assert!(
-            output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 18, characters 7-14\", v(\"a\"), \"x\")")
-                && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 23, characters 7-14\", u(\"x\"), \"a\")"),
-            "expected gpr_3142_test to reuse those aliases at the checked internal call sites, got:\n{output}"
+            output.contains("let v = tToJs;\n\nlet u = tFromJs;"),
+            "expected gpr_3142_test to keep the exported alias bindings materialized for the final export payload, got:\n{output}"
         );
         assert!(
             output.contains("export {\n  tToJs,\n  tFromJs,\n  v,\n  u,\n}")
+                && output.find("Mocha.describe(\"Gpr_3142_test\"").is_some()
+                && output.find("let v = tToJs;").is_some()
+                && output.find("Mocha.describe(\"Gpr_3142_test\"").unwrap()
+                    < output.find("let v = tToJs;").unwrap()
                 && !output.contains("v$1 as v")
                 && !output.contains("u$1 as u"),
-            "unexpected rebound export aliases remained in gpr_3142_test:\n{output}"
+            "expected gpr_3142_test to keep the aliases only as late export bindings with no rebound export aliases, got:\n{output}"
         );
     }
 
@@ -20950,14 +21518,20 @@ mod tests {
     fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("string_set");
         assert!(
-            output.contains("let empty = Set_gen.empty;\n\nlet singleton = Set_gen.singleton;\n\nlet of_sorted_list = Set_gen.of_sorted_list;"),
-            "expected string_set to keep the shared same-name module field aliases materialized once, got:\n{output}"
+            output.contains("return Set_gen.empty;")
+                && output.contains("return Set_gen.singleton(x0);")
+                && output.contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
+            "expected string_set to inline exported module-field aliases at ordinary internal call sites like OCaml, got:\n{output}"
         );
         assert!(
-            output.contains("return empty;")
-                && output.contains("return singleton(x0);")
-                && output.contains("return of_sorted_list(Belt_List.sort(l, compare_elt));"),
-            "expected string_set to reuse the shared aliases at internal call sites, got:\n{output}"
+            output.contains("let empty = Set_gen.empty;")
+                && output.contains("let singleton = Set_gen.singleton;")
+                && output.contains("let of_sorted_list = Set_gen.of_sorted_list;")
+                && output.find("function invariant(t)").is_some()
+                && output.find("let empty = Set_gen.empty;").is_some()
+                && output.find("function invariant(t)").unwrap()
+                    < output.find("let empty = Set_gen.empty;").unwrap(),
+            "expected string_set to keep those alias bindings only in the later export section, got:\n{output}"
         );
         assert!(
             output.contains("export {\n  compare_elt,\n  empty,")
@@ -20967,6 +21541,21 @@ mod tests {
                 && !output.contains("singleton$1 as singleton")
                 && !output.contains("of_sorted_list$1 as of_sorted_list"),
             "unexpected rebound export aliases remained in string_set:\n{output}"
+        );
+    }
+
+    #[test]
+    fn external_shadow_keeps_new_wrapper_after_new_module_binding_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("ExternalShadow");
+        assert!(
+            output.contains("let New = {};\n\nfunction url(prim) {\n  return new URL(prim);\n}\n\nlet Global = {};"),
+            "expected ExternalShadow to keep the @new wrapper after the New module binding and before Global, got:\n{output}"
+        );
+        assert!(
+            output.find("let X = {};").is_some()
+                && output.find("function url(prim) {").is_some()
+                && output.find("let X = {};").unwrap() < output.find("function url(prim) {").unwrap(),
+            "expected ExternalShadow to keep earlier module/value bindings ahead of the @new wrapper, got:\n{output}"
         );
     }
 

@@ -69,6 +69,58 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-17**:
 
+- Active slice: move export-only same-name alias bindings to the late export
+  tail only when the existing binding is a real alias (`Var` / `StaticIndex`)
+  with later internal uses, which is the checked-in `gpr_3142_test` /
+  `string_set` authoritative snapshot family under the actual CLI harness
+- Active backend focus stayed in **Phase 3** JS IR lowering / export metadata
+  from `PLAN.md`: the fix remains in
+  `compiler-rust/src/lambda/compile.rs` during top-level export coercion, not
+  in the final printer
+- OCaml reference:
+  - `compiler/core/js_dump_program.ml` and
+    `compiler/core/js_dump_import_export.ml`, which print already-bound export
+    identifiers rather than synthesizing extra same-name rebound aliases
+  - checked-in JS snapshots for `tests/tests/src/gpr_3142_test.mjs` and
+    `tests/tests/src/string_set.mjs`, which keep the alias bindings in the
+    final export section while internal call sites use the underlying target
+- Rust change:
+  - taught `coerce_toplevel_exports(...)` to move same-stamp or rebound
+    same-name alias bindings to the export tail when their initializer is a
+    direct alias target and later internal uses should be rewritten back to
+    that target
+  - narrowed the move logic so real function bindings are excluded; only alias
+    initializers lowered as `Var` / `StaticIndex` participate
+  - kept focused regression coverage in
+    `compiler-rust/src/lambda/compile.rs` around the alias-tail coercion path
+- Verified focused guards for this slice:
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_moves_same_name_export_alias_binding_to_tail_when_reused -- --nocapture`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot -- --nocapture`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot -- --nocapture`
+  - `cargo test --manifest-path compiler-rust/Cargo.toml --release external_shadow_keeps_new_wrapper_after_new_module_binding_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3142_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh string_set --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh LetUnwrap`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3142_test.res` is exact again on the authoritative
+    single-file harness; the internal test body now calls `tToJs` / `tFromJs`
+    directly while the `v` / `u` aliases stay materialized only in the export
+    tail
+  - `tests/tests/src/string_set.res` no longer differs on the `empty` /
+    `singleton` / `of_sorted_list` alias-hoist placement; the remaining diff in
+    that file is the separate `subset` loop temporary shape
+  - `tests/tests/src/ExternalShadow.res` and
+    `tests/tests/src/LetUnwrap.res` stayed exact through the alias-tail change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **597 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **60** (**no change**)
+
+Latest iteration on **2026-04-17**:
+
 - Active slice: reuse the declared let-binding target for effectful
   short-circuit expressions instead of lowering through a Rust-only temporary
   alias, which is the checked-in `gpr_2608_test` snapshot shape
