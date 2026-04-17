@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
+**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **68**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,85 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **68**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's checked-in unit-function fallthrough shape for
+  single clean mutation guards, so Rust stops emitting
+  `if (v !== "b") { return; } state.contents = "b";`
+  or `if (x.RE_EXN_ID !== A4) { return; } x.x = ...; x.z = ...;`
+  and instead prints the checked-in positive guarded fallthrough form
+  `if (v === "b") { state.contents = "b"; return; }`
+  / `if (x.RE_EXN_ID === A4) { ...; return; }`
+- Active backend focus stays on the **Phase 5** last-mile printer slice from
+  `PLAN.md`: the verified change is in `compiler-rust/src/js_ir/printer.rs`,
+  and it only rewrites the final unit-function guard shape after backend
+  lowering has already produced the correct statements
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, whose recursive `if_` helper chooses
+    between explicit positive guard blocks and negative early-return
+    fallthrough depending on the emitted statement bodies
+  - checked-in `tests/tests/src/inline_record_test.mjs`, whose `ff0` snapshot
+    proves OCaml keeps the positive exception tag guard around the mutation
+    block
+  - checked-in `tests/tests/src/stdlib/Stdlib_IteratorTests.mjs`, whose
+    iterator callbacks prove OCaml keeps the positive equality guard around
+    mutation-only `contents` writes
+  - checked-in exact guards such as `tests/tests/src/ext_array_test.mjs`,
+    `tests/tests/src/undef_regression_test.mjs`, and
+    `tests/tests/src/untagged_variants_heuristic.mjs`, which prove this flip
+    must stay narrower than general unit-return negative guards
+- Rust change:
+  - added
+    `try_unit_function_body_single_clean_negative_guard_merge(...)` in
+    `compiler-rust/src/js_ir/printer.rs` and only run it for `return_unit`
+    function bodies before the broader tail merges
+  - constrained that rewrite to a single collected guard whose body is only
+    assignment-style side effects plus the implicit unit return, so loops,
+    calls, and broader control flow keep their checked-in negative-guard form
+  - added focused printer regression coverage in
+    `test_print_unit_function_body_flips_single_clean_negative_guard_like_ocaml`,
+    `test_print_unit_function_body_keeps_single_negative_guard_before_loop_like_ocaml`,
+    and
+    `test_print_unit_function_body_keeps_single_negative_guard_before_call_like_ocaml`
+  - added a checked-in end-to-end fixture guard in
+    `inline_record_test_keeps_positive_exception_fallthrough_guard_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_flips_single_clean_negative_guard_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_keeps_single_negative_guard_before_loop_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_unit_function_body_keeps_single_negative_guard_before_call_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml inline_record_test_keeps_positive_exception_fallthrough_guard_like_ocaml -- --nocapture`
+  - `env RUSTFLAGS='-Awarnings' timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh inline_record_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ext_array_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh undef_regression_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh untagged_variants_heuristic --diff`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Stdlib_IteratorTests.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh src/stdlib/Test.res --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/inline_record_test.res` is exact again; Rust now prints
+    `ff0` with the same positive exception-tag fallthrough guard that OCaml
+    checks in
+  - `tests/tests/src/stdlib/Stdlib_IteratorTests.res` is exact again; Rust now
+    keeps the same positive equality guard around the callback mutation writes
+  - `tests/tests/src/ext_array_test.res`,
+    `tests/tests/src/undef_regression_test.res`, and
+    `tests/tests/src/untagged_variants_heuristic.res` stayed exact after the
+    narrowed rewrite, so this printer change did not reopen the broader
+    unit-return guard cluster
+  - the verified improvement is a narrow last-mile printer shape match, not a
+    backend string rewrite: the function-body printer now recognizes the same
+    single clean mutation-guard fallthrough form that OCaml checks in for
+    these snapshots
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **587 / 657** -> **589 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **70** -> **68** (**-2**)
 
 Latest iteration on **2026-04-17**:
 

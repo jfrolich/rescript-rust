@@ -2423,6 +2423,13 @@ impl JsPrinter {
             return;
         }
 
+        if return_unit {
+            if let Some(merged) = try_unit_function_body_single_clean_negative_guard_merge(stmts) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
+        }
+
         if let Some(merged) = try_function_body_shared_return_guard_chain_merge(stmts) {
             self.print_function_tail_statement(&merged, return_unit);
             return;
@@ -2973,6 +2980,38 @@ fn try_function_body_negative_guard_chain_merge(stmts: &Block) -> Option<Stateme
     )))
 }
 
+fn try_unit_function_body_single_clean_negative_guard_merge(stmts: &Block) -> Option<Statement> {
+    let mut guards = Vec::new();
+    let mut body = collect_function_tail_negative_guard_chain_stmt(
+        &Statement::new(StatementDesc::Block(stmts.clone())),
+        &mut guards,
+    )?;
+    if body.is_empty() {
+        return None;
+    }
+
+    let [guard] = guards.as_slice() else {
+        return None;
+    };
+    let positive_guard = supported_single_negative_guard_condition(guard)?;
+    if !supported_single_negative_guard_body(&body) {
+        return None;
+    }
+
+    if !body
+        .last()
+        .is_some_and(|stmt| return_is_undefined(unwrap_single_block_stmt(stmt)))
+    {
+        body.push(Statement::return_(Expression::undefined(true)));
+    }
+
+    Some(Statement::new(StatementDesc::If(
+        positive_guard,
+        body,
+        vec![],
+    )))
+}
+
 fn try_function_body_shared_return_guard_chain_merge(stmts: &Block) -> Option<Statement> {
     let (last, prefix) = stmts.split_last()?;
     if prefix.is_empty() {
@@ -3469,6 +3508,64 @@ fn negate_tail_merge_condition(cond: &Expression) -> Expression {
             Expression::bin(BinOp::EqEqEq, left.as_ref().clone(), right.as_ref().clone())
         }
         _ => Expression::not(cond.clone()),
+    }
+}
+
+fn supported_single_negative_guard_condition(cond: &Expression) -> Option<Expression> {
+    match &cond.desc {
+        ExpressionDesc::Bin(BinOp::EqEqEq | BinOp::NotEqEq, left, right)
+            if single_negative_guard_subject_expr_supported(left)
+                && single_negative_guard_tag_expr_supported(right) =>
+        {
+            Some(cond.clone())
+        }
+        ExpressionDesc::Bin(BinOp::EqEqEq | BinOp::NotEqEq, left, right)
+            if single_negative_guard_subject_expr_supported(right)
+                && single_negative_guard_tag_expr_supported(left) =>
+        {
+            Some(cond.clone())
+        }
+        _ => None,
+    }
+}
+
+fn single_negative_guard_subject_expr_supported(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(_) => true,
+        ExpressionDesc::StaticIndex(target, _, _) => single_negative_guard_subject_expr_supported(target),
+        _ => false,
+    }
+}
+
+fn single_negative_guard_tag_expr_supported(expr: &Expression) -> bool {
+    matches!(expr.desc, ExpressionDesc::Str { .. } | ExpressionDesc::Var(_))
+}
+
+fn supported_single_negative_guard_body(body: &Block) -> bool {
+    body.iter().all(|stmt| match &unwrap_single_block_stmt(stmt).desc {
+        StatementDesc::Return(Expression {
+            desc: ExpressionDesc::Undefined { .. },
+            ..
+        }) => true,
+        StatementDesc::Exp(expr) => supported_single_negative_guard_effect(expr),
+        _ => false,
+    })
+}
+
+fn supported_single_negative_guard_effect(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Bin(BinOp::Eq, left, _) => supported_single_negative_guard_assign_target(left),
+        _ => false,
+    }
+}
+
+fn supported_single_negative_guard_assign_target(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(_) => true,
+        ExpressionDesc::StaticIndex(target, _, _) | ExpressionDesc::ArrayIndex(target, _) => {
+            single_negative_guard_subject_expr_supported(target)
+        }
+        _ => false,
     }
 }
 
@@ -5943,6 +6040,147 @@ mod tests {
         assert!(rendered.contains("if (q.length <= 0) {"));
         assert!(rendered.contains("doAction();"));
         assert!(!rendered.contains("if (q.length > 0) {"));
+    }
+
+    #[test]
+    fn test_print_unit_function_body_flips_single_clean_negative_guard_like_ocaml() {
+        let handle = Ident::create_local("handle");
+        let value = Ident::create_local("value");
+        let state = Ident::create_local("state");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![value.clone(), state.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::NotEqEq,
+                            Expression::var(value.clone()),
+                            Expression::string("b"),
+                        ),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::new(ExpressionDesc::StaticIndex(
+                            Box::new(Expression::var(state)),
+                            "contents".to_string(),
+                            None,
+                        )),
+                        Expression::string("b"),
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (value === \"b\") {"), "{rendered}");
+        assert!(rendered.contains("state.contents = \"b\";"), "{rendered}");
+        assert!(rendered.contains("return;"), "{rendered}");
+        assert!(!rendered.contains("if (value !== \"b\") {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_unit_function_body_keeps_single_negative_guard_before_loop_like_ocaml() {
+        let handle = Ident::create_local("handle");
+        let len = Ident::create_local("len");
+        let k = Ident::create_local("k");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![len.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::EqEqEq,
+                            Expression::var(len.clone()),
+                            Expression::number(Number::int(0)),
+                        ),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::new(StatementDesc::ForRange(
+                        Some(Expression::number(Number::int(0))),
+                        Expression::number(Number::int(1)),
+                        k,
+                        ForDirection::Up,
+                        vec![],
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (len === 0) {"), "{rendered}");
+        assert!(rendered.contains("for (let k = 0; k < 1; ++k) {"), "{rendered}");
+        assert!(!rendered.contains("if (len !== 0) {"), "{rendered}");
+    }
+
+    #[test]
+    fn test_print_unit_function_body_keeps_single_negative_guard_before_call_like_ocaml() {
+        let handle = Ident::create_local("handle");
+        let obj = Ident::create_local("obj");
+        let size = Ident::create_local("size");
+        let log = Ident::create_local("log");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: handle,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![obj.clone()],
+                body: vec![
+                    Statement::new(StatementDesc::If(
+                        Expression::bin(
+                            BinOp::EqEqEq,
+                            Expression::new(ExpressionDesc::Typeof(Box::new(Expression::var(
+                                obj.clone(),
+                            )))),
+                            Expression::string("function"),
+                        ),
+                        vec![Statement::return_(Expression::undefined(true))],
+                        vec![],
+                    )),
+                    Statement::variable(VariableDeclaration {
+                        ident: size,
+                        value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                            Box::new(Expression::var(obj)),
+                            "length".to_string(),
+                            None,
+                        ))),
+                        property: crate::lambda::compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    }),
+                    Statement::exp(Expression::call(
+                        Expression::var(log),
+                        vec![],
+                        CallInfo::default(),
+                    )),
+                ],
+                env: Default::default(),
+                return_unit: true,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("if (typeof obj === \"function\") {"), "{rendered}");
+        assert!(rendered.contains("let size = obj.length;"), "{rendered}");
+        assert!(rendered.contains("log();"), "{rendered}");
+        assert!(!rendered.contains("if (typeof obj !== \"function\") {"), "{rendered}");
     }
 
     #[test]

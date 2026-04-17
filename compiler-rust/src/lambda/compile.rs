@@ -20385,6 +20385,21 @@ mod tests {
     }
 
     #[test]
+    fn inline_record_test_keeps_positive_exception_fallthrough_guard_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("inline_record_test");
+        assert!(
+            output.contains(
+                "function ff0(x) {\n  if (x.RE_EXN_ID === A4) {\n    x.x = x.x + 1 | 0;\n    x.z = x.z + 1 | 0;\n    return;\n  }\n}"
+            ),
+            "expected inline_record_test.ff0 to keep the positive exception guard with guarded fallthrough, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (x.RE_EXN_ID !== A4) {"),
+            "unexpected negative early-return guard in inline_record_test.ff0:\n{output}"
+        );
+    }
+
+    #[test]
     fn json_decorders_keeps_needvalue_if_temp_declared_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("json_decorders");
         assert!(
