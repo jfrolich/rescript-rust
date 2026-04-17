@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
+**Status:** 591 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 66 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **591 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **66**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,55 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **591 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **66**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep nested `Const_module_alias` inputs materialized when a
+  local module block is later projected back out to exported fields, which is
+  the checked-in `offset` snapshot shape
+- Active backend focus moved back to **Phase 4** late lambda/backend cleanup
+  from `PLAN.md`: the fix is in `compiler-rust/src/lambda/simplify.rs`, not in
+  the final printer
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, which keeps the shared local
+    module alias input available instead of substituting it away before the
+    projected export field can collapse onto the same identity
+  - checked-in `tests/tests/src/offset.mjs`, which confirms OCaml keeps the
+    shared `$$Set` placeholder alive and reuses it both inside `M` and for the
+    exported `$$Set`
+- Rust change:
+  - added a whole-lambda collector for projected local-module alias inputs in
+    `compiler-rust/src/lambda/simplify.rs` so nested `Const_module_alias`
+    bindings feeding projected local modules are preserved across all backend
+    simplify passes
+  - threaded that preserved alias set into
+    `simplify_alias_bindings_like_lets_dce(...)`, preventing the late alias-DCE
+    pass from substituting away the shared module-alias placeholder after the
+    earlier simplifier had already kept it alive
+  - tightened the simplify regression to assert the real invariant instead of
+    the previous over-specific nesting shape, and kept the checked-in JS output
+    regression in `compiler-rust/src/lambda/compile.rs`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release keeps_nested_module_alias_inputs_materialized_when_projected_local_modules_are_exported -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh offset --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/offset.res` is exact again; Rust now keeps the shared
+    module-alias placeholder alive through alias cleanup, so `M.$$Set` and the
+    exported `$$Set` both point at the same preserved binding like OCaml
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the alias-cleanup
+    fix did not perturb the broader stable guard outside this local-module
+    cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **590 / 657** -> **591 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **67** -> **66** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

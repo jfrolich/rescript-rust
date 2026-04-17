@@ -316,8 +316,10 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     let preserved_local_module_module_field_call_bindings =
         collect_local_module_module_field_call_bindings(&flattened);
-    let preserved_local_module_module_alias_bindings =
+    let mut preserved_local_module_module_alias_bindings =
         collect_local_module_module_alias_bindings(&flattened);
+    preserved_local_module_module_alias_bindings
+        .extend(collect_projected_local_module_alias_inputs(&flattened));
     let preserved_local_module_eta_alias_bindings =
         collect_local_module_eta_alias_bindings(&flattened);
     let preserved_local_module_materialized_alias_bindings =
@@ -358,7 +360,10 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
         collect_local_module_global_module_alias_bindings(&second),
     );
     let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
-    let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(&lets_dce_style);
+    let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(
+        &lets_dce_style,
+        &preserved_local_module_module_alias_bindings,
+    );
     simplify_for_js_backend_once(
         &lets_dce_aliases,
         &preserved_export_bindings_after_first,
@@ -1241,15 +1246,26 @@ fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
     }
 }
 
-fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
+fn simplify_alias_bindings_like_lets_dce(
+    lam: &Lambda,
+    preserved_local_module_module_alias_bindings: &HashSet<Ident>,
+) -> Lambda {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
         Lambda::Lapply(apply) => Lambda::apply(
-            simplify_alias_bindings_like_lets_dce(&apply.ap_func),
+            simplify_alias_bindings_like_lets_dce(
+                &apply.ap_func,
+                preserved_local_module_module_alias_bindings,
+            ),
             apply
                 .ap_args
                 .iter()
-                .map(simplify_alias_bindings_like_lets_dce)
+                .map(|arg| {
+                    simplify_alias_bindings_like_lets_dce(
+                        arg,
+                        preserved_local_module_module_alias_bindings,
+                    )
+                })
                 .collect(),
             apply.ap_info.clone(),
             apply.ap_transformed_jsx,
@@ -1257,14 +1273,25 @@ fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
         Lambda::Lfunction(func) => Lambda::function_(
             func.arity,
             func.params.clone(),
-            simplify_alias_bindings_like_lets_dce(&func.body),
+            simplify_alias_bindings_like_lets_dce(
+                &func.body,
+                preserved_local_module_module_alias_bindings,
+            ),
             func.attr.clone(),
         ),
         Lambda::Llet(kind, id, value, body) => {
-            let value = simplify_alias_bindings_like_lets_dce(value);
-            let body = simplify_alias_bindings_like_lets_dce(body);
+            let value = simplify_alias_bindings_like_lets_dce(
+                value,
+                preserved_local_module_module_alias_bindings,
+            );
+            let body = simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            );
             if *kind == LetKind::Alias {
                 let binding_is_exported = lambda_exports_ident(&body, id);
+                let preserve_local_module_module_alias =
+                    preserved_local_module_module_alias_bindings.contains(id);
                 let preserve_local_module_materialized_alias =
                     preserve_local_module_materialized_alias_binding_in_alias_cleanup(
                         id, &value, &body,
@@ -1276,21 +1303,24 @@ fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
                 if use_info.times == 0 {
                     return body;
                 }
-                if !preserve_local_module_materialized_alias
+                if !preserve_local_module_module_alias
+                    && !preserve_local_module_materialized_alias
                     && lets_dce_unconditional_alias_substitution(&value)
                 {
                     return substitute_alias_use(&body, id, &value);
                 }
-                if !preserve_local_module_materialized_alias
+                if !preserve_local_module_module_alias
+                    && !preserve_local_module_materialized_alias
                     && use_info.times == 1
                     && matches!(
                         value,
                         Lambda::Lconst(ref constant) if constant.is_allocating()
                     )
                 {
-                    return simplify_alias_bindings_like_lets_dce(&substitute_alias_use(
-                        &body, id, &value,
-                    ));
+                    return simplify_alias_bindings_like_lets_dce(
+                        &substitute_alias_use(&body, id, &value),
+                        preserved_local_module_module_alias_bindings,
+                    );
                 }
             }
             Lambda::let_(*kind, id.clone(), value, body)
@@ -1298,89 +1328,190 @@ fn simplify_alias_bindings_like_lets_dce(lam: &Lambda) -> Lambda {
         Lambda::Lletrec(bindings, body) => Lambda::letrec(
             bindings
                 .iter()
-                .map(|(id, binding)| (id.clone(), simplify_alias_bindings_like_lets_dce(binding)))
+                .map(|(id, binding)| {
+                    (
+                        id.clone(),
+                        simplify_alias_bindings_like_lets_dce(
+                            binding,
+                            preserved_local_module_module_alias_bindings,
+                        ),
+                    )
+                })
                 .collect(),
-            simplify_alias_bindings_like_lets_dce(body),
+            simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            ),
         ),
         Lambda::Lprim(info) => Lambda::prim(
             info.primitive.clone(),
             info.args
                 .iter()
-                .map(simplify_alias_bindings_like_lets_dce)
+                .map(|arg| {
+                    simplify_alias_bindings_like_lets_dce(
+                        arg,
+                        preserved_local_module_module_alias_bindings,
+                    )
+                })
                 .collect(),
             info.loc.clone(),
         ),
         Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
-            Box::new(simplify_alias_bindings_like_lets_dce(scrutinee)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                scrutinee,
+                preserved_local_module_module_alias_bindings,
+            )),
             LambdaSwitch {
                 sw_consts_full: switch.sw_consts_full,
                 sw_consts: switch
                     .sw_consts
                     .iter()
-                    .map(|(tag, lam)| (*tag, simplify_alias_bindings_like_lets_dce(lam)))
+                    .map(|(tag, lam)| {
+                        (
+                            *tag,
+                            simplify_alias_bindings_like_lets_dce(
+                                lam,
+                                preserved_local_module_module_alias_bindings,
+                            ),
+                        )
+                    })
                     .collect(),
                 sw_blocks_full: switch.sw_blocks_full,
                 sw_blocks: switch
                     .sw_blocks
                     .iter()
-                    .map(|(tag, lam)| (*tag, simplify_alias_bindings_like_lets_dce(lam)))
+                    .map(|(tag, lam)| {
+                        (
+                            *tag,
+                            simplify_alias_bindings_like_lets_dce(
+                                lam,
+                                preserved_local_module_module_alias_bindings,
+                            ),
+                        )
+                    })
                     .collect(),
-                sw_failaction: switch
-                    .sw_failaction
-                    .as_ref()
-                    .map(|lam| Box::new(simplify_alias_bindings_like_lets_dce(lam))),
+                sw_failaction: switch.sw_failaction.as_ref().map(|lam| {
+                    Box::new(simplify_alias_bindings_like_lets_dce(
+                        lam,
+                        preserved_local_module_module_alias_bindings,
+                    ))
+                }),
                 sw_names: switch.sw_names.clone(),
             },
         ),
         Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
-            Box::new(simplify_alias_bindings_like_lets_dce(scrutinee)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                scrutinee,
+                preserved_local_module_module_alias_bindings,
+            )),
             cases
                 .iter()
-                .map(|(tag, lam)| (tag.clone(), simplify_alias_bindings_like_lets_dce(lam)))
+                .map(|(tag, lam)| {
+                    (
+                        tag.clone(),
+                        simplify_alias_bindings_like_lets_dce(
+                            lam,
+                            preserved_local_module_module_alias_bindings,
+                        ),
+                    )
+                })
                 .collect(),
-            default
-                .as_ref()
-                .map(|lam| Box::new(simplify_alias_bindings_like_lets_dce(lam))),
+            default.as_ref().map(|lam| {
+                Box::new(simplify_alias_bindings_like_lets_dce(
+                    lam,
+                    preserved_local_module_module_alias_bindings,
+                ))
+            }),
         ),
         Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
             *id,
             args.iter()
-                .map(simplify_alias_bindings_like_lets_dce)
+                .map(|arg| {
+                    simplify_alias_bindings_like_lets_dce(
+                        arg,
+                        preserved_local_module_module_alias_bindings,
+                    )
+                })
                 .collect(),
         ),
         Lambda::LstaticCatch(body, handler, recover) => Lambda::LstaticCatch(
-            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            )),
             handler.clone(),
-            Box::new(simplify_alias_bindings_like_lets_dce(recover)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                recover,
+                preserved_local_module_module_alias_bindings,
+            )),
         ),
         Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
-            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            )),
             exn.clone(),
-            Box::new(simplify_alias_bindings_like_lets_dce(handler)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                handler,
+                preserved_local_module_module_alias_bindings,
+            )),
         ),
         Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
-            simplify_alias_bindings_like_lets_dce(cond),
-            simplify_alias_bindings_like_lets_dce(then_),
-            simplify_alias_bindings_like_lets_dce(else_),
+            simplify_alias_bindings_like_lets_dce(
+                cond,
+                preserved_local_module_module_alias_bindings,
+            ),
+            simplify_alias_bindings_like_lets_dce(
+                then_,
+                preserved_local_module_module_alias_bindings,
+            ),
+            simplify_alias_bindings_like_lets_dce(
+                else_,
+                preserved_local_module_module_alias_bindings,
+            ),
         ),
         Lambda::Lsequence(first, second) => Lambda::seq(
-            simplify_alias_bindings_like_lets_dce(first),
-            simplify_alias_bindings_like_lets_dce(second),
+            simplify_alias_bindings_like_lets_dce(
+                first,
+                preserved_local_module_module_alias_bindings,
+            ),
+            simplify_alias_bindings_like_lets_dce(
+                second,
+                preserved_local_module_module_alias_bindings,
+            ),
         ),
         Lambda::Lwhile(cond, body) => Lambda::Lwhile(
-            Box::new(simplify_alias_bindings_like_lets_dce(cond)),
-            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                cond,
+                preserved_local_module_module_alias_bindings,
+            )),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            )),
         ),
         Lambda::Lfor(id, from, to, direction, body) => Lambda::Lfor(
             id.clone(),
-            Box::new(simplify_alias_bindings_like_lets_dce(from)),
-            Box::new(simplify_alias_bindings_like_lets_dce(to)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                from,
+                preserved_local_module_module_alias_bindings,
+            )),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                to,
+                preserved_local_module_module_alias_bindings,
+            )),
             *direction,
-            Box::new(simplify_alias_bindings_like_lets_dce(body)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                body,
+                preserved_local_module_module_alias_bindings,
+            )),
         ),
         Lambda::Lassign(id, value) => Lambda::Lassign(
             id.clone(),
-            Box::new(simplify_alias_bindings_like_lets_dce(value)),
+            Box::new(simplify_alias_bindings_like_lets_dce(
+                value,
+                preserved_local_module_module_alias_bindings,
+            )),
         ),
     }
 }
@@ -1422,14 +1553,21 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             let original_value = value.as_ref();
             let binding_is_exported = lambda_exports_ident(body, id);
             let mut kind = *kind;
-            let value_env = if binding_is_exported && inlineable_local_function(original_value).is_some()
-            {
-                let mut next = env.clone();
-                next.delay_dead_let_cleanup = true;
-                next
-            } else {
-                env.clone()
-            };
+            let mut value_env =
+                if binding_is_exported && inlineable_local_function(original_value).is_some() {
+                    let mut next = env.clone();
+                    next.delay_dead_let_cleanup = true;
+                    next
+                } else {
+                    env.clone()
+                };
+            if lambda_contains_module_field_read_of_ident(body, id) {
+                value_env
+                    .preserved_local_module_module_alias_bindings
+                    .extend(collect_module_alias_bindings_used_in_local_module_blocks(
+                        original_value,
+                    ));
+            }
             let mut value = simplify_with_env(value, &value_env, exports);
             let mut body_env = env.without_ident(id);
             let mut body_exports = None;
@@ -4232,6 +4370,174 @@ fn collect_local_module_module_alias_bindings(lam: &Lambda) -> HashSet<Ident> {
     preserved
 }
 
+fn collect_module_alias_bindings_used_in_local_module_blocks(lam: &Lambda) -> HashSet<Ident> {
+    fn collect_into(lam: &Lambda, preserved: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect_into(&apply.ap_func, preserved);
+                for arg in &apply.ap_args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lfunction(func) => collect_into(&func.body, preserved),
+            Lambda::Llet(_, id, value, body) => {
+                if matches!(value.as_ref(), Lambda::Lconst(Constant::ModuleAlias))
+                    && lambda_uses_ident_in_local_module_block(body, id)
+                {
+                    preserved.insert(id.clone());
+                }
+                collect_into(value, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, expr) in bindings {
+                    collect_into(expr, preserved);
+                }
+                collect_into(body, preserved);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in &switch.sw_consts {
+                    collect_into(lam, preserved);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect_into(lam, preserved);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect_into(failaction, preserved);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in cases {
+                    collect_into(lam, preserved);
+                }
+                if let Some(default) = default {
+                    collect_into(default, preserved);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect_into(body, preserved);
+                collect_into(handler, preserved);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect_into(cond, preserved);
+                collect_into(then_, preserved);
+                collect_into(else_, preserved);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect_into(first, preserved);
+                collect_into(second, preserved);
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect_into(start, preserved);
+                collect_into(end, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lassign(_, value) => collect_into(value, preserved),
+        }
+    }
+
+    let mut preserved = HashSet::new();
+    collect_into(lam, &mut preserved);
+    preserved
+}
+
+fn collect_projected_local_module_alias_inputs(lam: &Lambda) -> HashSet<Ident> {
+    fn collect_into(lam: &Lambda, preserved: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect_into(&apply.ap_func, preserved);
+                for arg in &apply.ap_args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lfunction(func) => collect_into(&func.body, preserved),
+            Lambda::Llet(_, module_id, value, body) => {
+                if lambda_contains_module_field_read_of_ident(body, module_id) {
+                    preserved.extend(collect_module_alias_bindings_used_in_local_module_blocks(
+                        value,
+                    ));
+                }
+                collect_into(value, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, expr) in bindings {
+                    collect_into(expr, preserved);
+                }
+                collect_into(body, preserved);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in &switch.sw_consts {
+                    collect_into(lam, preserved);
+                }
+                for (_, lam) in &switch.sw_blocks {
+                    collect_into(lam, preserved);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect_into(failaction, preserved);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect_into(scrutinee, preserved);
+                for (_, lam) in cases {
+                    collect_into(lam, preserved);
+                }
+                if let Some(default) = default {
+                    collect_into(default, preserved);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect_into(arg, preserved);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect_into(body, preserved);
+                collect_into(handler, preserved);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect_into(cond, preserved);
+                collect_into(then_, preserved);
+                collect_into(else_, preserved);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect_into(first, preserved);
+                collect_into(second, preserved);
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                collect_into(start, preserved);
+                collect_into(end, preserved);
+                collect_into(body, preserved);
+            }
+            Lambda::Lassign(_, value) => collect_into(value, preserved),
+        }
+    }
+
+    let mut preserved = HashSet::new();
+    collect_into(lam, &mut preserved);
+    preserved
+}
+
 fn collect_local_module_module_field_call_bindings(lam: &Lambda) -> HashSet<Ident> {
     fn collect_into(lam: &Lambda, preserved: &mut HashSet<Ident>) {
         match lam {
@@ -5377,14 +5683,19 @@ fn preserve_local_module_materialized_alias_binding(
     simplified_value: &Lambda,
     body: &Lambda,
 ) -> bool {
+    let exported_module_alias_feeds_local_module_block = lambda_exports_ident(body, id)
+        && lambda_uses_ident_in_local_module_block(body, id)
+        && (matches!(original_value, Lambda::Lconst(Constant::ModuleAlias))
+            || matches!(simplified_value, Lambda::Lconst(Constant::ModuleAlias)));
     let projected_field_outside_local_module = safe_aliasable_local_module_field_read(
         simplified_value,
     ) && local_module_block_using_ident_has_projected_field(body, id);
-    lambda_uses_ident_in_local_module_block(body, id)
+    exported_module_alias_feeds_local_module_block
+        || (lambda_uses_ident_in_local_module_block(body, id)
         && materialized_local_module_alias_value(simplified_value)
         && (!materialized_local_module_alias_value(original_value)
             || lambda_uses_ident_outside_local_module_block(body, id)
-            || projected_field_outside_local_module)
+            || projected_field_outside_local_module))
 }
 
 fn preserve_local_module_materialized_alias_binding_in_alias_cleanup(
@@ -7089,6 +7400,196 @@ mod tests {
         };
         assert_eq!(fields.as_slice(), &["Set".to_string()]);
         assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == module_alias));
+    }
+
+    #[test]
+    fn keeps_exported_module_alias_bindings_materialized_when_local_module_blocks_share_them() {
+        let module_alias = Ident::create_local("Set");
+        let module_binding = Ident::create_local("M");
+        let export_block = Lambda::prim(
+            Primitive::Pmakeblock(
+                0,
+                TagInfo::ModuleExport(vec![module_binding.clone(), module_alias.clone()]),
+                Mutable::Immutable,
+            ),
+            vec![Lambda::var(module_binding.clone()), Lambda::var(module_alias.clone())],
+            Location::none(),
+        );
+        let body = Lambda::let_(
+            LetKind::Strict,
+            module_binding.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::module(vec!["Set".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::var(module_alias.clone())],
+                Location::none(),
+            ),
+            export_block,
+        );
+        let lambda = Lambda::let_(
+            LetKind::Alias,
+            module_alias.clone(),
+            Lambda::const_(Constant::ModuleAlias),
+            body,
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Some(kept_value) = find_binding_value(&simplified, &module_alias) else {
+            panic!("expected the exported module alias binding to remain materialized");
+        };
+        assert!(matches!(kept_value, Lambda::Lconst(Constant::ModuleAlias)));
+
+        let Some(module_value) = find_binding_value(&simplified, &module_binding) else {
+            panic!("expected the local module block to remain");
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            args,
+            ..
+        }) = module_value
+        else {
+            panic!("expected the simplified module block to stay a module makeblock");
+        };
+        assert_eq!(fields.as_slice(), &["Set".to_string()]);
+        assert!(matches!(args.as_slice(), [Lambda::Lvar(id)] if *id == module_alias));
+
+        let Lambda::Llet(_, _, _, body) = simplified else {
+            panic!("expected the module alias binding at the outer let");
+        };
+        let Lambda::Llet(_, _, _, export_block) = *body else {
+            panic!("expected the local module block before the export block");
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(export_ids), _),
+            args,
+            ..
+        }) = *export_block
+        else {
+            panic!("expected the export block at the tail");
+        };
+        assert_eq!(
+            export_ids,
+            vec![module_binding.clone(), module_alias.clone()]
+        );
+        assert!(matches!(
+            args.as_slice(),
+            [Lambda::Lvar(first), Lambda::Lvar(second)]
+                if *first == module_binding && *second == module_alias
+        ));
+    }
+
+    #[test]
+    fn keeps_nested_module_alias_inputs_materialized_when_projected_local_modules_are_exported() {
+        let module_binding = Ident::create_local("M");
+        let inner_x = Ident::create_local("x$inner");
+        let inner_set = Ident::create_local("Set$inner");
+        let exported_x = Ident::create_local("x");
+        let exported_set = Ident::create_local("Set");
+        let module_value = Lambda::let_(
+            LetKind::Strict,
+            inner_x.clone(),
+            Lambda::const_(Constant::int(1)),
+            Lambda::let_(
+                LetKind::Alias,
+                inner_set.clone(),
+                Lambda::const_(Constant::ModuleAlias),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::module(vec!["x".to_string(), "Set".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(inner_x.clone()), Lambda::var(inner_set.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            module_binding.clone(),
+            module_value,
+            Lambda::let_(
+                LetKind::Alias,
+                exported_x.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "x".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(module_binding.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Alias,
+                    exported_set.clone(),
+                    Lambda::prim(
+                        Primitive::Pfield(
+                            1,
+                            FieldDbgInfo::Module {
+                                name: "Set".to_string(),
+                            },
+                        ),
+                        vec![Lambda::var(module_binding.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![
+                                module_binding.clone(),
+                                exported_x.clone(),
+                                exported_set.clone(),
+                            ]),
+                            Mutable::Immutable,
+                        ),
+                        vec![
+                            Lambda::var(module_binding.clone()),
+                            Lambda::var(exported_x),
+                            Lambda::var(exported_set.clone()),
+                        ],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Some(inner_set_value) = find_binding_value(&simplified, &inner_set) else {
+            panic!("expected the nested module alias input to remain materialized");
+        };
+        assert!(matches!(inner_set_value, Lambda::Lconst(Constant::ModuleAlias)));
+
+        let Some(module_value) = find_binding_value(&simplified, &module_binding) else {
+            panic!("expected the projected local module binding to remain");
+        };
+        let module_makeblock = match module_value {
+            Lambda::Llet(_, _, _, body_after_inner_set) => body_after_inner_set.as_ref(),
+            Lambda::Lprim(_) => module_value,
+            _ => panic!("expected the local module value to keep the shared alias input"),
+        };
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+            args,
+            ..
+        }) = module_makeblock
+        else {
+            panic!("expected the local module value to end in a module makeblock");
+        };
+        assert_eq!(fields.as_slice(), &["x".to_string(), "Set".to_string()]);
+        assert!(matches!(
+            args.as_slice().last(),
+            Some(Lambda::Lvar(second)) if *second == inner_set
+        ));
+
+        let Some(export_value) = find_binding_value(&simplified, &exported_set) else {
+            panic!("expected the projected export field binding to remain");
+        };
+        assert!(matches!(export_value, Lambda::Lvar(id) if *id == inner_set));
     }
 
     #[test]

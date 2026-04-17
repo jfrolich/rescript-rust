@@ -20701,6 +20701,19 @@ mod tests {
     }
 
     #[test]
+    fn offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("offset");
+        assert!(
+            output.contains("let $$Set;\n\nlet M = {\n  x: 1,\n  $$Set: $$Set\n};"),
+            "expected offset to keep the exported module alias placeholder before M, got:\n{output}"
+        );
+        assert!(
+            !output.contains("$$Set: undefined"),
+            "unexpected inlined undefined module alias field remained in offset:\n{output}"
+        );
+    }
+
+    #[test]
     fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("uncurried_cast");
         assert!(
