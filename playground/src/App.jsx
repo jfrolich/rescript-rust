@@ -25,10 +25,10 @@ type tree = { value: string, children: array<tree> }
 exception DecodeError(string)
 
 // Variants with no payloads compile to their name as a string in ReScript 12,
-// and JSON.t is @unboxed, so both runtime representations are identical —
-// a %identity cast is all we need, no runtime pattern match.
+// and JSON.t is @unboxed, so encoding is just a %identity cast. Decoding
+// uses @constructor(t, name) to build the variant from a comptime-known
+// constructor name — the compiler knows which constant value to emit.
 external variantToJson: 'a => JSON.t = "%identity"
-external jsonToVariant: JSON.t => 'a = "%identity"
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
 // encode(alice) produces a specialized encode$user function. Since the
@@ -98,12 +98,14 @@ let rec decode = (type t, json: JSON.t) => {
   | Variant({constructors}) =>
     switch json {
     | String(s) =>
-      let valid = ref(false)
+      let result = ref(None)
       inline for c in constructors {
-        if s == c.name { valid := true }
+        if s == c.name { result := Some(@constructor(t, c.name)) }
       }
-      if !valid.contents { throw(DecodeError("unknown variant: " ++ s)) }
-      jsonToVariant(json)
+      switch result.contents {
+      | Some(v) => v
+      | None => throw(DecodeError("unknown variant: " ++ s))
+      }
     | _ => throw(DecodeError("expected variant string"))
     }
   | _ => @compileError("decode: unsupported type")

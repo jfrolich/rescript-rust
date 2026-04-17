@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
                 _ => false,
             }
         });
@@ -6106,8 +6106,10 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_comptime_record(Box::new((ct_idx, fields_idx)))
         }
-        "variant" => {
-            // @variant(TypeName, "CtorName") or @variant(TypeName, "CtorName", payload)
+        "variant" | "constructor" => {
+            // @variant / @constructor(TypeName, "CtorName", payload?) —
+            // synonyms that construct a variant value. `@constructor` is the
+            // clearer name; `@variant` is kept for back-compat.
             let core_type = super::typ::parse_typ_expr(p);
             let ct_idx = p.arena_mut().push_core_type(core_type);
             p.expect(Token::Comma);
