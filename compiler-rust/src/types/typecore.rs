@@ -4607,27 +4607,32 @@ pub fn type_expect<'a>(
                 return result;
             }
 
-            // Check for Array.map(comptime_array, lambda) — unroll like inline for
+            // Check for Array.map / Array.forEach on a comptime array — unroll like inline for.
             if let Some((pat_idx, coll_idx, body_idx)) = as_comptime_loop(expr, tctx.arena) {
-                // Only intercept if the collection resolves to a comptime array
                 let coll_expr = tctx.arena.get_expr(coll_idx);
-                let is_comptime = matches!(&*coll_expr.pexp_desc,
-                    ED::Pexp_ident(lid) if {
-                        let longident = tctx.arena.get_longident(lid.txt);
-                        longident.is_simple() && matches!(
-                            tctx.comptime_bindings.get(tctx.arena.get_string(longident.last_idx())),
-                            Some(crate::types::comptime::ComptimeValue::Array(_))
-                        )
-                    }
-                );
-                if is_comptime {
-                    // Build an Expression that looks like Pexp_inline_for and recurse
+                if resolve_comptime_array(coll_expr, tctx.arena, &tctx.comptime_bindings).is_some() {
                     let synthetic = ParsedExpression {
                         pexp_desc: Box::new(ED::Pexp_inline_for(Box::new((pat_idx, coll_idx, body_idx)))),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: crate::parser::ast::Attributes::new(),
                     };
                     return type_expect(tctx, env, &synthetic, expected_ty, context);
+                }
+            }
+
+            // Check for Array.reduce on a comptime array — unroll into a let-chain.
+            if let Some((acc_pat_idx, elem_pat_idx, coll_idx, init_idx, body_idx)) =
+                as_comptime_reduce(expr, tctx.arena)
+            {
+                let coll_expr = tctx.arena.get_expr(coll_idx);
+                if let Some(elements) =
+                    resolve_comptime_array(coll_expr, tctx.arena, &tctx.comptime_bindings)
+                {
+                    return type_comptime_reduce(
+                        tctx, env, loc,
+                        acc_pat_idx, elem_pat_idx, init_idx, body_idx,
+                        &elements, expected_ty, &expr.pexp_attributes,
+                    );
                 }
             }
 
@@ -21656,10 +21661,53 @@ fn contains_build_variant_inside(
     }
 }
 
+/// Resolve an expression to a comptime-known array if possible. Accepts a
+/// bare ident bound to `ComptimeValue::Array`, or a record-field access
+/// `record.field` where `record` is a `ComptimeValue::Record` whose field
+/// holds an array.
+pub fn resolve_comptime_array(
+    coll_expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+    bindings: &HashMap<String, crate::types::comptime::ComptimeValue>,
+) -> Option<Vec<crate::types::comptime::ComptimeValue>> {
+    use crate::parser::ast::ExpressionDesc as ED;
+    match &*coll_expr.pexp_desc {
+        ED::Pexp_ident(lid) => {
+            let longident = arena.get_longident(lid.txt);
+            if !longident.is_simple() { return None; }
+            let name = arena.get_string(longident.last_idx());
+            match bindings.get(name) {
+                Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                _ => None,
+            }
+        }
+        ED::Pexp_field(rec_idx, field_lid) => {
+            let rec_expr = arena.get_expr(*rec_idx);
+            let ED::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc else { return None };
+            let rec_longident = arena.get_longident(rec_lid.txt);
+            if !rec_longident.is_simple() { return None; }
+            let rec_name = arena.get_string(rec_longident.last_idx());
+            let Some(crate::types::comptime::ComptimeValue::Record(entries)) = bindings.get(rec_name) else {
+                return None;
+            };
+            let field_name = {
+                let fl = arena.get_longident(field_lid.txt);
+                arena.get_string(fl.last_idx()).to_string()
+            };
+            match entries.iter().find(|(k, _)| k == &field_name).map(|(_, v)| v) {
+                Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Normalize an expression into `(pattern, collection, body)` form as if it
 /// were `inline for pat in collection { body }`. Handles:
 /// - `inline for pat in collection { body }` (direct)
 /// - `Array.map(collection, pat => body)` (syntactic sugar)
+/// - `Array.forEach(collection, pat => body)` (statement form)
 /// - `collection->Array.map(pat => body)` (pipe form — pre-expanded by parser)
 ///
 /// Returns None if the expression is neither form.
@@ -21682,14 +21730,14 @@ pub fn as_comptime_loop(
             let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
             let funct_expr = arena.get_expr(*funct);
 
-            // Check if the function is Array.map (or just map)
-            let is_array_map = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+            // Check if the function is Array.map / Array.forEach (or bare map / forEach)
+            let is_array_loop = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
                 let longident = arena.get_longident(lid.txt);
                 let last_name = arena.get_string(longident.last_idx());
-                if last_name != "map" {
+                if last_name != "map" && last_name != "forEach" {
                     return None;
                 }
-                // Check that module prefix is "Array" (or no prefix — just `map`)
+                // Check that module prefix is "Array" (or no prefix)
                 let parts: Vec<String> = longident.flatten_idx().iter()
                     .map(|idx| arena.get_string(*idx).to_string())
                     .collect();
@@ -21698,7 +21746,7 @@ pub fn as_comptime_loop(
                 false
             };
 
-            if !is_array_map || args.len() != 2 {
+            if !is_array_loop || args.len() != 2 {
                 return None;
             }
 
@@ -21715,6 +21763,225 @@ pub fn as_comptime_loop(
         }
         _ => None,
     }
+}
+
+/// Recognize `Array.reduce(collection, init, (acc, elem) => body)` (or the
+/// pipe form `collection->Array.reduce(init, (acc, elem) => body)`).
+/// Returns the destructured pieces if matched, else None.
+pub fn as_comptime_reduce(
+    expr: &ParsedExpression,
+    arena: &crate::parse_arena::ParseArena,
+) -> Option<(
+    crate::parse_arena::PatIdx,    // acc pattern
+    crate::parse_arena::PatIdx,    // elem pattern
+    crate::parse_arena::ExprIdx,   // collection
+    crate::parse_arena::ExprIdx,   // init
+    crate::parse_arena::ExprIdx,   // body
+)> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    let ED::Pexp_apply(inner) = &*expr.pexp_desc else { return None };
+    let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
+    let funct_expr = arena.get_expr(*funct);
+
+    let is_array_reduce = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+        let longident = arena.get_longident(lid.txt);
+        let last_name = arena.get_string(longident.last_idx());
+        if last_name != "reduce" {
+            return None;
+        }
+        let parts: Vec<String> = longident.flatten_idx().iter()
+            .map(|idx| arena.get_string(*idx).to_string())
+            .collect();
+        parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
+    } else {
+        false
+    };
+
+    if !is_array_reduce || args.len() != 3 {
+        return None;
+    }
+
+    let coll_idx = args[0].1;
+    let init_idx = args[1].1;
+    let lambda_expr = arena.get_expr(args[2].1);
+
+    // Lambda must be `(acc, elem) => body` — encoded as nested Pexp_fun.
+    let ED::Pexp_fun(outer_fun) = &*lambda_expr.pexp_desc else { return None };
+    let acc_pat = outer_fun.lhs;
+    let inner_expr = arena.get_expr(outer_fun.rhs);
+    let ED::Pexp_fun(inner_fun) = &*inner_expr.pexp_desc else { return None };
+    let elem_pat = inner_fun.lhs;
+    let body = inner_fun.rhs;
+
+    Some((acc_pat, elem_pat, coll_idx, init_idx, body))
+}
+
+/// Unroll a comptime `Array.reduce(coll, init, (acc, elem) => body)` into a
+/// nested chain of `let acc = body` bindings, threading the accumulator
+/// through each iteration. The collection elements are comptime-known, but
+/// the accumulator and lambda body are normal runtime expressions.
+pub fn type_comptime_reduce(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    acc_pat_idx: crate::parse_arena::PatIdx,
+    elem_pat_idx: crate::parse_arena::PatIdx,
+    init_idx: crate::parse_arena::ExprIdx,
+    body_idx: crate::parse_arena::ExprIdx,
+    elements: &[crate::types::comptime::ComptimeValue],
+    expected_ty: TypeExprRef,
+    attributes: &Attributes,
+) -> TypeCoreResult<Expression> {
+    use crate::parser::ast::PatternDesc as PD;
+
+    // Extract parameter names from patterns. They must be simple identifiers.
+    let acc_pat = tctx.arena.get_pat(acc_pat_idx);
+    let acc_name = match &*acc_pat.ppat_desc {
+        PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+        _ => return Err(TypeCoreError::Other(
+            "Array.reduce: accumulator parameter must be a simple variable".into(),
+        )),
+    };
+    let elem_pat = tctx.arena.get_pat(elem_pat_idx);
+    let elem_name = match &*elem_pat.ppat_desc {
+        PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+        _ => return Err(TypeCoreError::Other(
+            "Array.reduce: element parameter must be a simple variable".into(),
+        )),
+    };
+
+    let ctx = tctx.type_ctx;
+    let acc_ty = ctx.new_var(None);
+
+    // Type-check init.
+    let init_expr = tctx.arena.get_expr(init_idx);
+    let typed_init = type_expect(tctx, env, init_expr, acc_ty, None)?;
+
+    // Empty collection: result is just init.
+    if elements.is_empty() {
+        unify_expression_types(tctx, loc, typed_init.exp_type, expected_ty, None)?;
+        return Ok(typed_init);
+    }
+
+    let body_expr = tctx.arena.get_expr(body_idx);
+
+    // Pre-allocate a fresh `acc` ident per "step": acc_ids[0] is bound to
+    // init, acc_ids[i+1] is bound to body iteration i's result. The body of
+    // iteration i sees acc as acc_ids[i].
+    let ctx = tctx.type_ctx;
+    let mut acc_ids: Vec<Ident> = Vec::with_capacity(elements.len() + 1);
+    for _ in 0..=elements.len() {
+        acc_ids.push(ctx.create_ident(&acc_name));
+    }
+
+    // Type-check body once per element, with `acc` bound to acc_ids[i] in
+    // env and `elem` bound as the comptime value.
+    let prev_elem_binding = tctx.comptime_bindings.get(&elem_name).cloned();
+    let mut typed_bodies: Vec<Expression> = Vec::with_capacity(elements.len());
+
+    for (i, element) in elements.iter().enumerate() {
+        tctx.comptime_bindings.insert(elem_name.clone(), element.clone());
+
+        let mut iter_env = env.clone();
+        let acc_vd = crate::types::decl::ValueDescription {
+            val_type: acc_ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        iter_env.add_value(acc_ids[i].clone(), acc_vd);
+
+        // Also bind elem as a runtime ident with a fresh type var, mirroring
+        // the inline_for handler so the body can reference `elem` directly.
+        let elem_ty = tctx.type_ctx.new_var(None);
+        let elem_id = tctx.type_ctx.create_ident(&elem_name);
+        let elem_vd = crate::types::decl::ValueDescription {
+            val_type: elem_ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        iter_env.add_value(elem_id, elem_vd);
+
+        let result = type_expect(tctx, &iter_env, body_expr, acc_ty, None);
+
+        match &prev_elem_binding {
+            Some(v) => { tctx.comptime_bindings.insert(elem_name.clone(), v.clone()); }
+            None => { tctx.comptime_bindings.remove(&elem_name); }
+        }
+        typed_bodies.push(result?);
+    }
+
+    unify_expression_types(tctx, loc, acc_ty, expected_ty, None)?;
+
+    let ctx = tctx.type_ctx;
+    let env_ref = ctx.store_typed_env(env);
+    let none_loc = LocIdx::none();
+    let mk_acc_vd = || crate::types::decl::ValueDescription {
+        val_type: acc_ty,
+        val_kind: crate::types::decl::ValueKind::ValReg,
+        val_loc: crate::location::Location::none(),
+        val_attributes: vec![],
+        val_path: None,
+    };
+
+    // Innermost expression: reference the final acc ident.
+    let final_id = acc_ids[elements.len()].clone();
+    let mut current = Expression::new(
+        ExpressionDesc::Texp_ident(
+            Path::pident(final_id),
+            Located { txt: LidentIdx(0), loc: none_loc },
+            mk_acc_vd(),
+        ),
+        loc, acc_ty, env_ref,
+        Attributes::new(),
+    );
+
+    // Wrap from innermost to outermost: each let binds acc_ids[i+1] = body[i].
+    for i in (0..elements.len()).rev() {
+        let bind_id = acc_ids[i + 1].clone();
+        let pat = Pattern::new(
+            PatternDesc::Tpat_var(
+                bind_id,
+                Located { txt: acc_name.clone(), loc: none_loc },
+            ),
+            none_loc, acc_ty, env_ref, Attributes::new(),
+        );
+        let binding = ValueBinding {
+            vb_pat: pat,
+            vb_expr: typed_bodies[i].clone(),
+            vb_attributes: Attributes::new(),
+            vb_loc: none_loc,
+        };
+        current = Expression::new(
+            ExpressionDesc::Texp_let(RecFlag::Nonrecursive, vec![binding], Box::new(current)),
+            loc, acc_ty, env_ref, Attributes::new(),
+        );
+    }
+
+    // Outermost: let acc_0 = init in <chain>
+    let init_id = acc_ids[0].clone();
+    let init_pat = Pattern::new(
+        PatternDesc::Tpat_var(
+            init_id,
+            Located { txt: acc_name.clone(), loc: none_loc },
+        ),
+        none_loc, acc_ty, env_ref, Attributes::new(),
+    );
+    let init_binding = ValueBinding {
+        vb_pat: init_pat,
+        vb_expr: typed_init,
+        vb_attributes: Attributes::new(),
+        vb_loc: none_loc,
+    };
+    Ok(Expression::new(
+        ExpressionDesc::Texp_let(RecFlag::Nonrecursive, vec![init_binding], Box::new(current)),
+        loc, acc_ty, env_ref,
+        attributes.clone(),
+    ))
 }
 
 /// Evaluate a type-builder expression to a TypeBuilderResult.

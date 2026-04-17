@@ -403,6 +403,63 @@ let k3: userKey = Email
 }
 
 #[test]
+fn comptime_array_foreach_unrolls() {
+    // Array.forEach on a comptime array should unroll into a sequence of
+    // statements (no runtime .forEach call left in the output).
+    let source = r#"
+type user = { name: string, age: int }
+
+let alice: user = { name: "Alice", age: 30 }
+
+let dict = Dict.make()
+
+let () = switch @typeInfo(user) {
+| Record({fields}) =>
+  fields->Array.forEach(field => {
+    Dict.set(dict, field.name, "x")
+  })
+| _ => ()
+}
+"#;
+    let result = compile_with_stdlib(source, "array_foreach.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.FOREACH ===\n{}\n=== END ===", output);
+            assert!(output.contains("\"name\""), "Expected 'name' literal:\n{output}");
+            assert!(output.contains("\"age\""), "Expected 'age' literal:\n{output}");
+            assert!(!output.contains(".forEach"), "Should not have runtime .forEach:\n{output}");
+        }
+        Err(e) => panic!("Array.forEach should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_array_reduce_unrolls() {
+    // Array.reduce on a comptime array should unroll into a let-chain
+    // threading the accumulator through each iteration.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+let allFieldNames: string = switch @typeInfo(user) {
+| Record({fields}) =>
+  fields->Array.reduce("", (acc, field) => acc ++ field.name)
+| _ => ""
+}
+"#;
+    let result = compile_with_stdlib(source, "array_reduce.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.REDUCE ===\n{}\n=== END ===", output);
+            assert!(output.contains("\"name\""), "Expected 'name' literal:\n{output}");
+            assert!(output.contains("\"age\""), "Expected 'age' literal:\n{output}");
+            assert!(output.contains("\"email\""), "Expected 'email' literal:\n{output}");
+            assert!(!output.contains(".reduce"), "Should not have runtime .reduce:\n{output}");
+        }
+        Err(e) => panic!("Array.reduce should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_build_record_mirror() {
     // @buildRecord + @recordField: build a record with the same fields
     // as the source type (non-optional).
