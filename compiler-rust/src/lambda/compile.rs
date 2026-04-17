@@ -318,11 +318,10 @@ impl LambdaCompiler {
         self.external_module_ids.clear();
         let mut possible_required_modules = collect_possible_required_modules(lam);
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified =
-            crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(
-                lam,
-                self.jsx_preserve,
-            );
+        let simplified = crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(
+            lam,
+            self.jsx_preserve,
+        );
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
         let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
@@ -657,7 +656,9 @@ impl LambdaCompiler {
                     expr: Expression::undefined(false),
                 }
             }
-            Lambda::Lfor(var, start, end, dir, body) => self.compile_for_loop(var, start, end, dir, body),
+            Lambda::Lfor(var, start, end, dir, body) => {
+                self.compile_for_loop(var, start, end, dir, body)
+            }
             Lambda::Lassign(id, value) => {
                 let compiled = self.compile_expr(value);
                 let mut prelude = compiled.prelude;
@@ -712,7 +713,11 @@ impl LambdaCompiler {
         };
 
         if finish_compiled.prelude.is_empty() {
-            push_loop(&mut prelude, Some(start_compiled.expr), finish_compiled.expr);
+            push_loop(
+                &mut prelude,
+                Some(start_compiled.expr),
+                finish_compiled.expr,
+            );
         } else if js_expr_no_side_effects(&start_compiled.expr) {
             prelude.extend(finish_compiled.prelude);
             if block_terminates(&prelude) {
@@ -721,7 +726,11 @@ impl LambdaCompiler {
                     expr: Expression::undefined(false),
                 };
             }
-            push_loop(&mut prelude, Some(start_compiled.expr), finish_compiled.expr);
+            push_loop(
+                &mut prelude,
+                Some(start_compiled.expr),
+                finish_compiled.expr,
+            );
         } else {
             prelude.push(Statement::variable(VariableDeclaration {
                 ident: var.clone(),
@@ -834,7 +843,8 @@ impl LambdaCompiler {
         }
 
         if group.len() == 1 {
-            if let Some(block) = self.try_compile_recursive_singleton_binding_without_placeholder(id, expr)
+            if let Some(block) =
+                self.try_compile_recursive_singleton_binding_without_placeholder(id, expr)
             {
                 return (vec![], block);
             }
@@ -1486,7 +1496,9 @@ impl LambdaCompiler {
                 }),
                 ..
             }
-        ) && prefix.iter().all(|stmt| matches!(stmt.desc, StatementDesc::Exp(_)))
+        ) && prefix
+            .iter()
+            .all(|stmt| matches!(stmt.desc, StatementDesc::Exp(_)))
     }
 
     fn handler_returns_unit_undefined(&self, bindings: &[Ident], handler: &Lambda) -> bool {
@@ -1626,9 +1638,7 @@ impl LambdaCompiler {
             && lambda_has_multiple_static_raises_to_label(body, label, arity);
         match body {
             Lambda::Lswitch(_, switch) => match handler {
-                Lambda::LstaticRaise(_, args)
-                    if args.len() == arity && body_has_target_exit =>
-                {
+                Lambda::LstaticRaise(_, args) if args.len() == arity && body_has_target_exit => {
                     true
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
@@ -1677,9 +1687,7 @@ impl LambdaCompiler {
                 _ => false,
             },
             Lambda::LstringSwitch(_, cases, default) => match handler {
-                Lambda::LstaticRaise(_, args)
-                    if args.len() == arity && body_has_target_exit =>
-                {
+                Lambda::LstaticRaise(_, args) if args.len() == arity && body_has_target_exit => {
                     true
                 }
                 _ if !keep_complete_named_variant_plain_handler_inline
@@ -1690,17 +1698,11 @@ impl LambdaCompiler {
                 _ if !lambda_contains_static_raise(handler)
                     && !keep_complete_named_variant_plain_handler_inline
                     && !lambda_contains_staticcatch(handler)
-                    && string_switch_cases_contain_static_raise_to_label(
-                        cases,
-                        label,
-                        arity,
-                    )
+                    && string_switch_cases_contain_static_raise_to_label(cases, label, arity)
                     && body_has_target_exit
                     && (lambda_contains_static_raise_to_other_label(body, label)
                         || string_switch_cases_contain_nontrivial_static_raise_to_label(
-                            cases,
-                            label,
-                            arity,
+                            cases, label, arity,
                         )) =>
                 {
                     true
@@ -1801,8 +1803,9 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
-            let should_break =
-                !compiled_body.is_empty() && !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = !compiled_body.is_empty()
+                && !block_terminates(&compiled_body)
+                && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -1811,7 +1814,7 @@ impl LambdaCompiler {
                     group_falls_through,
                 ));
             }
-                clauses.push((
+            clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
                     body: compiled_body,
@@ -2012,11 +2015,10 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 let uses_fallthrough =
                     self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler);
-                let requires_explicit_jump =
-                    (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                        || self.return_staticcatch_requires_explicit_jump(
-                            *label, bindings, body, handler,
-                        );
+                let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
+                    && !bindings.is_empty())
+                    || self
+                        .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if uses_fallthrough {
                     self.compile_fallthrough_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
@@ -2121,9 +2123,7 @@ impl LambdaCompiler {
             };
             block.extend(
                 self.compile_named_variant_switch_tail_loop_return_statements(
-                    scrut_expr,
-                    switch,
-                    tail_loop,
+                    scrut_expr, switch, tail_loop,
                 ),
             );
             return block;
@@ -2385,7 +2385,11 @@ impl LambdaCompiler {
                     return block;
                 }
                 (Some(then_expr), None) => {
-                    block.push(Statement::if_(cond_expr, vec![Statement::exp(then_expr)], vec![]));
+                    block.push(Statement::if_(
+                        cond_expr,
+                        vec![Statement::exp(then_expr)],
+                        vec![],
+                    ));
                     return block;
                 }
                 (None, Some(else_expr)) => {
@@ -2732,7 +2736,10 @@ impl LambdaCompiler {
         let overlap_literal_disjunction =
             || ocaml_literal_fold_right_or(self, &expr, &literal_cases);
         let typeof_neq = |type_name: &str| {
-            (raw_typeof_comparison(expr.clone(), BinOp::NotEqEq, type_name), 4usize)
+            (
+                raw_typeof_comparison(expr.clone(), BinOp::NotEqEq, type_name),
+                4usize,
+            )
         };
 
         let is_not_block_case = |block_type: &SwitchBlockType| -> (Expression, usize) {
@@ -3914,10 +3921,12 @@ impl LambdaCompiler {
 
     fn peel_single_block_statement(block: Block) -> Block {
         match block.as_slice() {
-            [Statement {
-                desc: StatementDesc::Block(inner),
-                ..
-            }] => Self::peel_single_block_statement(inner.clone()),
+            [
+                Statement {
+                    desc: StatementDesc::Block(inner),
+                    ..
+                },
+            ] => Self::peel_single_block_statement(inner.clone()),
             _ => block,
         }
     }
@@ -4060,12 +4069,8 @@ impl LambdaCompiler {
         allow_small: bool,
     ) -> Block {
         if allow_small {
-            if let Some(block) = self.compile_small_string_switch_return(
-                test.clone(),
-                cases,
-                default,
-                complete,
-            )
+            if let Some(block) =
+                self.compile_small_string_switch_return(test.clone(), cases, default, complete)
             {
                 return block;
             }
@@ -4276,8 +4281,7 @@ impl LambdaCompiler {
                 filtered_cases.as_slice(),
                 default,
                 complete,
-            )
-            {
+            ) {
                 return block;
             }
         }
@@ -4602,10 +4606,9 @@ impl LambdaCompiler {
             self.take_single_result_assignment(result, then_block),
             self.take_single_result_assignment(result, else_block),
         ) {
-            (Ok(then_expr), Ok(else_expr)) => vec![self.result_assignment(
-                result,
-                Expression::cond(cond, then_expr, else_expr),
-            )],
+            (Ok(then_expr), Ok(else_expr)) => {
+                vec![self.result_assignment(result, Expression::cond(cond, then_expr, else_expr))]
+            }
             (then_result, else_result) => {
                 let then_block = match then_result {
                     Ok(expr) => vec![self.result_assignment(result, expr)],
@@ -4663,11 +4666,7 @@ impl LambdaCompiler {
         }
     }
 
-    fn take_single_result_assignment(
-        &self,
-        id: &Ident,
-        block: Block,
-    ) -> Result<Expression, Block> {
+    fn take_single_result_assignment(&self, id: &Ident, block: Block) -> Result<Expression, Block> {
         let [stmt] = block.as_slice() else {
             return Err(block);
         };
@@ -4687,10 +4686,11 @@ impl LambdaCompiler {
 
         let stmt = block.into_iter().next().expect("single-statement block");
         let Statement {
-            desc: StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
-                ..
-            }),
+            desc:
+                StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(BinOp::Eq, _, rhs),
+                    ..
+                }),
             ..
         } = stmt
         else {
@@ -4749,11 +4749,7 @@ impl LambdaCompiler {
         let else_block = self.normalize_unit_return_if_branch(else_block);
 
         let mut block = cond_compiled.prelude;
-        block.extend(self.compile_test_return_block(
-            cond_compiled.expr,
-            then_block,
-            else_block,
-        ));
+        block.extend(self.compile_test_return_block(cond_compiled.expr, then_block, else_block));
         block
     }
 
@@ -4768,7 +4764,9 @@ impl LambdaCompiler {
             self.take_return_tail_expr(else_block),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
-                vec![Statement::return_(Expression::cond(cond, then_expr, else_expr))]
+                vec![Statement::return_(Expression::cond(
+                    cond, then_expr, else_expr,
+                ))]
             }
             (then_result, else_result) => {
                 let then_block = match then_result {
@@ -5024,8 +5022,9 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
-            let should_break =
-                !compiled_body.is_empty() && !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = !compiled_body.is_empty()
+                && !block_terminates(&compiled_body)
+                && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -10405,7 +10404,10 @@ fn ocaml_typeof_expr(expr: Expression) -> Expression {
         ExpressionDesc::Str { .. } => Expression::string("string"),
         ExpressionDesc::Array(_, _) => Expression::string("object"),
         ExpressionDesc::Bool(_) => Expression::string("boolean"),
-        desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression { desc, comment }))),
+        desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression {
+            desc,
+            comment,
+        }))),
     }
 }
 
@@ -11002,15 +11004,15 @@ fn flatten_and_mark_dead_statement(
                                             )
                                         })
                                         .collect(),
-                                        MutableFlag::Immutable,
-                                        Box::new(flatten_and_mark_dead_expression(
-                                            *tag,
-                                            id_gen,
-                                            substitution,
-                                            jsx_preserve,
-                                        )),
-                                        tag_info,
-                                    ),
+                                    MutableFlag::Immutable,
+                                    Box::new(flatten_and_mark_dead_expression(
+                                        *tag,
+                                        id_gen,
+                                        substitution,
+                                        jsx_preserve,
+                                    )),
+                                    tag_info,
+                                ),
                                 comment: value_comment,
                             };
                             StatementDesc::Variable(VariableDeclaration {
@@ -11379,8 +11381,7 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::StaticIndex(target, field, pos) => {
             let target =
                 flatten_and_mark_dead_expression(*target, id_gen, substitution, jsx_preserve);
-            if let Some(rewritten) =
-                direct_projection_from_pure_literal(&target, Some(&field), pos)
+            if let Some(rewritten) = direct_projection_from_pure_literal(&target, Some(&field), pos)
             {
                 return rewritten;
             }
@@ -15095,7 +15096,10 @@ mod tests {
             loc.clone(),
         ));
         assert!(init.prelude.is_empty());
-        assert_eq!(print_expression(&init.expr), "Primitive_module.init(1, shape)");
+        assert_eq!(
+            print_expression(&init.expr),
+            "Primitive_module.init(1, shape)"
+        );
 
         let update = compiler.compile_expr(&Lambda::prim(
             Primitive::PupdateMod,
@@ -17380,8 +17384,7 @@ mod tests {
             "expected nested wrapped staticcatch tail recursion to continue the loop:\n{rendered}"
         );
         assert!(
-            !rendered.contains("return loop({")
-                && !rendered.contains("return loop(nextAcc)"),
+            !rendered.contains("return loop({") && !rendered.contains("return loop(nextAcc)"),
             "unexpected direct recursive return remained in the wrapped staticcatch path:\n{rendered}"
         );
     }
@@ -17792,28 +17795,22 @@ mod tests {
         let yes_seen = Ident::create_local("yes_seen");
         let no_seen = Ident::create_local("no_seen");
         let yes_branch = Lambda::seq(
-            Lambda::Lassign(
-                yes_seen.clone(),
-                Box::new(Lambda::const_(Constant::int(1))),
-            ),
+            Lambda::Lassign(yes_seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
             Lambda::unit(),
         );
         let no_branch = Lambda::seq(
-            Lambda::Lassign(
-                no_seen.clone(),
-                Box::new(Lambda::const_(Constant::int(0))),
-            ),
+            Lambda::Lassign(no_seen.clone(), Box::new(Lambda::const_(Constant::int(0)))),
             Lambda::unit(),
         );
         let block = LambdaCompiler::normalize_runtime_test_return_body(
             compiler
                 .compile_small_string_switch_return(
-                Expression::var(value.clone()),
-                &[(SwitchCaseTag::Int(10), &yes_branch)],
-                Some(&no_branch),
-                false,
-            )
-            .expect("expected the small switch fast path"),
+                    Expression::var(value.clone()),
+                    &[(SwitchCaseTag::Int(10), &yes_branch)],
+                    Some(&no_branch),
+                    false,
+                )
+                .expect("expected the small switch fast path"),
         );
 
         let [ret] = block.as_slice() else {
@@ -18922,8 +18919,8 @@ mod tests {
     }
 
     #[test]
-    fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads(
-    ) {
+    fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads()
+     {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
         let then_seen = Ident::create_local("then_seen");
@@ -19623,7 +19620,8 @@ mod tests {
             "after compile_expr",
         );
 
-        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
+        {
             if block_terminates(&block) {
                 for value in &mut exports.values {
                     *value = Expression::undefined(false);
@@ -20274,8 +20272,29 @@ mod tests {
             "expected gpr_1891_test.foo4 to keep the guarded call in the body, got:\n{output}"
         );
         assert!(
-            !output.contains("if (typeof x === \"object\" && x.NAME === \"Foo\") {\n    if (x.VAL !== 3) {"),
+            !output.contains(
+                "if (typeof x === \"object\" && x.NAME === \"Foo\") {\n    if (x.VAL !== 3) {"
+            ),
             "unexpected nested negative payload guard in gpr_1891_test.foo4:\n{output}"
+        );
+    }
+
+    #[test]
+    fn gpr_3154_keeps_none_guard_chain_conjoined_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_3154_test");
+        assert!(
+            output.contains(
+                "if (match !== undefined && Primitive_option.valFromOption(match) === undefined) {"
+            ),
+            "expected gpr_3154_test to keep the shared fallback guard chain collapsed into one positive conjunction, got:\n{output}"
+        );
+        assert!(
+            !output.contains("if (match === undefined) {\n      return Test_utils.ok("),
+            "unexpected standalone negative guard on the option match in gpr_3154_test:\n{output}"
+        );
+        assert!(
+            !output.contains("if (Primitive_option.valFromOption(match) !== undefined) {"),
+            "unexpected nested negative payload guard in gpr_3154_test:\n{output}"
         );
     }
 
@@ -20376,13 +20395,11 @@ mod tests {
             "expected complex_while_loop to keep the recursive condition binding scoped inside the while predicate IIFE, got:\n{output}"
         );
         assert!(
-            output.contains("let b = 9;")
-                && output.contains("return (3 + b | 0) > 10;"),
+            output.contains("let b = 9;") && output.contains("return (3 + b | 0) > 10;"),
             "expected complex_while_loop's second predicate to stay as an IIFE-wrapped block, got:\n{output}"
         );
         assert!(
-            !output.contains("while (fib(n) > 10)")
-                && !output.contains("while ((3 + b | 0) > 10)"),
+            !output.contains("while (fib(n) > 10)") && !output.contains("while ((3 + b | 0) > 10)"),
             "unexpected dropped predicate-prelude scope in complex_while_loop:\n{output}"
         );
     }
@@ -20425,10 +20442,7 @@ mod tests {
                         Lambda::const_(Constant::int(0)),
                         Lambda::const_(Constant::int(1)),
                         crate::lambda::DirectionFlag::Upto,
-                        Lambda::Lassign(
-                            seen.clone(),
-                            Box::new(Lambda::const_(Constant::int(1))),
-                        ),
+                        Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
                     )),
                     Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
                 ),
@@ -20481,10 +20495,7 @@ mod tests {
                         Lambda::const_(Constant::int(0)),
                         Lambda::const_(Constant::int(1)),
                         crate::lambda::DirectionFlag::Upto,
-                        Lambda::Lassign(
-                            seen.clone(),
-                            Box::new(Lambda::const_(Constant::int(1))),
-                        ),
+                        Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
                     )),
                 ),
                 crate::lambda::FunctionAttribute {
@@ -21597,11 +21608,12 @@ mod tests {
 
     #[test]
     fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test()
-    {
+     {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
-        let block =
-            compiler.compile_named_variant_switch_return_statements(Expression::var(action.clone()), &LambdaSwitch {
+        let block = compiler.compile_named_variant_switch_return_statements(
+            Expression::var(action.clone()),
+            &LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (0, Lambda::const_(Constant::int(0))),
@@ -21627,7 +21639,8 @@ mod tests {
                         crate::lambda::SwitchBlock::named("WithPayloadC"),
                     ],
                 }),
-            });
+            },
+        );
 
         let [dispatch] = block.as_slice() else {
             panic!("expected a single outer named-variant dispatch");
@@ -21787,8 +21800,8 @@ mod tests {
     }
 
     #[test]
-    fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_switch_like_test_incomplete(
-    ) {
+    fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_switch_like_test_incomplete()
+     {
         let mut compiler = LambdaCompiler::new();
         let action = Ident::create_local("action");
         let action_field = || {
@@ -23386,7 +23399,9 @@ mod tests {
 
     fn assert_fallthrough_return_outside_switch_body(body: &Block, stage: &str) {
         let [switch_stmt, handler_return] = body.as_slice() else {
-            panic!("{stage}: expected the function body to keep the fallthrough tail after the switch");
+            panic!(
+                "{stage}: expected the function body to keep the fallthrough tail after the switch"
+            );
         };
         let StatementDesc::IntSwitch(_, _, None) = &switch_stmt.desc else {
             panic!("{stage}: expected the fallthrough default to stay outside the switch");
@@ -23413,7 +23428,9 @@ mod tests {
                 };
                 &func.body
             }
-            other => panic!("expected the top-level binding to stay function-shaped, got {other:?}"),
+            other => {
+                panic!("expected the top-level binding to stay function-shaped, got {other:?}")
+            }
         }
     }
 
@@ -25317,7 +25334,8 @@ mod tests {
             }) if matches!(
                 &target.as_ref().desc,
                 ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) if id.same(&module)
-            ) && field == "Eq" && *index == 0 => {}
+            ) && field == "Eq"
+                && *index == 0 => {}
             other => panic!(
                 "expected the single-field module projection to stay materialized, got {other:?}"
             ),
@@ -25404,7 +25422,7 @@ mod tests {
 
     #[test]
     fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_preserve_like_ocaml()
-    {
+     {
         let module = Ident::create_local("Foo");
         let component = Ident::create_local("Async_jsx$Foo");
         let rendered = print_deps_program(
@@ -28610,7 +28628,10 @@ let fib3 = n => {
             1,
             &FieldDbgInfo::Extension,
             &Expression::new(ExpressionDesc::CamlBlock(
-                vec![Expression::string("Exn".to_string()), Expression::var(payload.clone())],
+                vec![
+                    Expression::string("Exn".to_string()),
+                    Expression::var(payload.clone()),
+                ],
                 MutableFlag::Immutable,
                 Box::new(Expression::number(Number::int(0))),
                 TagInfo::Extension,

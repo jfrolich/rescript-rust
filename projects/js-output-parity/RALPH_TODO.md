@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 72 output diffs
+**Status:** 586 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 71 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,65 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **586 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **71**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: collapse OCaml-style shared-return tail guard chains after
+  earlier setup statements, so Rust stops printing
+  `if (match === undefined) return no; if (val !== undefined) return no; else return yes;`
+  and instead emits the checked-in positive conjunction
+  `if (match !== undefined && val === undefined) { return yes; } else { return no; }`
+- Active backend focus stays on the **Phase 5** last-mile printer slice from
+  `PLAN.md`: the verified change is in `compiler-rust/src/js_ir/printer.rs`,
+  and it only rewrites the final function-body suffix after the backend has
+  already produced the correct shared fallback-return structure
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, whose recursive `if_` helper collapses
+    nested/shared fallback guards with `E.and_` / `E.not`
+  - checked-in `tests/tests/src/gpr_3154_test.mjs`, whose first `Mocha.test`
+    snapshot proves OCaml emits one positive conjunction instead of two
+    fallback-return guards
+  - checked-in `tests/tests/src/gpr_3770_test.mjs`, which still differs and
+    confirms the remaining all-zero tuple case is a separate non-suffix guard
+    cluster
+- Rust change:
+  - added
+    `try_function_body_shared_return_guard_chain_merge(...)` and
+    `try_function_body_shared_return_guard_chain_suffix_rewrite(...)` in
+    `compiler-rust/src/js_ir/printer.rs` to collapse trailing fallback-return
+    guard chains into a single explicit `If`
+  - added focused printer regression coverage in
+    `test_print_non_unit_function_body_collapses_shared_return_guard_chain_like_ocaml`
+  - added a checked-in end-to-end fixture guard in
+    `gpr_3154_keeps_none_guard_chain_conjoined_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml test_print_non_unit_function_body_collapses_shared_return_guard_chain_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml gpr_3154_keeps_none_guard_chain_conjoined_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml gpr_1891_keeps_unit_polyvariant_guard_flattened_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3154_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3770_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3154_test.res` is exact again; Rust now prints the
+    same shared-fallback positive guard chain that OCaml checks in
+  - `tests/tests/src/ExternalShadow.res` stayed exact after the same printer
+    change, so this non-unit tail merge did not reopen the import/export guard
+    cluster
+  - `tests/tests/src/gpr_3770_test.res` still differs, confirming the
+    remaining all-zero tuple guard is a separate nested non-unit guard-chain
+    cluster rather than part of this suffix-merge slice
+  - the verified improvement is a last-mile printer tail merge, not a backend
+    string rewrite: the function-body printer now recognizes the same shared
+    fallback-return suffix pattern OCaml emits for `gpr_3154_test`
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **585 / 657** -> **586 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **72** -> **71** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
