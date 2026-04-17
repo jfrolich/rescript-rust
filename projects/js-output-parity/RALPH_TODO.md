@@ -69,6 +69,69 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 Latest iteration on **2026-04-17**:
 
+- Active slice: match OCaml's backend simplifier behavior for payload aliases
+  feeding `Lstringswitch`, so the post-lowering cleanup can substitute
+  constant string scrutinees after `Lstaticcatch` elimination and remove the
+  leftover field alias in `gpr_5280_optimize_test`
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/simplify.rs` with
+  the already-landed single-case string-switch lowering support in
+  `compiler-rust/src/lambda/compile.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_exits.ml`, where the backend removes the
+    `Lstaticcatch` around the default arm and leaves the handler variable in
+    place
+  - `compiler/core/lam_pass_remove_alias.ml`, where the payload field alias is
+    collapsed back to the same immutable string constant before later backend
+    sweeps
+  - checked-in diagnose dumps for
+    `tests/tests/src/gpr_5280_optimize_test`, especially
+    `.04simplyf_exits.lam`, `.05simplify_alias.lam`, and
+    `.13simplify_lets.lam`, which show the alias disappearing and the
+    `stringswitch` scrutinee/default both becoming `"#ffff"`
+- Rust change:
+  - extended `SimplifyEnv` in `compiler-rust/src/lambda/simplify.rs` with a
+    stringswitch-specific constant table that records exact string constants
+    from `let` bindings and only substitutes them back into
+    `Lstringswitch` scrutinees during `simplify_for_js_backend`
+  - kept the substitution scoped to string-switch scrutinees instead of adding
+    a broad constant-rewrite pass, matching the OCaml backend effect needed
+    for `gpr_5280` without reopening unrelated simplifier behavior
+  - added focused regression coverage in
+    `gpr_5280_style_payload_aliases_collapse_across_backend_sweeps`
+  - retained the earlier `compiler-rust/src/lambda/compile.rs` support for
+    lowering single-case string switches with defaults through the conditional
+    assignment / return path, which is the codegen shape this simplifier fix
+    now feeds on the real file
+- Verified focused guards for this slice:
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml gpr_5280_style_payload_aliases_collapse_across_backend_sweeps`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml single_case_string_switches_with_default_lower_to_conditional_assignment`
+  - `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml staticcatch_wrapped_string_switches_use_the_handler_as_the_default_value`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_5280_optimize_test.res -o /tmp/gpr_5280_optimize_test.mjs`
+  - `diff -u tests/tests/src/gpr_5280_optimize_test.mjs /tmp/gpr_5280_optimize_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_5280_optimize_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_5280_optimize_test.res` now matches its checked-in
+    `.mjs` snapshot exactly in both direct `bsc` repro and the project-local
+    single-file JS parity harness; the payload alias introduced for
+    `Pfield(0, a)` no longer survives past the OCaml-aligned backend cleanup
+  - broader exact guard `tests/tests/src/ExternalShadow.res` remained exact
+    after the same change
+  - `gpr_5280_optimize_test` no longer appears in
+    `temp/rust-parity/diffs`; the current smallest remaining diff files now
+    start at `test_simple_ref` (19 lines) and `gpr_3770_test` /
+    `update_record_test` (20 lines each)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **590 / 657** -> **590 / 657** (**no net change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **67** -> **67** (**no net change**)
+
+Latest iteration on **2026-04-17**:
+
 - Active slice: keep OCaml's boxed nullable-option wrapper shape across
   JS-path direct-wrapper beta reduction so later backend cleanup does not
   reclassify beta-reduced `Pnull_to_opt` / `Pnull_undefined_to_opt` arguments

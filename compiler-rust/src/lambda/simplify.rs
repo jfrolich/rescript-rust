@@ -26,6 +26,7 @@ struct SimplifyEnv {
     known_functions: HashMap<Ident, LFunction>,
     optional_blocks: HashMap<Ident, OptionalBlockInfo>,
     plain_strings: HashMap<Ident, String>,
+    string_switch_constants: HashMap<Ident, Constant>,
     preserved_export_bindings: HashSet<Ident>,
     preserved_local_module_module_field_call_bindings: HashSet<Ident>,
     preserved_local_module_eta_alias_bindings: HashSet<Ident>,
@@ -84,6 +85,7 @@ impl SimplifyEnv {
         next.known_functions.remove(id);
         next.optional_blocks.remove(id);
         next.plain_strings.remove(id);
+        next.string_switch_constants.remove(id);
         next.substitutions.remove(id);
         next
     }
@@ -97,6 +99,7 @@ impl SimplifyEnv {
             next.known_functions.remove(id);
             next.optional_blocks.remove(id);
             next.plain_strings.remove(id);
+            next.string_switch_constants.remove(id);
             next.substitutions.remove(id);
         }
         next
@@ -108,6 +111,8 @@ impl SimplifyEnv {
             .retain(|_, value| captured_substitution_allowed(value));
         next.substitutions
             .retain(|_, value| captured_substitution_allowed(value));
+        next.string_switch_constants
+            .retain(|_, constant| string_switch_constant_captured_substitution_allowed(constant));
         next.allow_dead_binding_direct_wrapper_cleanup = true;
         next
     }
@@ -1167,6 +1172,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             if let Some(string_value) = plain_string_constant(&value) {
                 body_env.plain_strings.insert(id.clone(), string_value);
             }
+            if let Some(string_constant) = string_switch_constant(&value) {
+                body_env
+                    .string_switch_constants
+                    .insert(id.clone(), string_constant);
+            }
             let preserve_single_use_switch_scrutinee_alias =
                 single_use_switch_scrutinee_alias_from_mutated_source(id, &value, body, env);
             if let Some(substitution) = substitution_candidate(kind, original_value, &value) {
@@ -1311,16 +1321,22 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                 sw_names: switch.sw_names.clone(),
             },
         ),
-        Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
-            Box::new(simplify_with_env(scrutinee, env, exports)),
-            cases
-                .iter()
-                .map(|(tag, lam)| (tag.clone(), simplify_with_env(lam, env, exports)))
-                .collect(),
-            default
-                .as_ref()
-                .map(|lam| Box::new(simplify_with_env(lam, env, exports))),
-        ),
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            let scrutinee = simplify_string_switch_scrutinee_for_backend(
+                simplify_with_env(scrutinee, env, exports),
+                env,
+            );
+            Lambda::LstringSwitch(
+                Box::new(scrutinee),
+                cases
+                    .iter()
+                    .map(|(tag, lam)| (tag.clone(), simplify_with_env(lam, env, exports)))
+                    .collect(),
+                default
+                    .as_ref()
+                    .map(|lam| Box::new(simplify_with_env(lam, env, exports))),
+            )
+        }
         Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
             *id,
             args.iter()
@@ -4065,6 +4081,34 @@ fn plain_string_constant(lam: &Lambda) -> Option<String> {
     match lam {
         Lambda::Lconst(Constant::String { s, delim: None }) => Some(s.clone()),
         _ => None,
+    }
+}
+
+fn string_switch_constant(lam: &Lambda) -> Option<Constant> {
+    match lam {
+        Lambda::Lconst(Constant::String { .. } | Constant::ImmString(_)) => {
+            let Lambda::Lconst(constant) = lam else {
+                unreachable!();
+            };
+            Some(constant.clone())
+        }
+        _ => None,
+    }
+}
+
+fn string_switch_constant_captured_substitution_allowed(constant: &Constant) -> bool {
+    matches!(constant, Constant::String { .. } | Constant::ImmString(_))
+}
+
+fn simplify_string_switch_scrutinee_for_backend(scrutinee: Lambda, env: &SimplifyEnv) -> Lambda {
+    match scrutinee {
+        Lambda::Lvar(id) => env
+            .string_switch_constants
+            .get(&id)
+            .cloned()
+            .map(Lambda::const_)
+            .unwrap_or(Lambda::Lvar(id)),
+        other => other,
     }
 }
 
@@ -6833,6 +6877,116 @@ mod tests {
             panic!("expected the bound constant-record field read to fold");
         };
         assert_eq!(s, "a");
+    }
+
+    #[test]
+    fn gpr_5280_style_payload_aliases_collapse_across_backend_sweeps() {
+        let a = Ident::create_local("a");
+        let c = Ident::create_local("c");
+        let s = Ident::create_local("s");
+
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            a.clone(),
+            Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::constructor("Color", 1, 0),
+                elements: vec![Constant::string_with_delim(
+                    "#ffff",
+                    crate::lambda::constant::StringDelim::StarJ,
+                )],
+            }),
+            Lambda::let_(
+                LetKind::Strict,
+                c.clone(),
+                Lambda::Lswitch(
+                    Box::new(Lambda::var(a.clone())),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![(
+                            0,
+                            Lambda::const_(Constant::string_with_delim(
+                                "orange",
+                                crate::lambda::constant::StringDelim::StarJ,
+                            )),
+                        )],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![(
+                            0,
+                            Lambda::let_(
+                                LetKind::Alias,
+                                s.clone(),
+                                Lambda::prim(
+                                    Primitive::Pfield(0, FieldDbgInfo::Variant),
+                                    vec![Lambda::var(a.clone())],
+                                    Location::none(),
+                                ),
+                                Lambda::LstaticCatch(
+                                    Box::new(Lambda::LstringSwitch(
+                                        Box::new(Lambda::var(s.clone())),
+                                        vec![(
+                                            "#ffff".to_string(),
+                                            Lambda::const_(Constant::string_with_delim(
+                                                "white",
+                                                crate::lambda::constant::StringDelim::StarJ,
+                                            )),
+                                        )],
+                                        Some(Box::new(Lambda::LstaticRaise(1, vec![]))),
+                                    )),
+                                    (1, vec![]),
+                                    Box::new(Lambda::var(s.clone())),
+                                ),
+                            ),
+                        )],
+                        sw_failaction: None,
+                        sw_names: Some(crate::lambda::SwitchNames {
+                            consts: vec![crate::lambda::SwitchTag::named("Orange")],
+                            blocks: vec![crate::lambda::SwitchBlock::named("Color")],
+                        }),
+                    },
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![a.clone(), c.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(a), Lambda::var(c.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        assert!(
+            find_binding_value(&simplified, &s).is_none(),
+            "expected the repeated JS-backend simplification to eliminate the payload alias, got {simplified:?}"
+        );
+
+        let Some(c_binding) = find_binding_value(&simplified, &c) else {
+            panic!("expected the switch binding to remain");
+        };
+        let Lambda::Lswitch(_, switch) = c_binding else {
+            panic!("expected the binding for c to stay a switch, got {c_binding:?}");
+        };
+        let [(_, color_case)] = switch.sw_blocks.as_slice() else {
+            panic!("expected exactly one block case");
+        };
+        let Lambda::LstringSwitch(scrutinee, _, Some(default)) = color_case else {
+            panic!("expected the Color arm to simplify to a string switch, got {color_case:?}");
+        };
+        assert!(matches!(
+            scrutinee.as_ref(),
+            Lambda::Lconst(Constant::String { s, delim })
+                if s == "#ffff"
+                    && matches!(delim, Some(crate::lambda::constant::StringDelim::StarJ))
+        ));
+        assert!(matches!(
+            default.as_ref(),
+            Lambda::Lconst(Constant::String { s, delim })
+                if s == "#ffff"
+                    && matches!(delim, Some(crate::lambda::constant::StringDelim::StarJ))
+        ));
     }
 
     #[test]

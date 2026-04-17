@@ -3839,19 +3839,19 @@ impl LambdaCompiler {
             [(_tag, body)] if complete && default.is_none() => {
                 Some(self.compile_assign_to_target_block(result, body))
             }
-            [(tag, body)] => Some(vec![Statement::if_(
-                self.switch_case_test(test, tag),
-                self.compile_assign_to_target_block(result, body),
-                default
+            [(tag, body)] => {
+                let cond = self.switch_case_test(test, tag);
+                let then_block = self.compile_assign_to_target_block(result, body);
+                let else_block = default
                     .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                    .unwrap_or_default(),
-            )]),
+                    .unwrap_or_default();
+                Some(self.compile_test_assignment_block(result, cond, then_block, else_block))
+            }
             [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
-                Some(vec![Statement::if_(
-                    self.switch_case_test(test, tag),
-                    self.compile_assign_to_target_block(result, then_body),
-                    self.compile_assign_to_target_block(result, else_body),
-                )])
+                let cond = self.switch_case_test(test, tag);
+                let then_block = self.compile_assign_to_target_block(result, then_body);
+                let else_block = self.compile_assign_to_target_block(result, else_body);
+                Some(self.compile_test_assignment_block(result, cond, then_block, else_block))
             }
             _ => None,
         }
@@ -3873,19 +3873,19 @@ impl LambdaCompiler {
             [(_tag, body)] if complete && default.is_none() => {
                 Some(self.compile_return_block(body))
             }
-            [(tag, body)] => Some(vec![Statement::if_(
-                self.switch_case_test(test, tag),
-                self.compile_return_block(body),
-                default
+            [(tag, body)] => {
+                let cond = self.switch_case_test(test, tag);
+                let then_block = self.compile_return_block(body);
+                let else_block = default
                     .map(|fallback| self.compile_return_block(fallback))
-                    .unwrap_or_default(),
-            )]),
+                    .unwrap_or_default();
+                Some(self.compile_test_return_block(cond, then_block, else_block))
+            }
             [(tag, then_body), (_, else_body)] if complete && default.is_none() => {
-                Some(vec![Statement::if_(
-                    self.switch_case_test(test, tag),
-                    self.compile_return_block(then_body),
-                    self.compile_return_block(else_body),
-                )])
+                let cond = self.switch_case_test(test, tag);
+                let then_block = self.compile_return_block(then_body);
+                let else_block = self.compile_return_block(else_body);
+                Some(self.compile_test_return_block(cond, then_block, else_block))
             }
             _ => None,
         }
@@ -4582,16 +4582,30 @@ impl LambdaCompiler {
         let else_block = self.compile_assign_to_target_block(result, else_);
 
         let mut block = cond_compiled.prelude;
+        block.extend(self.compile_test_assignment_block(
+            result,
+            cond_compiled.expr,
+            then_block,
+            else_block,
+        ));
+        block
+    }
+
+    fn compile_test_assignment_block(
+        &self,
+        result: &Ident,
+        cond: Expression,
+        then_block: Block,
+        else_block: Block,
+    ) -> Block {
         match (
             self.take_single_result_assignment(result, then_block),
             self.take_single_result_assignment(result, else_block),
         ) {
-            (Ok(then_expr), Ok(else_expr)) => {
-                block.push(self.result_assignment(
-                    result,
-                    Expression::cond(cond_compiled.expr, then_expr, else_expr),
-                ));
-            }
+            (Ok(then_expr), Ok(else_expr)) => vec![self.result_assignment(
+                result,
+                Expression::cond(cond, then_expr, else_expr),
+            )],
             (then_result, else_result) => {
                 let then_block = match then_result {
                     Ok(expr) => vec![self.result_assignment(result, expr)],
@@ -4601,10 +4615,9 @@ impl LambdaCompiler {
                     Ok(expr) => vec![self.result_assignment(result, expr)],
                     Err(block) => block,
                 };
-                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+                vec![Statement::if_(cond, then_block, else_block)]
             }
         }
-        block
     }
 
     fn compile_declared_if_block(
@@ -4730,16 +4743,26 @@ impl LambdaCompiler {
         let else_block = Self::peel_single_block_statement(self.compile_return_block(else_));
 
         let mut block = cond_compiled.prelude;
+        block.extend(self.compile_test_return_block(
+            cond_compiled.expr,
+            then_block,
+            else_block,
+        ));
+        block
+    }
+
+    fn compile_test_return_block(
+        &self,
+        cond: Expression,
+        then_block: Block,
+        else_block: Block,
+    ) -> Block {
         match (
             self.take_return_tail_expr(then_block),
             self.take_return_tail_expr(else_block),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
-                block.push(Statement::return_(Expression::cond(
-                    cond_compiled.expr,
-                    then_expr,
-                    else_expr,
-                )));
+                vec![Statement::return_(Expression::cond(cond, then_expr, else_expr))]
             }
             (then_result, else_result) => {
                 let then_block = match then_result {
@@ -4750,10 +4773,9 @@ impl LambdaCompiler {
                     Ok(expr) => vec![Statement::return_(expr)],
                     Err(block) => block,
                 };
-                block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+                vec![Statement::if_(cond, then_block, else_block)]
             }
         }
-        block
     }
 
     fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
@@ -17784,14 +17806,18 @@ mod tests {
             .expect("expected the small switch fast path"),
         );
 
-        let [dispatch, ret] = block.as_slice() else {
-            panic!("expected explicit if/else followed by one shared return");
+        let [ret] = block.as_slice() else {
+            panic!("expected one conditional return");
         };
-        let StatementDesc::If(test, then_block, else_block) = &dispatch.desc else {
-            panic!("expected the runtime-test body to use an explicit if");
+        let StatementDesc::Return(Expression {
+            desc: ExpressionDesc::Cond(test, then_expr, else_expr),
+            ..
+        }) = &ret.desc
+        else {
+            panic!("expected the runtime-test body to use one conditional return");
         };
         assert!(matches!(
-            &test.desc,
+            &test.as_ref().desc,
             ExpressionDesc::Bin(op, left, right)
                 if matches!(
                     op,
@@ -17811,31 +17837,38 @@ mod tests {
                 )
         ));
         assert!(matches!(
-            then_block.as_slice(),
-            [Statement {
-                desc: StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
-                    ..
-                }),
-                ..
-            }]
+            &then_expr.as_ref().desc,
+            ExpressionDesc::Seq(first, second)
+                if matches!(
+                    first.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
+                        ..
+                    }
+                ) && matches!(
+                    second.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Undefined { is_unit: true },
+                        ..
+                    }
+                )
         ));
         assert!(matches!(
-            else_block.as_slice(),
-            [Statement {
-                desc: StatementDesc::Exp(Expression {
-                    desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
-                    ..
-                }),
-                ..
-            }]
-        ));
-        assert!(matches!(
-            ret.desc,
-            StatementDesc::Return(Expression {
-                desc: ExpressionDesc::Undefined { is_unit: true },
-                ..
-            })
+            &else_expr.as_ref().desc,
+            ExpressionDesc::Seq(first, second)
+                if matches!(
+                    first.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Bin(BinOp::Eq, _, _),
+                        ..
+                    }
+                ) && matches!(
+                    second.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Undefined { is_unit: true },
+                        ..
+                    }
+                )
         ));
     }
 
@@ -18079,7 +18112,7 @@ mod tests {
     }
 
     #[test]
-    fn single_case_string_switches_with_default_lower_to_if_else() {
+    fn single_case_string_switches_with_default_lower_to_conditional_assignment() {
         let mut compiler = LambdaCompiler::new();
         let scrutinee = Ident::create_local("platform");
         let compiled = compiler.compile_expr(&Lambda::LstringSwitch(
@@ -18088,19 +18121,33 @@ mod tests {
             Some(Box::new(Lambda::const_(Constant::int(2)))),
         ));
 
-        let [declare, if_stmt] = compiled.prelude.as_slice() else {
-            panic!("expected a declaration followed by an if statement");
+        let [declare, assign] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration followed by one assignment");
         };
         let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
         else {
             panic!("expected the string switch temporary declaration");
         };
-        let StatementDesc::If(cond, then_block, else_block) = &if_stmt.desc else {
-            panic!("expected single-case string switches to lower to if/else");
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, left, right),
+            ..
+        }) = &assign.desc
+        else {
+            panic!("expected the lowered switch to assign into the result temp");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(result)
+        ));
+        let ExpressionDesc::Cond(cond, then_expr, else_expr) = &right.as_ref().desc else {
+            panic!("expected the assignment RHS to be a conditional expression");
         };
         assert_string_equality_check(cond, Some(&scrutinee), None, "linux");
-        assert_switch_default_assigns_int_result(then_block, result, 1);
-        assert_switch_default_assigns_int_result(else_block, result, 2);
+        assert_int_expr(then_expr, 1);
+        assert_int_expr(else_expr, 2);
     }
 
     #[test]
