@@ -20019,6 +20019,40 @@ mod tests {
     }
 
     #[test]
+    fn pr6726_keeps_local_module_wrapper_call_materialized_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("pr6726");
+        assert!(
+            output.contains("let v = test_endian_string(1);"),
+            "expected pr6726 to keep the local module wrapper call materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("v: v"),
+            "expected the local module block to reference the call-result binding, got:\n{output}"
+        );
+        assert!(
+            output.contains("/* v Not a pure module */"),
+            "expected pr6726 to preserve OCaml's module-side-effect reason, got:\n{output}"
+        );
+        assert!(
+            !output.contains("v: 33"),
+            "unexpected inlined local-module wrapper call result in pr6726:\n{output}"
+        );
+    }
+
+    #[test]
+    fn uncurried_always_keeps_non_module_field_partial_calls_inlineable() {
+        let output = compile_checked_in_test_file_to_js("UncurriedAlways");
+        assert!(
+            output.contains("let a1 = [\n  \"x\",\n  \"y\",\n  \"z\"\n];"),
+            "expected UncurriedAlways.AllLabels.a1 to stay inlined to the tuple literal, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let a1 = ptl$1(\"x\", \"z\");"),
+            "unexpected preserved partial-wrapper call in UncurriedAlways:\n{output}"
+        );
+    }
+
+    #[test]
     fn gpr_1728_unit_if_tail_stays_as_condition_effect() {
         let output = compile_checked_in_test_file_to_js("gpr_1728_test");
         assert!(

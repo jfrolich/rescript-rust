@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 70 output diffs
+**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 69 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,62 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: narrow Rust's local-module named-function skip set so it only
+  preserves wrappers whose bodies forward into module-field call chains,
+  matching the OCaml-aligned local-module/module-field behavior that fixes
+  `pr6726` without freezing ordinary local partial-application wrappers like
+  `UncurriedAlways.AllLabels.ptl`
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in the final JS-backend lambda cleanup in
+  `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_pass_remove_alias.ml`, especially the named-function
+    inlining boundary around `Lapply {ap_func = Lvar v; ...}` and the existing
+    module-field wrapper behavior Rust must not over-generalize
+  - `compiler/core/lam_analysis.ml`, which still makes ordinary pure local
+    partial wrappers like `ptl(~y="y", ...)` inlineable and therefore confirms
+    the `pr6726` exception must stay scoped to module-field forwarding wrappers
+- Rust change:
+  - renamed the local-module preservation path in
+    `compiler-rust/src/lambda/simplify.rs` to track only
+    `preserved_local_module_module_field_call_bindings`
+  - replaced the broad "any inlineable local function with a sibling bound
+    call-result" heuristic with a narrower detector that only preserves
+    inlineable local-module wrappers whose bodies reduce to a module-field call
+    chain, while still allowing pure local partial wrappers to inline
+  - added focused regression coverage in
+    `local_module_skip_set_ignores_non_module_field_partial_wrappers`,
+    `pr6726_keeps_local_module_wrapper_call_materialized_like_ocaml`, and
+    `uncurried_always_keeps_non_module_field_partial_calls_inlineable`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release pr6726 -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_skip_set -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release uncurried_always -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/pr6726.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh UncurriedAlways --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/pr6726.res` now matches its checked-in `.mjs` snapshot
+    exactly again; Rust keeps `let v = test_endian_string(1);` materialized,
+    preserves `v: v` in the local module object, and keeps OCaml's
+    `/* v Not a pure module */` trailer
+  - `tests/tests/src/UncurriedAlways.res` stays exact after the narrowing;
+    Rust again inlines `AllLabels.a1` to the tuple literal instead of emitting
+    `let a1 = ptl$1("x", "z");`
+  - broader guard `tests/tests/src/array_subtle_test.res` remained an exact
+    snapshot match after the same simplifier change
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **587 / 657** -> **588 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **70** -> **69** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
