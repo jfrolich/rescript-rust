@@ -13,9 +13,9 @@ loader.init().then((monaco) => {
 
 const INITIAL_CODE = `// ── Comptime playground ─────────────────────────────────────────────────
 // Functions marked @comptime run at compile time. @typeInfo introspects a
-// type; inline for unrolls loops. Each call monomorphizes to a specialized
-// function — recursive types produce self-recursive code, no infinite
-// expansion.
+// type; Array.map / Array.forEach over comptime arrays unroll into specialized
+// code. Each call monomorphizes to a specialized function — recursive types
+// produce self-recursive code, no infinite expansion.
 
 type address = { street: string, city: string }
 type status = Active | Inactive | Pending
@@ -25,11 +25,11 @@ type tree = { value: string, children: array<tree> }
 exception DecodeError(string)
 
 // Variant primitives:
-//   @hasTag(v, "Name")      — runtime check: is `v` constructor "Name"?
-//   @argAt(v, i, argType)   — runtime `v._<i>` typed as argType (comptime).
-// Together with `inline for c in constructors { inline for argType in c.args }`,
-// they let the encoder recursively call `encode` on each argument with its
-// real type — so `encode$float`, `encode$address`, etc. are emitted, not a
+//   @hasTag(v, "Name")      — runtime check: is \`v\` constructor "Name"?
+//   @argAt(v, i, argType)   — runtime \`v._<i>\` typed as argType (comptime).
+// Together with \`constructors->Array.forEach(c => c.args->Array.forEach(...))\`,
+// they let the encoder recursively call \`encode\` on each argument with its
+// real type — so \`encode$float\`, \`encode$address\`, etc. are emitted, not a
 // uniform array<JSON.t>.
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
@@ -45,23 +45,23 @@ let rec encode = (value): JSON.t => {
   | Bool => JSON.Encode.bool(value)
   | Record({fields}) =>
     let dict = Dict.make()
-    inline for field in fields {
+    fields->Array.forEach(field => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
-    }
+    })
     JSON.Encode.object(dict)
   | Variant({constructors}) =>
     let result = ref(JSON.Null)
-    inline for c in constructors {
+    constructors->Array.forEach(c => {
       if @hasTag(value, c.name) {
         let arr = [JSON.Encode.string(c.name)]
         let idx = ref(0)
-        inline for argType in c.args {
+        c.args->Array.forEach(argType => {
           Array.push(arr, encode(@argAt(value, idx.contents, argType)))
           idx := idx.contents + 1
-        }
+        })
         result := JSON.Encode.array(arr)
       }
-    }
+    })
     result.contents
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
@@ -105,9 +105,9 @@ let rec decode = (type t, json: JSON.t) => {
   | Record({fields}) =>
     switch json {
     | Object(dict) =>
-      @record(t, inline for field in fields {
+      @record(t, fields->Array.map(field =>
         decode(field.typ, Dict.getUnsafe(dict, field.name))
-      })
+      ))
     | _ => throw(DecodeError("expected object"))
     }
   | Variant({constructors}) =>
@@ -116,9 +116,9 @@ let rec decode = (type t, json: JSON.t) => {
       switch items[0] {
       | Some(String(name)) =>
         let result = ref(None)
-        inline for c in constructors {
+        constructors->Array.forEach(c => {
           if name == c.name { result := Some(@constructor(t, c.name)) }
-        }
+        })
         switch result.contents {
         | Some(v) => v
         | None => throw(DecodeError("unknown variant: " ++ name))
@@ -143,9 +143,9 @@ let decodedAlice = try Some(decode(user, aliceJson)) catch {
 let userKey =
   switch @typeInfo(user) {
   | Record({fields}) =>
-    @buildVariant(inline for field in fields {
+    @buildVariant(fields->Array.map(field =>
       @variantCase({name: field.name})
-    })
+    ))
   | _ => @compileError("expected record")
   }
 
