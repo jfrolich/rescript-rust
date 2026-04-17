@@ -11555,12 +11555,12 @@ fn flatten_and_mark_dead_statement(
                     comment: value_comment,
                 }) = decl.value
                 {
-                    if items.len() >= 2 && !matches!(tag_info, TagInfo::PolyVar(_)) {
+                    if should_materialize_block_binding_items(decl.property, &items, &tag_info) {
                         let mut rewritten_items = Vec::with_capacity(items.len());
                         let mut bindings = Vec::new();
 
                         for (index, item) in items.into_iter().enumerate() {
-                            if is_simple_block_binding_item(&item) {
+                            if is_simple_block_binding_item(decl.property, &item) {
                                 rewritten_items.push(item);
                             } else {
                                 let rewritten = flatten_and_mark_dead_expression(
@@ -12204,20 +12204,53 @@ fn substituted_caml_block_item(
     is_simple_substituted_index_value(item).then(|| item.clone())
 }
 
-fn is_simple_block_binding_item(expr: &Expression) -> bool {
+fn should_materialize_block_binding_items(
+    property: LetKind,
+    items: &[Expression],
+    tag_info: &TagInfo,
+) -> bool {
+    if items.len() < 2 || matches!(tag_info, TagInfo::PolyVar(_)) {
+        return false;
+    }
+
+    // Checked-in OCaml snapshots keep alias-bound deep constants inline, while
+    // still materializing Strict/StrictOpt bindings and alias blocks with
+    // computed payloads.
+    !(property == LetKind::Alias && items.iter().all(is_deep_constant_block_binding_item))
+}
+
+fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Undefined { .. } => true,
+        ExpressionDesc::OptionalBlock(inner, _) => is_deep_constant_block_binding_item(inner),
+        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _) => {
+            items.iter().all(is_deep_constant_block_binding_item)
+        }
+        _ => false,
+    }
+}
+
+fn is_simple_block_binding_item(property: LetKind, expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::OptionalBlock(inner, true) => is_simple_block_binding_item(inner),
+        ExpressionDesc::OptionalBlock(inner, true) if property != LetKind::StrictOpt => {
+            is_simple_block_binding_item(property, inner)
+        }
         ExpressionDesc::CamlBlock(
             items,
             MutableFlag::Immutable,
             _,
             TagInfo::Constructor { .. },
-        ) => items.iter().all(is_simple_block_binding_item),
+        ) => items
+            .iter()
+            .all(|item| is_simple_block_binding_item(property, item)),
         _ => false,
     }
 }
@@ -12228,7 +12261,6 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::OptionalBlock(inner, true) => is_simple_substituted_index_value(inner),
         ExpressionDesc::CamlBlock(
             items,
             MutableFlag::Immutable,
@@ -22128,6 +22160,22 @@ mod tests {
     }
 
     #[test]
+    fn record_debug_test_keeps_record_update_projection_materialized_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("record_debug_test");
+        assert!(
+            output.contains("let u_a = 2;")
+                && output.contains("let u_b = v.b;")
+                && output.contains("let u = {\n  a: u_a,\n  b: u_b\n};"),
+            "expected record_debug_test to keep the record-update projection materialized, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let v_b = {\n  xx: 2,\n  yy: 3\n};")
+                && !output.contains("let u_b = {\n  xx: 2,\n  yy: 3\n};"),
+            "did not expect record_debug_test to inline the nested allocating record field, got:\n{output}"
+        );
+    }
+
+    #[test]
     fn derive_projector_test_collapses_pure_record_projection_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("derive_projector_test");
         assert!(
@@ -27843,7 +27891,8 @@ mod tests {
     }
 
     #[test]
-    fn js_flatten_and_mark_dead_keeps_identity_optional_record_fields_inline() {
+    fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fields_like_ocaml()
+    {
         let record = Ident::create_local("x");
         let deps = apply_js_flatten_and_mark_dead_pass(
             DepsProgram {
@@ -27879,7 +27928,7 @@ mod tests {
                                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                             },
                         ))),
-                        property: LetKind::Strict,
+                        property: LetKind::StrictOpt,
                         ident_info: IdentInfo::default(),
                     })],
                     vec![],
@@ -27891,9 +27940,146 @@ mod tests {
         );
 
         let [record_stmt] = deps.program.block.as_slice() else {
-            panic!("expected the record binding to stay as a single declaration");
+            panic!("expected the pass to return a single transparent block");
         };
         match &record_stmt.desc {
+            StatementDesc::Block(bindings) => {
+                let [name_stmt, x_stmt, record_stmt] = bindings.as_slice() else {
+                    panic!("expected the hoisted optional bindings plus the record binding");
+                };
+                match &name_stmt.desc {
+                    StatementDesc::Variable(VariableDeclaration {
+                        ident,
+                        value:
+                            Some(Expression {
+                                desc: ExpressionDesc::OptionalBlock(_, true),
+                                ..
+                            }),
+                        ..
+                    }) => assert_eq!(ident.name(), "x_name"),
+                    other => panic!(
+                        "expected the first hoisted optional binding, got {other:?}"
+                    ),
+                }
+                match &x_stmt.desc {
+                    StatementDesc::Variable(VariableDeclaration {
+                        ident,
+                        value:
+                            Some(Expression {
+                                desc: ExpressionDesc::OptionalBlock(_, true),
+                                ..
+                            }),
+                        ..
+                    }) => assert_eq!(ident.name(), "x_x"),
+                    other => panic!(
+                        "expected the second hoisted optional binding, got {other:?}"
+                    ),
+                }
+                match &record_stmt.desc {
+                    StatementDesc::Variable(VariableDeclaration {
+                        ident,
+                        value:
+                            Some(Expression {
+                                desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                                ..
+                            }),
+                        ..
+                    }) => {
+                        assert!(ident.same(&record));
+                        assert!(matches!(
+                            items.as_slice(),
+                            [
+                                Expression {
+                                    desc: ExpressionDesc::Undefined { .. },
+                                    ..
+                                },
+                                Expression {
+                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(name)),
+                                    ..
+                                },
+                                Expression {
+                                    desc: ExpressionDesc::Undefined { .. },
+                                    ..
+                                },
+                                Expression {
+                                    desc: ExpressionDesc::Undefined { .. },
+                                    ..
+                                },
+                                Expression {
+                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(x_value)),
+                                    ..
+                                },
+                                Expression {
+                                    desc: ExpressionDesc::Undefined { .. },
+                                    ..
+                                }
+                            ] if name.name() == "x_name" && x_value.name() == "x_x"
+                        ));
+                    }
+                    other => panic!(
+                        "expected the rewritten record binding to reference the hoisted optionals, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the optional record binding block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_ocaml() {
+        let record = Ident::create_local("v");
+        let deps = apply_js_flatten_and_mark_dead_pass(
+            DepsProgram {
+                program: Program::new(
+                    vec![Statement::variable(VariableDeclaration {
+                        ident: record.clone(),
+                        value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                            vec![
+                                Expression::new(ExpressionDesc::OptionalBlock(
+                                    Box::new(Expression::number(Number::int(3))),
+                                    true,
+                                )),
+                                Expression::new(ExpressionDesc::CamlBlock(
+                                    vec![
+                                        Expression::number(Number::int(2)),
+                                        Expression::number(Number::int(3)),
+                                    ],
+                                    MutableFlag::Immutable,
+                                    Box::new(Expression::number(Number::int(0))),
+                                    TagInfo::Record {
+                                        fields: vec![
+                                            ("xx".to_string(), false),
+                                            ("yy".to_string(), false),
+                                        ],
+                                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    },
+                                )),
+                            ],
+                            MutableFlag::Immutable,
+                            Box::new(Expression::number(Number::int(0))),
+                            TagInfo::Record {
+                                fields: vec![
+                                    ("a".to_string(), false),
+                                    ("b".to_string(), false),
+                                ],
+                                mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                            },
+                        ))),
+                        property: LetKind::Alias,
+                        ident_info: IdentInfo::default(),
+                    })],
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            false,
+        );
+
+        let [stmt] = deps.program.block.as_slice() else {
+            panic!("expected the alias-bound constant record to stay as one binding");
+        };
+        match &stmt.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
                 value:
@@ -27901,40 +28087,40 @@ mod tests {
                         desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
                         ..
                     }),
+                property,
                 ..
             }) => {
                 assert!(ident.same(&record));
+                assert_eq!(*property, LetKind::Alias);
                 assert!(matches!(
                     items.as_slice(),
                     [
                         Expression {
-                            desc: ExpressionDesc::Undefined { .. },
-                            ..
-                        },
-                        Expression {
                             desc: ExpressionDesc::OptionalBlock(_, true),
                             ..
                         },
                         Expression {
-                            desc: ExpressionDesc::Undefined { .. },
-                            ..
-                        },
-                        Expression {
-                            desc: ExpressionDesc::Undefined { .. },
-                            ..
-                        },
-                        Expression {
-                            desc: ExpressionDesc::OptionalBlock(_, true),
-                            ..
-                        },
-                        Expression {
-                            desc: ExpressionDesc::Undefined { .. },
+                            desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _, _),
                             ..
                         }
-                    ]
+                    ] if matches!(
+                        inner.as_slice(),
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                                ..
+                            }
+                        ]
+                    )
                 ));
             }
-            other => panic!("expected the optional record binding to remain inline, got {other:?}"),
+            other => panic!(
+                "expected the alias-bound deep-constant record to stay inline, got {other:?}"
+            ),
         }
     }
 

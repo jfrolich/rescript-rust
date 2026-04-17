@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 599 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 58 output diffs
+**Status:** 601 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 56 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **599 / 657**
+- JS snapshot parity: **601 / 657**
 - Compile errors: **0**
-- Output diffs: **58**
+- Output diffs: **56**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,79 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **599 / 657**
+- JS snapshot parity: **601 / 657**
 - Compile errors: **0**
-- Output diffs: **58**
+- Output diffs: **56**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep `js_pass_flatten_and_mark_dead` aligned with the checked-in
+  OCaml snapshots for two neighboring cases in the remaining record/option
+  cluster:
+  alias-bound deep-constant record blocks must stay inline, while
+  `StrictOpt` bindings like `record_debug_test.u` still materialize identity
+  optional payload temps
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`;
+  this is still late JS-pass cleanup in `flatten_and_mark_dead`, not printer
+  work and not an upstream lambda issue
+- OCaml / snapshot reference:
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml`
+  - checked-in snapshots and pass dumps for
+    `tests/tests/src/record_debug_test.{res,mjs,05.flatten_and_mark_dead.jsx}`,
+    `tests/tests/src/DotDotDot.{res,mjs}`,
+    `tests/tests/src/option_encoding_test.{res,mjs}`,
+    `tests/tests/src/res_debug.{res,mjs}`,
+    `tests/tests/src/RecordCoercion.{res,mjs}`, and
+    `tests/tests/src/Import.{res,mjs}`
+- Rust changes:
+  - in `compiler-rust/src/lambda/simplify.rs`, kept allocating constant record
+    field reads projected from the shared binding instead of collapsing them to
+    a fresh nested literal, which is what restored `record_debug_test`’s
+    `u_b = v.b` shape
+  - in `compiler-rust/src/lambda/compile.rs`, narrowed
+    `flatten_and_mark_dead_statement(...)` so alias-bound deep-constant
+    immutable Caml blocks stay inline like the snapshots, while
+    `OptionalBlock(_, true)` is only treated as non-simple for `StrictOpt`
+    bindings; ordinary `Strict` / `Alias` constant record literals now stay
+    inline again
+  - added focused regression coverage
+    `record_debug_test_keeps_record_update_projection_materialized_like_ocaml`,
+    `js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_ocaml`,
+    and
+    `js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fields_like_ocaml`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release shared_allocating_constant_record_field_reads_stay_projected_from_the_binding -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fields_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release record_debug_test_keeps_record_update_projection_materialized_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release res_debug_materializes_two_field_record_payload_bindings_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release record_coercion_materializes_nested_two_field_record_blocks_like_ocaml -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release import_keeps_nested_module_field_alias_binding_materialized_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/record_debug_test.res -o /tmp/record_debug_test.mjs`
+  - `diff -u tests/tests/src/record_debug_test.mjs /tmp/record_debug_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `diff -u tests/tests/src/Import.mjs /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DotDotDot.res -o /tmp/DotDotDot.mjs`
+  - `diff -u tests/tests/src/DotDotDot.mjs /tmp/DotDotDot.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/option_encoding_test.res -o /tmp/option_encoding_test.mjs`
+  - `diff -u tests/tests/src/option_encoding_test.mjs /tmp/option_encoding_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/record_debug_test.res` is exact again; Rust now matches
+    the snapshot’s inline `v` literal plus materialized `u_a` / `u_b = v.b`
+    update shape
+  - `tests/tests/src/DotDotDot.res` and
+    `tests/tests/src/option_encoding_test.res` stayed inline after narrowing the
+    optional-field rule back to `StrictOpt`, so the earlier strict-binding
+    regressions were removed before the baseline rerun
+  - the earlier `res_debug`, `RecordCoercion`, and `Import` guards still pass,
+    so the narrowed pass-05 fix did not reopen the two-field record payload or
+    local-module alias regressions
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **599 / 657** -> **601 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **58** -> **56** (**-2**)
 
 Latest iteration on **2026-04-17**:
 

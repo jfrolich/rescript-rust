@@ -3321,12 +3321,7 @@ fn immutable_block_elements(value: &Lambda) -> Option<ImmutableBlockInfo> {
             tag_info, elements, ..
         }) => Some(ImmutableBlockInfo {
             tag_info: tag_info.clone(),
-            elements: elements
-                .iter()
-                .cloned()
-                .map(Lambda::const_)
-                .map(BlockElement::Simple)
-                .collect(),
+            elements: elements.iter().map(block_element_of_constant).collect(),
         }),
         _ => None,
     }
@@ -3762,6 +3757,14 @@ fn block_element_of_lambda(value: &Lambda) -> BlockElement {
             BlockElement::Simple(value.clone())
         }
         _ => BlockElement::Na,
+    }
+}
+
+fn block_element_of_constant(value: &Constant) -> BlockElement {
+    if value.is_allocating() {
+        BlockElement::Na
+    } else {
+        BlockElement::Simple(Lambda::const_(value.clone()))
     }
 }
 
@@ -8712,6 +8715,239 @@ mod tests {
                     )
             ),
             "expected alias cleanup to inline the record constant into the surviving wrapper call without beta-reducing the wrapper itself, got {simplified:?}"
+        );
+    }
+
+    #[test]
+    fn shared_allocating_constant_record_field_reads_stay_projected_from_the_binding() {
+        fn contains_shared_field_projection(lam: &Lambda, shared: &Ident) -> bool {
+            match lam {
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::Record { name, .. },
+                    ),
+                    args,
+                    ..
+                }) if name == "b" => {
+                    matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(shared))
+                }
+                Lambda::Lapply(apply) => {
+                    contains_shared_field_projection(&apply.ap_func, shared)
+                        || apply
+                            .ap_args
+                            .iter()
+                            .any(|arg| contains_shared_field_projection(arg, shared))
+                }
+                Lambda::Lprim(_) => false,
+                Lambda::Lfunction(func) => contains_shared_field_projection(&func.body, shared),
+                Lambda::Llet(_, _, value, body) => {
+                    contains_shared_field_projection(value, shared)
+                        || contains_shared_field_projection(body, shared)
+                }
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, value)| contains_shared_field_projection(value, shared))
+                        || contains_shared_field_projection(body, shared)
+                }
+                Lambda::Lswitch(scrutinee, switch) => {
+                    contains_shared_field_projection(scrutinee, shared)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, body)| contains_shared_field_projection(body, shared))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, body)| contains_shared_field_projection(body, shared))
+                        || switch.sw_failaction.as_deref().is_some_and(|body| {
+                            contains_shared_field_projection(body, shared)
+                        })
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    contains_shared_field_projection(scrutinee, shared)
+                        || cases
+                            .iter()
+                            .any(|(_, body)| contains_shared_field_projection(body, shared))
+                        || default.as_deref().is_some_and(|body| {
+                            contains_shared_field_projection(body, shared)
+                        })
+                }
+                Lambda::LstaticRaise(_, args) => args
+                    .iter()
+                    .any(|arg| contains_shared_field_projection(arg, shared)),
+                Lambda::LstaticCatch(body, _, handler) => {
+                    contains_shared_field_projection(body, shared)
+                        || contains_shared_field_projection(handler, shared)
+                }
+                Lambda::LtryWith(body, _, handler) => {
+                    contains_shared_field_projection(body, shared)
+                        || contains_shared_field_projection(handler, shared)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    contains_shared_field_projection(cond, shared)
+                        || contains_shared_field_projection(then_, shared)
+                        || contains_shared_field_projection(else_, shared)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    contains_shared_field_projection(first, shared)
+                        || contains_shared_field_projection(second, shared)
+                }
+                Lambda::Lfor(_, from, to, _, body) => {
+                    contains_shared_field_projection(from, shared)
+                        || contains_shared_field_projection(to, shared)
+                        || contains_shared_field_projection(body, shared)
+                }
+                Lambda::Lassign(_, value) => contains_shared_field_projection(value, shared),
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            }
+        }
+
+        fn contains_constant_field_projection(lam: &Lambda) -> bool {
+            match lam {
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::Record { name, .. },
+                    ),
+                    args,
+                    ..
+                }) if name == "b" => matches!(
+                    args.as_slice(),
+                    [Lambda::Lconst(Constant::Block { .. })]
+                ),
+                Lambda::Lapply(apply) => {
+                    contains_constant_field_projection(&apply.ap_func)
+                        || apply.ap_args.iter().any(contains_constant_field_projection)
+                }
+                Lambda::Lprim(_) => false,
+                Lambda::Lfunction(func) => contains_constant_field_projection(&func.body),
+                Lambda::Llet(_, _, value, body) => {
+                    contains_constant_field_projection(value)
+                        || contains_constant_field_projection(body)
+                }
+                Lambda::Lletrec(bindings, body) => {
+                    bindings
+                        .iter()
+                        .any(|(_, value)| contains_constant_field_projection(value))
+                        || contains_constant_field_projection(body)
+                }
+                Lambda::Lswitch(scrutinee, switch) => {
+                    contains_constant_field_projection(scrutinee)
+                        || switch
+                            .sw_consts
+                            .iter()
+                            .any(|(_, body)| contains_constant_field_projection(body))
+                        || switch
+                            .sw_blocks
+                            .iter()
+                            .any(|(_, body)| contains_constant_field_projection(body))
+                        || switch.sw_failaction.as_deref().is_some_and(|body| {
+                            contains_constant_field_projection(body)
+                        })
+                }
+                Lambda::LstringSwitch(scrutinee, cases, default) => {
+                    contains_constant_field_projection(scrutinee)
+                        || cases
+                            .iter()
+                            .any(|(_, body)| contains_constant_field_projection(body))
+                        || default.as_deref().is_some_and(|body| {
+                            contains_constant_field_projection(body)
+                        })
+                }
+                Lambda::LstaticRaise(_, args) => args.iter().any(contains_constant_field_projection),
+                Lambda::LstaticCatch(body, _, handler) => {
+                    contains_constant_field_projection(body)
+                        || contains_constant_field_projection(handler)
+                }
+                Lambda::LtryWith(body, _, handler) => {
+                    contains_constant_field_projection(body)
+                        || contains_constant_field_projection(handler)
+                }
+                Lambda::LifThenElse(cond, then_, else_) => {
+                    contains_constant_field_projection(cond)
+                        || contains_constant_field_projection(then_)
+                        || contains_constant_field_projection(else_)
+                }
+                Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                    contains_constant_field_projection(first)
+                        || contains_constant_field_projection(second)
+                }
+                Lambda::Lfor(_, from, to, _, body) => {
+                    contains_constant_field_projection(from)
+                        || contains_constant_field_projection(to)
+                        || contains_constant_field_projection(body)
+                }
+                Lambda::Lassign(_, value) => contains_constant_field_projection(value),
+                Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            }
+        }
+
+        let shared = Ident::create_local("shared");
+        let projected = Ident::create_local("projected");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            shared.clone(),
+            Lambda::const_(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::record(
+                    vec![("a".to_string(), false), ("b".to_string(), false)],
+                    crate::parser::ast::MutableFlag::Immutable,
+                ),
+                elements: vec![
+                    Constant::int(3),
+                    Constant::Block {
+                        tag: 0,
+                        tag_info: TagInfo::record(
+                            vec![("xx".to_string(), false), ("yy".to_string(), false)],
+                            crate::parser::ast::MutableFlag::Immutable,
+                        ),
+                        elements: vec![Constant::int(2), Constant::int(3)],
+                    },
+                ],
+            }),
+            Lambda::let_(
+                LetKind::Strict,
+                projected.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::Record {
+                            name: "b".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(shared.clone())],
+                    Location::none(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::module(vec!["shared".to_string(), "projected".to_string()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(shared.clone()), Lambda::var(projected)],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Some(shared_value) = find_binding_value(&simplified, &shared) else {
+            panic!("expected the shared constant record binding to remain");
+        };
+        assert!(matches!(
+            shared_value,
+            Lambda::Lconst(Constant::Block { .. })
+        ));
+        assert!(
+            contains_shared_field_projection(&simplified, &shared),
+            "expected the nested record field read to stay projected from the shared binding, got {simplified:?}"
+        );
+        assert!(
+            !contains_constant_field_projection(&simplified),
+            "did not expect the nested record field read to collapse to a direct constant projection, got {simplified:?}"
         );
     }
 
