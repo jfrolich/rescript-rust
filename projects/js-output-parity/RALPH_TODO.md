@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 69 output diffs
+**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -54,7 +54,7 @@ reported:
 
 - JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -65,7 +65,55 @@ reproduces a stable no-compile-error baseline in the current dirty worktree:
 
 - JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: match OCaml's extension-record field flattening in the final
+  backend simplifier so hidden exception slots stay at index `0` while named
+  payload fields stay offset by `+1`, fixing the last `inline_record_test`
+  drift without perturbing unrelated simplifier output
+- Active backend focus stays in **Phase 5: Byte-Exact Dumping** from
+  `PLAN.md`; the change stays in `compiler-rust/src/lambda/simplify.rs`
+- OCaml reference:
+  - `compiler/core/lam_util.ml`, especially `field_flatten_get` and its
+    immutable-block/index-based field flattening behavior
+  - `compiler/core/lam_convert.ml`, where `Pextension_slot_eq` lowers through
+    `lam_extension_id` to a `Pfield (0, Fld_record {name = RE_EXN_ID})` read,
+    confirming that extension-slot flattening must still work through the
+    hidden slot at element `0`
+  - `compiler/ml/translcore.ml` and `compiler/ml/matching.ml`, which both
+    build extension-record payload field accesses at `lbl.lbl_pos + 1`
+- Rust change:
+  - fixed `constant_block_field(...)` and `block_field(...)` in
+    `compiler-rust/src/lambda/simplify.rs` so `TagInfo::RecordExt` payload
+    fields resolve from `position + 1` while unmatched field reads still fall
+    back to the raw index, letting `RE_EXN_ID` read element `0`
+  - added focused regression coverage in
+    `flattens_record_extension_field_aliases_with_hidden_slot_offset` and
+    `flattens_record_extension_slot_aliases_to_hidden_extension_id`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release flattens_record_extension_field_aliases_with_hidden_slot_offset -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release flattens_record_extension_slot_aliases_to_hidden_extension_id -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh src/inline_record_test.res --diff`
+  - `timeout 30 ./scripts/test_js_single.sh array_subtle_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/inline_record_test.res` now matches its checked-in `.mjs`
+    snapshot exactly; Rust folds both the extension payload read and the hidden
+    `RE_EXN_ID` slot read so OCaml's `if (A0 === A0) { tmp = 3; }` shape is
+    restored
+  - broader guard `tests/tests/src/array_subtle_test.res` remained an exact
+    snapshot match after the same simplifier fix, so the change stayed scoped
+    to extension-record flattening
+  - current smallest remaining JS diffs now start at `js_re_test` (15 lines),
+    `gpr_5280_optimize_test` (16 lines), `test_simple_ref` (19 lines), and
+    `gpr_3770_test` / `update_record_test` (20 lines each)
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **588 / 657** -> **589 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **69** -> **68** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

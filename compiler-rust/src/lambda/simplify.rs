@@ -3059,12 +3059,18 @@ fn constant_block_field(
             .and_then(|position| elements.get(position))
             .filter(|constant| !constant.is_allocating())
             .cloned(),
-        (TagInfo::RecordExt { fields, .. }, _) => dbg
-            .name()
-            .and_then(|name| fields.iter().position(|field_name| field_name == name))
-            .and_then(|position| elements.get(position))
-            .filter(|constant| !constant.is_allocating())
-            .cloned(),
+        (TagInfo::RecordExt { fields, .. }, _) => {
+            let resolved = dbg
+                .name()
+                .and_then(|name| fields.iter().position(|field_name| field_name == name))
+                // Extension records store the constructor slot at element 0 and
+                // payload fields starting at element 1.
+                .and_then(|position| elements.get(position + 1));
+            resolved
+                .or_else(|| elements.get(index))
+                .filter(|constant| !constant.is_allocating())
+                .cloned()
+        }
         _ => elements
             .get(index)
             .filter(|constant| !constant.is_allocating())
@@ -3093,7 +3099,8 @@ fn block_field<'a>(
         (TagInfo::RecordExt { fields, .. }, _) => dbg
             .name()
             .and_then(|name| fields.iter().position(|field_name| field_name == name))
-            .and_then(|position| block.elements.get(position)),
+            .and_then(|position| block.elements.get(position + 1))
+            .or_else(|| block.elements.get(index as usize)),
         _ => block.elements.get(index as usize),
     }
 }
@@ -6820,6 +6827,103 @@ mod tests {
             panic!("expected the bound constant-record field read to fold");
         };
         assert_eq!(s, "a");
+    }
+
+    #[test]
+    fn flattens_record_extension_field_aliases_with_hidden_slot_offset() {
+        let extension = Ident::create_local("A0");
+        let record = Ident::create_local("record");
+        let lbl = Ident::create_local("lbl");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            record.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::RecordExt {
+                        fields: vec!["lbl".to_string(), "more".to_string()],
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                    Mutable::Immutable,
+                ),
+                vec![
+                    Lambda::var(extension),
+                    Lambda::const_(Constant::int(3)),
+                    Lambda::const_(Constant::int(0)),
+                ],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                lbl.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        1,
+                        FieldDbgInfo::RecordExtension {
+                            name: "lbl".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(record)],
+                    Location::none(),
+                ),
+                Lambda::var(lbl),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lconst(Constant::Int { i, .. }) = simplified else {
+            panic!("expected the extension-record field read to fold to the payload");
+        };
+        assert_eq!(i, 3);
+    }
+
+    #[test]
+    fn flattens_record_extension_slot_aliases_to_hidden_extension_id() {
+        let extension = Ident::create_local("A0");
+        let record = Ident::create_local("record");
+        let tag = Ident::create_local("tag");
+        let lambda = Lambda::let_(
+            LetKind::Strict,
+            record.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::RecordExt {
+                        fields: vec!["lbl".to_string(), "more".to_string()],
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    },
+                    Mutable::Immutable,
+                ),
+                vec![
+                    Lambda::var(extension.clone()),
+                    Lambda::const_(Constant::int(3)),
+                    Lambda::const_(Constant::int(0)),
+                ],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                tag.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Record {
+                            name: "RE_EXN_ID".to_string(),
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ),
+                    vec![Lambda::var(record)],
+                    Location::none(),
+                ),
+                Lambda::var(tag),
+            ),
+        );
+
+        let simplified = simplify_for_js_backend(&lambda);
+        let Lambda::Lvar(id) = simplified else {
+            panic!("expected the extension slot read to fold to the slot binding");
+        };
+        assert!(id.same(&extension));
     }
 
     #[test]
