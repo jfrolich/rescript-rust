@@ -10410,11 +10410,7 @@ fn ocaml_typeof_expr(expr: Expression) -> Expression {
 }
 
 fn raw_typeof_comparison(expr: Expression, op: BinOp, type_name: &str) -> Expression {
-    Expression::new(ExpressionDesc::Bin(
-        op,
-        Box::new(ocaml_typeof_expr(expr)),
-        Box::new(Expression::string(type_name)),
-    ))
+    Expression::bin(op, ocaml_typeof_expr(expr), Expression::string(type_name))
 }
 
 fn is_type_number_expr(expr: Expression) -> Expression {
@@ -27851,14 +27847,22 @@ let fib3 = n => {
     }
 
     #[test]
-    fn typeof_literal_comparisons_stay_materialized_like_ocaml() {
+    fn typeof_literal_comparisons_fold_like_ocaml_string_equal() {
         assert_eq!(
             print_expression(&raw_typeof_comparison(
                 Expression::number(Number::int(3)),
                 BinOp::NotEqEq,
                 "number",
             )),
-            "\"number\" !== \"number\""
+            "false"
+        );
+        assert_eq!(
+            print_expression(&raw_typeof_comparison(
+                Expression::string("x"),
+                BinOp::EqEqEq,
+                "object",
+            )),
+            "false"
         );
     }
 

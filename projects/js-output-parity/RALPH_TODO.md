@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 579 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 78 output diffs
+**Status:** 581 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 76 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **579 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **78**
+- Output diffs: **76**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,58 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **579 / 657**
+- JS snapshot parity: **581 / 657**
 - Compile errors: **0**
-- Output diffs: **78**
+- Output diffs: **76**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: fold OCaml-style literal `typeof` comparisons during backend
+  JS-expression construction, so Rust stops leaving dead
+  `"string" === "object"` / `"number" !== "number"` tests inside emitted
+  conditional expressions and matches OCaml's already-collapsed constant
+  branches
+- Active backend focus stays on the **Phase 3 / Phase 4 boundary** from
+  `PLAN.md`: the change is in `compiler-rust/src/lambda/compile.rs`, but it is
+  matching `Js_exp_make` lowering behavior before the final dump rather than
+  changing the printer
+- OCaml reference:
+  - `compiler/core/lam_compile_primitive.ml`, whose `Pisint` /
+    `Pis_poly_var_block` lowering goes through `E.is_type_number` /
+    `E.is_type_object`
+  - `compiler/core/js_exp_make.ml`, whose `typeof` helper folds literal inputs
+    to string literals and whose `string_equal` / `string_comp` immediately
+    collapses literal string comparisons to booleans
+  - checked-in `tests/tests/src/poly_variant_test.mjs`, which confirms OCaml
+    has already reduced the literal poly-variant `typeof` split to a plain `2`
+    in the final snapshot
+- Rust change:
+  - changed `raw_typeof_comparison(...)` to build through `Expression::bin(...)`
+    instead of constructing a raw `ExpressionDesc::Bin`, so the existing
+    OCaml-aligned string-equality folding runs on literal `typeof` comparisons
+  - updated focused regression coverage in
+    `typeof_literal_comparisons_fold_like_ocaml_string_equal`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml typeof_literal_comparisons_fold_like_ocaml_string_equal -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_pis_poly_var_block_to_typeof_object_check -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml lowers_pisint_to_typeof_number_check -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh poly_variant_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh UntaggedVariants --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/poly_variant_test.res` is exact again; Rust now removes
+    the dead literal `typeof` branch and emits the same constant `2` that
+    OCaml's backend already produces
+  - `tests/tests/src/UntaggedVariants.res` is unchanged, confirming this fix is
+    isolated to literal `typeof` folding rather than the larger remaining
+    branch-shaping cluster
+  - the verified improvement is JS-expression lowering / cleanup behavior, not
+    a printer-only string rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **580 / 657** -> **581 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **77** -> **76** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
