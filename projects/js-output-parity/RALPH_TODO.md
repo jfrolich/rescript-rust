@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 595 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 62 output diffs
+**Status:** 596 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 61 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **595 / 657**
+- JS snapshot parity: **596 / 657**
 - Compile errors: **0**
-- Output diffs: **62**
+- Output diffs: **61**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,63 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **595 / 657**
+- JS snapshot parity: **596 / 657**
 - Compile errors: **0**
-- Output diffs: **62**
+- Output diffs: **61**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: collapse redundant same-name rebound export aliases when the
+  JS block already contains a matching binding, which is the checked-in
+  `gpr_3142_test`, `string_set`, `bs_set_int_test`, and
+  `bs_mutable_set_test` snapshot family
+- Active backend focus moved to **Phase 3** JS IR lowering / export metadata
+  from `PLAN.md`: the fix is in `compiler-rust/src/lambda/compile.rs` during
+  top-level export coercion and export-alias resolution, not in the final
+  printer
+- OCaml reference:
+  - `compiler/core/js_dump_program.ml`, which only forwards the already chosen
+    `program.exports` list into ES module printing
+  - `compiler/core/js_dump_import_export.ml`, whose `es6_export` path prints
+    existing bound identifiers and does not synthesize an extra same-name alias
+    when a matching binding is already present
+- Rust change:
+  - taught `coerce_toplevel_exports(...)` to reuse an already materialized
+    same-name binding when its initializer matches the export payload value,
+    avoiding an unnecessary rebound alias on the Rust side
+  - taught `resolve_export_aliases(...)` to collapse rebound export aliases back
+    onto an earlier same-name binding with the same initializer before JS shake
+    runs, which lets the redundant export-only alias disappear
+  - added focused regression coverage in
+    `compiler-rust/src/lambda/compile.rs` for both synthetic export-coercion
+    cases and checked-in `gpr_3142_test` / `string_set` snapshots
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_reuses_existing_same_name_alias_binding -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3142_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh string_set --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - redundant rebound export aliases are gone in the targeted family; for
+    example `v$1 as v`, `u$1 as u`, `empty$1 as empty`,
+    `singleton$1 as singleton`, and `of_sorted_list$1 as of_sorted_list` no
+    longer appear in the Rust output
+  - targeted diff files shrank even though they are not exact yet:
+    `gpr_3142_test` **48 -> 40** lines, `string_set` **136 -> 113**,
+    `bs_set_int_test` **106 -> 97**, `bs_mutable_set_test` **116 -> 105**
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the export-resolution
+    change did not perturb the stable module/export guard
+  - `gpr_3142_test` still differs on alias placement relative to the test body,
+    and `string_set` still differs on the subset-loop temporary / alias-hoist
+    ordering, so this export-coercion fix removes one backend drift layer but
+    does not finish those files alone
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **596 / 657** -> **596 / 657** (**no change**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **61** -> **61** (**no change**)
 
 Latest iteration on **2026-04-17**:
 

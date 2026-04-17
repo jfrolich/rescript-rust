@@ -407,6 +407,10 @@ impl LambdaCompiler {
                 exports.push(export);
                 continue;
             }
+            if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
+                exports.push(reused);
+                continue;
+            }
 
             let rebound = self.id_gen.create(export.name());
             let property = if matches!(value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
@@ -9048,8 +9052,25 @@ fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     collect_export_aliases(block, &mut aliases);
     exports
         .into_iter()
-        .map(|export| resolve_export_alias(&export, &aliases, &declared))
+        .map(|export| {
+            reusable_declared_same_name_export_alias(block, &export)
+                .unwrap_or_else(|| resolve_export_alias(&export, &aliases, &declared))
+        })
         .collect()
+}
+
+fn reusable_declared_same_name_export_alias(block: &Block, export: &Ident) -> Option<Ident> {
+    let initializer = flatten_toplevel_block(block)
+        .into_iter()
+        .find_map(|stmt| match stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                ..
+            }) if ident.same(export) => Some(initializer),
+            _ => None,
+        })?;
+    reusable_same_name_export_binding(block, export, &initializer)
 }
 
 fn collect_declared_idents(block: &Block, declared: &mut HashSet<Ident>) {
@@ -9336,6 +9357,47 @@ fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) ->
     flattened[export_index + 1..]
         .iter()
         .all(statement_allows_undefined_export_reuse)
+}
+
+fn reusable_same_name_export_binding(
+    block: &Block,
+    export: &Ident,
+    value: &Expression,
+) -> Option<Ident> {
+    flatten_toplevel_block(block)
+        .into_iter()
+        .find_map(|stmt| match stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                property,
+                ..
+            }) if ident.name() == export.name()
+                && !ident.same(export)
+                && !matches!(property, LetKind::Variable)
+                && same_reusable_export_value(&initializer, value) =>
+            {
+                Some(ident)
+            }
+            _ => None,
+        })
+}
+
+fn same_reusable_export_value(left: &Expression, right: &Expression) -> bool {
+    match (&left.desc, &right.desc) {
+        (ExpressionDesc::Var(left_ident), ExpressionDesc::Var(right_ident)) => {
+            left_ident == right_ident
+        }
+        (
+            ExpressionDesc::StaticIndex(left_target, left_field, left_pos),
+            ExpressionDesc::StaticIndex(right_target, right_field, right_pos),
+        ) => {
+            left_field == right_field
+                && left_pos == right_pos
+                && same_reusable_export_value(left_target, right_target)
+        }
+        _ => false,
+    }
 }
 
 fn push_effect_expression(block: &mut Block, expr: Expression) {
@@ -16702,6 +16764,82 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_var_value() {
+        let mut compiler = LambdaCompiler::new();
+        let target = Ident::create_persistent("tToJs");
+        let declared_alias = Ident::create_local("v");
+        let exported = Ident::create_local("v");
+        let mut block = vec![Statement::variable(VariableDeclaration {
+            ident: declared_alias.clone(),
+            value: Some(Expression::var(target.clone())),
+            property: LetKind::Alias,
+            ident_info: IdentInfo::default(),
+        })];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported],
+                values: vec![Expression::var(target)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![declared_alias.clone()]);
+        let [stmt] = block.as_slice() else {
+            panic!("expected the existing same-name alias binding to be reused");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&declared_alias));
+            }
+            other => panic!("expected the original same-name alias binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_module_field()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let set_gen = ModuleId {
+            id: Ident::create_persistent("Set_gen"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let declared_alias = Ident::create_local("empty");
+        let exported = Ident::create_local("empty");
+        let mut block = vec![Statement::variable(VariableDeclaration {
+            ident: declared_alias.clone(),
+            value: Some(Expression::qualified(
+                set_gen.clone(),
+                Some("empty".to_string()),
+            )),
+            property: LetKind::Alias,
+            ident_info: IdentInfo::default(),
+        })];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported],
+                values: vec![Expression::qualified(set_gen, Some("empty".to_string()))],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![declared_alias.clone()]);
+        let [stmt] = block.as_slice() else {
+            panic!("expected the existing same-name module field alias to be reused");
+        };
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&declared_alias));
+            }
+            other => panic!("expected the original same-name alias binding, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
         let mut compiler = LambdaCompiler::new();
         let exported = Ident::create_local("foo");
@@ -20697,6 +20835,50 @@ mod tests {
         assert!(
             !output.contains("s: Stdlib_String") && !output.contains("3, v(\"abc\")"),
             "unexpected inlined local-module field or stale snapshot-era wrapper call remained in module_parameter_test:\n{output}"
+        );
+    }
+
+    #[test]
+    fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("gpr_3142_test");
+        assert!(
+            output.contains("let v = tToJs;\n\nlet u = tFromJs;"),
+            "expected gpr_3142_test to keep the shared same-name aliases materialized once, got:\n{output}"
+        );
+        assert!(
+            output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 18, characters 7-14\", v(\"a\"), \"x\")")
+                && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 23, characters 7-14\", u(\"x\"), \"a\")"),
+            "expected gpr_3142_test to reuse those aliases at the checked internal call sites, got:\n{output}"
+        );
+        assert!(
+            output.contains("export {\n  tToJs,\n  tFromJs,\n  v,\n  u,\n}")
+                && !output.contains("v$1 as v")
+                && !output.contains("u$1 as u"),
+            "unexpected rebound export aliases remained in gpr_3142_test:\n{output}"
+        );
+    }
+
+    #[test]
+    fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("string_set");
+        assert!(
+            output.contains("let empty = Set_gen.empty;\n\nlet singleton = Set_gen.singleton;\n\nlet of_sorted_list = Set_gen.of_sorted_list;"),
+            "expected string_set to keep the shared same-name module field aliases materialized once, got:\n{output}"
+        );
+        assert!(
+            output.contains("return empty;")
+                && output.contains("return singleton(x0);")
+                && output.contains("return of_sorted_list(Belt_List.sort(l, compare_elt));"),
+            "expected string_set to reuse the shared aliases at internal call sites, got:\n{output}"
+        );
+        assert!(
+            output.contains("export {\n  compare_elt,\n  empty,")
+                && output.contains("  singleton,")
+                && output.contains("  of_sorted_list,")
+                && !output.contains("empty$1 as empty")
+                && !output.contains("singleton$1 as singleton")
+                && !output.contains("of_sorted_list$1 as of_sorted_list"),
+            "unexpected rebound export aliases remained in string_set:\n{output}"
         );
     }
 
