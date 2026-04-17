@@ -3099,6 +3099,9 @@ fn try_function_body_guard_return_fallthrough_else_merge(stmts: &Block) -> Optio
     if !else_.is_empty() || single_wrapped_return_expr(then_).is_none() {
         return None;
     }
+    if conjunction_is_all_zero_equality_guard(test) {
+        return None;
+    }
 
     if !matches!(unwrap_single_block_stmt(success_stmt).desc, StatementDesc::Return(_)) {
         return None;
@@ -3138,6 +3141,30 @@ fn try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts: &Block) 
     });
     rewritten.push(Statement::return_(success));
     Some(rewritten)
+}
+
+fn conjunction_is_all_zero_equality_guard(cond: &Expression) -> bool {
+    let mut guards = Vec::new();
+    collect_conjunction_chain(cond, &mut guards);
+    guards.len() >= 2 && guards.iter().all(all_zero_equality_guard)
+}
+
+fn collect_conjunction_chain(cond: &Expression, guards: &mut Vec<Expression>) {
+    match &cond.desc {
+        ExpressionDesc::Bin(BinOp::And, left, right) => {
+            collect_conjunction_chain(left, guards);
+            collect_conjunction_chain(right, guards);
+        }
+        _ => guards.push(cond.clone()),
+    }
+}
+
+fn all_zero_equality_guard(cond: &Expression) -> bool {
+    matches!(
+        &cond.desc,
+        ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+            if is_zero_int_literal(left) || is_zero_int_literal(right)
+    )
 }
 
 fn try_function_body_shared_success_disjunction_fallthrough_rewrite(stmts: &Block) -> Option<Block> {

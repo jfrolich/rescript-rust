@@ -20534,6 +20534,25 @@ mod tests {
     }
 
     #[test]
+    fn gpr_3609_keeps_explicit_else_tail_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_3609_test");
+        assert!(
+            output.contains("if (typeof state !== \"object\") {"),
+            "expected gpr_3609_test.func to keep the outer object guard, got:\n{output}"
+        );
+        assert!(
+            output.contains("  } else {\n    return 0 + state._0 | 0;\n  }"),
+            "expected gpr_3609_test.func to keep the explicit else tail, got:\n{output}"
+        );
+        assert!(
+            !output.contains(
+                "if (typeof state !== \"object\") {\n    return 0;\n  }\n  return 0 + state._0 | 0;"
+            ),
+            "unexpected fallthrough tail in gpr_3609_test.func:\n{output}"
+        );
+    }
+
+    #[test]
     fn gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("gpr_3770_test");
         assert!(
@@ -20555,6 +20574,10 @@ mod tests {
         assert!(
             !output.contains("else if (x._1 !== 0) {") && !output.contains("else if (x._2 !== 0) {"),
             "unexpected nested negative guard chain in gpr_3770_test.show:\n{output}"
+        );
+        assert!(
+            !output.contains("  } else {\n    return a.toString() + x._1.toString();\n  }"),
+            "unexpected explicit else tail in gpr_3770_test.show:\n{output}"
         );
     }
 

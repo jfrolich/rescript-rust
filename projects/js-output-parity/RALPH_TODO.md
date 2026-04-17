@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 69 output diffs
+**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 68 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,61 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep OCaml's explicit `if/else` tail reconstruction for plain
+  guard-plus-fallthrough returns like `gpr_3609_test`, while skipping that
+  printer rewrite for the all-zero shared-success fallthrough family so
+  `gpr_3770_test` stays on OCaml's checked-in fallthrough form
+- Active backend focus stays on **Phase 5** last-mile printer cleanup from
+  `PLAN.md`: the fix is isolated to `compiler-rust/src/js_ir/printer.rs` and
+  only narrows the final function-body tail rewrite after the backend has
+  already built the right shared-success guard
+- OCaml reference:
+  - `compiler/core/js_stmt_make.ml`, especially `if_`'s `| _, [Return _] ->`
+    fallthrough rewrite, which is what keeps the all-zero `gpr_3770_test`
+    guard as `if (...) { return "zeroes"; } return expr;`
+  - checked-in `tests/tests/src/gpr_3609_test.mjs` plus the regenerated
+    `tests/tests/src/gpr_3609_test.ocaml.mjs`, which confirm OCaml keeps the
+    explicit `else` for the plain `typeof state !== "object"` guard
+  - checked-in `tests/tests/src/gpr_3770_test.mjs` plus the regenerated
+    `tests/tests/src/gpr_3770_test.ocaml.mjs`, which confirm OCaml does **not**
+    reconstruct an explicit `else` after the all-zero conjunction
+- Rust change:
+  - narrowed `try_function_body_guard_return_fallthrough_else_merge(...)` in
+    `compiler-rust/src/js_ir/printer.rs` so it now skips conjunctions made only
+    of `=== 0` guards, preserving the OCaml all-zero fallthrough family after
+    the earlier shared-success disjunction rewrite
+  - added a direct checked-in regression test in
+    `compiler-rust/src/lambda/compile.rs`:
+    `gpr_3609_keeps_explicit_else_tail_like_ocaml`
+  - tightened `gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml` so it also
+    rejects the reintroduced explicit `else` form
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_function_body_reconstructs_else_from_guard_return_fallthrough_tail -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release test_print_non_unit_function_body_inverts_shared_success_or_guard_into_fallthrough -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3609_keeps_explicit_else_tail_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - direct release repros for `tests/tests/src/gpr_3609_test.res`,
+    `tests/tests/src/gpr_3770_test.res`, and `tests/tests/src/ExternalShadow.res`
+    diffing the generated files against their checked-in snapshots
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3609_test.res` stays exact after the rebuild; Rust
+    still reconstructs the explicit outer `else` for the plain object guard
+  - `tests/tests/src/gpr_3770_test.res` is exact again; Rust no longer
+    re-wraps the OCaml all-zero conjunction in `else { return ... }`
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the narrowed printer
+    rewrite did not reopen the earlier shared-fallback guard cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **588 / 657** -> **589 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **69** -> **68** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
