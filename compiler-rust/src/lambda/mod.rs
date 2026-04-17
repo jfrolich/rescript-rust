@@ -43,6 +43,7 @@ use crate::ident::Ident;
 use crate::location::Location;
 pub use compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 pub use constant::Constant;
+use constant::StringDelim;
 pub use primitive::Primitive;
 pub use tag_info::TagInfo;
 
@@ -357,6 +358,66 @@ impl Lambda {
         })
     }
 
+    /// Create a switch using OCaml's `Lam.switch` smart constructor.
+    pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
+        match scrutinee {
+            Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
+                .sw_consts
+                .iter()
+                .find(|(tag, _)| *tag == i)
+                .map(|(_, branch)| branch.clone())
+                .or_else(|| switch.sw_failaction.as_deref().cloned())
+                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
+            Lambda::Lconst(constant @ Constant::Block { tag, .. }) => switch
+                .sw_blocks
+                .iter()
+                .find(|(block_tag, _)| *block_tag == tag)
+                .map(|(_, branch)| branch.clone())
+                .or_else(|| switch.sw_failaction.as_deref().cloned())
+                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
+            other => Lambda::Lswitch(Box::new(other), switch),
+        }
+    }
+
+    /// Create a string switch using OCaml's `Lam.stringswitch` smart constructor.
+    pub fn string_switch(
+        scrutinee: Lambda,
+        cases: Vec<(String, Lambda)>,
+        default: Option<Box<Lambda>>,
+    ) -> Self {
+        let matched = |value: &str| {
+            cases.iter()
+                .find(|(tag, _)| tag == value)
+                .map(|(_, branch)| branch.clone())
+                .or_else(|| default.as_deref().cloned())
+        };
+
+        match scrutinee {
+            Lambda::Lconst(
+                ref constant @ Constant::String {
+                    ref s,
+                    delim: None | Some(StringDelim::NoQuotes),
+                },
+            ) => matched(s).unwrap_or_else(|| {
+                Lambda::LstringSwitch(
+                    Box::new(Lambda::Lconst(constant.clone())),
+                    cases,
+                    default,
+                )
+            }),
+            Lambda::Lconst(ref constant @ Constant::ImmString(ref s)) => matched(s).unwrap_or_else(
+                || {
+                    Lambda::LstringSwitch(
+                        Box::new(Lambda::Lconst(constant.clone())),
+                        cases,
+                        default,
+                    )
+                },
+            ),
+            other => Lambda::LstringSwitch(Box::new(other), cases, default),
+        }
+    }
+
     /// Create a function application using OCaml's `Lam.apply` smart constructor.
     pub fn apply(
         func: Lambda,
@@ -369,7 +430,12 @@ impl Lambda {
                 if let Some(reduced) = eta_reduce_function_apply(&function, &args, &ap_info) {
                     return reduced;
                 }
-                make_lapply(Lambda::Lfunction(function), args, ap_info, ap_transformed_jsx)
+                make_lapply(
+                    Lambda::Lfunction(function),
+                    args,
+                    ap_info,
+                    ap_transformed_jsx,
+                )
             }
             Lambda::Llet(kind, id, value, body) => match *body {
                 body @ Lambda::Lfunction(_) => Lambda::let_(
@@ -718,7 +784,11 @@ impl Lambda {
     }
 }
 
-fn eta_reduce_function_apply(function: &LFunction, args: &[Lambda], ap_info: &ApInfo) -> Option<Lambda> {
+fn eta_reduce_function_apply(
+    function: &LFunction,
+    args: &[Lambda],
+    ap_info: &ApInfo,
+) -> Option<Lambda> {
     match function.body.as_ref() {
         Lambda::Lprim(PrimInfo {
             primitive:
@@ -822,7 +892,12 @@ fn eta_conversion_args(
         .collect()
 }
 
-fn make_lapply(func: Lambda, args: Vec<Lambda>, ap_info: ApInfo, ap_transformed_jsx: bool) -> Lambda {
+fn make_lapply(
+    func: Lambda,
+    args: Vec<Lambda>,
+    ap_info: ApInfo,
+    ap_transformed_jsx: bool,
+) -> Lambda {
     Lambda::Lapply(Apply {
         ap_func: Box::new(func),
         ap_args: args,

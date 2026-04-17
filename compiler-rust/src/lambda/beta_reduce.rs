@@ -211,10 +211,7 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
             _ => {
                 let new_param = param.rename(&id_gen);
                 rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(
-                    param.clone(),
-                    bound_param_substitution(new_param, arg),
-                );
+                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -278,10 +275,7 @@ pub fn propagate_beta_reduce_with_map(
                 // Bind to a new variable
                 let new_param = param.rename(&id_gen);
                 rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
-                substitution.insert(
-                    param.clone(),
-                    bound_param_substitution(new_param, arg),
-                );
+                substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
             }
         }
     }
@@ -420,24 +414,20 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
             loc: prim_info.loc.clone(),
         }),
         Lambda::LglobalModule(_, _) => lam.clone(),
-        Lambda::Lswitch(arg, switch) => Lambda::Lswitch(
-            Box::new(rewrite_bounded_vars(substitution, arg, id_gen)),
+        Lambda::Lswitch(arg, switch) => Lambda::switch(
+            rewrite_bounded_vars(substitution, arg, id_gen),
             crate::lambda::LambdaSwitch {
                 sw_consts_full: switch.sw_consts_full,
                 sw_consts: switch
                     .sw_consts
                     .iter()
-                    .map(|(key, value)| {
-                        (*key, rewrite_bounded_vars(substitution, value, id_gen))
-                    })
+                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
                     .collect(),
                 sw_blocks_full: switch.sw_blocks_full,
                 sw_blocks: switch
                     .sw_blocks
                     .iter()
-                    .map(|(key, value)| {
-                        (*key, rewrite_bounded_vars(substitution, value, id_gen))
-                    })
+                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
                     .collect(),
                 sw_failaction: switch
                     .sw_failaction
@@ -446,11 +436,16 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 sw_names: switch.sw_names.clone(),
             },
         ),
-        Lambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(
-            Box::new(rewrite_bounded_vars(substitution, arg, id_gen)),
+        Lambda::LstringSwitch(arg, cases, default) => Lambda::string_switch(
+            rewrite_bounded_vars(substitution, arg, id_gen),
             cases
                 .iter()
-                .map(|(key, value)| (key.clone(), rewrite_bounded_vars(substitution, value, id_gen)))
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        rewrite_bounded_vars(substitution, value, id_gen),
+                    )
+                })
                 .collect(),
             default
                 .as_ref()
@@ -596,7 +591,7 @@ fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
 mod tests {
     use super::*;
     use crate::lambda::closure::VarStats;
-    use crate::lambda::{Constant, FunctionAttribute, Primitive};
+    use crate::lambda::{Constant, FunctionAttribute, LambdaSwitch, Primitive};
     use crate::location::Location;
 
     #[test]
@@ -771,8 +766,7 @@ mod tests {
                         kind: crate::lambda::primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
-                        return_wrapper:
-                            crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },
                     dynamic_import: false,
@@ -979,6 +973,31 @@ mod tests {
             matches!(func.body.as_ref(), Lambda::Lvar(body_id) if body_id.same(param)),
             "expected the returned wrapper body to keep using its own parameter, got {func:?}"
         );
+    }
+
+    #[test]
+    fn test_propagate_beta_reduce_folds_constant_switch_scrutinee_like_ocaml() {
+        let x = Ident::create_local("x");
+        let reduced = propagate_beta_reduce(
+            std::slice::from_ref(&x),
+            &Lambda::Lswitch(
+                Box::new(Lambda::var(x.clone())),
+                LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![
+                        (0, Lambda::const_(Constant::JsFalse)),
+                        (1, Lambda::const_(Constant::JsTrue)),
+                    ],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+            ),
+            &[Lambda::const_(Constant::int(1))],
+        );
+
+        assert!(matches!(reduced, Lambda::Lconst(Constant::JsTrue)));
     }
 
     #[test]

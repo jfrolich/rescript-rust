@@ -20734,6 +20734,44 @@ mod tests {
     }
 
     #[test]
+    fn gpr_4900_inlines_local_matcher_calls_to_constants_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_4900_test");
+        assert!(
+            output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4900_test.res\\\", line 14, characters 7-14\", true, true);"
+            ) && output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4900_test.res\\\", line 15, characters 7-14\", false, false);"
+            ) && output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4900_test.res\\\", line 16, characters 7-14\", true, true);"
+            ),
+            "expected gpr_4900_test to inline the local matcher calls to constants, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let showToJs = x =>"),
+            "unexpected retained local matcher helper in gpr_4900_test:\n{output}"
+        );
+    }
+
+    #[test]
+    fn gpr_4924_inlines_local_variant_matcher_calls_to_constants_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("gpr_4924_test");
+        assert!(
+            output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4924_test.res\\\", line 29, characters 7-14\", false, false);"
+            ) && output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4924_test.res\\\", line 30, characters 7-14\", true, true);"
+            ) && output.contains(
+                "Test_utils.eq(\"File \\\"gpr_4924_test.res\\\", line 31, characters 7-14\", true, true);"
+            ),
+            "expected gpr_4924_test to inline the local matcher calls to constants, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let u2 = b =>"),
+            "unexpected retained local matcher helper in gpr_4924_test:\n{output}"
+        );
+    }
+
+    #[test]
     fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("uncurried_cast");
         assert!(

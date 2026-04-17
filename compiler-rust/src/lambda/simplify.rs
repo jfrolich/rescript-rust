@@ -3928,16 +3928,19 @@ fn reduce_named_function_application(
         return None;
     }
 
-    // OCaml's backend alias cleanup can expose literal block arguments after
-    // field-folding, but it does not then reopen the const-argument inlining
-    // heuristic for larger named functions. Keeping that boundary avoids
-    // collapsing wrappers like `update_record_test` past the OCaml lambda state.
+    let allow_via_destruct_pattern = analysis::destruct_pattern(&func.body, &func.params, args);
+
+    // OCaml's backend does not reopen the broader const-argument named-function
+    // inlining heuristic after alias cleanup exposes allocating constant blocks,
+    // but it still allows the dedicated destruct-pattern fast path where folding
+    // a constant switch/if makes the body small enough to inline.
     let has_allocating_const_arg = args
         .iter()
         .any(|arg| matches!(arg, Lambda::Lconst(constant) if constant.is_allocating()));
     if has_allocating_const_arg
         && matches!(func.attr.inline, InlineAttribute::Default)
         && analysis::size(&func.body) >= analysis::SMALL_INLINE_SIZE
+        && !allow_via_destruct_pattern
     {
         return None;
     }
@@ -13325,6 +13328,55 @@ mod tests {
         };
         assert!(id.same(&belt_list));
         assert!(!dynamic_import);
+    }
+
+    #[test]
+    fn inlines_named_functions_applied_to_constant_constructor_blocks_like_ocaml() {
+        let show_to_js = Ident::create_local("showToJs");
+        let x = Ident::create_local("x");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            show_to_js.clone(),
+            Lambda::function_(
+                1,
+                vec![x.clone()],
+                Lambda::Lswitch(
+                    Box::new(Lambda::var(x)),
+                    LambdaSwitch {
+                        sw_consts_full: true,
+                        sw_consts: vec![
+                            (0, Lambda::const_(Constant::JsFalse)),
+                            (1, Lambda::const_(Constant::JsTrue)),
+                        ],
+                        sw_blocks_full: true,
+                        sw_blocks: vec![(0, Lambda::const_(Constant::JsTrue))],
+                        sw_failaction: None,
+                        sw_names: None,
+                    },
+                ),
+                FunctionAttribute::default(),
+            ),
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(show_to_js)),
+                ap_args: vec![Lambda::const_(Constant::Block {
+                    tag: 0,
+                    tag_info: TagInfo::constructor("After", 1, 0),
+                    elements: vec![Constant::int(3)],
+                })],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Na,
+                },
+                ap_transformed_jsx: false,
+            }),
+        ));
+
+        assert!(
+            matches!(simplified, Lambda::Lconst(Constant::JsTrue)),
+            "expected named function application on a constant constructor block to inline to `true`, got {simplified:?}",
+        );
     }
 
     #[test]

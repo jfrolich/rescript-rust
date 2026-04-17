@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 594 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 63 output diffs
+**Status:** 595 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 62 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **594 / 657**
+- JS snapshot parity: **595 / 657**
 - Compile errors: **0**
-- Output diffs: **63**
+- Output diffs: **62**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,62 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **594 / 657**
+- JS snapshot parity: **595 / 657**
 - Compile errors: **0**
-- Output diffs: **63**
+- Output diffs: **62**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: inline constant-constructor matcher wrappers through OCaml's
+  switch smart-constructor path without reopening the broader allocating-
+  constant named-function inlining that keeps `update_record_test` on the
+  checked-in snapshot shape
+- Active backend focus stayed in **Phase 4** late lambda/backend cleanup from
+  `PLAN.md`: the fix spans the lambda smart constructors, beta reduction, and
+  named-function inlining in the JS-backend simplifier
+- OCaml reference:
+  - `compiler/core/lam.ml`, where `Lam.switch` and `Lam.stringswitch` fold
+    constant scrutinees before later inlining and simplification decisions
+  - `compiler/core/lam_analysis.ml`, whose `destruct_pattern` path is the
+    dedicated exception that still allows constant matcher wrappers to inline
+    once folding makes them small
+- Rust change:
+  - added `Lambda::switch` and `Lambda::string_switch` in
+    `compiler-rust/src/lambda/mod.rs` and routed
+    `compiler-rust/src/lambda/analysis.rs` plus
+    `compiler-rust/src/lambda/beta_reduce.rs` through them so constant switch
+    scrutinees fold like OCaml during inlining and beta reduction
+  - narrowed `reduce_named_function_application(...)` in
+    `compiler-rust/src/lambda/simplify.rs` so allocating constant block
+    arguments still keep wrappers like `update_record_test`, except for the
+    OCaml-aligned destruct-pattern fast path
+  - added focused regressions in
+    `compiler-rust/src/lambda/simplify.rs` and checked-in JS regressions in
+    `compiler-rust/src/lambda/compile.rs` for `gpr_4900_test` and
+    `gpr_4924_test`
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release inlines_named_functions_applied_to_constant_constructor_blocks_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release final_backend_cleanup_inlines_record_constant_alias_after_projection_folding -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_4900_inlines_local_matcher_calls_to_constants_like_ocaml -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_4924_inlines_local_variant_matcher_calls_to_constants_like_ocaml -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_4900_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_4924_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh update_record_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_4900_test.res` is exact again; Rust now folds the
+    constant constructor switch and no longer emits the local `showToJs` helper
+  - `tests/tests/src/gpr_4924_test.res` is exact again; Rust likewise removes
+    the local `u2` matcher helper once the constant switch folds
+  - `tests/tests/src/update_record_test.res` and
+    `tests/tests/src/ExternalShadow.res` stayed exact, so the destruct-pattern
+    exception did not reopen the older allocating-constant wrapper regression
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **594 / 657** -> **595 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **63** -> **62** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

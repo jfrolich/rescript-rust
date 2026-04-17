@@ -447,7 +447,7 @@ pub fn ok_to_inline_fun_when_app(func: &LFunction, args: &[Lambda]) -> bool {
 ///
 /// This returns true when the function body is a switch/if on one of its
 /// parameters and the corresponding argument is a constant.
-fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda]) -> bool {
+pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda]) -> bool {
     use crate::ident::Ident;
 
     fn find_arg<'a>(v: &Ident, params: &[Ident], args: &'a [Lambda]) -> Option<&'a Lambda> {
@@ -462,10 +462,12 @@ fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda]) -> bool {
     match body {
         Lambda::Lswitch(scrutinee, switch) => {
             if let Lambda::Lvar(v) = &**scrutinee {
-                if let Some(Lambda::Lconst(_)) = find_arg(v, params, args) {
+                if let Some(Lambda::Lconst(constant)) = find_arg(v, params, args) {
                     // Would need to evaluate the switch to check size
-                    return size(&Lambda::Lswitch(scrutinee.clone(), switch.clone()))
-                        < SMALL_INLINE_SIZE;
+                    return size(&Lambda::switch(
+                        Lambda::Lconst(constant.clone()),
+                        switch.clone(),
+                    )) < SMALL_INLINE_SIZE;
                 }
             }
             false
@@ -510,7 +512,7 @@ pub fn safe_to_inline(lam: &Lambda) -> bool {
 mod tests {
     use super::*;
     use crate::ident::Ident;
-    use crate::lambda::{FunctionAttribute, LetKind, Primitive};
+    use crate::lambda::{FunctionAttribute, LambdaSwitch, LetKind, Primitive};
     use crate::location::Location;
 
     #[test]
@@ -777,5 +779,34 @@ mod tests {
             }),
             3
         );
+    }
+
+    #[test]
+    fn test_ok_to_inline_fun_when_app_folds_switch_on_constant_scrutinee_like_ocaml() {
+        let x = Ident::create_local("x");
+        let func = LFunction {
+            arity: 1,
+            params: vec![x.clone()],
+            body: Box::new(Lambda::Lswitch(
+                Box::new(Lambda::var(x)),
+                LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![
+                        (0, Lambda::const_(Constant::JsFalse)),
+                        (1, Lambda::const_(Constant::JsTrue)),
+                    ],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: None,
+                    sw_names: None,
+                },
+            )),
+            attr: FunctionAttribute::default(),
+        };
+
+        assert!(ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::const_(Constant::int(1))]
+        ));
     }
 }
