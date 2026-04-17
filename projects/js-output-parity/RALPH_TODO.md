@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 596 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 61 output diffs
+**Status:** 597 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 60 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **596 / 657**
+- JS snapshot parity: **597 / 657**
 - Compile errors: **0**
-- Output diffs: **61**
+- Output diffs: **60**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,52 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **596 / 657**
+- JS snapshot parity: **597 / 657**
 - Compile errors: **0**
-- Output diffs: **61**
+- Output diffs: **60**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: reuse the declared let-binding target for effectful
+  short-circuit expressions instead of lowering through a Rust-only temporary
+  alias, which is the checked-in `gpr_2608_test` snapshot shape
+- Active backend focus stayed in **Phase 3** JS IR lowering / control-flow
+  metadata from `PLAN.md`: this is the OCaml `Lam_compile` `Psequand` /
+  `Psequor` declare-continuation path, not a printer rewrite
+- OCaml reference:
+  - `compiler/core/lam_compile.ml`, especially `compile_sequand` and
+    `compile_sequor`, whose `Declare` branch initializes the final binding
+    directly and assigns back into that same identifier inside the guarded
+    right-hand branch
+- Rust change:
+  - added `ShortCircuitOp::test_expr(...)` plus
+    `compile_short_circuit_binding_block(...)` in
+    `compiler-rust/src/lambda/compile.rs`
+  - taught `compile_let_binding(...)` to detect `Psequand` / `Psequor` and use
+    the direct declared-binding path instead of first lowering to
+    `compile_short_circuit_expr(...)` and then wrapping the result in a second
+    alias binding
+  - added focused regression coverage in
+    `compiler-rust/src/lambda/compile.rs` for both the lowered let-binding shape
+    and the checked-in `gpr_2608_test` snapshot
+- Verified focused guards for this slice:
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release let_bindings_lower_effectful_short_circuits_without_a_result_alias_temp -- --nocapture`
+  - `timeout 240 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_2608_test_keeps_declared_short_circuit_binding_shape_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_2608_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_2608_test.res` is exact again; Rust now emits
+    `let huntGrootCondition = false;` / `let huntGrootCondition2 = true;`
+    directly instead of synthesizing `tmp` / `tmp$1` aliases and then rebinding
+    the final names
+  - `tests/tests/src/ExternalShadow.res` stayed exact, so the short-circuit
+    declare-path change did not perturb the stable import/export guard
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **596 / 657** -> **597 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **61** -> **60** (**-1**)
 
 Latest iteration on **2026-04-17**:
 

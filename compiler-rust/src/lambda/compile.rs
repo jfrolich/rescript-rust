@@ -94,6 +94,13 @@ impl ShortCircuitOp {
         Expression::bool(matches!(self, Self::Or))
     }
 
+    fn test_expr(self, lhs: Expression) -> Expression {
+        match self {
+            Self::And => lhs,
+            Self::Or => Expression::not(lhs),
+        }
+    }
+
     fn default_lambda(self) -> Lambda {
         match self {
             Self::And => Lambda::false_(),
@@ -1109,6 +1116,23 @@ impl LambdaCompiler {
             Lambda::LstringSwitch(scrut, cases, default) => {
                 self.compile_string_switch_binding_block(kind, id, scrut, cases, default.as_deref())
             }
+            Lambda::Lprim(info) => {
+                if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
+                    return self.compile_short_circuit_binding_block(kind, id, op, lhs, rhs);
+                }
+                let value_compiled = self.compile_expr(value);
+                let mut block = value_compiled.prelude;
+                if block_terminates(&block) {
+                    return block;
+                }
+                block.push(Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(value_compiled.expr),
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                }));
+                block
+            }
             _ => {
                 let value_compiled = self.compile_expr(value);
                 let mut block = value_compiled.prelude;
@@ -1271,16 +1295,63 @@ impl LambdaCompiler {
             )));
         }
 
-        let test = match op {
-            ShortCircuitOp::And => lhs_compiled.expr,
-            ShortCircuitOp::Or => Expression::not(lhs_compiled.expr),
-        };
+        let test = op.test_expr(lhs_compiled.expr);
         prelude.push(Statement::if_(test, then_block, vec![]));
 
         Compiled {
             prelude,
             expr: Expression::var(tmp),
         }
+    }
+
+    fn compile_short_circuit_binding_block(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        op: ShortCircuitOp,
+        lhs: &Lambda,
+        rhs: &Lambda,
+    ) -> Block {
+        let lhs_compiled = self.compile_expr(lhs);
+        let rhs_compiled = self.compile_expr(rhs);
+        let mut block = lhs_compiled.prelude;
+
+        if rhs_compiled.prelude.is_empty() {
+            let expr = match op {
+                ShortCircuitOp::And => {
+                    Expression::bin(BinOp::And, lhs_compiled.expr, rhs_compiled.expr)
+                }
+                ShortCircuitOp::Or => {
+                    Expression::bin(BinOp::Or, lhs_compiled.expr, rhs_compiled.expr)
+                }
+            };
+            block.push(Statement::variable(VariableDeclaration {
+                ident: id.clone(),
+                value: Some(expr),
+                property: kind,
+                ident_info: IdentInfo::default(),
+            }));
+            return block;
+        }
+
+        block.push(Statement::variable(VariableDeclaration {
+            ident: id.clone(),
+            value: Some(op.default_expr()),
+            property: kind,
+            ident_info: IdentInfo::default(),
+        }));
+
+        let mut then_block = rhs_compiled.prelude;
+        if !block_terminates(&then_block) {
+            then_block.push(self.result_assignment(id, rhs_compiled.expr));
+        }
+
+        block.push(Statement::if_(
+            op.test_expr(lhs_compiled.expr),
+            then_block,
+            vec![],
+        ));
+        block
     }
 
     fn compile_short_circuit_return_block(
@@ -20760,6 +20831,23 @@ mod tests {
     }
 
     #[test]
+    fn gpr_2608_test_keeps_declared_short_circuit_binding_shape_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("gpr_2608_test");
+        assert!(
+            output.contains("let huntGrootCondition = false;")
+                && output.contains("let huntGrootCondition2 = true;"),
+            "expected gpr_2608_test to keep the declared short-circuit bindings, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let tmp = false;")
+                && !output.contains("let tmp$1 = true;")
+                && !output.contains("let huntGrootCondition = tmp;")
+                && !output.contains("let huntGrootCondition2 = tmp$1;"),
+            "unexpected temporary alias binding remained in gpr_2608_test:\n{output}"
+        );
+    }
+
+    #[test]
     fn variant_pattern_matching_spreads_keeps_positive_unit_fallthrough_guards_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("VariantPatternMatchingSpreads");
         assert!(
@@ -21450,6 +21538,98 @@ mod tests {
                 ) if lhs_id.same(&result)
             )
         ));
+    }
+
+    #[test]
+    fn let_bindings_lower_effectful_short_circuits_without_a_result_alias_temp() {
+        let mut compiler = LambdaCompiler::new();
+        let cond = Ident::create_local("cond");
+        let result = Ident::create_local("result");
+        let branch = Ident::create_local("branch");
+        let compiled = compiler.compile_expr(&Lambda::Llet(
+            LetKind::Strict,
+            result.clone(),
+            Box::new(Lambda::prim(
+                Primitive::Psequand,
+                vec![
+                    Lambda::var(cond.clone()),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        branch.clone(),
+                        Lambda::const_(Constant::int(1)),
+                        Lambda::var(branch.clone()),
+                    ),
+                ],
+                Location::none(),
+            )),
+            Box::new(Lambda::var(result.clone())),
+        ));
+
+        let [result_decl, if_stmt] = compiled.prelude.as_slice() else {
+            panic!("expected a declaration followed by direct short-circuit assignment");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Bool(false),
+                    ..
+                }),
+            ..
+        }) = &result_decl.desc
+        else {
+            panic!("expected the short-circuit target declaration");
+        };
+        assert!(ident.same(&result));
+
+        let StatementDesc::If(test, then_block, else_block) = &if_stmt.desc else {
+            panic!("expected the short-circuit binding to lower directly into an if");
+        };
+        assert!(matches!(
+            test,
+            Expression {
+                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                ..
+            } if id.same(&cond)
+        ));
+        assert!(else_block.is_empty());
+
+        let [branch_decl, branch_assign] = then_block.as_slice() else {
+            panic!("expected the right-hand branch declaration and assignment");
+        };
+        let StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                    ..
+                }),
+            ..
+        }) = &branch_decl.desc
+        else {
+            panic!("expected the right-hand branch local declaration");
+        };
+        assert!(ident.same(&branch));
+        assert!(matches!(
+            branch_assign,
+            Statement {
+                desc: StatementDesc::Exp(Expression {
+                    desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                    ..
+                }),
+                ..
+            } if matches!(
+                (&lhs.desc, &rhs.desc),
+                (
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                    ExpressionDesc::Var(crate::js_ir::VIdent::Id(rhs_id))
+                ) if lhs_id.same(&result) && rhs_id.same(&branch)
+            )
+        ));
+        assert!(
+            !print_block(&compiled.prelude).contains("tmp"),
+            "unexpected result-alias temp remained in short-circuit binding lowering"
+        );
     }
 
     #[test]
