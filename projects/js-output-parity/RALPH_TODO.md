@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-17
-**Status:** 590 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 67 output diffs
+**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 65 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **65**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,74 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **590 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **67**
+- Output diffs: **65**
+
+Latest iteration on **2026-04-17**:
+
+- Active slice: keep the `Import.res` nested local-module field aliases
+  materialized only for the dynamic-import-backed local-module shape that OCaml
+  preserves, instead of preserving every direct module-field alias and
+  reintroducing the broad alias-materialization regressions from the previous
+  Phase 4 experiment
+- Active backend focus remains **Phase 4: Port JS Passes** from `PLAN.md`; the
+  fix stays in late lambda simplification plus JS-pass cleanup, not in the
+  printer and not in the typedtree/raw-lambda stages
+- OCaml / snapshot reference:
+  - checked-in snapshots such as `tests/tests/src/Import.mjs`,
+    `tests/tests/src/test_pervasive.mjs`, and
+    `tests/tests/src/test_pervasives3.mjs`, which keep local module objects like
+    `each: N1_each` / `each: N_each` materialized for awaited dynamic imports
+    but do not introduce the same extra alias hoists for ordinary direct
+    module-field references
+  - current `-dlambda-sexp` output for `tests/tests/src/Import.res`, which still
+    carries generic `each` bindings before the backend renames them, confirming
+    that the OCaml-aligned correction belongs in the late backend path rather
+    than earlier lambda naming
+- Rust change:
+  - narrowed
+    `compiler-rust/src/lambda/simplify.rs::collect_local_module_materialized_alias_bindings`
+    so direct module-field aliases are preserved only when they are backed by an
+    awaited dynamic-import local-module binding, matching the `Import.res`
+    family instead of the broader Rust-only preservation that had regressed
+    files like `a.res` and `test_pervasive.res`
+  - kept the accompanying late JS-pass rename in
+    `compiler-rust/src/lambda/compile.rs`, but restricted it to aliases whose
+    base binding is an awaited dynamic import and whose value is a direct
+    `StaticIndex` module-field read
+  - updated focused regression coverage in both
+    `compiler-rust/src/lambda/simplify.rs` and
+    `compiler-rust/src/lambda/compile.rs` so the intended `Import.res` alias
+    shape stays protected without reopening the broader alias family
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release import_keeps_nested_module_field_alias_binding_materialized_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release local_module_blocks_keep_direct_module_field_aliases_materialized_like_import -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release js_flatten_and_mark_dead_rebinds_duplicate_local_module_field_aliases_to_module_names -- --nocapture`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `diff -u tests/tests/src/Import.mjs /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/a.res -o /tmp/a.mjs`
+  - `diff -u tests/tests/src/a.mjs /tmp/a.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_pervasive.res -o /tmp/test_pervasive.mjs`
+  - `diff -u tests/tests/src/test_pervasive.mjs /tmp/test_pervasive.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_pervasives3.res -o /tmp/test_pervasives3.mjs`
+  - `diff -u tests/tests/src/test_pervasives3.mjs /tmp/test_pervasives3.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/Import.res` remains an exact snapshot match, with the
+    nested awaited-import aliases staying materialized and renamed to the
+    snapshot-style `N1_each` / `N_each` locals
+  - the over-broad alias preservation regressions are back out: direct guards
+    for `tests/tests/src/a.res`, `tests/tests/src/test_pervasive.res`, and
+    `tests/tests/src/test_pervasives3.res` are exact again
+  - the verified correction is late backend alias-preservation / JS-pass
+    cleanup behavior for dynamic-import-backed local modules, not a printer
+    rewrite
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **583 / 657** -> **592 / 657** (**+9**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **74** -> **65** (**-9**)
 
 Latest iteration on **2026-04-17**:
 

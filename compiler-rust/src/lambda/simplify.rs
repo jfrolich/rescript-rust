@@ -91,7 +91,10 @@ fn raw_js_lambda_can_emit_comment(lam: &Lambda) -> bool {
             ..
         }) => {
             if info.is_stmt {
-                matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+                matches!(
+                    classify_js_stmt(&info.code),
+                    JsStmtClassification::JsStmtComment
+                )
             } else {
                 matches!(
                     classify_js_exp(&info.code),
@@ -154,7 +157,10 @@ fn raw_js_lambda_can_emit_comment(lam: &Lambda) -> bool {
                 || raw_js_lambda_can_emit_comment(body)
         }
         Lambda::Lassign(_, value) => raw_js_lambda_can_emit_comment(value),
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) | Lambda::Lfunction(_) => false,
+        Lambda::Lvar(_)
+        | Lambda::LglobalModule(_, _)
+        | Lambda::Lconst(_)
+        | Lambda::Lfunction(_) => false,
         _ => false,
     }
 }
@@ -321,8 +327,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let exports = collect_exported_idents(&flattened);
     let mut preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
     preserved_export_bindings.extend(collect_exported_module_field_alias_bindings(
-        &flattened,
-        &exports,
+        &flattened, &exports,
     ));
     let preserved_export_payload_bindings =
         collect_exported_constant_payload_bindings(&flattened, &exports);
@@ -350,9 +355,8 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     );
     let mut preserved_local_module_materialized_alias_bindings_after_first =
         preserved_local_module_materialized_alias_bindings;
-    preserved_local_module_materialized_alias_bindings_after_first.extend(
-        collect_local_module_global_module_alias_bindings(&first),
-    );
+    preserved_local_module_materialized_alias_bindings_after_first
+        .extend(collect_local_module_global_module_alias_bindings(&first));
     let mut preserved_export_bindings_after_first = preserved_export_bindings.clone();
     preserved_export_bindings_after_first.extend(collect_exported_var_alias_bindings(
         &first,
@@ -370,9 +374,8 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
         false,
         true,
     );
-    preserved_local_module_materialized_alias_bindings_after_first.extend(
-        collect_local_module_global_module_alias_bindings(&second),
-    );
+    preserved_local_module_materialized_alias_bindings_after_first
+        .extend(collect_local_module_global_module_alias_bindings(&second));
     let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
     let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(
         &lets_dce_style,
@@ -4663,14 +4666,15 @@ fn collect_local_module_materialized_alias_bindings(lam: &Lambda) -> HashSet<Ide
         known_functions: &HashMap<Ident, LFunction>,
         alias_like_bindings: &HashSet<Ident>,
     ) -> bool {
-        inlineable_local_module_field_call_wrapper(value)
+        dynamic_import_backed_local_module_alias_value(value, alias_like_bindings)
+            || inlineable_local_module_field_call_wrapper(value)
             || matches!(
                 value,
                 Lambda::Lapply(Apply { ap_func, ap_args, .. })
                     if matches!(
                         ap_args.as_slice(),
                         [arg]
-                            if materialized_local_module_alias_value(arg)
+                            if dynamic_import_backed_local_module_alias_value(arg, alias_like_bindings)
                                 || matches!(arg, Lambda::Lvar(id) if alias_like_bindings.contains(id))
                                 || matches!(arg, Lambda::Lconst(Constant::ModuleAlias))
                     )
@@ -4693,7 +4697,12 @@ fn collect_local_module_materialized_alias_bindings(lam: &Lambda) -> HashSet<Ide
         match lam {
             Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
             Lambda::Lapply(apply) => {
-                collect_into(&apply.ap_func, known_functions, alias_like_bindings, preserved);
+                collect_into(
+                    &apply.ap_func,
+                    known_functions,
+                    alias_like_bindings,
+                    preserved,
+                );
                 for arg in &apply.ap_args {
                     collect_into(arg, known_functions, alias_like_bindings, preserved);
                 }
@@ -4713,7 +4722,7 @@ fn collect_local_module_materialized_alias_bindings(lam: &Lambda) -> HashSet<Ide
                 }
                 collect_into(value, known_functions, alias_like_bindings, preserved);
                 let mut body_alias_like_bindings = alias_like_bindings.clone();
-                if materialized_local_module_alias_value(value)
+                if dynamic_import_backed_local_module_alias_value(value, alias_like_bindings)
                     || matches!(value.as_ref(), Lambda::Lconst(Constant::ModuleAlias))
                 {
                     body_alias_like_bindings.insert(id.clone());
@@ -5279,9 +5288,10 @@ fn local_module_block_uses_ident_and_bound_apply_result(lam: &Lambda, target: &I
                     .args
                     .iter()
                     .any(|arg| matches!(arg, Lambda::Lvar(id) if id.same(target)))
-                    && info.args.iter().any(
-                        |arg| matches!(arg, Lambda::Lvar(id) if apply_results.contains(id))
-                    ))
+                    && info
+                        .args
+                        .iter()
+                        .any(|arg| matches!(arg, Lambda::Lvar(id) if apply_results.contains(id))))
                     || info
                         .args
                         .iter()
@@ -5311,7 +5321,9 @@ fn local_module_block_uses_ident_and_bound_apply_result(lam: &Lambda, target: &I
                         .as_deref()
                         .is_some_and(|lam| visit(lam, target, apply_results))
             }
-            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| visit(arg, target, apply_results)),
+            Lambda::LstaticRaise(_, args) => {
+                args.iter().any(|arg| visit(arg, target, apply_results))
+            }
             Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
                 visit(body, target, apply_results) || visit(handler, target, apply_results)
             }
@@ -5706,6 +5718,41 @@ fn materialized_local_module_alias_value(lam: &Lambda) -> bool {
     matches!(lam, Lambda::LglobalModule(_, _)) || safe_aliasable_module_field_read(lam)
 }
 
+fn awaited_import_module_value(lam: &Lambda) -> bool {
+    matches!(
+        lam,
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pawait,
+            args,
+            ..
+        }) if matches!(
+            args.as_slice(),
+            [Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pimport,
+                ..
+            })]
+        )
+    )
+}
+
+fn dynamic_import_backed_local_module_alias_value(
+    lam: &Lambda,
+    alias_like_bindings: &HashSet<Ident>,
+) -> bool {
+    awaited_import_module_value(lam)
+        || matches!(
+            lam,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lvar(id)] if alias_like_bindings.contains(id)
+            )
+        )
+}
+
 fn preserve_local_module_materialized_alias_binding(
     id: &Ident,
     original_value: &Lambda,
@@ -5716,15 +5763,15 @@ fn preserve_local_module_materialized_alias_binding(
         && lambda_uses_ident_in_local_module_block(body, id)
         && (matches!(original_value, Lambda::Lconst(Constant::ModuleAlias))
             || matches!(simplified_value, Lambda::Lconst(Constant::ModuleAlias)));
-    let projected_field_outside_local_module = safe_aliasable_local_module_field_read(
-        simplified_value,
-    ) && local_module_block_using_ident_has_projected_field(body, id);
+    let projected_field_outside_local_module =
+        safe_aliasable_local_module_field_read(simplified_value)
+            && local_module_block_using_ident_has_projected_field(body, id);
     exported_module_alias_feeds_local_module_block
         || (lambda_uses_ident_in_local_module_block(body, id)
-        && materialized_local_module_alias_value(simplified_value)
-        && (!materialized_local_module_alias_value(original_value)
-            || lambda_uses_ident_outside_local_module_block(body, id)
-            || projected_field_outside_local_module))
+            && materialized_local_module_alias_value(simplified_value)
+            && (!materialized_local_module_alias_value(original_value)
+                || lambda_uses_ident_outside_local_module_block(body, id)
+                || projected_field_outside_local_module))
 }
 
 fn preserve_local_module_materialized_alias_binding_in_alias_cleanup(
@@ -6419,7 +6466,10 @@ mod tests {
                     || contains_raw_js_comment(body)
             }
             Lambda::Lassign(_, value) => contains_raw_js_comment(value),
-            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) | Lambda::Lfunction(_) => false,
+            Lambda::Lvar(_)
+            | Lambda::LglobalModule(_, _)
+            | Lambda::Lconst(_)
+            | Lambda::Lfunction(_) => false,
             _ => false,
         }
     }
@@ -7634,7 +7684,10 @@ mod tests {
                 TagInfo::ModuleExport(vec![module_binding.clone(), module_alias.clone()]),
                 Mutable::Immutable,
             ),
-            vec![Lambda::var(module_binding.clone()), Lambda::var(module_alias.clone())],
+            vec![
+                Lambda::var(module_binding.clone()),
+                Lambda::var(module_alias.clone()),
+            ],
             Location::none(),
         );
         let body = Lambda::let_(
@@ -7784,7 +7837,10 @@ mod tests {
         let Some(inner_set_value) = find_binding_value(&simplified, &inner_set) else {
             panic!("expected the nested module alias input to remain materialized");
         };
-        assert!(matches!(inner_set_value, Lambda::Lconst(Constant::ModuleAlias)));
+        assert!(matches!(
+            inner_set_value,
+            Lambda::Lconst(Constant::ModuleAlias)
+        ));
 
         let Some(module_value) = find_binding_value(&simplified, &module_binding) else {
             panic!("expected the projected local module binding to remain");
@@ -10522,22 +10578,28 @@ mod tests {
         let simplified = simplify_for_js_backend(&lambda);
         let int_hash_value =
             find_binding_value(&simplified, &int_hash).expect("expected intHash binding");
-        assert!(matches!(
-            int_hash_value,
-            Lambda::Lprim(crate::lambda::PrimInfo {
-                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
-                args,
-                ..
-            }) if name == "hash"
-                && matches!(args.as_slice(), [Lambda::LglobalModule(_, false)])
-        ), "expected the exported eta-wrapper to simplify to a module field alias: {simplified:?}");
+        assert!(
+            matches!(
+                int_hash_value,
+                Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                    args,
+                    ..
+                }) if name == "hash"
+                    && matches!(args.as_slice(), [Lambda::LglobalModule(_, false)])
+            ),
+            "expected the exported eta-wrapper to simplify to a module field alias: {simplified:?}"
+        );
 
         let y_value = find_binding_value(&simplified, &y).expect("expected Y binding");
-        assert!(matches!(
-            y_value,
-            Lambda::Lapply(Apply { ap_args, .. })
-                if matches!(ap_args.as_slice(), [Lambda::Lvar(id), Lambda::Lvar(eq)] if id.same(&int_hash) && eq.same(&int_eq))
-        ), "expected Y to keep using the exported intHash alias internally: {simplified:?}");
+        assert!(
+            matches!(
+                y_value,
+                Lambda::Lapply(Apply { ap_args, .. })
+                    if matches!(ap_args.as_slice(), [Lambda::Lvar(id), Lambda::Lvar(eq)] if id.same(&int_hash) && eq.same(&int_eq))
+            ),
+            "expected Y to keep using the exported intHash alias internally: {simplified:?}"
+        );
     }
 
     #[test]
@@ -11619,8 +11681,8 @@ mod tests {
     }
 
     #[test]
-    fn local_module_blocks_keep_simplified_global_module_aliases_materialized_like_module_parameter_test(
-    ) {
+    fn local_module_blocks_keep_simplified_global_module_aliases_materialized_like_module_parameter_test()
+     {
         let identity = Ident::create_local("u");
         let module_binding = Ident::create_local("N");
         let field_binding = Ident::create_local("s");
@@ -11707,8 +11769,134 @@ mod tests {
     }
 
     #[test]
-    fn local_module_blocks_keep_simplified_module_field_aliases_materialized_like_uncurried_cast()
-    {
+    fn local_module_blocks_keep_direct_module_field_aliases_materialized_like_import() {
+        let imported_module = Ident::create_local("O");
+        let field_binding = Ident::create_local("N1_each");
+        let inner_module = Ident::create_local("N1");
+        let exported_module = Ident::create_local("N");
+        let belt_list = Ident::create_persistent("Belt_List");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            imported_module.clone(),
+            Lambda::prim(
+                Primitive::Pawait,
+                vec![Lambda::prim(
+                    Primitive::Pimport,
+                    vec![Lambda::global_module(belt_list, true)],
+                    Location::none(),
+                )],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                field_binding.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "forEach".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(imported_module.clone())],
+                    Location::none(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    inner_module.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["O".to_string(), "each".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![
+                            Lambda::var(imported_module.clone()),
+                            Lambda::var(field_binding.clone()),
+                        ],
+                        Location::none(),
+                    ),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        exported_module.clone(),
+                        Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::Module(vec!["N1".to_string()]),
+                                Mutable::Immutable,
+                            ),
+                            vec![Lambda::var(inner_module.clone())],
+                            Location::none(),
+                        ),
+                        Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::ModuleExport(vec![exported_module.clone()]),
+                                Mutable::Immutable,
+                            ),
+                            vec![Lambda::var(exported_module.clone())],
+                            Location::none(),
+                        ),
+                    ),
+                ),
+            ),
+        ));
+
+        let Some(field_value) = find_binding_value(&simplified, &field_binding) else {
+            panic!("expected the direct module-field alias binding to remain materialized");
+        };
+        assert!(matches!(
+            field_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                args,
+                ..
+            }) if name == "forEach"
+                && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&imported_module))
+        ));
+
+        let Some(imported_value) = find_binding_value(&simplified, &imported_module) else {
+            panic!("expected the awaited import binding to remain materialized");
+        };
+        assert!(matches!(
+            imported_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pawait,
+                args,
+                ..
+            }) if matches!(
+                args.as_slice(),
+                [Lambda::Lprim(crate::lambda::PrimInfo {
+                    primitive: Primitive::Pimport,
+                    args,
+                    ..
+                })] if matches!(
+                    args.as_slice(),
+                    [Lambda::LglobalModule(id, true)] if id.name() == "Belt_List"
+                )
+            )
+        ));
+
+        let Some(inner_value) = find_binding_value(&simplified, &inner_module) else {
+            panic!("expected the nested local module binding to remain");
+        };
+        assert!(matches!(
+            inner_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(fields), _),
+                args,
+                ..
+            }) if matches!(fields.as_slice(), [first, second] if first == "O" && second == "each")
+                && matches!(
+                    args.as_slice(),
+                    [Lambda::Lvar(first), Lambda::Lvar(second)]
+                        if first.same(&imported_module) && second.same(&field_binding)
+                )
+        ));
+    }
+
+    #[test]
+    fn local_module_blocks_keep_simplified_module_field_aliases_materialized_like_uncurried_cast() {
         let belt_list = Ident::create_persistent("Belt_List");
         let field_binding = Ident::create_local("map");
         let module_binding = Ident::create_local("List");
@@ -11777,12 +11965,11 @@ mod tests {
                         ap_transformed_jsx: false,
                     }),
                     Lambda::prim(
-                        Primitive::Pmakeblock(
-                            0,
-                            TagInfo::Tuple,
-                            Mutable::Immutable,
-                        ),
-                        vec![Lambda::var(module_binding.clone()), Lambda::var(call_result.clone())],
+                        Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                        vec![
+                            Lambda::var(module_binding.clone()),
+                            Lambda::var(call_result.clone()),
+                        ],
                         Location::none(),
                     ),
                 ),
@@ -11911,11 +12098,7 @@ mod tests {
                             ap_transformed_jsx: false,
                         }),
                         Lambda::prim(
-                            Primitive::Pmakeblock(
-                                0,
-                                TagInfo::Tuple,
-                                Mutable::Immutable,
-                            ),
+                            Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
                             vec![
                                 Lambda::var(module_binding.clone()),
                                 Lambda::var(call_result.clone()),
@@ -12024,7 +12207,7 @@ mod tests {
 
     #[test]
     fn local_module_blocks_inline_direct_functor_field_aliases_used_only_for_module_construction_like_a()
-    {
+     {
         let module_param = Ident::create_local("U");
         let field_binding = Ident::create_local("v");
 
@@ -12084,8 +12267,8 @@ mod tests {
     }
 
     #[test]
-    fn local_module_blocks_inline_direct_global_field_aliases_projected_back_outside_like_test_pervasive(
-    ) {
+    fn local_module_blocks_inline_direct_global_field_aliases_projected_back_outside_like_test_pervasive()
+     {
         let pervasives = Ident::create_persistent("Pervasives");
         let field_binding = Ident::create_local("$at");
         let module_binding = Ident::create_local("Pervasives");
@@ -12135,7 +12318,10 @@ mod tests {
                             TagInfo::ModuleExport(vec![module_binding.clone(), projected.clone()]),
                             Mutable::Immutable,
                         ),
-                        vec![Lambda::var(module_binding.clone()), Lambda::var(projected.clone())],
+                        vec![
+                            Lambda::var(module_binding.clone()),
+                            Lambda::var(projected.clone()),
+                        ],
                         Location::none(),
                     ),
                 ),
@@ -12220,12 +12406,11 @@ mod tests {
                         FunctionAttribute::default(),
                     ),
                     Lambda::prim(
-                        Primitive::Pmakeblock(
-                            0,
-                            TagInfo::Tuple,
-                            Mutable::Immutable,
-                        ),
-                        vec![Lambda::var(module_binding.clone()), Lambda::var(partial_binding.clone())],
+                        Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                        vec![
+                            Lambda::var(module_binding.clone()),
+                            Lambda::var(partial_binding.clone()),
+                        ],
                         Location::none(),
                     ),
                 ),
@@ -12483,7 +12668,8 @@ mod tests {
     }
 
     #[test]
-    fn local_module_skip_set_ignores_calls_outside_materialized_module_blocks_like_uncurried_cast() {
+    fn local_module_skip_set_ignores_calls_outside_materialized_module_blocks_like_uncurried_cast()
+    {
         let map = Ident::create_local("map");
         let module_binding = Ident::create_local("List");
         let list_param = Ident::create_local("l");

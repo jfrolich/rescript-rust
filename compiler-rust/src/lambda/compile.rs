@@ -1615,7 +1615,11 @@ impl LambdaCompiler {
         }
     }
 
-    fn staticcatch_handler_is_identity_binding(&self, bindings: &[Ident], handler: &Lambda) -> bool {
+    fn staticcatch_handler_is_identity_binding(
+        &self,
+        bindings: &[Ident],
+        handler: &Lambda,
+    ) -> bool {
         matches!(
             (bindings, handler),
             ([binding], Lambda::Lvar(id)) if id.same(binding)
@@ -4179,12 +4183,10 @@ impl LambdaCompiler {
         if complete
             && default.is_none()
             && expression_has_no_side_effects(&test)
-            && cases
-                .split_first()
-                .is_some_and(|((_, first_body), rest)| {
-                    rest.iter()
-                        .all(|(_, body)| super::lambda_eq_approx(first_body, body))
-                })
+            && cases.split_first().is_some_and(|((_, first_body), rest)| {
+                rest.iter()
+                    .all(|(_, body)| super::lambda_eq_approx(first_body, body))
+            })
         {
             return self.compile_return_block(cases[0].1);
         }
@@ -9156,16 +9158,17 @@ fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
 }
 
 fn reusable_declared_same_name_export_alias(block: &Block, export: &Ident) -> Option<Ident> {
-    let initializer = flatten_toplevel_block(block)
-        .into_iter()
-        .find_map(|stmt| match stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                ..
-            }) if ident.same(export) => Some(initializer),
-            _ => None,
-        })?;
+    let initializer =
+        flatten_toplevel_block(block)
+            .into_iter()
+            .find_map(|stmt| match stmt.desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value: Some(initializer),
+                    ..
+                }) if ident.same(export) => Some(initializer),
+                _ => None,
+            })?;
     reusable_same_name_export_binding(block, export, &initializer)
 }
 
@@ -10826,6 +10829,7 @@ fn flatten_and_mark_dead_program(
     program.block =
         flatten_and_mark_dead_block(program.block, id_gen, &mut substitution, jsx_preserve);
     program.block = collapse_sync_component_make_aliases(program.block, &program.export_set);
+    program.block = rebind_materialized_local_module_field_aliases(program.block);
     mark_dead_code(&mut program);
     program
 }
@@ -10907,6 +10911,453 @@ fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident
     }
 
     rewritten
+}
+
+fn rebind_materialized_local_module_field_aliases(block: Block) -> Block {
+    let mut name_counts = HashMap::new();
+    collect_transparent_block_var_name_counts(&block, &mut name_counts);
+    let mut dynamic_import_bindings = HashSet::new();
+    collect_transparent_block_dynamic_import_bindings(&block, &mut dynamic_import_bindings);
+    rebind_materialized_local_module_field_aliases_with_counts(
+        block,
+        &name_counts,
+        &dynamic_import_bindings,
+    )
+}
+
+fn collect_transparent_block_var_name_counts(block: &Block, counts: &mut HashMap<String, usize>) {
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(decl) => {
+                *counts
+                    .entry(decl.ident.name().to_string())
+                    .or_insert(0usize) += 1;
+            }
+            StatementDesc::Block(inner) => collect_transparent_block_var_name_counts(inner, counts),
+            _ => {}
+        }
+    }
+}
+
+fn collect_transparent_block_dynamic_import_bindings(block: &Block, bindings: &mut HashSet<Ident>) {
+    for stmt in block {
+        match &stmt.desc {
+            StatementDesc::Variable(decl) => {
+                if decl
+                    .value
+                    .as_ref()
+                    .is_some_and(expression_is_awaited_dynamic_import_like)
+                {
+                    bindings.insert(decl.ident.clone());
+                }
+            }
+            StatementDesc::Block(inner) => {
+                collect_transparent_block_dynamic_import_bindings(inner, bindings)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rebind_materialized_local_module_field_aliases_with_counts(
+    mut block: Block,
+    name_counts: &HashMap<String, usize>,
+    dynamic_import_bindings: &HashSet<Ident>,
+) -> Block {
+    for stmt in &mut block {
+        rebind_materialized_local_module_field_aliases_in_statement(
+            stmt,
+            name_counts,
+            dynamic_import_bindings,
+        );
+    }
+
+    for index in 0..block.len().saturating_sub(1) {
+        let renamed = {
+            let Some(current) = block.get(index) else {
+                continue;
+            };
+            let Some(next) = block.get(index + 1) else {
+                continue;
+            };
+            let StatementDesc::Variable(alias_decl) = &current.desc else {
+                continue;
+            };
+            let Some(count) = name_counts.get(alias_decl.ident.name()) else {
+                continue;
+            };
+            if *count <= 1 {
+                continue;
+            }
+            let StatementDesc::Variable(module_decl) = &next.desc else {
+                continue;
+            };
+            materialized_local_module_field_alias_name(
+                alias_decl,
+                module_decl,
+                dynamic_import_bindings,
+            )
+        };
+
+        let Some(new_name) = renamed else {
+            continue;
+        };
+
+        let old_ident = match &block[index].desc {
+            StatementDesc::Variable(alias_decl) => alias_decl.ident.clone(),
+            _ => continue,
+        };
+        let new_ident = Ident::new(new_name, old_ident.stamp(), old_ident.flags());
+
+        let (head, tail) = block.split_at_mut(index + 1);
+        let StatementDesc::Variable(alias_decl) = &mut head[index].desc else {
+            continue;
+        };
+        alias_decl.ident = new_ident.clone();
+        rename_ident_in_statements(tail, &old_ident, &new_ident);
+    }
+
+    block
+}
+
+fn rebind_materialized_local_module_field_aliases_in_statement(
+    stmt: &mut Statement,
+    parent_counts: &HashMap<String, usize>,
+    dynamic_import_bindings: &HashSet<Ident>,
+) {
+    match &mut stmt.desc {
+        StatementDesc::Block(inner) => {
+            let rewritten = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(inner),
+                parent_counts,
+                dynamic_import_bindings,
+            );
+            *inner = rewritten;
+        }
+        StatementDesc::If(_, then_block, else_block) => {
+            let mut then_counts = HashMap::new();
+            collect_transparent_block_var_name_counts(then_block, &mut then_counts);
+            let mut else_counts = HashMap::new();
+            collect_transparent_block_var_name_counts(else_block, &mut else_counts);
+            *then_block = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(then_block),
+                &then_counts,
+                dynamic_import_bindings,
+            );
+            *else_block = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(else_block),
+                &else_counts,
+                dynamic_import_bindings,
+            );
+        }
+        StatementDesc::While(_, body) => {
+            let mut counts = HashMap::new();
+            collect_transparent_block_var_name_counts(body, &mut counts);
+            *body = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(body),
+                &counts,
+                dynamic_import_bindings,
+            );
+        }
+        StatementDesc::ForRange(_, _, _, _, body) => {
+            let mut counts = HashMap::new();
+            collect_transparent_block_var_name_counts(body, &mut counts);
+            *body = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(body),
+                &counts,
+                dynamic_import_bindings,
+            );
+        }
+        StatementDesc::IntSwitch(_, clauses, default) => {
+            for (_, clause) in clauses {
+                let mut counts = HashMap::new();
+                collect_transparent_block_var_name_counts(&clause.body, &mut counts);
+                clause.body = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(&mut clause.body),
+                    &counts,
+                    dynamic_import_bindings,
+                );
+            }
+            if let Some(default) = default {
+                let mut counts = HashMap::new();
+                collect_transparent_block_var_name_counts(default, &mut counts);
+                *default = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(default),
+                    &counts,
+                    dynamic_import_bindings,
+                );
+            }
+        }
+        StatementDesc::StringSwitch(_, clauses, default) => {
+            for clause in clauses {
+                let mut counts = HashMap::new();
+                collect_transparent_block_var_name_counts(&clause.clause.body, &mut counts);
+                clause.clause.body = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(&mut clause.clause.body),
+                    &counts,
+                    dynamic_import_bindings,
+                );
+            }
+            if let Some(default) = default {
+                let mut counts = HashMap::new();
+                collect_transparent_block_var_name_counts(default, &mut counts);
+                *default = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(default),
+                    &counts,
+                    dynamic_import_bindings,
+                );
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            let mut body_counts = HashMap::new();
+            collect_transparent_block_var_name_counts(body, &mut body_counts);
+            *body = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(body),
+                &body_counts,
+                dynamic_import_bindings,
+            );
+            if let Some((_, catch_block)) = catch {
+                let mut catch_counts = HashMap::new();
+                collect_transparent_block_var_name_counts(catch_block, &mut catch_counts);
+                *catch_block = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(catch_block),
+                    &catch_counts,
+                    dynamic_import_bindings,
+                );
+            }
+            if let Some(finally) = finally {
+                let mut finally_counts = HashMap::new();
+                collect_transparent_block_var_name_counts(finally, &mut finally_counts);
+                *finally = rebind_materialized_local_module_field_aliases_with_counts(
+                    std::mem::take(finally),
+                    &finally_counts,
+                    dynamic_import_bindings,
+                );
+            }
+        }
+        StatementDesc::Variable(_)
+        | StatementDesc::Exp(_)
+        | StatementDesc::Return(_)
+        | StatementDesc::Throw(_)
+        | StatementDesc::Debugger
+        | StatementDesc::Break
+        | StatementDesc::Continue => {}
+    }
+}
+
+fn materialized_local_module_field_alias_name(
+    alias_decl: &VariableDeclaration,
+    module_decl: &VariableDeclaration,
+    dynamic_import_bindings: &HashSet<Ident>,
+) -> Option<String> {
+    let Some(Expression {
+        desc: ExpressionDesc::StaticIndex(inner, _, _),
+        ..
+    }) = alias_decl.value.as_ref()
+    else {
+        return None;
+    };
+
+    let Expression {
+        desc: ExpressionDesc::Var(VIdent::Id(base_ident)),
+        ..
+    } = inner.as_ref()
+    else {
+        return None;
+    };
+
+    if !dynamic_import_bindings.contains(base_ident) {
+        return None;
+    }
+
+    let Some(Expression {
+        desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, TagInfo::Module(fields)),
+        ..
+    }) = module_decl.value.as_ref()
+    else {
+        return None;
+    };
+
+    fields
+        .iter()
+        .zip(items.iter())
+        .find_map(|(field, item)| match &item.desc {
+            ExpressionDesc::Var(VIdent::Id(id)) if id.same(&alias_decl.ident) => {
+                Some(format!("{}_{}", module_decl.ident.name(), field))
+            }
+            _ => None,
+        })
+}
+
+fn expression_is_awaited_dynamic_import_like(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Await(inner) => expression_is_dynamic_import_like(inner),
+        _ => false,
+    }
+}
+
+fn expression_is_dynamic_import_like(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Call(func, _, _) => match &func.desc {
+            ExpressionDesc::Var(VIdent::Id(id)) => id.name() == "import",
+            ExpressionDesc::StaticIndex(target, field, _) => {
+                field == "then" && expression_is_dynamic_import_like(target)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn rename_ident_in_statements(stmts: &mut [Statement], from: &Ident, to: &Ident) {
+    for stmt in stmts {
+        rename_ident_in_statement(stmt, from, to);
+    }
+}
+
+fn rename_ident_in_statement(stmt: &mut Statement, from: &Ident, to: &Ident) {
+    match &mut stmt.desc {
+        StatementDesc::Block(block) => rename_ident_in_statements(block, from, to),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+            if ident.same(from) {
+                *ident = to.clone();
+            }
+            if let Some(value) = value {
+                rename_ident_in_expression(value, from, to);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            rename_ident_in_expression(expr, from, to);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            rename_ident_in_expression(cond, from, to);
+            rename_ident_in_statements(then_block, from, to);
+            rename_ident_in_statements(else_block, from, to);
+        }
+        StatementDesc::While(cond, body) => {
+            rename_ident_in_expression(cond, from, to);
+            rename_ident_in_statements(body, from, to);
+        }
+        StatementDesc::ForRange(start, finish, ident, _, body) => {
+            if let Some(start) = start {
+                rename_ident_in_expression(start, from, to);
+            }
+            rename_ident_in_expression(finish, from, to);
+            if ident.same(from) {
+                *ident = to.clone();
+            }
+            rename_ident_in_statements(body, from, to);
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            rename_ident_in_expression(test, from, to);
+            for (_, clause) in clauses {
+                rename_ident_in_statements(&mut clause.body, from, to);
+            }
+            if let Some(default) = default {
+                rename_ident_in_statements(default, from, to);
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            rename_ident_in_expression(test, from, to);
+            for clause in clauses {
+                rename_ident_in_statements(&mut clause.clause.body, from, to);
+            }
+            if let Some(default) = default {
+                rename_ident_in_statements(default, from, to);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            rename_ident_in_statements(body, from, to);
+            if let Some((catch_ident, catch_block)) = catch {
+                if catch_ident.same(from) {
+                    *catch_ident = to.clone();
+                }
+                rename_ident_in_statements(catch_block, from, to);
+            }
+            if let Some(finally) = finally {
+                rename_ident_in_statements(finally, from, to);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+    }
+}
+
+fn rename_ident_in_expression(expr: &mut Expression, from: &Ident, to: &Ident) {
+    match &mut expr.desc {
+        ExpressionDesc::Var(VIdent::Id(id)) => {
+            if id.same(from) {
+                *id = to.clone();
+            }
+        }
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::New(inner, None) => rename_ident_in_expression(inner, from, to),
+        ExpressionDesc::In(left, right)
+        | ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            rename_ident_in_expression(left, from, to);
+            rename_ident_in_expression(right, from, to);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            rename_ident_in_expression(test, from, to);
+            rename_ident_in_expression(consequent, from, to);
+            rename_ident_in_expression(alternate, from, to);
+        }
+        ExpressionDesc::Call(func, args, _)
+        | ExpressionDesc::New(func, Some(args))
+        | ExpressionDesc::TaggedTemplate(func, _, args) => {
+            rename_ident_in_expression(func, from, to);
+            for arg in args {
+                rename_ident_in_expression(arg, from, to);
+            }
+        }
+        ExpressionDesc::Fun { params, body, .. } => {
+            for param in params {
+                if param.same(from) {
+                    *param = to.clone();
+                }
+            }
+            rename_ident_in_statements(body, from, to);
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                rename_ident_in_expression(item, from, to);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                rename_ident_in_expression(item, from, to);
+            }
+            rename_ident_in_expression(tag, from, to);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                rename_ident_in_expression(dup, from, to);
+            }
+            for (_, value) in props {
+                rename_ident_in_expression(value, from, to);
+            }
+        }
+    }
 }
 
 fn is_make_like_binding_name(name: &str) -> bool {
@@ -13838,8 +14289,7 @@ fn move_same_name_export_alias_to_export_tail(
     }
 
     let mut flattened = flatten_toplevel_block(block);
-    let Some((index, initializer, property)) =
-        same_name_export_alias_binding(&flattened, target)
+    let Some((index, initializer, property)) = same_name_export_alias_binding(&flattened, target)
     else {
         return None;
     };
@@ -13944,9 +14394,9 @@ fn direct_reused_same_name_export_alias_binding(
 
 fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident) -> bool {
     block.iter().any(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value: Some(value), .. }) => {
-            expression_mentions_ident_outside_nested_functions(value, target)
-        }
+        StatementDesc::Variable(VariableDeclaration {
+            value: Some(value), ..
+        }) => expression_mentions_ident_outside_nested_functions(value, target),
         _ => false,
     })
 }
@@ -13997,12 +14447,12 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
             expression_mentions_ident_outside_nested_functions(tag, target)
-                || strings.iter().any(|expr| {
-                    expression_mentions_ident_outside_nested_functions(expr, target)
-                })
-                || values.iter().any(|expr| {
-                    expression_mentions_ident_outside_nested_functions(expr, target)
-                })
+                || strings
+                    .iter()
+                    .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
+                || values
+                    .iter()
+                    .any(|expr| expression_mentions_ident_outside_nested_functions(expr, target))
         }
         ExpressionDesc::New(func, Some(args)) => {
             expression_mentions_ident_outside_nested_functions(func, target)
@@ -14021,11 +14471,11 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
                     .any(|item| expression_mentions_ident_outside_nested_functions(item, target))
         }
         ExpressionDesc::Object(dup, props) => {
-            dup.as_deref().is_some_and(|dup| {
-                expression_mentions_ident_outside_nested_functions(dup, target)
-            }) || props.iter().any(|(_, value)| {
-                expression_mentions_ident_outside_nested_functions(value, target)
-            })
+            dup.as_deref()
+                .is_some_and(|dup| expression_mentions_ident_outside_nested_functions(dup, target))
+                || props.iter().any(|(_, value)| {
+                    expression_mentions_ident_outside_nested_functions(value, target)
+                })
         }
     }
 }
@@ -15047,23 +15497,21 @@ fn collect_modules_from_block(block: &Block, modules: &mut OcamlModuleSet) {
 fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet) {
     match &stmt.desc {
         StatementDesc::Block(block) => collect_modules_from_block(block, modules),
-        StatementDesc::Variable(decl) => {
-            match decl.ident_info.used_stats {
-                UsedStats::DeadPure => {}
-                UsedStats::DeadNonPure => {
-                    if let Some(value) = &decl.value
-                        && !matches!(value.desc, ExpressionDesc::Var(_))
-                    {
-                        collect_modules_from_expression(value, modules);
-                    }
-                }
-                _ => {
-                    if let Some(value) = &decl.value {
-                        collect_modules_from_expression(value, modules);
-                    }
+        StatementDesc::Variable(decl) => match decl.ident_info.used_stats {
+            UsedStats::DeadPure => {}
+            UsedStats::DeadNonPure => {
+                if let Some(value) = &decl.value
+                    && !matches!(value.desc, ExpressionDesc::Var(_))
+                {
+                    collect_modules_from_expression(value, modules);
                 }
             }
-        }
+            _ => {
+                if let Some(value) = &decl.value {
+                    collect_modules_from_expression(value, modules);
+                }
+            }
+        },
         StatementDesc::Exp(expr) | StatementDesc::Throw(expr) | StatementDesc::Return(expr) => {
             collect_modules_from_expression(expr, modules)
         }
@@ -17455,8 +17903,7 @@ mod tests {
     }
 
     #[test]
-    fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_module_field()
-    {
+    fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_module_field() {
         let mut compiler = LambdaCompiler::new();
         let set_gen = ModuleId {
             id: Ident::create_persistent("Set_gen"),
@@ -17539,11 +17986,15 @@ mod tests {
                 };
                 match &arg.desc {
                     ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
-                    other => panic!("expected the internal call argument to stay as \"a\", got {other:?}"),
+                    other => panic!(
+                        "expected the internal call argument to stay as \"a\", got {other:?}"
+                    ),
                 }
                 match &func.desc {
                     ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
-                    other => panic!("expected the call to use the underlying target directly, got {other:?}"),
+                    other => panic!(
+                        "expected the call to use the underlying target directly, got {other:?}"
+                    ),
                 }
             }
             other => panic!("expected the internal call to remain first, got {other:?}"),
@@ -17568,8 +18019,8 @@ mod tests {
     }
 
     #[test]
-    fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_top_level_initializer(
-    ) {
+    fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_top_level_initializer()
+     {
         let mut compiler = LambdaCompiler::new();
         let hash_utils = ModuleId {
             id: Ident::create_persistent("Hash_utils"),
@@ -17587,10 +18038,7 @@ mod tests {
         let mut block = vec![
             Statement::variable(VariableDeclaration {
                 ident: int_hash.clone(),
-                value: Some(Expression::qualified(
-                    hash_utils,
-                    Some("hash".to_string()),
-                )),
+                value: Some(Expression::qualified(hash_utils, Some("hash".to_string()))),
                 property: LetKind::Alias,
                 ident_info: IdentInfo::default(),
             }),
@@ -17598,7 +18046,10 @@ mod tests {
                 ident: y.clone(),
                 value: Some(Expression::call(
                     Expression::qualified(belt_id, Some("hashable".to_string())),
-                    vec![Expression::var(int_hash.clone()), Expression::var(int_eq.clone())],
+                    vec![
+                        Expression::var(int_hash.clone()),
+                        Expression::var(int_eq.clone()),
+                    ],
                     CallInfo::default(),
                 )),
                 property: LetKind::Strict,
@@ -17610,7 +18061,10 @@ mod tests {
             &mut block,
             ExtractedExports {
                 exports: vec![int_hash.clone(), y.clone()],
-                values: vec![Expression::var(int_hash.clone()), Expression::var(y.clone())],
+                values: vec![
+                    Expression::var(int_hash.clone()),
+                    Expression::var(y.clone()),
+                ],
             },
         );
         let exports = resolve_export_aliases(&block, exports);
@@ -17641,7 +18095,9 @@ mod tests {
                 };
                 match &hash_arg.desc {
                     ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&int_hash)),
-                    other => panic!("expected the first call arg to stay as intHash, got {other:?}"),
+                    other => {
+                        panic!("expected the first call arg to stay as intHash, got {other:?}")
+                    }
                 }
                 match &eq_arg.desc {
                     ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&int_eq)),
@@ -18091,7 +18547,9 @@ mod tests {
         ));
 
         let [try_stmt] = block.as_slice() else {
-            panic!("expected the identity staticcatch wrapper to collapse to one try statement, got {block:?}");
+            panic!(
+                "expected the identity staticcatch wrapper to collapse to one try statement, got {block:?}"
+            );
         };
         let StatementDesc::Try(body, Some((caught, handler)), None) = &try_stmt.desc else {
             panic!("expected the collapsed block to stay a try statement, got {try_stmt:?}");
@@ -21415,7 +21873,9 @@ mod tests {
             "expected test_match_exception to keep the catch return shape, got:\n{output}"
         );
         assert!(
-            !output.contains("let y;") && !output.contains("y = g(x);") && !output.contains("return y;"),
+            !output.contains("let y;")
+                && !output.contains("y = g(x);")
+                && !output.contains("return y;"),
             "unexpected staticcatch temp assignment shape remained in test_match_exception:\n{output}"
         );
     }
@@ -21523,7 +21983,8 @@ mod tests {
             "unexpected leading negative guard in gpr_3770_test.show:\n{output}"
         );
         assert!(
-            !output.contains("else if (x._1 !== 0) {") && !output.contains("else if (x._2 !== 0) {"),
+            !output.contains("else if (x._1 !== 0) {")
+                && !output.contains("else if (x._2 !== 0) {"),
             "unexpected nested negative guard chain in gpr_3770_test.show:\n{output}"
         );
         assert!(
@@ -21669,6 +22130,23 @@ mod tests {
     }
 
     #[test]
+    fn import_keeps_nested_module_field_alias_binding_materialized_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("Import");
+        assert!(
+            output.contains("let N1_each = O.forEach;\n\nlet N1 = {\n  O: O,\n  each: N1_each\n};"),
+            "expected Import to keep the nested module-field alias binding materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("let N_each = N2.forEach;\n\nlet N = {\n  N0: N0,\n  N1: N1,\n  N2: N2,\n  each: N_each\n};"),
+            "expected Import to keep the outer module-field alias binding materialized with the module-prefixed name, got:\n{output}"
+        );
+        assert!(
+            !output.contains("each: O.forEach") && !output.contains("each: each$1"),
+            "unexpected inlined nested module-field alias remained in Import:\n{output}"
+        );
+    }
+
+    #[test]
     fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("gpr_3142_test");
         assert!(
@@ -21698,7 +22176,8 @@ mod tests {
         assert!(
             output.contains("return Set_gen.empty;")
                 && output.contains("return Set_gen.singleton(x0);")
-                && output.contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
+                && output
+                    .contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
             "expected string_set to inline exported module-field aliases at ordinary internal call sites like OCaml, got:\n{output}"
         );
         assert!(
@@ -21732,7 +22211,8 @@ mod tests {
         assert!(
             output.find("let X = {};").is_some()
                 && output.find("function url(prim) {").is_some()
-                && output.find("let X = {};").unwrap() < output.find("function url(prim) {").unwrap(),
+                && output.find("let X = {};").unwrap()
+                    < output.find("function url(prim) {").unwrap(),
             "expected ExternalShadow to keep earlier module/value bindings ahead of the @new wrapper, got:\n{output}"
         );
     }
@@ -23122,7 +23602,7 @@ mod tests {
 
     #[test]
     fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_tag_split_like_gpr_3609()
-    {
+     {
         let mut compiler = LambdaCompiler::new();
         let state = Ident::create_local("state");
         let payload = Lambda::prim(
@@ -27187,6 +27667,74 @@ mod tests {
     }
 
     #[test]
+    fn js_flatten_and_mark_dead_rebinds_duplicate_local_module_field_aliases_to_module_names() {
+        let imported = Ident::create_local("O");
+        let each = Ident::create_local("each");
+        let module = Ident::create_local("N1");
+        let import_fn = Ident::create_persistent("import");
+        let rendered = print_deps_program(
+            &DepsProgram {
+                program: Program::new(
+                    rebind_materialized_local_module_field_aliases(vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: imported.clone(),
+                            value: Some(Expression::new(ExpressionDesc::Await(Box::new(
+                                Expression::call(
+                                    Expression::var(import_fn),
+                                    vec![Expression::string("belt-list")],
+                                    CallInfo::default(),
+                                ),
+                            )))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: each.clone(),
+                            value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                                Box::new(Expression::var(imported.clone())),
+                                "forEach".to_string(),
+                                None,
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: module.clone(),
+                            value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                                vec![Expression::var(imported), Expression::var(each.clone())],
+                                MutableFlag::Immutable,
+                                Box::new(Expression::number(Number::int(0))),
+                                TagInfo::Module(vec!["O".to_string(), "each".to_string()]),
+                            ))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                        Statement::variable(VariableDeclaration {
+                            ident: Ident::create_local("each"),
+                            value: Some(Expression::number(Number::int(1))),
+                            property: LetKind::Strict,
+                            ident_info: IdentInfo::default(),
+                        }),
+                    ]),
+                    vec![],
+                ),
+                modules: vec![],
+                side_effect: None,
+            },
+            None,
+        );
+
+        assert!(
+            rendered.contains("let N1_each = O.forEach;"),
+            "expected the duplicate module-field alias binding to get the module-prefixed name:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let N1 = {\n  O: O,\n  each: N1_each\n};"),
+            "expected the module block to reference the rebound alias name:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
         let make = Ident::create_local("make");
         let component = Ident::create_local("Async_jsx$Foo");
@@ -28196,8 +28744,8 @@ let arg_pair = #Pair("hi", 1)
 let _ = log1(arg_pair)
 "#;
 
-        let output = crate::driver::compile_source_to_js(source, "bs_unwrap_exported_polyvars.res")
-            .unwrap();
+        let output =
+            crate::driver::compile_source_to_js(source, "bs_unwrap_exported_polyvars.res").unwrap();
 
         assert!(
             output.contains("console.log(arg_string.VAL);"),
