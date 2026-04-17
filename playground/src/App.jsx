@@ -24,11 +24,11 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-// %identity casts let us bridge a simple enum-variant value to its runtime
-// int tag (and back) without a runtime pattern match. Safe only for
-// no-payload variants.
-external tagOfVariant: 'a => int = "%identity"
-external variantOfTag: int => 'a = "%identity"
+// Variants with no payloads compile to their name as a string in ReScript 12,
+// and JSON.t is @unboxed, so both runtime representations are identical —
+// a %identity cast is all we need, no runtime pattern match.
+external variantToJson: 'a => JSON.t = "%identity"
+external jsonToVariant: JSON.t => 'a = "%identity"
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
 // encode(alice) produces a specialized encode$user function. Since the
@@ -47,14 +47,7 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant({constructors}) =>
-    // Simple enum variants: emit the constructor name as a string.
-    // The runtime tag indexes into a comptime-populated names array.
-    let names = []
-    inline for c in constructors {
-      Array.push(names, c.name)
-    }
-    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | Variant(_) => variantToJson(value)
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }
@@ -105,16 +98,12 @@ let rec decode = (type t, json: JSON.t) => {
   | Variant({constructors}) =>
     switch json {
     | String(s) =>
-      let result = ref(None)
-      let idx = ref(0)
+      let valid = ref(false)
       inline for c in constructors {
-        if s == c.name { result := Some(variantOfTag(idx.contents)) }
-        idx := idx.contents + 1
+        if s == c.name { valid := true }
       }
-      switch result.contents {
-      | Some(v) => v
-      | None => throw(DecodeError("unknown variant: " ++ s))
-      }
+      if !valid.contents { throw(DecodeError("unknown variant: " ++ s)) }
+      jsonToVariant(json)
     | _ => throw(DecodeError("expected variant string"))
     }
   | _ => @compileError("decode: unsupported type")

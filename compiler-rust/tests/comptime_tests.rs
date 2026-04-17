@@ -841,27 +841,24 @@ let aliceJson = encode(alice)
 
 #[test]
 fn playground_variants_encoding() {
-    // Simple enum-variant encoding via runtime tag trick.
-    // Tag int indexes into a comptime-populated names array.
+    // Simple enum-variant encoding. Variants without payloads compile to
+    // their name as a string in ReScript 12, and JSON.t is @unboxed, so
+    // both runtime representations are identical — a %identity cast is
+    // all we need.
     let source = r#"
 type status = Active | Inactive | Pending
 
 exception DecodeError(string)
 
-external tagOfVariant: 'a => int = "%identity"
-external variantOfTag: int => 'a = "%identity"
+external variantToJson: 'a => JSON.t = "%identity"
+external jsonToVariant: JSON.t => 'a = "%identity"
 
 @comptime
 let rec encode = (value): JSON.t => {
   switch @typeInfo(value) {
   | String => JSON.Encode.string(value)
   | Int => JSON.Encode.int(value)
-  | Variant({constructors}) =>
-    let names = []
-    inline for c in constructors {
-      Array.push(names, c.name)
-    }
-    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | Variant(_) => variantToJson(value)
   | _ => @compileError("unsupported")
   }
 }
@@ -874,16 +871,12 @@ let rec decode = (type t, json: JSON.t) => {
   | Variant({constructors}) =>
     switch json {
     | String(s) =>
-      let result = ref(None)
-      let idx = ref(0)
+      let valid = ref(false)
       inline for c in constructors {
-        if s == c.name { result := Some(variantOfTag(idx.contents)) }
-        idx := idx.contents + 1
+        if s == c.name { valid := true }
       }
-      switch result.contents {
-      | Some(v) => v
-      | None => throw(DecodeError("unknown variant: " ++ s))
-      }
+      if !valid.contents { throw(DecodeError("unknown variant: " ++ s)) }
+      jsonToVariant(json)
     | _ => throw(DecodeError("expected variant string"))
     }
   | _ => @compileError("unsupported")
@@ -1165,8 +1158,8 @@ type tree = { value: string, children: array<tree> }
 
 exception DecodeError(string)
 
-external tagOfVariant: 'a => int = "%identity"
-external variantOfTag: int => 'a = "%identity"
+external variantToJson: 'a => JSON.t = "%identity"
+external jsonToVariant: JSON.t => 'a = "%identity"
 
 @comptime
 let rec encode = (value): JSON.t => {
@@ -1180,12 +1173,7 @@ let rec encode = (value): JSON.t => {
       Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
     JSON.Encode.object(dict)
-  | Variant({constructors}) =>
-    let names = []
-    inline for c in constructors {
-      Array.push(names, c.name)
-    }
-    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | Variant(_) => variantToJson(value)
   | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
   | _ => @compileError("encode: unsupported type")
   }
@@ -1217,16 +1205,12 @@ let rec decode = (type t, json: JSON.t) => {
   | Variant({constructors}) =>
     switch json {
     | String(s) =>
-      let result = ref(None)
-      let idx = ref(0)
+      let valid = ref(false)
       inline for c in constructors {
-        if s == c.name { result := Some(variantOfTag(idx.contents)) }
-        idx := idx.contents + 1
+        if s == c.name { valid := true }
       }
-      switch result.contents {
-      | Some(v) => v
-      | None => throw(DecodeError("unknown variant: " ++ s))
-      }
+      if !valid.contents { throw(DecodeError("unknown variant: " ++ s)) }
+      jsonToVariant(json)
     | _ => throw(DecodeError("expected variant string"))
     }
   | _ => @compileError("decode: unsupported type")
