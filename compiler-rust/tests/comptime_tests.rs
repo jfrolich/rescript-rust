@@ -225,6 +225,37 @@ let y = describe(int, 42)
 // ============================================================================
 
 #[test]
+fn comptime_array_map_as_inline_for() {
+    // Array.map(fields, f => ...) should work interchangeably with
+    // inline for field in fields { ... } in comptime contexts.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(Array.map(fields, f => @variantCase({name: f.name})))
+  | _ => @compileError("expected record")
+  }
+
+let k: userKey = Name
+let k2: userKey = Age
+let k3: userKey = Email
+"#;
+    let result = compile_with_stdlib(source, "array_map_inline.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== ARRAY.MAP AS INLINE FOR ===\n{}\n=== END ===", output);
+            assert!(output.contains("Name"), "Expected Name:\n{output}");
+            assert!(output.contains("Age"), "Expected Age:\n{output}");
+            assert!(output.contains("Email"), "Expected Email:\n{output}");
+        }
+        Err(e) => panic!("Array.map as inline for should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_build_record_mirror() {
     // @buildRecord + @recordField: build a record with the same fields
     // as the source type (non-optional).
