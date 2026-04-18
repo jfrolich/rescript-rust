@@ -430,6 +430,7 @@ impl LambdaCompiler {
                             block,
                             &Expression::var(target.clone()),
                             target,
+                            false,
                         );
                         match resolved.desc {
                             ExpressionDesc::Var(VIdent::Id(resolved_target)) => {
@@ -491,6 +492,7 @@ impl LambdaCompiler {
         }
 
         block.extend(rebound_exports);
+        reorder_trailing_export_bindings_by_export_order(block, &exports);
         exports
     }
 
@@ -9219,8 +9221,13 @@ fn count_materialized_same_name_binding_roots(block: &Block, name: &str) -> usiz
 }
 
 fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -> Option<Ident> {
-    match resolve_tail_move_replacement_expression(block, &Expression::var(export.clone()), export)
-        .desc
+    match resolve_tail_move_replacement_expression(
+        block,
+        &Expression::var(export.clone()),
+        export,
+        false,
+    )
+    .desc
     {
         ExpressionDesc::Var(VIdent::Id(target))
             if !target.same(export) && block_declares_initialized_ident(block, &target) =>
@@ -9333,11 +9340,27 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
                 continue;
             };
 
-            let Some(replacement) =
+            let materialized_root =
+                tail_move_materialized_root_ident(&flattened, &current_value);
+            let Some(mut replacement) =
                 resolve_rewriteable_toplevel_alias_initializer(&flattened, &target)
             else {
                 continue;
             };
+            if matches!(
+                replacement.desc,
+                ExpressionDesc::Number(_)
+                    | ExpressionDesc::Str { .. }
+                    | ExpressionDesc::Bool(_)
+                    | ExpressionDesc::Undefined { .. }
+                    | ExpressionDesc::Null
+            ) {
+                if let Some(root) = materialized_root {
+                    if rewriteable_alias_root_has_other_toplevel_uses(&flattened, index, &root) {
+                        replacement = Expression::var(root);
+                    }
+                }
+            }
 
             if ocaml_eq_expression(&current_value, &replacement) {
                 continue;
@@ -9355,6 +9378,83 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
     }
 
     *block = flattened;
+}
+
+fn reorder_trailing_export_bindings_by_export_order(block: &mut Block, exports: &[Ident]) {
+    if block.len() < 2 || exports.len() < 2 {
+        return;
+    }
+
+    let export_positions: HashMap<Ident, usize> = exports
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, ident)| (ident, index))
+        .collect();
+    let Some(end) = block
+        .iter()
+        .rposition(|stmt| reorderable_trailing_export_binding_ident(stmt, &export_positions).is_some())
+    else {
+        return;
+    };
+    let start = block[..=end]
+        .iter()
+        .rposition(|stmt| {
+            reorderable_trailing_export_binding_ident(stmt, &export_positions).is_none()
+        })
+        .map_or(0, |index| index + 1);
+    if end <= start {
+        return;
+    }
+
+    block[start..=end].sort_by_key(|stmt| {
+        reorderable_trailing_export_binding_ident(stmt, &export_positions)
+            .and_then(|ident| export_positions.get(ident).copied())
+            .unwrap_or(usize::MAX)
+    });
+}
+
+fn reorderable_trailing_export_binding_ident<'a>(
+    stmt: &'a Statement,
+    export_positions: &HashMap<Ident, usize>,
+) -> Option<&'a Ident> {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc:
+                        ExpressionDesc::Var(_)
+                        | ExpressionDesc::Undefined { .. }
+                        | ExpressionDesc::Null
+                        | ExpressionDesc::Bool(_)
+                        | ExpressionDesc::Str { .. }
+                        | ExpressionDesc::Number(_),
+                    ..
+                }),
+            ..
+        }) if export_positions.contains_key(ident) =>
+        {
+            Some(ident)
+        }
+        _ => None,
+    }
+}
+
+fn rewriteable_alias_root_has_other_toplevel_uses(
+    block: &Block,
+    alias_index: usize,
+    root: &Ident,
+) -> bool {
+    block.iter().enumerate().any(|(index, stmt)| {
+        if index == alias_index {
+            return false;
+        }
+        match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(root) => false,
+            _ => statement_mentions_ident_anywhere(stmt, root),
+        }
+    })
 }
 
 fn resolve_rewriteable_toplevel_alias_initializer(
@@ -14561,8 +14661,23 @@ fn move_same_name_export_alias_to_export_tail(
     else {
         return None;
     };
-    let replacement =
-        resolve_tail_move_replacement_expression(&flattened, &initializer, target);
+    let remaining = &flattened[index + 1..];
+    let later_initializer_mentions_target =
+        later_toplevel_initializer_mentions_ident(remaining, target);
+    let prefer_materialized_root = tail_move_materialized_root_ident(&flattened, &initializer)
+        .is_some_and(|root| {
+            !root.same(target)
+                && (later_initializer_mentions_target
+                    || remaining
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, &root)))
+        });
+    let replacement = resolve_tail_move_replacement_expression(
+        &flattened,
+        &initializer,
+        target,
+        prefer_materialized_root,
+    );
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     let blocked_by_literal_binding =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
@@ -14572,13 +14687,13 @@ fn move_same_name_export_alias_to_export_tail(
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
     let blocked_by_self_mention = expression_mentions_ident_anywhere(&replacement, target);
-    let remaining = &flattened[index + 1..];
     let blocked_by_prior_use = flattened[..index]
         .iter()
         .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
     let blocked_by_unsafe_inline = matches!(initializer_kind, TailMoveInitializerKind::Qualified)
         && !qualified_tail_move_uses_are_safe_to_inline(remaining, target, &replacement);
-    let blocked_by_later_initializer = later_toplevel_initializer_mentions_ident(remaining, target);
+    let blocked_by_later_initializer =
+        later_initializer_mentions_target && !matches!(initializer_kind, TailMoveInitializerKind::Literal);
     let blocked_by_later_effect =
         !later_toplevel_effect_allows_tail_move(remaining, target, initializer_kind, &replacement);
     if blocked_by_variable
@@ -14613,7 +14728,8 @@ fn move_reused_same_name_export_binding_to_export_tail(
     else {
         return None;
     };
-    let replacement = resolve_tail_move_replacement_expression(&flattened, value, &reused);
+    let replacement =
+        resolve_tail_move_replacement_expression(&flattened, value, &reused, false);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     let remaining = &flattened[index + 1..];
     let blocked_by_literal_binding =
@@ -14663,6 +14779,13 @@ fn same_name_export_alias_binding(
         })
 }
 
+fn toplevel_declared_ident(stmt: &Statement) -> Option<&Ident> {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { ident, .. }) => Some(ident),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TailMoveInitializerKind {
     Qualified,
@@ -14694,6 +14817,7 @@ fn resolve_tail_move_replacement_expression(
     block: &Block,
     initializer: &Expression,
     rebound: &Ident,
+    prefer_materialized_root: bool,
 ) -> Expression {
     let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
         return initializer.clone();
@@ -14727,7 +14851,9 @@ fn resolve_tail_move_replacement_expression(
         match &value.desc {
             ExpressionDesc::Fun { .. } => return Expression::var(current),
             ExpressionDesc::Var(VIdent::Qualified(module, field)) => {
-                return if current.same(rebound) {
+                return if prefer_materialized_root && !current.same(rebound) {
+                    Expression::var(current)
+                } else if current.same(rebound) {
                     Expression::qualified(module.clone(), field.clone())
                 } else {
                     Expression::var(current)
@@ -14740,8 +14866,50 @@ fn resolve_tail_move_replacement_expression(
             | ExpressionDesc::Str { .. }
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => return value.clone(),
+            | ExpressionDesc::Null => {
+                return if prefer_materialized_root && !current.same(rebound) {
+                    Expression::var(current)
+                } else {
+                    value.clone()
+                };
+            }
             _ => return Expression::var(current),
+        }
+    }
+}
+
+fn tail_move_materialized_root_ident(block: &Block, initializer: &Expression) -> Option<Ident> {
+    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
+        return None;
+    };
+
+    let mut current = start.clone();
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+
+        let stmt = block.iter().find(|stmt| {
+            matches!(
+                &stmt.desc,
+                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
+            )
+        })?;
+
+        let StatementDesc::Variable(VariableDeclaration {
+            value: Some(value), ..
+        }) = &stmt.desc
+        else {
+            return Some(current);
+        };
+
+        match &value.desc {
+            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
+                current = next.clone();
+            }
+            _ => return Some(current),
         }
     }
 }
@@ -14827,6 +14995,9 @@ fn later_toplevel_effect_allows_tail_move(
     replacement: &Expression,
 ) -> bool {
     if !later_toplevel_effect_statement(block) {
+        return true;
+    }
+    if matches!(initializer_kind, TailMoveInitializerKind::Literal) {
         return true;
     }
     if !block
@@ -19497,6 +19668,327 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_initializer_use()
+     {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("a15");
+        let derived = Ident::create_local("a20");
+        let ff = Ident::create_local("ff");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::string("hello world")),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: derived.clone(),
+                value: Some(Expression::new(ExpressionDesc::StringAppend(
+                    Box::new(Expression::var(exported.clone())),
+                    Box::new(Expression::string("not")),
+                ))),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: ff.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![],
+                    body: vec![Statement::return_(Expression::var(derived.clone()))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the rewritten initializer, function binding, and late export");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::StringAppend(left, right),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&derived));
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "hello world"
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "not"
+                ));
+            }
+            other => panic!("expected the rewritten derived binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&ff));
+            }
+            other => panic!("expected the function binding second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(txt, "hello world");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late literal export binding third, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root_for_same_name_literal_alias_chain(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let root = Ident::create_local("a10");
+        let exported = Ident::create_local("a15");
+        let derived = Ident::create_local("a20");
+        let ff = Ident::create_local("ff");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: root.clone(),
+                value: Some(Expression::string("hello world")),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(root.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: derived.clone(),
+                value: Some(Expression::new(ExpressionDesc::StringAppend(
+                    Box::new(Expression::var(exported.clone())),
+                    Box::new(Expression::string("not")),
+                ))),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: ff.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![],
+                    body: vec![Statement::return_(Expression::var(derived.clone()))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third, fourth] = block.as_slice() else {
+            panic!("expected the root binding, rewritten initializer, function binding, and late export");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&root));
+                assert_eq!(txt, "hello world");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the materialized root binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::StringAppend(left, right),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&derived));
+                assert!(matches!(
+                    left.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    } if target.same(&root)
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    } if txt == "not"
+                ));
+            }
+            other => panic!("expected the rewritten derived binding second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&ff));
+            }
+            other => panic!("expected the function binding third, got {other:?}"),
+        }
+        match &fourth.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&root));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late export binding to reuse the materialized root, got {other:?}"),
+        }
+    }
+
+    fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_effect_without_remaining_use()
+     {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("b");
+        let helper = Ident::create_local("f1");
+        let sink = Ident::create_persistent("sink");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::string("Three")),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: helper.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![],
+                    body: vec![Statement::return_(Expression::string("b"))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink),
+                vec![Expression::number(Number::int(1))],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the function binding, effect, and late export");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&helper));
+            }
+            other => panic!("expected the function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(_, args, _),
+                ..
+            }) => {
+                assert!(matches!(
+                    args.as_slice(),
+                    [Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected the later effect second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(txt, "Three");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late literal export binding third, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_effects() {
         let mut compiler = LambdaCompiler::new();
         let set_gen = ModuleId {
@@ -20264,6 +20756,49 @@ mod tests {
         match &non_export_alias_value.desc {
             ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&exported_same_name_alias)),
             other => panic!("expected non-export alias to stay as a variable alias, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_keeps_shared_literal_roots_materialized(
+    ) {
+        let shared_root = Ident::create_local("a10");
+        let shared_use = Ident::create_local("a20");
+        let exported_alias = Ident::create_local("a15");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: shared_root.clone(),
+                value: Some(Expression::string("hello world")),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: shared_use,
+                value: Some(Expression::var(shared_root.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported_alias.clone(),
+                value: Some(Expression::var(shared_root.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
+            &mut block,
+            std::slice::from_ref(&exported_alias),
+        );
+
+        let Some(exported_alias_value) = find_variable_initializer(&block, &exported_alias) else {
+            panic!("expected the exported alias binding to remain");
+        };
+        match &exported_alias_value.desc {
+            ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&shared_root)),
+            other => panic!(
+                "expected the shared literal root to stay materialized, got {other:?}"
+            ),
         }
     }
 

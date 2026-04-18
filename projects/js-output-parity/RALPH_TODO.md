@@ -69,6 +69,55 @@ reproduces the following no-compile-error baseline in the dirty worktree:
 
 Latest iteration on **2026-04-18**:
 
+- Active slice: restore OCaml’s late export-tail ordering for same-name literal
+  exports by preserving the surviving computed section first and then ordering
+  only the final simple export-alias/literal suffix, which was the checked-in
+  JS cluster behind `alias_test`, `Coercion`, and `VariantCoercion`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / final statement ordering
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/alias_test.mjs`,
+    `tests/tests/src/Coercion.mjs`,
+    `tests/tests/src/VariantCoercion.mjs`, and
+    `tests/tests/src/block_alias_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, kept the same-name literal export
+    tail move on the late-export path while preserving materialized roots when
+    later exported alias initializers would otherwise collapse back to a shared
+    literal
+  - added `reorder_trailing_export_bindings_by_export_order(...)` and narrowed
+    it to the final simple export-binding suffix only
+    (`var`/qualified/literal/undefined/null/bool/number initializers), so the
+    OCaml export tail keeps rebound literal aliases in export order without
+    dragging surviving computed bindings like `ff`, `a23`, or
+    `CoerceVariantBinaryOp` behind them
+  - added focused synthetic coverage for the shared-literal-root rewrite path
+    and kept the existing checked-in `Coercion` snapshot test green
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml rewrite_toplevel_variable_initializers_through_rewriteable_aliases_ -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml same_name_literal -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `RUST_TARGET=release timeout 30 ./scripts/test_js_single.sh alias_test`
+  - `RUST_TARGET=release timeout 30 ./scripts/test_js_single.sh Coercion`
+  - `RUST_TARGET=release timeout 30 ./scripts/test_js_single.sh VariantCoercion`
+  - `RUST_TARGET=release timeout 30 ./scripts/test_js_single.sh block_alias_test`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/alias_test.res`,
+    `Coercion.res`, `VariantCoercion.res`, and `block_alias_test.res` are exact
+    again on the release harness path; Rust now matches the checked-in OCaml JS
+    by keeping surviving computed bindings before the late simple export tail
+    while still ordering that final literal/alias suffix in export order
+  - the authoritative current dirty-worktree baseline remains
+    **585 / 657**, with **72** output diffs and **0** compile errors, so this
+    iteration appears to be a correctness-preserving swap rather than a net
+    parity gain; keep it because the checked-in export-order snapshots now
+    match the OCaml backend again
+
+Latest iteration on **2026-04-18**:
+
 - Active slice: allow OCaml-aligned late export-tail moves only when the later
   top-level effect still contains a real remaining alias use to rewrite, and
   then only for the two verified-safe cases from the snapshots: direct-call
