@@ -14325,7 +14325,7 @@ fn move_same_name_export_alias_to_export_tail(
     else {
         return None;
     };
-    if property != LetKind::Alias
+    if matches!(property, LetKind::Variable)
         || !matches!(
             initializer.desc,
             ExpressionDesc::Var(_) | ExpressionDesc::StaticIndex(_, _, _)
@@ -14336,9 +14336,6 @@ fn move_same_name_export_alias_to_export_tail(
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
         || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target)
-        || !flattened[index + 1..]
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
     {
         return None;
     }
@@ -14362,15 +14359,12 @@ fn move_reused_same_name_export_binding_to_export_tail(
     else {
         return None;
     };
-    if property != LetKind::Alias
+    if matches!(property, LetKind::Variable)
         || !js_expr_no_side_effects(value)
         || flattened[..index]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
         || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], &reused)
-        || !flattened[index + 1..]
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
     {
         return None;
     }
@@ -18047,6 +18041,85 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late export alias binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let set_gen = ModuleId {
+            id: Ident::create_persistent("Set_gen"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let declared_alias = Ident::create_local("empty");
+        let exported = Ident::create_local("empty");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: declared_alias.clone(),
+                value: Some(Expression::qualified(
+                    set_gen.clone(),
+                    Some("empty".to_string()),
+                )),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(declared_alias.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(declared_alias)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the internal use plus the late export binding");
+        };
+        match &first.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Qualified(module, Some(field))) => {
+                        assert_eq!(module.id.name(), "Set_gen");
+                        assert_eq!(field, "empty");
+                    }
+                    other => panic!(
+                        "expected the internal call to use the underlying module field directly, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the internal call to remain first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(module.id.name(), "Set_gen");
+                assert_eq!(field, "empty");
+                assert_eq!(*property, LetKind::Strict);
+            }
+            other => panic!("expected the late export binding second, got {other:?}"),
         }
     }
 
@@ -22236,6 +22309,22 @@ mod tests {
             "unexpected callee alias binding remained in bs_mutable_set_test:\n{output}"
         );
     }
+
+    #[test]
+    fn bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section() {
+        let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
+        assert!(
+            output.find("Mocha.describe(\"Bs_mutable_set_test\"").is_some()
+                && output.find("let empty = Belt_MutableSetInt.make;").is_some()
+                && output.find("let fromArray = Belt_MutableSetInt.fromArray;").is_some()
+                && output.find("Mocha.describe(\"Bs_mutable_set_test\"").unwrap()
+                    < output.find("let empty = Belt_MutableSetInt.make;").unwrap()
+                && output.find("Mocha.describe(\"Bs_mutable_set_test\"").unwrap()
+                    < output.find("let fromArray = Belt_MutableSetInt.fromArray;").unwrap(),
+            "expected bs_mutable_set_test to keep the exported module-field aliases only in the late export section, got:\n{output}"
+        );
+    }
+
 
     #[test]
     fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {

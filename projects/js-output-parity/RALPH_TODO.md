@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 598 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 59 output diffs
+**Status:** 564 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 93 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,20 +52,75 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **598 / 657**
+- JS snapshot parity: **564 / 657**
 - Compile errors: **0**
-- Output diffs: **59**
+- Output diffs: **93**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 ## Current Worktree Status
 
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
-reproduces a stable no-compile-error baseline in the current dirty worktree:
+reproduces a no-compile-error but substantially regressed baseline in the
+current dirty worktree:
 
-- JS snapshot parity: **598 / 657**
+- JS snapshot parity: **564 / 657**
 - Compile errors: **0**
-- Output diffs: **59**
+- Output diffs: **93**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: sink pure exported module-field helper bindings into the late
+  export section even when internal alias uses have already been inlined away,
+  matching the checked-in OCaml snapshots for `bs_mutable_set_test` and the
+  same-name export-alias path
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, but
+  this iteration was specifically in the Rust backend export-tail / JS-shake
+  handoff rather than printer-only formatting
+- OCaml / backend reference:
+  - `compiler/core/js_shake.ml`
+  - checked-in snapshots `tests/tests/src/bs_mutable_set_test.mjs`,
+    `tests/tests/src/gpr_3142_test.mjs`, and `tests/tests/src/Import.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, relaxed the late export-tail move
+    helpers so pure lexical same-name export bindings lowered as
+    `Strict` / `StrictOpt` can be sunk to the final export section, not only
+    explicit `Alias` bindings
+  - allowed those helpers to sink export-only same-name bindings even after
+    ordinary internal alias uses were already inlined away, as long as no later
+    top-level initializer still depends on the binding
+  - added focused regression coverage
+    `coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused`
+    and
+    `bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_mutable_set_test.res -o /tmp/bs_mutable_set_test.mjs`
+  - `diff -u tests/tests/src/bs_mutable_set_test.mjs /tmp/bs_mutable_set_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Import.res -o /tmp/Import.mjs`
+  - `diff -u tests/tests/src/Import.mjs /tmp/Import.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3142_test.res -o /tmp/gpr_3142_test.mjs`
+  - `diff -u tests/tests/src/gpr_3142_test.mjs /tmp/gpr_3142_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_mutable_set_test.res` is exact again and no longer
+    appears in `temp/rust-parity/diffs`
+  - related export-tail guard files `tests/tests/src/Import.res` and
+    `tests/tests/src/gpr_3142_test.res` stayed exact after the change
+  - `tests/tests/src/string_set.res` still differs, but only in the separate
+    loop-shape cluster; the misplaced late-export helper aliases are no longer
+    part of its diff
+- Topline impact in the freshly rebuilt current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **564 / 657** (**-33**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **93** (**+33**)
+  - This rebuild-level regression is much larger than the focused export-tail
+    slice and likely reflects other pre-existing dirty compiler changes that
+    were pulled into the rebuilt binary during this iteration
 
 Latest iteration on **2026-04-18**:
 
