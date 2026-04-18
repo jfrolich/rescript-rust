@@ -648,6 +648,160 @@ pub fn type_info_to_typed_expr<'a>(
     ))
 }
 
+/// Find a label by name whose result type is a constructor for the given path.
+/// Disambiguates between labels of the same name on different record types
+/// (e.g., fieldInfo.name vs a user-defined record's name field).
+fn find_label_for_record<'a>(
+    env: &'a Env,
+    ctx: &'a TypeContext<'a>,
+    label_name: &str,
+    record_path: &crate::types::Path,
+) -> Option<crate::types::decl::LabelDescription> {
+    for lbl in env.find_all_labels(label_name) {
+        let repr = ctx.repr(lbl.lbl_res);
+        let desc = ctx.get_desc(repr);
+        if let TypeDesc::Tconstr { path, .. } = &*desc {
+            if path.same(record_path) {
+                return Some(lbl.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Build a proper Texp_record from a list of (String, ComptimeValue) entries.
+/// Used when `comptime_value_to_typed_expr` recognizes a ComptimeValue::Record
+/// as matching a predef record shape (fieldInfo, constructorInfo).
+pub fn build_record_expr_from_entries<'a>(
+    record_path: &crate::types::Path,
+    entries: &[(std::string::String, ComptimeValue)],
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> Option<typedtree::Expression> {
+    let env_ref = ctx.store_typed_env(env);
+    let record_ty = ctx.new_constr(record_path.clone(), vec![]);
+    let mut typed_fields = Vec::with_capacity(entries.len());
+    for (name, cv) in entries {
+        let label_desc = find_label_for_record(env, ctx, name, record_path)?;
+        let value_expr = value_to_typed_expr(cv, ctx, env, loc)?;
+        let lid_loc = crate::parse_arena::Located {
+            txt: crate::parse_arena::LidentIdx(0),
+            loc: crate::parse_arena::LocIdx::none(),
+        };
+        typed_fields.push((
+            lid_loc.clone(),
+            label_desc,
+            typedtree::RecordLabelDefinition::Overridden(lid_loc, value_expr),
+            false,
+        ));
+    }
+    Some(typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_record {
+            fields: typed_fields,
+            extended_expression: None,
+        },
+        loc,
+        record_ty,
+        env_ref,
+        crate::parser::ast::Attributes::new(),
+    ))
+}
+
+/// Minimal ComptimeValue → typed-expression used by `build_record_expr_from_entries`.
+/// Mirrors the cases of `comptime_value_to_typed_expr` in typecore.rs but
+/// without cyclic crate dependency (typecore's version calls back into us).
+fn value_to_typed_expr<'a>(
+    value: &ComptimeValue,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> Option<typedtree::Expression> {
+    let env_ref = ctx.store_typed_env(env);
+    match value {
+        ComptimeValue::String(s) => Some(make_string_expr(s, ctx, env, loc)),
+        ComptimeValue::Int(n) => Some(typedtree::Expression::new(
+            typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::Int(*n)),
+            loc,
+            ctx.new_constr(predef::path_int(), vec![]),
+            env_ref,
+            crate::parser::ast::Attributes::new(),
+        )),
+        ComptimeValue::Bool(b) => Some(make_bool_expr(*b, ctx, env, loc)),
+        ComptimeValue::Type(ti) => type_info_to_typed_expr(ti, ctx, env, loc),
+        ComptimeValue::Array(elems) => {
+            let elem_exprs: Vec<_> = elems
+                .iter()
+                .filter_map(|e| value_to_typed_expr(e, ctx, env, loc))
+                .collect();
+            Some(typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_array(elem_exprs),
+                loc,
+                ctx.new_constr(predef::path_array(), vec![ctx.new_var(None)]),
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Build a proper Texp_record for a predefined record type, given a list of
+/// (label_name, value_expr) pairs. Uses `find_label_for_record` to pick the
+/// right LabelDescription when label names collide with user-defined records.
+fn build_record_expr<'a>(
+    record_path: &crate::types::Path,
+    fields: Vec<(&'static str, typedtree::Expression)>,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    loc: crate::parse_arena::LocIdx,
+) -> typedtree::Expression {
+    let env_ref = ctx.store_typed_env(env);
+    let record_ty = ctx.new_constr(record_path.clone(), vec![]);
+    let mut typed_fields = Vec::with_capacity(fields.len());
+    for (name, value_expr) in fields {
+        let Some(label_desc) = find_label_for_record(env, ctx, name, record_path) else {
+            // Fallback: tuple (should not happen for predef records)
+            return typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_tuple(
+                    typed_fields
+                        .into_iter()
+                        .map(|(_, _, def, _): (_, _, typedtree::RecordLabelDefinition, _)| match def {
+                            typedtree::RecordLabelDefinition::Overridden(_, e) => e,
+                            typedtree::RecordLabelDefinition::Kept(_) => unreachable!(),
+                        })
+                        .chain(std::iter::once(value_expr))
+                        .collect(),
+                ),
+                loc,
+                record_ty,
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            );
+        };
+        let lid_loc = crate::parse_arena::Located {
+            txt: crate::parse_arena::LidentIdx(0),
+            loc: crate::parse_arena::LocIdx::none(),
+        };
+        typed_fields.push((
+            lid_loc.clone(),
+            label_desc,
+            typedtree::RecordLabelDefinition::Overridden(lid_loc, value_expr),
+            false,
+        ));
+    }
+    typedtree::Expression::new(
+        typedtree::ExpressionDesc::Texp_record {
+            fields: typed_fields,
+            extended_expression: None,
+        },
+        loc,
+        record_ty,
+        env_ref,
+        crate::parser::ast::Attributes::new(),
+    )
+}
+
 /// Build a typed expression for a fieldInfo record value.
 fn build_field_info_expr<'a>(
     field: &FieldInfo,
@@ -655,20 +809,23 @@ fn build_field_info_expr<'a>(
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
-    let env_ref = ctx.store_typed_env(env);
     let name_expr = make_string_expr(&field.name, ctx, env, loc);
     let typ_expr = type_info_to_typed_expr(&field.typ, ctx, env, loc)
         .unwrap_or_else(|| make_string_expr("unknown", ctx, env, loc));
     let optional_expr = make_bool_expr(field.optional, ctx, env, loc);
     let mutable_expr = make_bool_expr(field.mutable, ctx, env, loc);
 
-    // Return as a tuple for now (proper record construction needs LabelDescription)
-    typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_tuple(vec![name_expr, typ_expr, optional_expr, mutable_expr]),
+    build_record_expr(
+        &predef::path_field_info(),
+        vec![
+            ("name", name_expr),
+            ("typ", typ_expr),
+            ("optional", optional_expr),
+            ("mutable_", mutable_expr),
+        ],
+        ctx,
+        env,
         loc,
-        ctx.new_constr(predef::path_field_info(), vec![]),
-        env_ref,
-        crate::parser::ast::Attributes::new(),
     )
 }
 
@@ -784,12 +941,12 @@ pub fn match_typeinfo_pattern(
                         ("name".to_string(), ComptimeValue::String(f.name.clone())),
                         ("typ".to_string(), ComptimeValue::Type(f.typ.clone())),
                         (
-                            "mutable".to_string(),
-                            ComptimeValue::Bool(f.mutable),
-                        ),
-                        (
                             "optional".to_string(),
                             ComptimeValue::Bool(f.optional),
+                        ),
+                        (
+                            "mutable_".to_string(),
+                            ComptimeValue::Bool(f.mutable),
                         ),
                     ])
                 })

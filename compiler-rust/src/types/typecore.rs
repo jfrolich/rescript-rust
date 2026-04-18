@@ -21156,6 +21156,23 @@ fn try_comptime_match(
     None
 }
 
+/// Recognize a ComptimeValue::Record's entries as matching a predef record
+/// shape — returns the predef Path so the caller can build a proper Texp_record
+/// instead of a Texp_tuple (which would JS-emit as an array).
+fn detect_predef_record_path(
+    entries: &[(String, crate::types::comptime::ComptimeValue)],
+) -> Option<crate::types::Path> {
+    let names: std::collections::HashSet<&str> =
+        entries.iter().map(|(k, _)| k.as_str()).collect();
+    if names == ["name", "typ", "optional", "mutable_"].into_iter().collect() {
+        Some(crate::types::predef::path_field_info())
+    } else if names == ["name", "args"].into_iter().collect() {
+        Some(crate::types::predef::path_constructor_info())
+    } else {
+        None
+    }
+}
+
 /// Convert a ComptimeValue to a typed tree Expression.
 /// Used to substitute comptime-known variables during type checking.
 fn comptime_value_to_typed_expr<'a>(
@@ -21203,22 +21220,31 @@ fn comptime_value_to_typed_expr<'a>(
             ))
         }
         ComptimeValue::Record(entries) => {
-            // For comptime records (like fieldInfo), we produce a tuple
-            // representation for now
-            let exprs: Vec<_> = entries
-                .iter()
-                .filter_map(|(_, v)| comptime_value_to_typed_expr(v, ctx, env, loc))
-                .collect();
-            if exprs.is_empty() {
-                None
+            // Detect predef record shapes and emit a proper Texp_record so the
+            // JS output is an object, not an array. A bare Texp_tuple would
+            // compile to `[name, typ, optional, mutable_]` — surfacing as
+            // nested arrays in `Console.log(fields[0])`.
+            let record_path = detect_predef_record_path(entries);
+            if let Some(path) = record_path {
+                crate::types::comptime::build_record_expr_from_entries(
+                    &path, entries, ctx, env, loc,
+                )
             } else {
-                Some(Expression::new(
-                    ExpressionDesc::Texp_tuple(exprs),
-                    loc,
-                    ctx.new_var(None),
-                    env_ref,
-                    crate::parser::ast::Attributes::new(),
-                ))
+                let exprs: Vec<_> = entries
+                    .iter()
+                    .filter_map(|(_, v)| comptime_value_to_typed_expr(v, ctx, env, loc))
+                    .collect();
+                if exprs.is_empty() {
+                    None
+                } else {
+                    Some(Expression::new(
+                        ExpressionDesc::Texp_tuple(exprs),
+                        loc,
+                        ctx.new_var(None),
+                        env_ref,
+                        crate::parser::ast::Attributes::new(),
+                    ))
+                }
             }
         }
         _ => None,
@@ -21312,7 +21338,6 @@ fn bind_comptime_record_fields(
                 let field_values: Vec<_> = fields.iter().map(|f| {
                     crate::types::comptime::ComptimeValue::Record(vec![
                         ("name".to_string(), crate::types::comptime::ComptimeValue::String(f.name.clone())),
-                        ("type".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
                         ("typ".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
                         ("optional".to_string(), crate::types::comptime::ComptimeValue::Bool(f.optional)),
                         ("mutable_".to_string(), crate::types::comptime::ComptimeValue::Bool(f.mutable)),
