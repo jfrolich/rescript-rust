@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 597 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 60 output diffs
+**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 64 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **597 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **60**
+- Output diffs: **64**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,51 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **597 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **60**
+- Output diffs: **64**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: nested return-path `Lstaticcatch` lowering where a plain
+  handler sits above a forwarding staticcatch in the same chain; this stayed in
+  **Phase 3: Port JS IR Lowering And Metadata** from `PLAN.md`
+- OCaml / backend reference:
+  - `compiler/core/lam_compile.ml` (`flat_catches`, `flatten_nested_caches`,
+    `compile_staticcatch`)
+  - checked-in snapshots `tests/tests/src/VariantPatternMatchingSpreads.mjs`
+    and `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.mjs`
+- Rust changes in `compiler-rust/src/lambda/compile.rs`:
+  - narrowed the return-path `path=nested-fallthrough` shortcut so it only
+    peels a zero-binding nested staticcatch when the *immediate* nested handler
+    is still a forwarding static raise, which matches the OCaml
+    `flatten_nested_caches` boundary more closely
+  - concrete nested handlers such as the `doWithA` / `doWithB` branch handlers
+    now stay inline inside the mixed named-variant dispatch instead of escaping
+    as a Rust-only post-switch fallthrough tail
+  - added a checked-in fixture regression,
+    `variant_pattern_matching_spreads_with_payloads_keeps_nested_handlers_inline_like_ocaml`,
+    alongside the existing `VariantPatternMatchingSpreads` and multi-case
+    staticcatch guards
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_cases_last' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::variant_pattern_matching_spreads_with_payloads_keeps_nested_handlers_inline_like_ocaml' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::variant_pattern_matching_spreads_keeps_positive_unit_fallthrough_guards_like_ocaml' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh VariantPatternMatchingSpreadsWithPayloads --diff`
+  - `timeout 30 ./scripts/test_js_single.sh VariantPatternMatchingSpreads --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/VariantPatternMatchingSpreadsWithPayloads.res` is exact
+    again; `lookup2` no longer lowers `Four | Five` through a trailing
+    `doWithB(d)` fallthrough after the switch
+  - `tests/tests/src/VariantPatternMatchingSpreads.res` stayed exact, so the
+    narrower rule did not reopen the positive-guard sibling in the same family
+  - `tests/tests/src/ExternalShadow.res` also stayed exact as the broader guard
+  - the authoritative dirty-worktree baseline improved from **584 / 657** to
+    **593 / 657**, with output diffs reduced from **73** to **64** and compile
+    errors still at **0**
 
 Latest iteration on **2026-04-18**:
 

@@ -1487,6 +1487,14 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
+                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                    eprintln!(
+                        "[staticcatch-return] label={label} path=fallthrough bindings={} body_kind={} handler_kind={}",
+                        bindings.len(),
+                        staticcatch_debug_kind(body),
+                        staticcatch_debug_kind(handler),
+                    );
+                }
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
@@ -1494,13 +1502,56 @@ impl LambdaCompiler {
                     body, *label, bindings, handler,
                 ) =>
             {
+                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                    eprintln!(
+                        "[staticcatch-return] label={label} path=pseudo-fallthrough bindings={} body_kind={} handler_kind={}",
+                        bindings.len(),
+                        staticcatch_debug_kind(body),
+                        staticcatch_debug_kind(handler),
+                    );
+                }
+                self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler)
+                if bindings.is_empty()
+                    && matches!(
+                        body.as_ref(),
+                        Lambda::LstaticCatch(_, _, nested_handler)
+                            if lambda_contains_static_raise(nested_handler)
+                    )
+                    && !self.handler_returns_unit_undefined(bindings, handler)
+                    && !lambda_contains_static_raise(handler) =>
+            {
+                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                    eprintln!(
+                        "[staticcatch-return] label={label} path=nested-fallthrough bindings={} body_kind={} handler_kind={}",
+                        bindings.len(),
+                        staticcatch_debug_kind(body),
+                        staticcatch_debug_kind(handler),
+                    );
+                }
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                    || self
-                        .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler)
-                {
+                let requires_explicit_jump =
+                    (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
+                        || self.return_staticcatch_requires_explicit_jump(
+                            *label, bindings, body, handler,
+                        );
+                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                    eprintln!(
+                        "[staticcatch-return] label={label} path={} bindings={} body_kind={} handler_kind={}",
+                        if requires_explicit_jump {
+                            "explicit-jump"
+                        } else {
+                            "inline-handler"
+                        },
+                        bindings.len(),
+                        staticcatch_debug_kind(body),
+                        staticcatch_debug_kind(handler),
+                    );
+                }
+                if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
                 } else {
                     self.with_static_handler(*label, bindings, handler, |this| {
@@ -4868,6 +4919,16 @@ impl LambdaCompiler {
     }
 
     fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
+        if std::env::var_os("RUST_DEBUG_TAKE_RETURN_TAIL").is_some() {
+            let rendered = crate::js_ir::print_block(&block);
+            if rendered.contains("Invalid_argument")
+                || rendered.contains("RE_EXN_ID === A")
+                || rendered.contains("RE_EXN_ID === B")
+            {
+                eprintln!("[take-return-tail]\n{rendered}\n");
+            }
+        }
+
         let mut prefix = block.clone();
         let Some(last) = prefix.pop() else {
             return Err(block);
@@ -4882,6 +4943,15 @@ impl LambdaCompiler {
 
         if matches!(expr.desc, ExpressionDesc::Undefined { .. }) && !prefix.is_empty() {
             return Err(block);
+        }
+
+        if let [stmt] = prefix.as_slice() {
+            if let StatementDesc::If(cond, then_block, else_block) = &stmt.desc {
+                if else_block.is_empty() {
+                    let then_expr = self.take_return_tail_expr(then_block.clone())?;
+                    return Ok(Expression::cond(cond.clone(), then_expr, expr));
+                }
+            }
         }
 
         // OCaml reaches `return cond ? (effect, value) : fallback` here for
@@ -4919,6 +4989,17 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
+        if std::env::var_os("RUST_DEBUG_COMPILE_TEST_RETURN").is_some() {
+            let cond_text = crate::js_ir::print_expression(&cond);
+            if cond_text.contains("RE_EXN_ID") || cond_text.contains("_1 === \"x\"") {
+                eprintln!(
+                    "[compile-test-return]\ncond: {cond_text}\nthen:\n{}\nelse:\n{}\n",
+                    crate::js_ir::print_block(&then_block),
+                    crate::js_ir::print_block(&else_block),
+                );
+            }
+        }
+
         match (
             self.take_return_tail_expr(then_block),
             self.take_return_tail_expr(else_block),
@@ -7786,6 +7867,13 @@ impl LambdaCompiler {
         body: &Lambda,
         handler: &Lambda,
     ) -> bool {
+        if bindings.is_empty()
+            && matches!(body, Lambda::LstaticCatch(_, _, _))
+            && self.handler_is_inlineable_pure_return_static_raise_dispatch(handler)
+        {
+            return false;
+        }
+
         self.return_handler_requires_explicit_staticcatch_jump(handler)
             || (lambda_has_multiple_static_raises_to_label(body, label, bindings.len())
                 && lambda_contains_static_raise_to_other_label(handler, label)
@@ -7835,6 +7923,16 @@ impl LambdaCompiler {
     fn return_handler_requires_explicit_staticcatch_jump(&self, lam: &Lambda) -> bool {
         match lam {
             Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+            Lambda::LifThenElse(_, _, _)
+            | Lambda::Lswitch(_, _)
+            | Lambda::LstringSwitch(_, _, _)
+            | Lambda::Llet(_, _, _, _)
+            | Lambda::Lsequence(_, _)
+                if lambda_contains_static_raise(lam)
+                    && !self.handler_is_pure_outward_static_raise_forwarder(lam) =>
+            {
+                true
+            }
             Lambda::Lapply(apply) => {
                 self.return_handler_requires_explicit_staticcatch_jump(&apply.ap_func)
                     || apply
@@ -7914,6 +8012,72 @@ impl LambdaCompiler {
                     || self.return_handler_requires_explicit_staticcatch_jump(then_)
                     || self.return_handler_requires_explicit_staticcatch_jump(else_)
             }
+        }
+    }
+
+    fn handler_is_inlineable_pure_return_static_raise_dispatch(&self, lam: &Lambda) -> bool {
+        self.handler_is_pure_outward_static_raise_forwarder(lam)
+            || self
+                .pure_return_static_raise_dispatch_has_terminal_value(lam)
+                .unwrap_or(false)
+    }
+
+    fn pure_return_static_raise_dispatch_has_terminal_value(&self, lam: &Lambda) -> Option<bool> {
+        match lam {
+            Lambda::LstaticRaise(label, args) => {
+                let args_are_pure = args.iter().all(analysis::no_side_effects);
+                if self.active_static_raise_target_exists(*label, args.len()) && args_are_pure {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            Lambda::Llet(kind, _, value, body)
+                if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
+                    && analysis::no_side_effects(value) =>
+            {
+                self.pure_return_static_raise_dispatch_has_terminal_value(body)
+            }
+            Lambda::Lsequence(first, second) if analysis::no_side_effects(first) => {
+                self.pure_return_static_raise_dispatch_has_terminal_value(second)
+            }
+            Lambda::LifThenElse(cond, then_, else_) if analysis::no_side_effects(cond) => {
+                let then_has_value =
+                    self.pure_return_static_raise_dispatch_has_terminal_value(then_)?;
+                let else_has_value =
+                    self.pure_return_static_raise_dispatch_has_terminal_value(else_)?;
+                Some(then_has_value || else_has_value)
+            }
+            Lambda::Lswitch(scrut, switch) if analysis::no_side_effects(scrut) => {
+                let mut has_terminal_value = false;
+                for (_, body) in &switch.sw_consts {
+                    has_terminal_value |=
+                        self.pure_return_static_raise_dispatch_has_terminal_value(body)?;
+                }
+                for (_, body) in &switch.sw_blocks {
+                    has_terminal_value |=
+                        self.pure_return_static_raise_dispatch_has_terminal_value(body)?;
+                }
+                if let Some(body) = switch.sw_failaction.as_deref() {
+                    has_terminal_value |=
+                        self.pure_return_static_raise_dispatch_has_terminal_value(body)?;
+                }
+                Some(has_terminal_value)
+            }
+            Lambda::LstringSwitch(scrut, cases, default) if analysis::no_side_effects(scrut) => {
+                let mut has_terminal_value = false;
+                for (_, body) in cases {
+                    has_terminal_value |=
+                        self.pure_return_static_raise_dispatch_has_terminal_value(body)?;
+                }
+                if let Some(body) = default.as_deref() {
+                    has_terminal_value |=
+                        self.pure_return_static_raise_dispatch_has_terminal_value(body)?;
+                }
+                Some(has_terminal_value)
+            }
+            _ if analysis::no_side_effects(lam) => Some(true),
+            _ => None,
         }
     }
 
@@ -8220,6 +8384,29 @@ impl LambdaCompiler {
         let mut modules = self.collect_required_module_set(block).to_vec();
         ocaml_sort_modules(&mut modules);
         modules
+    }
+}
+
+fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
+    match lam {
+        Lambda::LstaticCatch(_, _, _) => "staticcatch",
+        Lambda::LstaticRaise(_, _) => "staticraise",
+        Lambda::LifThenElse(_, _, _) => "if",
+        Lambda::Lswitch(_, _) => "switch",
+        Lambda::LstringSwitch(_, _, _) => "stringswitch",
+        Lambda::Llet(_, _, _, _) => "let",
+        Lambda::Lsequence(_, _) => "sequence",
+        Lambda::LtryWith(_, _, _) => "trywith",
+        Lambda::Lprim(_) => "prim",
+        Lambda::Lconst(_) => "const",
+        Lambda::Lvar(_) => "var",
+        Lambda::Lapply(_) => "apply",
+        Lambda::Lfunction(_) => "function",
+        Lambda::Lletrec(_, _) => "letrec",
+        Lambda::Lwhile(_, _) => "while",
+        Lambda::Lfor(_, _, _, _, _) => "for",
+        Lambda::Lassign(_, _) => "assign",
+        Lambda::LglobalModule(_, _) => "global_module",
     }
 }
 
@@ -25441,6 +25628,27 @@ mod tests {
                 "function doWithZ(z) {\n  if (z === \"First\") {\n    console.log(\"First\");\n    return;\n  }\n  console.log(\"Second\");"
             ),
             "expected doWithZ to keep the positive-guard fallthrough shape, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn variant_pattern_matching_spreads_with_payloads_keeps_nested_handlers_inline_like_ocaml() {
+        let output = compile_checked_in_test_file_to_js("VariantPatternMatchingSpreadsWithPayloads");
+        assert!(
+            output.contains(
+                "function lookup2(d) {\n  if (typeof d !== \"object\") {\n    switch (d) {\n      case \"Four\" :\n      case \"Five\" :\n        return doWithB(d);\n      case \"Six\" :\n        console.log(\"Got rest of d\");\n        return;\n      default:\n        return doWithA(d);\n    }\n  } else {"
+            ),
+            "expected lookup2 to keep the shared const-side handler inline inside the switch, got:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "  } else {\n    if (d.TAG !== \"Seven\") {\n      return doWithA(d);\n    }\n    console.log(\"Got rest of d\");\n    return;\n  }\n}"
+            ),
+            "expected lookup2 to keep the payload-side handler inline inside the outer else branch, got:\n{output}"
+        );
+        assert!(
+            !output.contains("  doWithB(d);\n}"),
+            "unexpected nested fallthrough handler escaped after lookup2's switch:\n{output}"
         );
     }
 
