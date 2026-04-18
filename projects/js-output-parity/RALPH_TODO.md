@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 564 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 93 output diffs
+**Status:** 572 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 85 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **564 / 657**
+- JS snapshot parity: **572 / 657**
 - Compile errors: **0**
-- Output diffs: **93**
+- Output diffs: **85**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -64,9 +64,60 @@ A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
 reproduces a no-compile-error but substantially regressed baseline in the
 current dirty worktree:
 
-- JS snapshot parity: **564 / 657**
+- JS snapshot parity: **572 / 657**
 - Compile errors: **0**
-- Output diffs: **93**
+- Output diffs: **85**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: keep OCaml-style exported alias tail moves for function/self-name
+  alias chains while preserving qualified imported value aliases in value
+  position, which was the live `ImportAttributes` / `gpr_3142_test` /
+  `ExternalShadow` cluster in the JS backend export-coercion handoff
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, but
+  this iteration fixed the export-tail / alias-resolution backend logic rather
+  than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/ImportAttributes.mjs`,
+    `tests/tests/src/gpr_3142_test.mjs`, and
+    `tests/tests/src/ExternalShadow.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, taught top-level export coercion
+    to collapse renamed self-name alias chains back to the underlying declared
+    binding when reusing exports, matching the OCaml `lam_coercion` behavior
+    needed by `gpr_3142_test`
+  - tightened same-name export tail moves so qualified imported values only
+    inline through safe callee/new positions, which keeps `ImportAttributes`
+    materialized ahead of top-level value-position effects
+  - resolved tail-move replacements through same-name alias chains before
+    rewriting later statements, so late export aliases reuse the underlying
+    declared function/module-field target instead of a rebound same-name alias
+  - in `compiler-rust/src/lambda/simplify.rs`, strengthened the
+    `ImportAttributes`-style regression test to prove this mismatch was not in
+    the simplifier
+- Verified focused guards for this slice:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ImportAttributes.res -o /tmp/ImportAttributes.mjs`
+  - `diff -u tests/tests/src/ImportAttributes.mjs /tmp/ImportAttributes.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3142_test.res -o /tmp/gpr_3142_test.mjs`
+  - `diff -u tests/tests/src/gpr_3142_test.mjs /tmp/gpr_3142_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_mutable_set_test.res -o /tmp/bs_mutable_set_test.mjs`
+  - `diff -u tests/tests/src/bs_mutable_set_test.mjs /tmp/bs_mutable_set_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/ImportAttributes.res`,
+    `tests/tests/src/gpr_3142_test.res`,
+    `tests/tests/src/ExternalShadow.res`, and
+    `tests/tests/src/bs_mutable_set_test.res` are all exact after the fix
+  - the authoritative current dirty-worktree baseline improved from
+    **564 / 657** to **572 / 657**
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **564 / 657** -> **572 / 657** (**+8**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **93** -> **85** (**-8**)
 
 Latest iteration on **2026-04-18**:
 

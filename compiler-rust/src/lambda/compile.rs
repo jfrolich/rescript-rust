@@ -410,11 +410,23 @@ impl LambdaCompiler {
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
                     if declared.contains(&export) {
-                        exports.push(export);
+                        exports.push(
+                            resolve_declared_same_name_self_alias_target(block, &export)
+                                .unwrap_or(export),
+                        );
                         continue;
                     }
                     if declared.contains(target) {
-                        exports.push(target.clone());
+                        let resolved = resolve_tail_move_replacement_expression(
+                            block,
+                            &Expression::var(target.clone()),
+                        );
+                        match resolved.desc {
+                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => {
+                                exports.push(resolved_target);
+                            }
+                            _ => exports.push(target.clone()),
+                        }
                         continue;
                     }
                 }
@@ -9151,10 +9163,22 @@ fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     exports
         .into_iter()
         .map(|export| {
-            reusable_declared_same_name_export_alias(block, &export)
+            resolve_declared_same_name_self_alias_target(block, &export)
+                .or_else(|| reusable_declared_same_name_export_alias(block, &export))
                 .unwrap_or_else(|| resolve_export_alias(&export, &aliases, &declared))
         })
         .collect()
+}
+
+fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -> Option<Ident> {
+    match resolve_tail_move_replacement_expression(block, &Expression::var(export.clone())).desc {
+        ExpressionDesc::Var(VIdent::Id(target))
+            if !target.same(export) && block_declares_initialized_ident(block, &target) =>
+        {
+            Some(target)
+        }
+        _ => None,
+    }
 }
 
 fn reusable_declared_same_name_export_alias(block: &Block, export: &Ident) -> Option<Ident> {
@@ -14325,27 +14349,36 @@ fn move_same_name_export_alias_to_export_tail(
     else {
         return None;
     };
-    if matches!(property, LetKind::Variable)
-        || !matches!(
-            initializer.desc,
-            ExpressionDesc::Var(_) | ExpressionDesc::StaticIndex(_, _, _)
-        )
-        || !js_expr_no_side_effects(&initializer)
-        || expression_mentions_ident_anywhere(&initializer, target)
-        || flattened[..index]
-            .iter()
-            .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-        || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target)
+    let replacement = resolve_tail_move_replacement_expression(&flattened, &initializer);
+    let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
+    let blocked_by_variable = matches!(property, LetKind::Variable);
+    let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
+    let blocked_by_effects = !js_expr_no_side_effects(&replacement);
+    let blocked_by_self_mention = expression_mentions_ident_anywhere(&replacement, target);
+    let blocked_by_prior_use = flattened[..index]
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
+    let blocked_by_unsafe_inline = matches!(initializer_kind, TailMoveInitializerKind::Qualified)
+        && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], target);
+    let blocked_by_later_initializer =
+        later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target);
+    if blocked_by_variable
+        || blocked_by_kind
+        || blocked_by_effects
+        || blocked_by_self_mention
+        || blocked_by_prior_use
+        || blocked_by_unsafe_inline
+        || blocked_by_later_initializer
     {
         return None;
     }
 
     for stmt in &mut flattened[index + 1..] {
-        substitute_export_alias_use_in_statement(stmt, target, &initializer);
+        substitute_export_alias_use_in_statement(stmt, target, &replacement);
     }
     flattened.remove(index);
     *block = flattened;
-    Some((initializer, property))
+    Some((replacement, property))
 }
 
 fn move_reused_same_name_export_binding_to_export_tail(
@@ -14354,27 +14387,32 @@ fn move_reused_same_name_export_binding_to_export_tail(
     value: &Expression,
 ) -> Option<(Expression, LetKind)> {
     let mut flattened = flatten_toplevel_block(block);
-    let Some((index, reused, property)) =
+    let Some((index, reused, _initializer, property)) =
         direct_reused_same_name_export_alias_binding(&flattened, export, value)
     else {
         return None;
     };
+    let replacement = resolve_tail_move_replacement_expression(&flattened, value);
+    let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     if matches!(property, LetKind::Variable)
-        || !js_expr_no_side_effects(value)
+        || matches!(initializer_kind, TailMoveInitializerKind::Other)
+        || !js_expr_no_side_effects(&replacement)
         || flattened[..index]
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
+        || (matches!(initializer_kind, TailMoveInitializerKind::Qualified)
+            && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], &reused))
         || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], &reused)
     {
         return None;
     }
 
     for stmt in &mut flattened[index + 1..] {
-        substitute_export_alias_use_in_statement(stmt, &reused, value);
+        substitute_export_alias_use_in_statement(stmt, &reused, &replacement);
     }
     flattened.remove(index);
     *block = flattened;
-    Some((value.clone(), property))
+    Some((replacement, property))
 }
 
 fn same_name_export_alias_binding(
@@ -14395,11 +14433,377 @@ fn same_name_export_alias_binding(
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailMoveInitializerKind {
+    Qualified,
+    Function,
+    Other,
+}
+
+fn same_name_export_initializer_kind(
+    block: &Block,
+    initializer: &Expression,
+) -> TailMoveInitializerKind {
+    match &initializer.desc {
+        ExpressionDesc::Var(VIdent::Qualified(_, _)) => TailMoveInitializerKind::Qualified,
+        ExpressionDesc::Var(VIdent::Id(target)) => {
+            resolve_tail_move_initializer_kind(block, target)
+                .unwrap_or(TailMoveInitializerKind::Other)
+        }
+        _ => TailMoveInitializerKind::Other,
+    }
+}
+
+fn resolve_tail_move_replacement_expression(
+    block: &Block,
+    initializer: &Expression,
+) -> Expression {
+    let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
+        return initializer.clone();
+    };
+
+    let mut current = start.clone();
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current.clone()) {
+            return initializer.clone();
+        }
+
+        let stmt = match block.iter().find(|stmt| {
+            matches!(
+                &stmt.desc,
+                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
+            )
+        }) {
+            Some(stmt) => stmt,
+            None => return Expression::var(current),
+        };
+
+        let StatementDesc::Variable(VariableDeclaration {
+            value: Some(value), ..
+        }) = &stmt.desc
+        else {
+            return Expression::var(current);
+        };
+
+        match &value.desc {
+            ExpressionDesc::Fun { .. } => return Expression::var(current),
+            ExpressionDesc::Var(VIdent::Qualified(module, field)) => {
+                return Expression::qualified(module.clone(), field.clone());
+            }
+            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
+                current = next.clone();
+            }
+            _ => return Expression::var(current),
+        }
+    }
+}
+
+fn resolve_tail_move_initializer_kind(
+    block: &Block,
+    start: &Ident,
+) -> Option<TailMoveInitializerKind> {
+    let mut current = start.clone();
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+
+        let stmt = block.iter().find(|stmt| {
+            matches!(
+                &stmt.desc,
+                StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&current)
+            )
+        })?;
+
+        let StatementDesc::Variable(VariableDeclaration {
+            value: Some(value), ..
+        }) = &stmt.desc
+        else {
+            return None;
+        };
+
+        match &value.desc {
+            ExpressionDesc::Fun { .. } => return Some(TailMoveInitializerKind::Function),
+            ExpressionDesc::Var(VIdent::Qualified(_, _)) => {
+                return Some(TailMoveInitializerKind::Qualified);
+            }
+            ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
+            _ => return None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TailMoveUseContext {
+    Other,
+    CallCallee,
+    NewTarget,
+}
+
+fn tail_move_uses_are_safe_to_inline(block: &[Statement], target: &Ident) -> bool {
+    block.iter()
+        .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
+}
+
+fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, target: &Ident) -> bool {
+    match &stmt.desc {
+        StatementDesc::Block(block) => tail_move_uses_are_safe_to_inline(block, target),
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
+            !ident.same(target)
+                && value.as_ref().is_none_or(|value| {
+                    expression_uses_ident_only_in_tail_move_safe_positions(
+                        value,
+                        target,
+                        TailMoveUseContext::Other,
+                    )
+                })
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                expr,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                cond,
+                target,
+                TailMoveUseContext::Other,
+            ) && tail_move_uses_are_safe_to_inline(then_block, target)
+                && tail_move_uses_are_safe_to_inline(else_block, target)
+        }
+        StatementDesc::While(cond, body) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                cond,
+                target,
+                TailMoveUseContext::Other,
+            ) && tail_move_uses_are_safe_to_inline(body, target)
+        }
+        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+            !loop_ident.same(target)
+                && start.as_ref().is_none_or(|expr| {
+                    expression_uses_ident_only_in_tail_move_safe_positions(
+                        expr,
+                        target,
+                        TailMoveUseContext::Other,
+                    )
+                })
+                && expression_uses_ident_only_in_tail_move_safe_positions(
+                    finish,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+                && tail_move_uses_are_safe_to_inline(body, target)
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                test,
+                target,
+                TailMoveUseContext::Other,
+            ) && clauses.iter().all(|(_, clause)| {
+                tail_move_uses_are_safe_to_inline(&clause.body, target)
+            }) && default
+                .as_ref()
+                .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                test,
+                target,
+                TailMoveUseContext::Other,
+            ) && clauses.iter().all(|clause| {
+                tail_move_uses_are_safe_to_inline(&clause.clause.body, target)
+            }) && default
+                .as_ref()
+                .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            tail_move_uses_are_safe_to_inline(body, target)
+                && catch.as_ref().is_none_or(|(catch_ident, block)| {
+                    !catch_ident.same(target) && tail_move_uses_are_safe_to_inline(block, target)
+                })
+                && finally
+                    .as_ref()
+                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
+        }
+        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => true,
+    }
+}
+
+fn expression_uses_ident_only_in_tail_move_safe_positions(
+    expr: &Expression,
+    target: &Ident,
+    context: TailMoveUseContext,
+) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Var(VIdent::Id(ident)) => {
+            !ident.same(target)
+                || matches!(
+                    context,
+                    TailMoveUseContext::CallCallee | TailMoveUseContext::NewTarget
+                )
+        }
+        ExpressionDesc::Var(VIdent::Qualified(_, _))
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Number(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::RawJsCode(_) => true,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                inner,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                left,
+                target,
+                TailMoveUseContext::Other,
+            ) && expression_uses_ident_only_in_tail_move_safe_positions(
+                right,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }
+        ExpressionDesc::FlatCall(left, right) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                left,
+                target,
+                TailMoveUseContext::CallCallee,
+            ) && expression_uses_ident_only_in_tail_move_safe_positions(
+                right,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                test,
+                target,
+                TailMoveUseContext::Other,
+            ) && expression_uses_ident_only_in_tail_move_safe_positions(
+                consequent,
+                target,
+                TailMoveUseContext::Other,
+            ) && expression_uses_ident_only_in_tail_move_safe_positions(
+                alternate,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                func,
+                target,
+                TailMoveUseContext::CallCallee,
+            ) && args.iter().all(|arg| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    arg,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            })
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                tag,
+                target,
+                TailMoveUseContext::CallCallee,
+            ) && strings.iter().all(|expr| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    expr,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            }) && values.iter().all(|expr| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    expr,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            })
+        }
+        ExpressionDesc::New(func, args) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                func,
+                target,
+                TailMoveUseContext::NewTarget,
+            ) && args.as_ref().is_none_or(|args| {
+                args.iter().all(|arg| {
+                    expression_uses_ident_only_in_tail_move_safe_positions(
+                        arg,
+                        target,
+                        TailMoveUseContext::Other,
+                    )
+                })
+            })
+        }
+        ExpressionDesc::Fun { body, .. } => tail_move_uses_are_safe_to_inline(body, target),
+        ExpressionDesc::Array(items, _) => items.iter().all(|item| {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                item,
+                target,
+                TailMoveUseContext::Other,
+            )
+        }),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            expression_uses_ident_only_in_tail_move_safe_positions(
+                tag,
+                target,
+                TailMoveUseContext::Other,
+            ) && items.iter().all(|item| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    item,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            })
+        }
+        ExpressionDesc::Object(dup, props) => {
+            dup.as_ref().is_none_or(|expr| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    expr,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            }) && props.iter().all(|(_, value)| {
+                expression_uses_ident_only_in_tail_move_safe_positions(
+                    value,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+            })
+        }
+    }
+}
+
 fn direct_reused_same_name_export_alias_binding(
     block: &Block,
     export: &Ident,
     value: &Expression,
-) -> Option<(usize, Ident, LetKind)> {
+) -> Option<(usize, Ident, Expression, LetKind)> {
     block
         .iter()
         .enumerate()
@@ -14412,7 +14816,7 @@ fn direct_reused_same_name_export_alias_binding(
             }) if ident.name() == export.name()
                 && same_reusable_export_value(initializer, value) =>
             {
-                Some((index, ident.clone(), *property))
+                Some((index, ident.clone(), initializer.clone(), *property))
             }
             _ => None,
         })
@@ -15836,6 +16240,180 @@ mod tests {
             module_bind_name: ExternalModuleBindName::Nothing,
             import_attributes: None,
         }
+    }
+
+    fn external_module_with_attrs(
+        bundle: &str,
+        hint: &str,
+        attrs: &[(&str, &str)],
+    ) -> ExternalModuleName {
+        ExternalModuleName {
+            bundle: bundle.to_string(),
+            module_bind_name: ExternalModuleBindName::HintName(hint.to_string()),
+            import_attributes: Some(
+                attrs.iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>) -> Lambda {
+        Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: name.to_string(),
+                arg_types: vec![],
+                ffi: ExternalFfiSpec {
+                    kind: ExternalFfiKind::Default,
+                    spec: Some(ExternalSpec::JsVar {
+                        name: name.to_string(),
+                        external_module_name,
+                        scopes: vec![],
+                    }),
+                    obj_params: None,
+                    return_wrapper: ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::none(),
+        )
+    }
+
+    fn console_log_effect(arg: Lambda) -> Lambda {
+        Lambda::seq(
+            Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "console.log".to_string(),
+                    arg_types: vec![],
+                    ffi: ExternalFfiSpec {
+                        kind: ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper: ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![arg],
+                Location::none(),
+            ),
+            Lambda::const_(Constant::JsUndefined { is_unit: true }),
+        )
+    }
+
+    fn import_attributes_lowered_lambda() -> Lambda {
+        let include_json = Ident::create_local("include");
+        let my_json = Ident::create_local("myJson");
+        let include_css = Ident::create_local("include");
+        let button_css = Ident::create_local("buttonCss");
+
+        let json_module = external_module_with_attrs(
+            "./myJson.json",
+            "MyJsonJson",
+            &[("type", "json"), ("some-identifier", "yep")],
+        );
+        let css_module = external_module_with_attrs(
+            "./myCss.css",
+            "MyCssCss",
+            &[("type", "css"), ("some-identifier", "yep")],
+        );
+
+        Lambda::let_(
+            LetKind::Strict,
+            include_json.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    0,
+                    TagInfo::Module(vec!["myJson".to_string()]),
+                    Mutable::Immutable,
+                ),
+                vec![js_var_external("default", Some(json_module))],
+                Location::none(),
+            ),
+            Lambda::let_(
+                LetKind::Alias,
+                my_json.clone(),
+                Lambda::prim(
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: "myJson".to_string(),
+                        },
+                    ),
+                    vec![Lambda::var(include_json.clone())],
+                    Location::none(),
+                ),
+                Lambda::seq(
+                    console_log_effect(Lambda::var(my_json.clone())),
+                    Lambda::let_(
+                        LetKind::Strict,
+                        include_css.clone(),
+                        Lambda::prim(
+                            Primitive::Pmakeblock(
+                                0,
+                                TagInfo::Module(vec!["buttonCss".to_string()]),
+                                Mutable::Immutable,
+                            ),
+                            vec![js_var_external("button", Some(css_module))],
+                            Location::none(),
+                        ),
+                        Lambda::let_(
+                            LetKind::Alias,
+                            button_css.clone(),
+                            Lambda::prim(
+                                Primitive::Pfield(
+                                    0,
+                                    FieldDbgInfo::Module {
+                                        name: "buttonCss".to_string(),
+                                    },
+                                ),
+                                vec![Lambda::var(include_css)],
+                                Location::none(),
+                            ),
+                            Lambda::seq(
+                                console_log_effect(Lambda::var(button_css.clone())),
+                                Lambda::prim(
+                                    Primitive::Pmakeblock(
+                                        0,
+                                        TagInfo::ModuleExport(vec![
+                                            my_json.clone(),
+                                            button_css.clone(),
+                                        ]),
+                                        Mutable::Immutable,
+                                    ),
+                                    vec![
+                                        Lambda::var(my_json.clone()),
+                                        Lambda::var(button_css.clone()),
+                                    ],
+                                    Location::none(),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    fn assert_import_attributes_alias_block_shape(block: &Block, stage: &str) {
+        let rendered = print_block(block);
+        assert!(
+            rendered.contains("let myJson = MyJsonJson;\n\nconsole.log(myJson);"),
+            "expected {stage} to keep the exported JSON alias before the log call, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("let buttonCss = MyCssCss.button;\n\nconsole.log(buttonCss);"),
+            "expected {stage} to keep the exported CSS alias before the log call, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("console.log(MyJsonJson);")
+                && !rendered.contains("console.log(MyCssCss.button);"),
+            "unexpected direct imported-value logging remained at {stage}:\n{rendered}"
+        );
     }
 
     fn resolver_with_checked_in_cmj() -> ModulePathResolver {
@@ -17970,12 +18548,27 @@ mod tests {
     }
 
     #[test]
-    fn coerce_toplevel_exports_moves_same_name_export_alias_binding_to_tail_when_reused() {
+    fn coerce_toplevel_exports_moves_same_name_function_alias_binding_to_tail_when_reused() {
         let mut compiler = LambdaCompiler::new();
-        let target = Ident::create_persistent("tToJs");
+        let target = Ident::create_local("tToJs");
         let declared_alias = Ident::create_local("v");
         let exported = Ident::create_local("v");
+        let param = Ident::create_local("param");
         let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
             Statement::variable(VariableDeclaration {
                 ident: declared_alias.clone(),
                 value: Some(Expression::var(target.clone())),
@@ -17999,10 +18592,24 @@ mod tests {
         let exports = resolve_export_aliases(&block, exports);
 
         assert_eq!(exports, vec![exported.clone()]);
-        let [first, second] = block.as_slice() else {
-            panic!("expected the internal use plus the late export alias binding");
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the function binding, internal use, and late export alias binding");
         };
         match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&target));
+            }
+            other => panic!("expected the function binding to remain first, got {other:?}"),
+        };
+        match &second.desc {
             StatementDesc::Exp(Expression {
                 desc: ExpressionDesc::Call(func, args, _),
                 ..
@@ -18023,9 +18630,9 @@ mod tests {
                     ),
                 }
             }
-            other => panic!("expected the internal call to remain first, got {other:?}"),
+            other => panic!("expected the internal call to remain second, got {other:?}"),
         }
-        match &second.desc {
+        match &third.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
                 value:
@@ -18040,8 +18647,164 @@ mod tests {
                 assert!(rebound_target.same(&target));
                 assert_eq!(*property, LetKind::Alias);
             }
-            other => panic!("expected the late export alias binding second, got {other:?}"),
+            other => panic!("expected the late export alias binding third, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_function_alias_chain_to_tail_using_underlying_target()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let target = Ident::create_local("tToJs");
+        let renamed_same_name = Ident::create_local("tToJs");
+        let declared_alias = Ident::create_local("v");
+        let exported = Ident::create_local("v");
+        let param = Ident::create_local("param");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: renamed_same_name.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: declared_alias.clone(),
+                value: Some(Expression::var(renamed_same_name)),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(declared_alias.clone()),
+                vec![Expression::string("a")],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(declared_alias)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third, fourth] = block.as_slice() else {
+            panic!(
+                "expected the original function, renamed alias, internal call, and late export alias"
+            );
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&target)),
+            other => panic!("expected the underlying function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(rebound_target)),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.name() == target.name());
+                assert!(rebound_target.same(&target));
+            }
+            other => panic!("expected the renamed same-name alias second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the internal call to keep one argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                    other => panic!("expected the internal call arg to stay as \"a\", got {other:?}"),
+                }
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
+                    other => panic!(
+                        "expected the internal call to collapse through the renamed self-alias, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the internal call third, got {other:?}"),
+        }
+        match &fourth.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(rebound_target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(rebound_target.same(&target));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late export alias binding fourth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_export_aliases_prefers_underlying_declared_same_name_target_over_self_alias() {
+        let target = Ident::create_local("tToJs");
+        let exported = Ident::create_local("tToJs");
+        let param = Ident::create_local("param");
+        let block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        assert_eq!(resolve_export_aliases(&block, vec![exported]), vec![target]);
     }
 
     #[test]
@@ -18210,6 +18973,208 @@ mod tests {
                 }
             }
             other => panic!("expected the Y initializer to stay intact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level_effect() {
+        let mut compiler = LambdaCompiler::new();
+        let imported = Ident::create_persistent("MyJsonJson");
+        let sink = Ident::create_persistent("sink");
+        let exported = Ident::create_local("myJson");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(imported.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink),
+                vec![Expression::var(exported.clone())],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the alias binding to stay ahead of the top-level effect");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&imported));
+            }
+            other => panic!("expected the imported alias binding to remain first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(_, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the top-level effect to keep one argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&exported)),
+                    other => panic!(
+                        "expected the top-level effect to keep using the alias binding, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the effect statement to remain second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_function_target() {
+        let mut compiler = LambdaCompiler::new();
+        let process = Ident::create_local("process");
+        let exported = Ident::create_local("proc");
+        let global_this = Ident::create_persistent("globalThis");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: process.clone(),
+                value: Some(Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(Expression::var(global_this)),
+                    "process".to_string(),
+                    None,
+                ))),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(process.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected both non-function aliases to stay materialized");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&process));
+            }
+            other => panic!("expected the source alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&process));
+            }
+            other => panic!("expected the exported alias binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_value_effect() {
+        let mut compiler = LambdaCompiler::new();
+        let module = ModuleId {
+            id: Ident::create_persistent("MyJsonJson"),
+            kind: Kind::External {
+                name: "./myJson.json".to_string(),
+                default: true,
+                import_attributes: Some(JsImportAttributes {
+                    entries: vec![
+                        ("type".to_string(), "json".to_string()),
+                        ("some-identifier".to_string(), "yep".to_string()),
+                    ],
+                }),
+            },
+            dynamic_import: false,
+        };
+        let exported = Ident::create_local("myJson");
+        let sink = Ident::create_persistent("sink");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::qualified(
+                    module.clone(),
+                    Some("default".to_string()),
+                )),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink),
+                vec![Expression::var(exported.clone())],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::qualified(module, Some("default".to_string()))],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the qualified alias binding to remain ahead of the value-position effect");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&exported));
+            }
+            other => panic!("expected the qualified alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(_, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the later effect to keep one argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&exported)),
+                    other => panic!(
+                        "expected the later effect to keep using the alias binding, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the effect statement second, got {other:?}"),
         }
     }
 
@@ -22296,6 +23261,62 @@ mod tests {
     }
 
     #[test]
+    fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_pipeline() {
+        let lam = import_attributes_lowered_lambda();
+        let simplified = crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(
+            &lam, false,
+        );
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr(&simplified);
+        let mut block = compiled.prelude;
+        let exports = extract_toplevel_exports(compiled.expr, &mut block)
+            .expect("expected ImportAttributes-style lambda to end in a module export block");
+        assert_import_attributes_alias_block_shape(&block, "after export extraction");
+
+        let exports = compiler.coerce_toplevel_exports(&mut block, exports);
+        let exports = resolve_export_aliases(&block, exports);
+        let program = Program::new(block, exports);
+        assert_import_attributes_alias_block_shape(&program.block, "after top-level export coercion");
+
+        let deps = apply_js_flatten_pass(DepsProgram {
+            program,
+            modules: vec![],
+            side_effect: module_side_effect_reason(&simplified),
+        });
+        assert_import_attributes_alias_block_shape(&deps.program.block, "after js_flatten");
+
+        let deps = apply_external_shadow_pass(deps);
+        assert_import_attributes_alias_block_shape(&deps.program.block, "after external_shadow");
+
+        let deps = apply_js_tailcall_inline_pass(deps);
+        assert_import_attributes_alias_block_shape(&deps.program.block, "after tailcall_inline");
+
+        let deps = apply_js_flatten_and_mark_dead_pass(deps, false);
+        assert_import_attributes_alias_block_shape(&deps.program.block, "after flatten_and_mark_dead");
+
+        let deps = apply_js_shake_pass(deps);
+        assert_import_attributes_alias_block_shape(&deps.program.block, "after js_shake");
+    }
+
+    #[test]
+    fn import_attributes_keeps_exported_alias_bindings_before_log_calls_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("ImportAttributes");
+        assert!(
+            output.contains("let myJson = MyJsonJson;\n\nconsole.log(myJson);"),
+            "expected ImportAttributes to keep the exported JSON alias binding ahead of the log call, got:\n{output}"
+        );
+        assert!(
+            output.contains("let buttonCss = MyCssCss.button;\n\nconsole.log(buttonCss);"),
+            "expected ImportAttributes to keep the exported CSS alias binding ahead of the log call, got:\n{output}"
+        );
+        assert!(
+            !output.contains("console.log(MyJsonJson);")
+                && !output.contains("console.log(MyCssCss.button);"),
+            "unexpected direct imported-value logging remained in ImportAttributes:\n{output}"
+        );
+    }
+
+    #[test]
     fn bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
         assert!(
@@ -22325,6 +23346,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("inline_string_test");
+        assert!(
+            output.contains("function f(x) {\n  if (x !== undefined) {\n    return \"Some\";\n  } else {\n    return \"None\";\n  }\n}"),
+            "expected inline_string_test to keep the named matcher function materialized, got:\n{output}"
+        );
+        assert!(
+            output.contains("console.log([\n  f(3),\n  \"None\",\n  \"Some\"\n]);"),
+            "expected inline_string_test to keep the alias-substituted `f(3)` call while inlining only the direct constant cases, got:\n{output}"
+        );
+        assert!(
+            !output.contains("console.log([\n  \"Some\",\n  \"None\",\n  \"Some\"\n]);"),
+            "unexpected full constant inlining remained in inline_string_test:\n{output}"
+        );
+    }
 
     #[test]
     fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
