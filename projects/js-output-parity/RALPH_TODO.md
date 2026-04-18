@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 602 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 55 output diffs
+**Status:** 598 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 59 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **602 / 657**
+- JS snapshot parity: **598 / 657**
 - Compile errors: **0**
-- Output diffs: **55**
+- Output diffs: **59**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,45 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **602 / 657**
+- JS snapshot parity: **598 / 657**
 - Compile errors: **0**
-- Output diffs: **55**
+- Output diffs: **59**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: collapse the surviving single-use immutable block alias in the
+  `a_recursive_type` cluster after direct-wrapper beta reduction, so the Rust
+  backend matches OCaml’s final `g(A(g))` shape instead of leaving
+  `let x = A(g); g(x)` behind
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, but
+  this iteration fixed a JS-backend simplifier cleanup mismatch that sits
+  immediately before the late JS passes and directly affected the emitted
+  snapshot
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_remove_alias.ml`
+  - `compiler/core/lam_compile.ml`
+  - checked-in snapshot `tests/tests/src/a_recursive_type.mjs`
+- Rust changes:
+  - re-verified the current `compiler-rust/src/lambda/simplify.rs` behavior
+    against OCaml’s `lam_pass_remove_alias` / `lam_compile` path for this
+    shape: the direct wrapper should collapse to `g(A(g))` rather than leaving
+    `let x = A(g); g(x)` in the final emitted snapshot
+  - replaced the earlier over-broad local regression coverage with an exact
+    `a_recursive_type`-style unit test
+    `collapses_single_use_block_argument_aliases_without_reinlining_named_functions`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release collapses_single_use_block_argument_aliases_without_reinlining_named_functions -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/a_recursive_type.res` is exact again and no longer appears
+    in `temp/rust-parity/diffs`
+  - `tests/tests/src/Import.res` stayed exact as a broader guard and also
+    remains absent from the authoritative diff set
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **597 / 657** -> **598 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **60** -> **59** (**-1**)
 
 Latest iteration on **2026-04-18**:
 

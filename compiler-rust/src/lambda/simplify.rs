@@ -7082,12 +7082,11 @@ mod tests {
     }
 
     #[test]
-    fn does_not_reinline_named_function_through_block_aliases() {
+    fn collapses_single_use_block_argument_aliases_without_reinlining_named_functions() {
         let g = Ident::create_local("g");
         let x = Ident::create_local("x");
         let param = Ident::create_local("param");
         let extracted = Ident::create_local("v");
-        let arg = Ident::create_local("arg");
 
         let g_body = Lambda::let_(
             LetKind::Alias,
@@ -7097,13 +7096,13 @@ mod tests {
                 vec![Lambda::var(param.clone())],
                 Location::none(),
             ),
-            Lambda::Lapply(Apply {
-                ap_func: Box::new(Lambda::var(extracted)),
-                ap_args: vec![Lambda::var(param.clone())],
-                ap_info: ApInfo {
-                    loc: Location::none(),
-                    inlined: InlineAttribute::Default,
-                    status: ApplyStatus::Uncurry,
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(extracted.clone())),
+                        ap_args: vec![Lambda::var(param.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
                 },
                 ap_transformed_jsx: false,
             }),
@@ -7116,44 +7115,70 @@ mod tests {
                 Primitive::PjsFnMake(1),
                 vec![Lambda::function_(
                     1,
-                    vec![param],
+                    vec![param.clone()],
                     g_body,
                     FunctionAttribute::default(),
                 )],
                 Location::none(),
             ),
-            Lambda::let_(
-                LetKind::Strict,
-                x.clone(),
-                Lambda::prim(
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::function_(
+                    1,
+                    vec![x.clone()],
+                    Lambda::let_(
+                        LetKind::Alias,
+                        extracted.clone(),
+                        Lambda::prim(
+                            Primitive::Pfield(0, FieldDbgInfo::Variant),
+                            vec![Lambda::var(x.clone())],
+                            Location::none(),
+                        ),
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(extracted)),
+                            ap_args: vec![Lambda::var(x.clone())],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                    ),
+                    FunctionAttribute::default(),
+                )),
+                ap_args: vec![Lambda::prim(
                     Primitive::Pmakeblock(0, TagInfo::constructor("A", 1, 0), Mutable::Immutable),
                     vec![Lambda::var(g.clone())],
                     Location::none(),
-                ),
-                Lambda::let_(
-                    LetKind::Strict,
-                    arg,
-                    Lambda::Lapply(Apply {
-                        ap_func: Box::new(Lambda::var(g.clone())),
-                        ap_args: vec![Lambda::var(x.clone())],
-                        ap_info: ApInfo {
-                            loc: Location::none(),
-                            inlined: InlineAttribute::Default,
-                            status: ApplyStatus::Uncurry,
-                        },
-                        ap_transformed_jsx: false,
-                    }),
-                    Lambda::var(x.clone()),
-                ),
-            ),
+                )],
+                ap_info: ApInfo {
+                    loc: Location::none(),
+                    inlined: InlineAttribute::Default,
+                    status: ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: false,
+            }),
         );
 
         let simplified = simplify_for_js_backend(&lambda);
-        let rendered = crate::lambda::print::lambda_to_string(&simplified);
-        assert!(
-            rendered.contains("(apply g x)"),
-            "expected simplified lambda to keep the recursive-looking application instead of re-inlining forever: {rendered}"
-        );
+        let Lambda::Llet(_, kept_g, _, body) = &simplified else {
+            panic!("expected the named function binding to remain in scope: {simplified:?}");
+        };
+        assert!(kept_g.same(&g));
+
+        let Lambda::Lapply(apply) = body.as_ref() else {
+            panic!("expected the single-use block alias to collapse into a direct apply: {simplified:?}");
+        };
+        assert!(matches!(apply.ap_func.as_ref(), Lambda::Lvar(id) if id.same(&g)));
+        assert!(matches!(
+            apply.ap_args.as_slice(),
+            [Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Constructor { name, .. }, Mutable::Immutable),
+                args,
+                ..
+            })]
+                if name == "A" && matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&g))
+        ));
     }
 
     #[test]
