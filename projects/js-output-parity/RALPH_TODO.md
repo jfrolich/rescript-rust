@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 68 output diffs
+**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 65 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **65**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,53 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **589 / 657**
+- JS snapshot parity: **592 / 657**
 - Compile errors: **0**
-- Output diffs: **68**
+- Output diffs: **65**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: keep the `@obj` external accumulator object materialized before
+  any complex optional-field temp bindings, matching OCaml's
+  `lam_compile_external_obj` named-expression order instead of hoisting those
+  temps ahead of the object literal
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend `@obj` lowering / temp-materialization order
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_compile_external_obj.ml`
+  - `compiler/core/js_ast_util.ml`
+  - checked-in snapshots `tests/tests/src/gpr_2503_test.mjs` and
+    `tests/tests/src/gpr_1409_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, rewrote
+    `compile_js_object_create(...)` so optional-field assignments first collect
+    pending work, then create the result object temp, then emit any
+    non-duplicable optional-value temp bindings and conditional assignments in
+    OCaml order
+  - switched that object-temp path from ad hoc `obj` prefixes to the shared
+    `tmp` ident sequence and matched OCaml's `named_expression` temp mutability
+    more closely by using `LetKind::Strict` for the prepared optional-value temp
+  - added focused regression coverage for the generic lowering shape and a
+    checked-in JS snapshot regression for `gpr_2503_test`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::lowers_js_object_create_with_nonduplicable_optional_field_after_object_temp_like_ocaml' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::gpr_2503_test_keeps_obj_external_accumulator_before_optional_value_temp_like_snapshot' -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_2503_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_1409_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_2503_test.res` is exact again; Rust now emits the
+    OCaml-style `let tmp = {}; let tmp$1 = ...; if (tmp$1 !== undefined) {
+    tmp.foo = ... }` ordering for complex optional `@obj` fields instead of
+    hoisting the optional temp before the accumulator object
+  - `tests/tests/src/gpr_1409_test.res` is also exact again; the same fix keeps
+    `make`, `test5`, and `test6` on the accumulator-first path, preserving both
+    object materialization order and the checked-in `tmp` naming shape
+  - the authoritative current dirty-worktree baseline improved from
+    **589 / 657** to **592 / 657**, with output diffs reduced from **68** to
+    **65** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 
