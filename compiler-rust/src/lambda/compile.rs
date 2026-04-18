@@ -14679,10 +14679,29 @@ fn move_same_name_export_alias_to_export_tail(
         prefer_materialized_root,
     );
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
+    let binding_is_direct_literal = matches!(
+        &initializer.desc,
+        ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null
+    );
+    let binding_is_local_alias = matches!(&initializer.desc, ExpressionDesc::Var(VIdent::Id(_)));
+    let later_initializer_mentions_target =
+        later_toplevel_initializer_mentions_ident(remaining, target);
     let blocked_by_literal_binding =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && (!matches!(property, LetKind::Alias)
                 || !has_later_toplevel_function_binding(&flattened[index + 1..]));
+    let blocked_by_direct_literal_reuse =
+        matches!(initializer_kind, TailMoveInitializerKind::Literal)
+            && binding_is_direct_literal
+            && later_initializer_mentions_target;
+    let blocked_by_literal_alias_without_materialized_root =
+        matches!(initializer_kind, TailMoveInitializerKind::Literal)
+            && binding_is_local_alias
+            && !prefer_materialized_root;
     let blocked_by_variable = matches!(property, LetKind::Variable);
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
@@ -14698,6 +14717,8 @@ fn move_same_name_export_alias_to_export_tail(
         !later_toplevel_effect_allows_tail_move(remaining, target, initializer_kind, &replacement);
     if blocked_by_variable
         || blocked_by_literal_binding
+        || blocked_by_direct_literal_reuse
+        || blocked_by_literal_alias_without_materialized_root
         || blocked_by_kind
         || blocked_by_effects
         || blocked_by_self_mention
@@ -25141,6 +25162,25 @@ mod tests {
                 && !output.contains("singleton$1 as singleton")
                 && !output.contains("of_sorted_list$1 as of_sorted_list"),
             "unexpected rebound export aliases remained in string_set:\n{output}"
+        );
+    }
+
+    #[test]
+    fn string_bound_get_test_keeps_direct_literal_export_binding_before_internal_uses_like_snapshot(
+    ) {
+        let output = compile_checked_in_test_file_to_js("string_bound_get_test");
+        assert!(
+            output.contains("let v = \"ghos\";\n\nlet u_a = v[0];")
+                && output.contains("function u_b() {\n  return v[-1];\n}")
+                && output.find("let v = \"ghos\";").is_some()
+                && output.find("let u_a = v[0];").is_some()
+                && output.find("let v = \"ghos\";").unwrap()
+                    < output.find("let u_a = v[0];").unwrap(),
+            "expected string_bound_get_test to keep the direct literal export binding ahead of later internal uses like OCaml, got:\n{output}"
+        );
+        assert!(
+            !output.contains("function u_b() {\n  return \"ghos\"[-1];\n}"),
+            "unexpected literal inlining of the exported binding into string_bound_get_test.u_b:\n{output}"
         );
     }
 

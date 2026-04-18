@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 72 output diffs
+**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 69 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **69**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,58 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **585 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **72**
+- Output diffs: **69**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: block the OCaml-incorrect same-name literal export tail move
+  when later top-level initializers still read the declared binding, and keep
+  literal alias bindings in place when there is no surviving materialized root
+  to rewrite through; this was the remaining export-tail cluster behind
+  `string_bound_get_test` and part of `test_fib`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / final statement ordering
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/string_bound_get_test.mjs`,
+    `tests/tests/src/test_fib.mjs`,
+    `tests/tests/src/Coercion.mjs`, and
+    `tests/tests/src/VariantCoercion.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, taught
+    `move_same_name_export_alias_to_export_tail(...)` to keep direct literal
+    same-name export bindings ahead of later top-level initializer uses of that
+    binding instead of collapsing those later reads back to the literal
+  - kept pure same-name literal alias bindings in place when there is no
+    materialized root left to rewrite through, matching the OCaml export-tail
+    behavior more closely on the remaining literal-alias cluster
+  - added checked-in snapshot regression coverage in
+    `string_bound_get_test_keeps_direct_literal_export_binding_before_internal_uses_like_snapshot`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml string_bound_get_test_keeps_direct_literal_export_binding_before_internal_uses_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh string_bound_get_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh Coercion --diff`
+  - `timeout 30 ./scripts/test_js_single.sh VariantCoercion --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_fib --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/string_bound_get_test.res` is exact again; Rust now keeps
+    `let v = "ghos";` ahead of `u_a` / `u_b` and no longer inlines that
+    exported literal into the later internal bindings
+  - `tests/tests/src/Coercion.res` and `VariantCoercion.res` stayed exact, so
+    the narrowed literal blocker preserves the earlier verified export-tail
+    fixes instead of reopening that cluster
+  - `tests/tests/src/test_fib.res` narrowed to the separate remaining
+    `let b = fib;` ordering drift, while `async_inline.res` remains a distinct
+    same-name function-wrapper/export-tail issue outside this literal slice
+  - the authoritative current dirty-worktree baseline improved from
+    **585 / 657** to **588 / 657**, with output diffs reduced from **72** to
+    **69** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 
