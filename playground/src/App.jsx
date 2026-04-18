@@ -87,8 +87,10 @@ let treeJson = encode(myTree)
 // ── 2. Decoder returning result<t, string> ──────────────────────────────
 // The decoder has no value to infer from, so it takes a comptime type
 // parameter: decode(user, json) specializes to decode$user. It returns
-// \`result<t, string>\` — no throws. For records, each field is decoded and
-// the first Error short-circuits through a mutable \`err\` ref.
+// \`result<t, string>\` — no throws escape the function. For records, each
+// field is decoded and the first Error short-circuits via a local exception.
+
+exception DecodeErr(string)
 
 @comptime
 let rec decode = (type t, json: JSON.t): result<t, string> => {
@@ -101,21 +103,14 @@ let rec decode = (type t, json: JSON.t): result<t, string> => {
     switch json { | Boolean(b) => Ok(b) | _ => Error("expected bool") }
   | Record({fields}) =>
     switch json {
-    | Object(dict) => {
-        let err = ref(None)
-        let values = fields->Array.map(field =>
-          switch decode(field.typ, Dict.getUnsafe(dict, field.name)) {
-          | Ok(v) => v
-          | Error(e) => {
-              if err.contents == None { err := Some(e) }
-              %raw(\`null\`)
-            }
-          }
-        )
-        switch err.contents {
-        | None => Ok(@record(t, values))
-        | Some(e) => Error(e)
+    | Object(dict) =>
+      try Ok(@record(t, fields->Array.map(field =>
+        switch decode(field.typ, Dict.getUnsafe(dict, field.name)) {
+        | Ok(v) => v
+        | Error(e) => throw(DecodeErr(e))
         }
+      ))) catch {
+      | DecodeErr(e) => Error(e)
       }
     | _ => Error("expected object")
     }
@@ -124,11 +119,29 @@ let rec decode = (type t, json: JSON.t): result<t, string> => {
     | Array(items) =>
       switch items[0] {
       | Some(String(name)) => {
-          let result = ref(Error("unknown variant: " ++ name))
-          constructors->Array.forEach(c => {
-            if name == c.name { result := Ok(@constructor(t, c.name)) }
-          })
-          result.contents
+          let matched = ref(None)
+          try {
+            constructors->Array.forEach(c => {
+              if name == c.name {
+                matched := Some(@constructor(t, c.name, c.args->Array.mapWithIndex((argType, i) =>
+                  switch items[i + 1] {
+                  | Some(argJson) =>
+                    switch decode(argType, argJson) {
+                    | Ok(v) => v
+                    | Error(e) => throw(DecodeErr(e))
+                    }
+                  | None => throw(DecodeErr("missing arg"))
+                  }
+                )))
+              }
+            })
+            switch matched.contents {
+            | Some(v) => Ok(v)
+            | None => Error("unknown variant: " ++ name)
+            }
+          } catch {
+          | DecodeErr(e) => Error(e)
+          }
         }
       | _ => Error("expected [name, ...] array")
       }

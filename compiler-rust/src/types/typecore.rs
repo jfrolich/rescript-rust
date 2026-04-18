@@ -22003,6 +22003,49 @@ pub fn as_comptime_loop_indexed(
     let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
     let funct_expr = arena.get_expr(*funct);
 
+    // Pipe form: `coll->Array.mapWithIndex(lambda)` parses as `(->)(coll,
+    // Array.mapWithIndex(lambda))`. Unwrap one level so the direct-call
+    // matcher below can recognize it. Mirrors `as_comptime_loop`.
+    if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+        let longident = arena.get_longident(lid.txt);
+        if longident.is_simple() && arena.get_string(longident.last_idx()) == "->" && args.len() == 2 {
+            let coll_idx = args[0].1;
+            let rhs_expr = arena.get_expr(args[1].1);
+            if let ED::Pexp_apply(rhs_inner) = &*rhs_expr.pexp_desc {
+                let crate::parser::ast::PexpApply {
+                    funct: rhs_funct,
+                    args: rhs_args,
+                    ..
+                } = &**rhs_inner;
+                let rhs_funct_expr = arena.get_expr(*rhs_funct);
+                let is_indexed = if let ED::Pexp_ident(flid) = &*rhs_funct_expr.pexp_desc {
+                    let flid_li = arena.get_longident(flid.txt);
+                    let last_name = arena.get_string(flid_li.last_idx());
+                    if last_name != "mapWithIndex" && last_name != "forEachWithIndex" {
+                        false
+                    } else {
+                        let parts: Vec<String> = flid_li.flatten_idx().iter()
+                            .map(|idx| arena.get_string(*idx).to_string())
+                            .collect();
+                        parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
+                    }
+                } else {
+                    false
+                };
+                if is_indexed && rhs_args.len() == 1 {
+                    let lambda_expr = arena.get_expr(rhs_args[0].1);
+                    if let ED::Pexp_fun(outer_fun) = &*lambda_expr.pexp_desc {
+                        let elem_pat = outer_fun.lhs;
+                        let inner_expr = arena.get_expr(outer_fun.rhs);
+                        if let ED::Pexp_fun(inner_fun) = &*inner_expr.pexp_desc {
+                            return Some((elem_pat, inner_fun.lhs, coll_idx, inner_fun.rhs));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let is_indexed = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
         let longident = arena.get_longident(lid.txt);
         let last_name = arena.get_string(longident.last_idx());

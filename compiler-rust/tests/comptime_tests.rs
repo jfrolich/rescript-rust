@@ -504,7 +504,6 @@ let rect: shape = make(shape)
 }
 
 #[test]
-#[ignore = "blocked on ref(None) + Some + switch result.contents + @comptime type-param interaction (UndefinedMethod: 'shape')"]
 fn comptime_constructor_multi_arg_with_map_with_index() {
     // Build a multi-arg constructor using Array.mapWithIndex over c.args —
     // the decoder pattern.
@@ -519,7 +518,7 @@ let make = (type t) => {
     let result = ref(None)
     let _ = constructors
     result := Some(@constructor(t, "Rectangle", [3.0, 4.0]))
-    switch result.contents { | Some(v) => v | None => @compileError("no ctor") }
+    switch result.contents { | Some(v) => v | None => failwith("no ctor") }
   | _ => @compileError("unsupported")
   }
 }
@@ -556,7 +555,6 @@ let p: pair = @constructor(pair, "Pair", [42, "hello"])
 }
 
 #[test]
-#[ignore = "blocked on ref(None) + Some + switch result.contents + @comptime type-param interaction (UndefinedMethod: 'shape')"]
 fn comptime_constructor_multi_arg_decoder() {
     // Decode a JSON array into a multi-arg variant via
     // @constructor(t, name, c.args->Array.mapWithIndex(...)).
@@ -2057,3 +2055,4 @@ let upperStr = upperCase("Bla")
         Err(e) => panic!("compile failed: {e}"),
     }
 }
+
