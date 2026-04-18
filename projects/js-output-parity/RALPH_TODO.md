@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 69 output diffs
+**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 70 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **70**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,59 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **587 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **70**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: collapse rebound same-name export aliases back onto an earlier
+  declared placeholder after top-level export-initializer rewriting, which was
+  the live dirty-worktree regression behind `offset` after the measured
+  baseline had slipped to **586 / 657** with **71** output diffs
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export-alias resolution / placeholder reuse
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/offset.mjs`,
+    `tests/tests/src/async_inline.mjs`, and
+    `tests/tests/src/coercion_module_alias_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, moved
+    `rewrite_toplevel_variable_initializers_through_rewriteable_aliases(...)`
+    ahead of the final `resolve_export_aliases(...)` call so rebound export
+    bindings are resolved using their post-rewrite initializer shape
+  - removed the overly conservative `resolve_export_alias(...)` early return
+    for declared exports so a declared same-name alias can still collapse onto
+    an earlier declared target when that alias chain is OCaml-aligned
+  - widened `resolve_declared_same_name_self_alias_target(...)` to allow
+    already-declared placeholder targets without requiring an initializer, and
+    tightened the checked-in `offset` regression guard to reject the rebound
+    `$$Set$1 as $$Set` shape explicitly
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml async_inline_keeps_same_name_export_alias_for_eta_reduced_async_wrapper_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh offset --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 30 ./scripts/test_js_single.sh coercion_module_alias_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/offset.res` is exact again and no longer appears under
+    `temp/rust-parity/diffs`; Rust now reuses the earlier declared `$$Set`
+    placeholder directly instead of emitting the OCaml-incorrect rebound export
+    alias `let $$Set$1 = $$Set; export { $$Set$1 as $$Set }`
+  - broader guard `tests/tests/src/async_inline.res` stayed in its pre-existing
+    top-level binding-order diff, so this export-resolution change did not
+    collapse the intentional same-name async wrapper alias that snapshot still
+    requires
+  - `tests/tests/src/coercion_module_alias_test.res` remains a deeper module-
+    alias / top-level ordering cluster; the final `C` / `C$p` export alias
+    rebound is still present there alongside unrelated ordering drift
+  - the authoritative current dirty-worktree baseline improved from
+    **586 / 657** to **587 / 657**, with output diffs reduced from **71** to
+    **70** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 

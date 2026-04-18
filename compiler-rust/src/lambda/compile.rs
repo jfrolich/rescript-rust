@@ -342,8 +342,8 @@ impl LambdaCompiler {
         } else {
             vec![]
         };
-        let exports = resolve_export_aliases(&block, exports);
         rewrite_toplevel_variable_initializers_through_rewriteable_aliases(&mut block, &exports);
+        let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
         let mut deps = apply_js_flatten_and_mark_dead_pass(
@@ -9230,7 +9230,7 @@ fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -
     .desc
     {
         ExpressionDesc::Var(VIdent::Id(target))
-            if !target.same(export) && block_declares_initialized_ident(block, &target) =>
+            if !target.same(export) && block_declares_ident(block, &target) =>
         {
             Some(target)
         }
@@ -9276,6 +9276,15 @@ fn block_declares_initialized_ident(block: &Block, target: &Ident) -> bool {
         }
         _ => None,
     }) == Some(true)
+}
+
+fn block_declares_ident(block: &Block, target: &Ident) -> bool {
+    block.iter().any(|stmt| {
+        matches!(
+            &stmt.desc,
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(target)
+        )
+    })
 }
 
 fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
@@ -9655,10 +9664,6 @@ fn resolve_export_alias(
     aliases: &HashMap<Ident, Ident>,
     declared: &HashSet<Ident>,
 ) -> Ident {
-    if declared.contains(export) {
-        return export.clone();
-    }
-
     let mut current = export.clone();
     let mut seen = HashSet::new();
 
@@ -25226,8 +25231,10 @@ mod tests {
             "expected offset to keep the exported module alias placeholder before M, got:\n{output}"
         );
         assert!(
-            !output.contains("$$Set: undefined"),
-            "unexpected inlined undefined module alias field remained in offset:\n{output}"
+            !output.contains("$$Set: undefined")
+                && !output.contains("let $$Set$1 = $$Set;")
+                && !output.contains("$$Set$1 as $$Set"),
+            "unexpected placeholder-field inlining or rebound export alias remained in offset:\n{output}"
         );
     }
 
