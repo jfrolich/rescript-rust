@@ -2056,3 +2056,38 @@ let upperStr = upperCase("Bla")
     }
 }
 
+#[test]
+fn comptime_unhandled_field_type_errors() {
+    // An encoder with only a Record arm and a @compileError fallthrough must
+    // fail at compile time when a field has an unhandled type (here: string)
+    // — not silently emit a bare unspecialized `encode(...)` call.
+    let source = r#"
+type person = {name: string}
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | Record({fields}) =>
+    JSON.Encode.object(Primitive_dict.make(fields->Array.map(field => {
+      (field.name, encode(@field(value, field.name)))
+    })))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let person = {name: "Jaap"}
+let bla = encode(person)
+"#;
+    let result = compile_with_stdlib(source, "unhandled_field_type.res");
+    match result {
+        Ok(output) => panic!(
+            "expected @compileError to propagate, but compilation succeeded:\n{output}"
+        ),
+        Err(e) => {
+            assert!(
+                e.contains("@compileError") && e.contains("encode: unsupported type"),
+                "expected @compileError message, got: {e}"
+            );
+        }
+    }
+}

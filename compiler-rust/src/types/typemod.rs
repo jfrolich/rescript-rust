@@ -9331,7 +9331,12 @@ fn type_structure_item<'a>(
             // OCaml: enter_type only adds placeholders for Recursive types.
             // For Nonrecursive, types refer to previous definitions (e.g., opened types).
             let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
-            let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
+            // ReScript type decls allow self-reference even without an explicit `rec`
+            // keyword (which doesn't exist for types at the surface). Single
+            // `type tree = { children: array<tree> }` self-references `tree`.
+            // Always predeclare so the body's recursive refs find the real stamp.
+            let needs_placeholder = true;
+            let _ = rec_flag;
             for decl in decls.iter() {
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);

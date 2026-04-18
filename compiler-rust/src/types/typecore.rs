@@ -21589,7 +21589,11 @@ fn try_comptime_application(
 
             Some(Ok(make_comptime_call(tctx, &gen_name, &gen_ident, &runtime_args, expected_ty)))
         }
-        Err(_) => None,
+        // Specialization already committed (monomorph_cache.begin ran, args typed).
+        // Propagate body errors — e.g. `@compileError` from an unhandled @typeInfo arm —
+        // instead of silently falling back to regular function dispatch, which would
+        // emit a bare reference to the unspecialized comptime function.
+        Err(e) => Some(Err(e)),
     }
 }
 
