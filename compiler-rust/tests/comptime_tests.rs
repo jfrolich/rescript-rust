@@ -2091,3 +2091,67 @@ let bla = encode(person)
         }
     }
 }
+
+#[test]
+fn comptime_newtype_param_auto_registers() {
+    // A `let` with a `(type t)` param is comptime-specialized without an
+    // explicit `@comptime` attribute. Each call produces a specialized
+    // `encode$<type>` function.
+    let source = r#"
+type user = { name: string, age: int }
+
+let rec encode = (type t, value: t): JSON.t => {
+  switch @typeInfo(t) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    fields->Array.forEach(field => {
+      Dict.set(dict, field.name, encode(field.typ, @field(value, field.name)))
+    })
+    JSON.Encode.object(dict)
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {name: "Alice", age: 30}
+let aliceJson = encode(user, alice)
+"#;
+    match compile_with_stdlib(source, "newtype_auto_register.res") {
+        Ok(output) => {
+            assert!(
+                output.contains("encode$user"),
+                "expected encode$user specialization, got:\n{output}"
+            );
+        }
+        Err(e) => panic!("should compile without @comptime attr: {e}"),
+    }
+}
+
+#[test]
+fn comptime_type_decl_from_function_call() {
+    // `type foo = partial(user)` — the type declaration's manifest is a call
+    // to a @comptime type-builder function. The compiler evaluates the call
+    // and replaces the type body with the built type.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+@comptime
+let partial = (type t) =>
+  switch @typeInfo(t) {
+  | Record({fields}) =>
+    @buildRecord(fields->Array.map(field => @recordField({...field, optional: true})))
+  | _ => @compileError("partial: expected record")
+  }
+
+type partialUser = partial(user)
+
+let patch: partialUser = { name: "Alice" }
+"#;
+    let output = compile_with_stdlib(source, "type_decl_call.res")
+        .expect("type foo = partial(user) should compile");
+    // Only `name` is supplied; the other fields must be optional for this to
+    // type-check. The emitted JS is a plain object literal.
+    assert!(output.contains(r#"name: "Alice""#), "Expected patch with name: {output}");
+    assert!(!output.contains("age"), "Other fields shouldn't be required: {output}");
+}

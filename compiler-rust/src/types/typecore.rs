@@ -23369,7 +23369,7 @@ fn substitute_ident(
 
 /// Extract parameter info and innermost body from a function parse tree.
 /// Handles both `Pexp_fun` (value params) and `Pexp_newtype` (type params).
-fn extract_function_params_and_body<'a>(
+pub fn extract_function_params_and_body<'a>(
     expr: &'a ParsedExpression,
     arena: &'a crate::parse_arena::ParseArena,
 ) -> (Vec<crate::types::comptime::ComptimeParam>, ParsedExpression) {

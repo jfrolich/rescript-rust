@@ -793,33 +793,16 @@ fn parse_type_constr_with_start(
 
     // Parse optional type arguments
     // OCaml: parse_type_constructor_args handles both < and ( as opening tokens
+    // ReScript also accepts `foo(args)` — desugars to `foo<args>`. This lets
+    // a `type bar = partial(user)` manifest route through the comptime type-
+    // builder path without a parser error when `partial` is a @comptime
+    // function.
     let args = if p.token == Token::LessThan || p.token == Token::Lparen {
         let opening = p.token.clone();
-        let opening_start_pos = p.start_pos.clone();
         p.set_diamond_mode();
         p.next();
         let args = parse_type_args(p);
         if p.token == Token::Rparen && opening == Token::Lparen {
-            // User wrote parens instead of angle brackets - emit helpful error
-            let path_str = path_parts.join(".");
-            let args_str: Vec<String> = args
-                .iter()
-                .map(|t| match &*t.ptyp_desc {
-                    CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
-                    _ => "_".to_string(),
-                })
-                .collect();
-            let type_str = if args_str.is_empty() {
-                path_str
-            } else {
-                format!("{}<{}>", path_str, args_str.join(", "))
-            };
-            let msg = format!("Type parameters require angle brackets:\n  {}", type_str);
-            p.err_at(
-                opening_start_pos,
-                p.end_pos.clone(),
-                DiagnosticCategory::message(&msg),
-            );
             p.next(); // consume )
         } else {
             p.expect(Token::GreaterThan);

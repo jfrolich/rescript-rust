@@ -186,8 +186,7 @@ let partial = (type t) =>
   | _ => @compileError("partial: expected record")
   }
 
-@comptime
-let partialUser = partial(user)
+type partialUser = partial(user)
 
 let patch: partialUser = { name: "Alice" }
 `;
