@@ -1762,6 +1762,15 @@ fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Blo
         return false;
     }
 
+    // OCaml only preserves the explicit success-arm shape for the loose
+    // `x == null`/`x != null` family. For strict `null`/`undefined`
+    // refinements, js_stmt_make.if_ still applies the generic guard/fallthrough
+    // rewrite, which is the shape used by files like pattern_match_json and
+    // test_zero_nullable.
+    if !is_loose_nullish_refinement_guard(cond) {
+        return false;
+    }
+
     let then_nontrivial_terminal = then_.len() > 1 && block_last_is_return(then_);
     let else_nontrivial_terminal = else_.len() > 1 && block_last_is_return(else_);
     let then_simple_fallback = then_.is_empty() || single_return_expr(then_).is_some();
@@ -1837,6 +1846,32 @@ fn is_nullish_refinement_guard(expr: &Expression) -> bool {
                 }
             ))
         ),
+    }
+}
+
+fn is_loose_nullish_refinement_guard(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::IsNullOrUndefined(inner) => matches!(
+            inner.as_ref(),
+            Expression {
+                desc: ExpressionDesc::Var(_),
+                ..
+            }
+        ),
+        ExpressionDesc::JsNot(inner) => matches!(
+            inner.as_ref(),
+            Expression {
+                desc: ExpressionDesc::IsNullOrUndefined(target),
+                ..
+            } if matches!(
+                target.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(_),
+                    ..
+                }
+            )
+        ),
+        _ => false,
     }
 }
 
@@ -3893,12 +3928,47 @@ mod tests {
 
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
 
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected strict null success guard to stay explicit: {stmt:#?}");
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected strict null success guard to become a negative guard: {stmt:#?}");
         };
-        assert!(ocaml_eq_expression(test, &cond));
-        assert!(ocaml_eq_block(kept_then, &then_block));
-        assert!(ocaml_eq_block(kept_else, &else_block));
+        let [guard, fallthrough, return_stmt] = block.as_slice() else {
+            panic!("expected guard + fallthrough effect + trailing return");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::EqEqEq,
+                        left,
+                        right
+                    ) if matches!(
+                        (&left.desc, &right.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Null
+                        ) if id.same(&elem)
+                    )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Number(Number::Int { i: 1, .. }),
+                            ..
+                        }),
+                        ..
+                    }]
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
+        assert!(matches!(
+            return_stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3958,12 +4028,47 @@ mod tests {
 
         let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
 
-        let StatementDesc::If(test, kept_then, kept_else) = &stmt.desc else {
-            panic!("expected strict undefined success tail to stay positive: {stmt:#?}");
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected strict undefined success tail to become a negative guard: {stmt:#?}");
         };
-        assert!(ocaml_eq_expression(test, &cond));
-        assert!(ocaml_eq_block(kept_then, &then_block));
-        assert!(ocaml_eq_block(kept_else, &else_block));
+        let [guard, fallthrough, return_stmt] = block.as_slice() else {
+            panic!("expected guard + fallthrough effect + trailing return");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::EqEqEq,
+                        left,
+                        right
+                    ) if matches!(
+                        (&left.desc, &right.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Undefined { .. }
+                        ) if id.same(&value)
+                    )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        }),
+                        ..
+                    }]
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
+        assert!(matches!(
+            return_stmt.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -4085,6 +4190,84 @@ mod tests {
                 desc: ExpressionDesc::Number(Number::Int { i: 2, .. }),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_strict_undefined_bound_success_tail_like_pattern_match_json() {
+        let match_id = Ident::create_local("match");
+        let tmp = Ident::create_local("tmp");
+        let cond = Expression::bin(
+            BinOp::NotEqEq,
+            Expression::var(match_id.clone()),
+            Expression::undefined(false),
+        );
+        let then_block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: tmp.clone(),
+                value: Some(Expression::var(match_id.clone())),
+                property: crate::lambda::LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::if_(
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(tmp.clone()),
+                    Expression::null(),
+                ),
+                vec![Statement::return_(Expression::string("yes"))],
+                vec![],
+            ),
+            Statement::return_(Expression::string("no")),
+        ];
+        let else_block = vec![Statement::return_(Expression::string("no"))];
+
+        let stmt = Statement::if_(cond, then_block, else_block);
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected strict undefined success tail to become a fallthrough guard: {stmt:#?}");
+        };
+        let [guard, tmp_decl, nested_if, final_return] = block.as_slice() else {
+            panic!("expected guard + bound temp + nested if + trailing fallback: {stmt:#?}");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::Bin(
+                        BinOp::EqEqEq,
+                        left,
+                        right
+                    ) if matches!(
+                        (&left.desc, &right.desc),
+                        (
+                            ExpressionDesc::Var(VIdent::Id(id)),
+                            ExpressionDesc::Undefined { .. }
+                        ) if id.same(&match_id)
+                    )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Str { txt, .. },
+                            ..
+                        }),
+                        ..
+                    }] if txt == "no"
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(
+            &tmp_decl.desc,
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) if ident.same(&tmp)
+        ));
+        assert!(matches!(&nested_if.desc, StatementDesc::If(_, _, _)));
+        assert!(matches!(
+            &final_return.desc,
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Str { txt, .. },
+                ..
+            }) if txt == "no"
         ));
     }
 

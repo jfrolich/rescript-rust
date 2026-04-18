@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 592 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 65 output diffs
+**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 64 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **64**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,59 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **592 / 657**
+- JS snapshot parity: **593 / 657**
 - Compile errors: **0**
-- Output diffs: **65**
+- Output diffs: **64**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: stop preserving explicit positive success arms for strict
+  `null` / `undefined` refinement guards, so `js_stmt_make.if_` can keep using
+  the OCaml generic guard-plus-fallthrough rewrite for this cluster; this was
+  the remaining direct-control-flow drift behind `pattern_match_json`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in JS-backend `if_` normalization rather than printer
+  formatting
+- OCaml / backend reference:
+  - `compiler/core/js_stmt_make.ml`
+  - checked-in snapshots `tests/tests/src/pattern_match_json.mjs`,
+    `tests/tests/src/test_zero_nullable.mjs`, and
+    `tests/tests/src/big_polyvar_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/js_ir/mod.rs`, narrowed
+    `preserves_nullish_success_guard(...)` so only loose nullish refinement
+    guards (`x == null` / `x != null`) keep the explicit success-arm shape;
+    strict `===` / `!==` checks against `null` or `undefined` now fall back to
+    the generic negative-guard rewrite like OCaml
+  - added `is_loose_nullish_refinement_guard(...)` to separate the loose OCaml
+    preserve case from the strict nullish comparisons that should still
+    normalize
+  - updated the focused `js_ir` unit coverage for the strict-null,
+    strict-undefined, and `pattern_match_json`-style bound-success-tail shapes
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::tests::test_if_statement_keeps_loose_nullish_else_branch_materialized' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::tests::test_if_statement_keeps_positive_strict_null_success_return_branch' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::tests::test_if_statement_keeps_positive_strict_undefined_unit_success_tail' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::tests::test_if_statement_rewrites_strict_undefined_bound_success_tail_like_pattern_match_json' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh pattern_match_json --diff`
+  - `timeout 30 ./scripts/test_js_single.sh test_zero_nullable --diff`
+  - `timeout 30 ./scripts/test_js_single.sh big_polyvar_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/pattern_match_json.res` is exact again; Rust now emits the
+    OCaml-style negative guard plus fallthrough for the strict
+    `!== undefined` outer check instead of preserving an explicit positive
+    success arm
+  - `tests/tests/src/test_zero_nullable.res` dropped the same strict-undefined
+    control-flow drift and now only differs in the separate bottom-of-file
+    binding-name / binding-order cluster
+  - `tests/tests/src/big_polyvar_test.res` stayed in its pre-existing `eq`
+    helper control-flow cluster, so this strict-nullish rewrite did not reopen
+    the broader positive-guard preservation behavior there
+  - the authoritative current dirty-worktree baseline improved from
+    **592 / 657** to **593 / 657**, with output diffs reduced from **65** to
+    **64** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 
