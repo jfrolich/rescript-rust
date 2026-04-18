@@ -31,13 +31,14 @@ type tree = { value: string, children: array<tree> }
 // uniform array<JSON.t>.
 
 // ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
-// encode(alice) produces a specialized encode$user function. Since the
-// JSON.Encode.* helpers are %identity, the output reduces to plain Dict
-// assignments — no runtime type dispatch.
+// Functions with a \`(type t)\` param are comptime-specialized per caller: no
+// function-level \`@comptime\` attribute needed. \`encode(alice)\` infers t=user
+// from alice's type and produces \`encode$user\`; recursive calls infer per
+// field type. JSON.Encode.* are %identity, so output reduces to plain Dict
+// assignments with no runtime type dispatch.
 
-@comptime
-let rec encode = (value): JSON.t => {
-  switch @typeInfo(value) {
+let rec encode = (type t, value: t): JSON.t => {
+  switch @typeInfo(t) {
   | String => JSON.Encode.string(value)
   | Int => JSON.Encode.int(value)
   | Bool => JSON.Encode.bool(value)

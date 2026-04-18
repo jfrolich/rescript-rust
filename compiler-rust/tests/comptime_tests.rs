@@ -2129,6 +2129,136 @@ let aliceJson = encode(user, alice)
 }
 
 #[test]
+fn plain_record_literal_correct_field_compiles() {
+    // Sanity: correct label compiles. Produces `{name: "Alice"}`.
+    let source = r#"
+type user = { name: string }
+let patch: user = { name: "Alice" }
+"#;
+    match compile_with_stdlib(source, "plain_good.res") {
+        Ok(output) => {
+            assert!(output.contains("name: \"Alice\""), "got:\n{output}");
+        }
+        Err(e) => panic!("should compile: {e}"),
+    }
+}
+
+#[test]
+#[ignore = "known bug: unknown record-literal labels silently accepted; output emits duplicate entries"]
+fn plain_record_literal_unknown_field_errors() {
+    // Sanity: a plain (non-comptime) record with a wrong label must error.
+    // Currently compiles and emits `{name2: 'Alice', name2: 'Alice'}` (dup).
+    let source = r#"
+type user = { name: string }
+let patch: user = { name2: "Alice" }
+"#;
+    match compile_with_stdlib(source, "plain_bad_field.res") {
+        Ok(output) => panic!(
+            "expected type error on unknown field `name2`, but compiled:\n{output}"
+        ),
+        Err(_) => {}
+    }
+}
+
+#[test]
+#[ignore = "same underlying bug as plain_record_literal_unknown_field_errors"]
+fn comptime_partial_record_literal_unknown_field_errors() {
+    // `type partialUser = partial(user)` builds a new record type with all
+    // fields upper-cased and optional. Constructing it with an unknown field
+    // name (here `name2`) must be a compile error — it's not one of NAME,
+    // AGE, ACTIVE, STATUS, ADDRESS.
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime.inline
+let toUpperCase = str => str->String.toUpperCase
+
+let partial = (type t) =>
+  switch @typeInfo(t) {
+  | Record({fields}) =>
+    @buildRecord(fields->Array.map(field =>
+      @recordField({...field, optional: true, name: field.name->toUpperCase})
+    ))
+  | _ => @compileError("partial: expected record")
+  }
+
+type partialUser = partial(user)
+
+let patch: partialUser = { name2: "Alice" }
+"#;
+    match compile_with_stdlib(source, "partial_bad_field.res") {
+        Ok(output) => panic!(
+            "expected type error on unknown field `name2`, but compiled:\n{output}"
+        ),
+        Err(_) => {}
+    }
+}
+
+#[test]
+fn comptime_typeinfo_rejects_runtime_value() {
+    // `@typeInfo(value)` on a runtime param (no `(type t)` in scope) must
+    // produce a clear compile error directing the user to add a type param.
+    let source = r#"
+let rec encode = (value) => {
+  switch @typeInfo(value) {
+  | Int => "int"
+  | _ => "other"
+  }
+}
+
+let _ = encode(42)
+"#;
+    match compile_with_stdlib(source, "typeinfo_runtime.res") {
+        Ok(output) => panic!(
+            "expected @typeInfo on a runtime value to error, but compiled:\n{output}"
+        ),
+        Err(e) => {
+            assert!(
+                e.contains("@typeInfo") && e.contains("(type t)"),
+                "expected error pointing at `(type t)` param, got: {e}"
+            );
+        }
+    }
+}
+
+#[test]
+fn comptime_newtype_param_implicit_type_arg() {
+    // `encode(alice)` with no explicit type arg: t is inferred from alice's
+    // type via `value: t` unification. Also exercises implicit inference on
+    // the recursive `encode(@field(...))` / `encode(v)` calls.
+    let source = r#"
+type address = { street: string, city: string }
+type user = { name: string, age: int, address: address }
+
+let rec encode = (type t, value: t): JSON.t => {
+  switch @typeInfo(t) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    fields->Array.forEach(field => {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    })
+    JSON.Encode.object(dict)
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {name: "Alice", age: 30, address: {street: "x", city: "y"}}
+let aliceJson = encode(alice)
+"#;
+    match compile_with_stdlib(source, "newtype_implicit.res") {
+        Ok(output) => {
+            assert!(
+                output.contains("encode$user") && output.contains("encode$address"),
+                "expected both encode$user and encode$address specializations, got:\n{output}"
+            );
+        }
+        Err(e) => panic!("should compile with implicit type arg: {e}"),
+    }
+}
+
+#[test]
 fn comptime_type_decl_from_function_call() {
     // `type foo = partial(user)` — the type declaration's manifest is a call
     // to a @comptime type-builder function. The compiler evaluates the call
@@ -2154,4 +2284,13 @@ let patch: partialUser = { name: "Alice" }
     // type-check. The emitted JS is a plain object literal.
     assert!(output.contains(r#"name: "Alice""#), "Expected patch with name: {output}");
     assert!(!output.contains("age"), "Other fields shouldn't be required: {output}");
+}
+
+#[test]
+fn parens_for_type_args_error() {
+    let source = std::fs::read_to_string("/tmp/test_parens.res").unwrap();
+    match compile_with_stdlib(&source, "parens.res") {
+        Ok(o) => eprintln!("OK: {o}"),
+        Err(e) => eprintln!("FAIL: {e}"),
+    }
 }

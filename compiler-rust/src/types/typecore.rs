@@ -1270,6 +1270,40 @@ fn transl_type_inner(
     let ctx = tctx.type_ctx;
     let loc = styp.ptyp_loc.clone();
 
+    // `foo(args)` was only allowed here to route through the comptime type-
+    // builder path (`type bar = partial(user)`). If we're resolving a
+    // Ptyp_constr with the internal `_paren_type_args` marker in any OTHER
+    // context, the user meant to write `foo<args>` — tell them so.
+    let used_parens_for_type_args = styp.ptyp_attributes.iter().any(|(name, _)| {
+        tctx.arena.get_string(name.txt) == "_paren_type_args"
+    });
+    if used_parens_for_type_args {
+        if let CTD::Ptyp_constr(inner) = &*styp.ptyp_desc {
+            let (ref lid, ref args) = **inner;
+            let longident = tctx.arena.get_longident(lid.txt);
+            let path_str: Vec<String> = longident.flatten_idx().iter()
+                .map(|idx| tctx.arena.get_string(*idx).to_string())
+                .collect();
+            let path_display = path_str.join(".");
+            let args_display: Vec<String> = args.iter().map(|a| {
+                let a_ct = tctx.arena.get_core_type(*a);
+                if let CTD::Ptyp_var(v) = &*a_ct.ptyp_desc {
+                    format!("'{}", v)
+                } else {
+                    "_".to_string()
+                }
+            }).collect();
+            let type_str = if args_display.is_empty() {
+                path_display
+            } else {
+                format!("{}<{}>", path_display, args_display.join(", "))
+            };
+            return Err(super::TypeCoreError::Other(format!(
+                "Type parameters require angle brackets:\n  {}", type_str
+            )));
+        }
+    }
+
     match &*styp.ptyp_desc {
         CTD::Ptyp_any => {
             // Wildcard type: create a fresh type variable
@@ -5455,7 +5489,11 @@ pub fn type_expect<'a>(
                 }
             }
 
-            // Try as a type name first
+            // Resolve as a type name. `@typeInfo` only accepts names that
+            // resolve to a comptime-known type — either a `(type t)` param
+            // of the enclosing function (handled above) or a top-level type
+            // declaration. Looking up a runtime value's type is an error:
+            // add a `(type t)` param and take `@typeInfo(t)` instead.
             ctx.begin_def();
             let resolved_ty = match transl_type(tctx, env, core_type) {
                 Ok((_, ty)) => {
@@ -5464,46 +5502,45 @@ pub fn type_expect<'a>(
                 }
                 Err(_) => {
                     ctx.end_def();
-                    // Type resolution failed — try as a variable name
-                    // Extract the name from the core type
-                    let var_ty = match &*core_type.ptyp_desc {
+                    let name = match &*core_type.ptyp_desc {
                         crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
                             let (ref lid, _) = **inner;
                             let longident = tctx.arena.get_longident(lid.txt);
-                            let name = tctx.arena.get_string(longident.last_idx());
-                            // Look up as a value in the environment
-                            env.find_value(name).ok().map(|vd| vd.val_type)
+                            tctx.arena.get_string(longident.last_idx()).to_string()
                         }
-                        _ => None,
+                        _ => "<unknown>".to_string(),
                     };
-                    match var_ty {
-                        Some(ty) => ty,
-                        None => return Err(super::TypeCoreError::Other(
-                            "@typeInfo: could not resolve type or variable".to_string(),
-                        )),
-                    }
+                    return Err(super::TypeCoreError::Other(format!(
+                        "@typeInfo: '{name}' is not a known type. `@typeInfo` \
+                         accepts only comptime type arguments — either a `(type t)` \
+                         parameter of the enclosing function or a top-level type \
+                         declaration. To introspect a runtime value's type, add a \
+                         `(type t)` parameter and call `@typeInfo(t)`."
+                    )));
                 }
             };
 
-            // Also check: if the resolved type is External (unknown type name),
-            // try as a variable name
+            // Reject `@typeInfo` on a name that resolved to an `External`
+            // (unknown) type — e.g. a value identifier. Same error guidance.
             let mut visited_check = Vec::new();
             let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-            let resolved_ty = if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
-                // Might be a variable name, not a type
-                let var_ty = match &*core_type.ptyp_desc {
+            if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+                let name = match &*core_type.ptyp_desc {
                     crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
                         let (ref lid, _) = **inner;
                         let longident = tctx.arena.get_longident(lid.txt);
-                        let name = tctx.arena.get_string(longident.last_idx());
-                        env.find_value(name).ok().map(|vd| vd.val_type)
+                        tctx.arena.get_string(longident.last_idx()).to_string()
                     }
-                    _ => None,
+                    _ => "<unknown>".to_string(),
                 };
-                var_ty.unwrap_or(resolved_ty)
-            } else {
-                resolved_ty
-            };
+                return Err(super::TypeCoreError::Other(format!(
+                    "@typeInfo: '{name}' is not a known type. `@typeInfo` \
+                     accepts only comptime type arguments — either a `(type t)` \
+                     parameter of the enclosing function or a top-level type \
+                     declaration. To introspect a runtime value's type, add a \
+                     `(type t)` parameter and call `@typeInfo(t)`."
+                )));
+            }
 
             // Check that the type is concrete (no unresolved type variables)
             let repr_ty = ctx.repr(resolved_ty);
@@ -21440,8 +21477,29 @@ fn try_comptime_application(
     let mut first_value_type: Option<crate::types::comptime::TypeInfo> = None;
     let has_type_params = params.iter().any(|p| p.is_type);
 
+    // Implicit type-arg inference: if the caller passed only value args but the
+    // function has type params, align args to value params and infer the type
+    // params from the value args' types. Lets `encode(alice)` specialize to
+    // `encode$user` when encode is `let rec encode = (type t, value: t) => …`.
+    let value_param_count = params.iter().filter(|p| !p.is_type).count();
+    let type_param_count = params.len() - value_param_count;
+    let infer_type_args = type_param_count > 0 && args.len() == value_param_count;
+
+    // Build an iteration plan: for each arg index, which param index it binds to.
+    let arg_to_param: Vec<usize> = if infer_type_args {
+        params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_type)
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        (0..args.len()).collect()
+    };
+
     for (i, (_label, arg_idx)) in args.iter().enumerate() {
-        let param = params.get(i);
+        let param_idx = arg_to_param.get(i).copied().unwrap_or(i);
+        let param = params.get(param_idx);
         let is_type_param = param.map_or(false, |p| p.is_type);
         let param_name = param.map_or(format!("__arg{i}"), |p| p.name.clone());
 
@@ -21489,6 +21547,24 @@ fn try_comptime_application(
                     tctx.comptime_bindings = saved_bindings;
                     COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     return None;
+                }
+            }
+        }
+    }
+
+    // In implicit-inference mode we didn't consume type-param slots via args,
+    // so bind them now from the inferred type. Only the single-type-param case
+    // is handled here — multi-type-param inference would need per-value-param
+    // unification against the declared type annotation.
+    if infer_type_args && type_param_count == 1 {
+        if let Some(ti) = &first_value_type {
+            for p in &params {
+                if p.is_type {
+                    tctx.comptime_bindings.insert(
+                        p.name.clone(),
+                        crate::types::comptime::ComptimeValue::Type(ti.clone()),
+                    );
+                    explicit_type_keys.push(ti.clone());
                 }
             }
         }
