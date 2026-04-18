@@ -739,6 +739,10 @@ pub struct TypeCheckContext<'a> {
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
     pub comptime_bindings: HashMap<String, crate::types::comptime::ComptimeValue>,
+    /// Let-bindings whose RHS is a comptime loop (Array.map / inline for over a
+    /// comptime-known array). Enables `let xs = …->Array.map(…); @record(t, xs)`
+    /// by redirecting @record's lookup of `xs` back to the original loop AST.
+    pub comptime_loop_aliases: HashMap<String, crate::parse_arena::ExprIdx>,
     pub monomorph_cache: crate::types::comptime::MonomorphCache,
     /// Comptime let bindings whose body is a type builder — to be evaluated
     /// at end of type_structure and emitted as type declarations.
@@ -777,6 +781,7 @@ impl<'a> TypeCheckContext<'a> {
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
+            comptime_loop_aliases: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),
             pending_type_builders: Vec::new(),
             package_coercions: HashMap::new(),
@@ -4408,14 +4413,50 @@ pub fn type_expect<'a>(
             // Let expression
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
+
+            // Detect `let x = <comptime loop>` bindings BEFORE type-checking them.
+            // Such RHSs are heterogeneously typed (Array.map over a comptime array
+            // whose body has a different type per iteration) so they can't be
+            // type-checked standalone. We register an alias and skip the binding.
+            // Downstream builtins (like @record) resolve `x` back to the loop AST.
+            let mut saved_aliases: Vec<(String, Option<crate::parse_arena::ExprIdx>)> = Vec::new();
+            let mut filtered_bindings: Vec<crate::parser::ast::ValueBinding> = Vec::new();
+            for vb in bindings.iter() {
+                let pat = tctx.arena.get_pat(vb.pvb_pat);
+                let name = if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) =
+                    &*pat.ppat_desc
+                {
+                    Some(tctx.arena.get_string(name_loc.txt).to_string())
+                } else {
+                    None
+                };
+                let rhs = tctx.arena.get_expr(vb.pvb_expr);
+                let is_comptime_loop = as_comptime_loop(rhs, tctx.arena).is_some()
+                    && loop_collection_is_comptime(rhs, tctx);
+                if let (Some(name), true) = (name, is_comptime_loop) {
+                    let prev = tctx.comptime_loop_aliases.insert(name.clone(), vb.pvb_expr);
+                    saved_aliases.push((name, prev));
+                } else {
+                    filtered_bindings.push(vb.clone());
+                }
+            }
+
             let (typed_bindings, new_env, unpacks) =
-                type_let_bindings(tctx, env, *rec_flag, bindings)?;
+                type_let_bindings(tctx, env, *rec_flag, &filtered_bindings)?;
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
+
+            // Restore shadowed aliases (and drop fresh ones).
+            for (name, prev) in saved_aliases {
+                match prev {
+                    Some(idx) => { tctx.comptime_loop_aliases.insert(name, idx); }
+                    None => { tctx.comptime_loop_aliases.remove(&name); }
+                }
+            }
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_let(*rec_flag, typed_bindings, Box::new(typed_body)),
@@ -5636,17 +5677,42 @@ pub fn type_expect<'a>(
             // Instance it to get fresh type variables that can unify with the expected type.
             let result_ty = crate::types::instance(ctx, cstr_desc.cstr_res);
 
+            // Instantiate every argument type once so that unifications on
+            // a multi-arg constructor don't leak between positions.
+            let arg_tys: Vec<TypeExprRef> = cstr_desc
+                .cstr_args
+                .iter()
+                .map(|&ty| crate::types::instance(ctx, ty))
+                .collect();
+
             let typed_args = if let Some(payload_expr_idx) = payload_idx {
                 let payload_expr = tctx.arena.get_expr(*payload_expr_idx);
-                // Use the constructor's argument type for the payload
-                let arg_ty = if !cstr_desc.cstr_args.is_empty() {
-                    crate::types::instance(ctx, cstr_desc.cstr_args[0])
-                } else {
-                    ctx.new_var(None)
-                };
-                vec![type_expect(tctx, env, payload_expr, arg_ty, None)?]
-            } else {
+                match try_payload_as_array(tctx, env, payload_expr, &arg_tys)? {
+                    Some(args) => args,
+                    None => {
+                        // Backward-compat: 1-arg constructor with a non-array payload.
+                        if arg_tys.len() == 1 {
+                            vec![type_expect(tctx, env, payload_expr, arg_tys[0], None)?]
+                        } else if arg_tys.is_empty() {
+                            return Err(super::TypeCoreError::Other(format!(
+                                "@constructor '{}': constructor takes no args, but a payload was supplied",
+                                ctor_name
+                            )));
+                        } else {
+                            return Err(super::TypeCoreError::Other(format!(
+                                "@constructor '{}': constructor takes {} args; payload must be an array literal or a comptime array expression",
+                                ctor_name, arg_tys.len()
+                            )));
+                        }
+                    }
+                }
+            } else if arg_tys.is_empty() {
                 vec![]
+            } else {
+                return Err(super::TypeCoreError::Other(format!(
+                    "@constructor '{}': constructor takes {} args, but no payload was supplied",
+                    ctor_name, arg_tys.len()
+                )));
             };
 
             // Unify the constructor's result type with expected type
@@ -5710,7 +5776,26 @@ pub fn type_expect<'a>(
             // The fields expression must be an inline for (or Array.map)
             // that produces record fields. @record unrolls it directly
             // to handle heterogeneous field types.
-            let fields_expr = tctx.arena.get_expr(*fields_expr_idx);
+            // If fields_expr is a bare identifier that aliases a prior
+            // `let x = <loop>` binding, redirect to the aliased loop AST.
+            let fields_expr_direct = tctx.arena.get_expr(*fields_expr_idx);
+            let fields_expr = if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid)
+                = &*fields_expr_direct.pexp_desc
+            {
+                let longident = tctx.arena.get_longident(lid.txt);
+                if longident.is_simple() {
+                    let name = tctx.arena.get_string(longident.last_idx());
+                    if let Some(aliased_idx) = tctx.comptime_loop_aliases.get(name).copied() {
+                        tctx.arena.get_expr(aliased_idx)
+                    } else {
+                        fields_expr_direct
+                    }
+                } else {
+                    fields_expr_direct
+                }
+            } else {
+                fields_expr_direct
+            };
             let mut typed_fields = Vec::new();
 
             if let Some((pat_idx, collection_idx, body_idx)) = as_comptime_loop(fields_expr, tctx.arena) {
@@ -21720,6 +21805,31 @@ pub fn resolve_comptime_array(
 }
 
 /// Normalize an expression into `(pattern, collection, body)` form as if it
+/// True if `as_comptime_loop(expr)`'s collection resolves to a comptime-known
+/// array binding (e.g. `fields` or `constructors` from a `@typeInfo` match).
+/// Used by the Pexp_let handler to identify bindings whose RHS unrolls into
+/// heterogeneously typed elements so they can be aliased rather than typed.
+pub fn loop_collection_is_comptime(
+    expr: &ParsedExpression,
+    tctx: &TypeCheckContext<'_>,
+) -> bool {
+    let Some((_pat_idx, coll_idx, _body_idx)) = as_comptime_loop(expr, tctx.arena) else {
+        return false;
+    };
+    let coll_expr = tctx.arena.get_expr(coll_idx);
+    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*coll_expr.pexp_desc {
+        let longident = tctx.arena.get_longident(lid.txt);
+        if longident.is_simple() {
+            let name = tctx.arena.get_string(longident.last_idx());
+            return matches!(
+                tctx.comptime_bindings.get(name),
+                Some(crate::types::comptime::ComptimeValue::Array(_))
+            );
+        }
+    }
+    false
+}
+
 /// were `inline for pat in collection { body }`. Handles:
 /// - `inline for pat in collection { body }` (direct)
 /// - `Array.map(collection, pat => body)` (syntactic sugar)
@@ -21745,6 +21855,47 @@ pub fn as_comptime_loop(
         ED::Pexp_apply(inner) => {
             let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
             let funct_expr = arena.get_expr(*funct);
+
+            // Pipe form: `coll->Array.map(lambda)` parses to
+            // `(->)(coll, Array.map(lambda))`. Unwrap one level so the
+            // direct-call matcher below can recognize it.
+            if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
+                let longident = arena.get_longident(lid.txt);
+                if longident.is_simple() && arena.get_string(longident.last_idx()) == "->"
+                    && args.len() == 2
+                {
+                    let coll_idx = args[0].1;
+                    let rhs_expr = arena.get_expr(args[1].1);
+                    if let ED::Pexp_apply(rhs_inner) = &*rhs_expr.pexp_desc {
+                        let crate::parser::ast::PexpApply {
+                            funct: rhs_funct,
+                            args: rhs_args,
+                            ..
+                        } = &**rhs_inner;
+                        let rhs_funct_expr = arena.get_expr(*rhs_funct);
+                        let is_array_loop = if let ED::Pexp_ident(flid) = &*rhs_funct_expr.pexp_desc {
+                            let flid_li = arena.get_longident(flid.txt);
+                            let last_name = arena.get_string(flid_li.last_idx());
+                            if last_name != "map" && last_name != "forEach" {
+                                false
+                            } else {
+                                let parts: Vec<String> = flid_li.flatten_idx().iter()
+                                    .map(|idx| arena.get_string(*idx).to_string())
+                                    .collect();
+                                parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
+                            }
+                        } else {
+                            false
+                        };
+                        if is_array_loop && rhs_args.len() == 1 {
+                            let lambda_expr = arena.get_expr(rhs_args[0].1);
+                            if let ED::Pexp_fun(fun_inner) = &*lambda_expr.pexp_desc {
+                                return Some((fun_inner.lhs, coll_idx, fun_inner.rhs));
+                            }
+                        }
+                    }
+                }
+            }
 
             // Check if the function is Array.map / Array.forEach (or bare map / forEach)
             let is_array_loop = if let ED::Pexp_ident(lid) = &*funct_expr.pexp_desc {
@@ -22047,6 +22198,149 @@ pub fn type_comptime_reduce(
         loc, acc_ty, env_ref,
         attributes.clone(),
     ))
+}
+
+/// Type-check the payload of `@constructor(t, ctor, payload)` as a list of
+/// constructor arguments. Accepts three shapes:
+///
+/// - `[expr0, expr1, ...]` — array literal
+/// - `coll->Array.map(x => body)` — unroll over comptime `coll`
+/// - `coll->Array.mapWithIndex((x, i) => body)` — same, with index
+///
+/// Each element is type-checked against `arg_tys[i]`. Returns `Ok(None)` if
+/// the payload is not one of the recognized array shapes (caller falls back
+/// to single-payload semantics).
+pub fn try_payload_as_array(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    payload: &ParsedExpression,
+    arg_tys: &[TypeExprRef],
+) -> TypeCoreResult<Option<Vec<Expression>>> {
+    use crate::parser::ast::ExpressionDesc as ED;
+
+    // Array literal [a, b, c]
+    if let ED::Pexp_array(exprs) = &*payload.pexp_desc {
+        if exprs.len() != arg_tys.len() {
+            return Err(TypeCoreError::Other(format!(
+                "@constructor: payload has {} elements, constructor expects {}",
+                exprs.len(), arg_tys.len()
+            )));
+        }
+        let mut typed_args = Vec::with_capacity(exprs.len());
+        for (i, &expr_idx) in exprs.iter().enumerate() {
+            let elem_expr = tctx.arena.get_expr(expr_idx);
+            typed_args.push(type_expect(tctx, env, elem_expr, arg_tys[i], None)?);
+        }
+        return Ok(Some(typed_args));
+    }
+
+    // Array.mapWithIndex / Array.forEachWithIndex
+    if let Some((elem_pat_idx, index_pat_idx, coll_idx, body_idx)) =
+        as_comptime_loop_indexed(payload, tctx.arena)
+    {
+        let coll_expr = tctx.arena.get_expr(coll_idx);
+        if let Some(elements) =
+            resolve_comptime_array(coll_expr, tctx.arena, &tctx.comptime_bindings)
+        {
+            return type_payload_indexed_loop(
+                tctx, env, elem_pat_idx, Some(index_pat_idx), body_idx, &elements, arg_tys,
+            ).map(Some);
+        }
+    }
+
+    // Array.map / Array.forEach
+    if let Some((elem_pat_idx, coll_idx, body_idx)) = as_comptime_loop(payload, tctx.arena) {
+        let coll_expr = tctx.arena.get_expr(coll_idx);
+        if let Some(elements) =
+            resolve_comptime_array(coll_expr, tctx.arena, &tctx.comptime_bindings)
+        {
+            return type_payload_indexed_loop(
+                tctx, env, elem_pat_idx, None, body_idx, &elements, arg_tys,
+            ).map(Some);
+        }
+    }
+
+    Ok(None)
+}
+
+/// Shared helper for unrolling a comptime loop into a list of typed
+/// constructor arguments. Each iteration's body is type-checked against the
+/// corresponding `arg_tys[i]`. If `index_pat` is None, no index binding is
+/// created.
+fn type_payload_indexed_loop(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    elem_pat_idx: crate::parse_arena::PatIdx,
+    index_pat: Option<crate::parse_arena::PatIdx>,
+    body_idx: crate::parse_arena::ExprIdx,
+    elements: &[crate::types::comptime::ComptimeValue],
+    arg_tys: &[TypeExprRef],
+) -> TypeCoreResult<Vec<Expression>> {
+    use crate::parser::ast::PatternDesc as PD;
+
+    if elements.len() != arg_tys.len() {
+        return Err(TypeCoreError::Other(format!(
+            "@constructor: payload array has {} elements, constructor expects {}",
+            elements.len(), arg_tys.len()
+        )));
+    }
+
+    let elem_pat = tctx.arena.get_pat(elem_pat_idx);
+    let elem_name = match &*elem_pat.ppat_desc {
+        PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+        _ => "__payload_elem".to_string(),
+    };
+    let index_name = index_pat.map(|pat_idx| {
+        let pat = tctx.arena.get_pat(pat_idx);
+        match &*pat.ppat_desc {
+            PD::Ppat_var(name) => tctx.arena.get_string(name.txt).to_string(),
+            _ => "__payload_idx".to_string(),
+        }
+    });
+
+    let body_expr = tctx.arena.get_expr(body_idx);
+    let mut typed_args = Vec::with_capacity(elements.len());
+
+    let prev_elem = tctx.comptime_bindings.get(&elem_name).cloned();
+    let prev_index = index_name.as_ref().and_then(|n| tctx.comptime_bindings.get(n).cloned());
+
+    for (i, element) in elements.iter().enumerate() {
+        tctx.comptime_bindings.insert(elem_name.clone(), element.clone());
+        if let Some(ref iname) = index_name {
+            tctx.comptime_bindings.insert(
+                iname.clone(),
+                crate::types::comptime::ComptimeValue::Int(i as i64),
+            );
+        }
+
+        let mut iter_env = env.clone();
+        let elem_ty = tctx.type_ctx.new_var(None);
+        let elem_id = tctx.type_ctx.create_ident(&elem_name);
+        iter_env.add_value(elem_id, crate::types::decl::ValueDescription {
+            val_type: elem_ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        });
+
+        let result = type_expect(tctx, &iter_env, body_expr, arg_tys[i], None);
+
+        match &prev_elem {
+            Some(v) => { tctx.comptime_bindings.insert(elem_name.clone(), v.clone()); }
+            None => { tctx.comptime_bindings.remove(&elem_name); }
+        }
+        if let Some(ref iname) = index_name {
+            match &prev_index {
+                Some(v) => { tctx.comptime_bindings.insert(iname.clone(), v.clone()); }
+                None => { tctx.comptime_bindings.remove(iname); }
+            }
+        }
+
+        typed_args.push(result?);
+    }
+
+    Ok(typed_args)
 }
 
 /// Unroll `Array.mapWithIndex(coll, (elem, i) => body)` or
@@ -22395,15 +22689,15 @@ fn evaluate_single_variant_case(
 ) -> TypeCoreResult<crate::types::comptime::VariantCaseSpec> {
     use crate::parser::ast::ExpressionDesc as ED;
 
-    // Expected form: @variantCase({name: ..., ...})
-    let rec_idx = match &*expr.pexp_desc {
-        ED::Pexp_comptime_variant_case(e) => *e,
+    // Accept either @variantCase({...}) (explicit primitive) or a bare
+    // record literal {name: ..., ...} (the @buildType shorthand).
+    let rec_expr = match &*expr.pexp_desc {
+        ED::Pexp_comptime_variant_case(e) => tctx.arena.get_expr(*e),
+        ED::Pexp_record(_) => expr,
         _ => return Err(super::TypeCoreError::Other(
-            "evaluate_variant_cases: expected @variantCase({...})".into(),
+            "evaluate_variant_cases: expected @variantCase({...}) or {name: ...}".into(),
         )),
     };
-
-    let rec_expr = tctx.arena.get_expr(rec_idx);
     // The record literal: {name: "Name"}
     if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
         let (ref fields, _) = **inner;
@@ -22491,20 +22785,56 @@ fn evaluate_single_record_field(
 ) -> TypeCoreResult<crate::types::comptime::RecordFieldSpec> {
     use crate::parser::ast::ExpressionDesc as ED;
 
-    let rec_idx = match &*expr.pexp_desc {
-        ED::Pexp_comptime_record_field(e) => *e,
+    // Accept either @recordField({...}) (explicit primitive) or a bare
+    // record literal (the @buildType shorthand).
+    let rec_expr = match &*expr.pexp_desc {
+        ED::Pexp_comptime_record_field(e) => tctx.arena.get_expr(*e),
+        ED::Pexp_record(_) => expr,
         _ => return Err(super::TypeCoreError::Other(
-            "evaluate_record_fields: expected @recordField({...})".into(),
+            "evaluate_record_fields: expected @recordField({...}) or {name, typ, ...}".into(),
         )),
     };
-
-    let rec_expr = tctx.arena.get_expr(rec_idx);
     if let ED::Pexp_record(inner) = &*rec_expr.pexp_desc {
-        let (ref fields, _) = **inner;
+        let (ref fields, ref base_opt) = **inner;
         let mut name = None;
         let mut typ = None;
         let mut optional = false;
         let mut mutable_ = false;
+
+        // Seed defaults from `{...base, ...}` spread base, if any.
+        // Supports patterns like `@recordField({...field, optional: true})`
+        // where `field` is a comptime-bound record from `fields->Array.map(...)`.
+        if let Some(base_idx) = base_opt {
+            let base_expr = tctx.arena.get_expr(*base_idx);
+            if let ED::Pexp_ident(lid) = &*base_expr.pexp_desc {
+                let longident = tctx.arena.get_longident(lid.txt);
+                if longident.is_simple() {
+                    let base_name = tctx.arena.get_string(longident.last_idx()).to_string();
+                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
+                        tctx.comptime_bindings.get(&base_name).cloned()
+                    {
+                        for (k, v) in entries {
+                            match (k.as_str(), &v) {
+                                ("name", crate::types::comptime::ComptimeValue::String(s)) => {
+                                    name = Some(s.clone());
+                                }
+                                ("typ" | "type", crate::types::comptime::ComptimeValue::Type(t)) => {
+                                    typ = Some(t.clone());
+                                }
+                                ("optional", crate::types::comptime::ComptimeValue::Bool(b)) => {
+                                    optional = *b;
+                                }
+                                ("mutable_", crate::types::comptime::ComptimeValue::Bool(b)) => {
+                                    mutable_ = *b;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for field in fields {
             let fname = {
                 let longident = tctx.arena.get_longident(field.lid.txt);

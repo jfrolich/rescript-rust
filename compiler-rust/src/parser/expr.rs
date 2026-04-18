@@ -592,7 +592,7 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField" | "buildType"),
                 _ => false,
             }
         });
@@ -4224,7 +4224,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField" | "buildType"),
                 _ => false,
             }
         });
@@ -6298,6 +6298,75 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let cases_idx = p.arena_mut().push_expr(cases_expr);
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_comptime_build_variant(cases_idx)
+        }
+        "buildType" => {
+            // @buildType(Variant({constructors: [...]}))
+            // @buildType(Record({fields: [...]}))
+            // Desugars to @buildVariant / @buildRecord. Each list element is a
+            // bare record ({name: ...} or {name, typ, optional?}) rather than
+            // a @variantCase / @recordField call.
+            let spec_expr = parse_expr(p);
+            p.expect(Token::Rparen);
+
+            let build_err = |msg: String, p: &mut Parser<'_>| -> ExpressionDesc {
+                p.err(super::diagnostics::DiagnosticCategory::Message(msg));
+                ExpressionDesc::Pexp_construct(
+                    with_loc(p.push_lident_static("()"), LocIdx::none()),
+                    None,
+                )
+            };
+
+            if let ExpressionDesc::Pexp_construct(lid, Some(payload_idx)) = &*spec_expr.pexp_desc {
+                let ctor_name = {
+                    let longident = p.arena().get_longident(lid.txt);
+                    p.arena().get_string(longident.last_idx()).to_string()
+                };
+                let payload_idx = *payload_idx;
+                let payload_expr = p.arena().get_expr(payload_idx).clone();
+                if let ExpressionDesc::Pexp_record(inner) = &*payload_expr.pexp_desc {
+                    let rec_fields = &(**inner).0;
+                    let find_field = |field_name: &str| -> Option<ExprIdx> {
+                        rec_fields.iter().find_map(|f| {
+                            let lid = p.arena().get_longident(f.lid.txt);
+                            let name = p.arena().get_string(lid.last_idx());
+                            (name == field_name).then_some(f.expr)
+                        })
+                    };
+                    match ctor_name.as_str() {
+                        "Variant" => match find_field("constructors") {
+                            Some(cases_idx) => ExpressionDesc::Pexp_comptime_build_variant(cases_idx),
+                            None => build_err(
+                                "@buildType(Variant(...)): expected `constructors: ...` field".into(),
+                                p,
+                            ),
+                        },
+                        "Record" => match find_field("fields") {
+                            Some(fields_idx) => ExpressionDesc::Pexp_comptime_build_record(fields_idx),
+                            None => build_err(
+                                "@buildType(Record(...)): expected `fields: ...` field".into(),
+                                p,
+                            ),
+                        },
+                        other => build_err(
+                            format!(
+                                "@buildType: unknown type kind '{}' (expected Variant or Record)",
+                                other
+                            ),
+                            p,
+                        ),
+                    }
+                } else {
+                    build_err(
+                        format!("@buildType({}, ...): expected a record argument", ctor_name),
+                        p,
+                    )
+                }
+            } else {
+                build_err(
+                    "@buildType: expected Variant({...}) or Record({...})".into(),
+                    p,
+                )
+            }
         }
         "variantCase" => {
             // @variantCase({name: "Name", as_?: "..."}) — describes one constructor

@@ -110,21 +110,35 @@ fn compile_runtime_module(
 }
 
 /// Compile ReScript source with stdlib available (using in-process mode).
+/// Runs the compile in a thread with a large stack — matches the bsc CLI,
+/// which uses 512MB to accommodate deeply nested type structures and
+/// recursive comptime specialization.
 fn compile_with_stdlib(source: &str, filename: &str) -> Result<String, String> {
-    let registry = stdlib_registry().clone();
+    let source = source.to_string();
+    let filename = filename.to_string();
 
-    let options = CompilerOptions {
-        source_filename: Some(filename.to_string()),
-        open_modules: vec!["Pervasives".to_string(), "Stdlib".to_string()],
-        ..Default::default()
-    };
+    std::thread::Builder::new()
+        .name("comptime-test-compile".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let registry = stdlib_registry().clone();
 
-    let module_name = "Test".to_string();
+            let options = CompilerOptions {
+                source_filename: Some(filename.clone()),
+                open_modules: vec!["Pervasives".to_string(), "Stdlib".to_string()],
+                ..Default::default()
+            };
 
-    match compile_source_in_process(source, filename, &module_name, &options, &registry, false) {
-        Ok(result) => Ok(result.js_output),
-        Err(e) => Err(format!("{e:?}")),
-    }
+            let module_name = "Test".to_string();
+
+            match compile_source_in_process(&source, &filename, &module_name, &options, &registry, false) {
+                Ok(result) => Ok(result.js_output),
+                Err(e) => Err(format!("{e:?}")),
+            }
+        })
+        .map_err(|e| format!("spawn: {e}"))?
+        .join()
+        .map_err(|_| "compile thread panicked".to_string())?
 }
 
 // ============================================================================
@@ -345,6 +359,39 @@ let k3: prefixedKeys = User_email
 }
 
 #[test]
+fn comptime_build_type_variant() {
+    // @buildType(Variant({constructors: ...})) — unified type-builder API
+    // that takes the target type kind directly as a pseudo-variant.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildType(Variant({
+      constructors: fields->Array.map(field => {name: field.name}),
+    }))
+  | _ => @compileError("expected record")
+  }
+
+let k1: userKey = Name
+let k2: userKey = Age
+let k3: userKey = Email
+"#;
+    let result = compile_with_stdlib(source, "build_type_variant.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== BUILDTYPE VARIANT ===\n{}\n=== END ===", output);
+            assert!(output.contains("Name"), "Expected Name ctor:\n{output}");
+            assert!(output.contains("Age"), "Expected Age ctor:\n{output}");
+            assert!(output.contains("Email"), "Expected Email ctor:\n{output}");
+        }
+        Err(e) => panic!("@buildType(Variant) should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_array_map_value_context() {
     // Array.map on a comptime array (like fields from @typeInfo)
     // should unroll to a concrete array literal at compile time.
@@ -434,6 +481,137 @@ let () = switch @typeInfo(user) {
 }
 
 #[test]
+fn comptime_constructor_multi_arg_inside_comptime() {
+    let source = r#"
+type shape =
+  | Rectangle(float, float)
+
+@comptime
+let make = (type t) => {
+  switch @typeInfo(t) {
+  | Variant(_) => @constructor(t, "Rectangle", [3.0, 4.0])
+  | _ => @compileError("unsupported")
+  }
+}
+
+let rect: shape = make(shape)
+"#;
+    let result = compile_with_stdlib(source, "ctor_multi_comptime.res");
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("multi-arg @constructor inside @comptime should compile: {e}"),
+    }
+}
+
+#[test]
+#[ignore = "blocked on ref(None) + Some + switch result.contents + @comptime type-param interaction (UndefinedMethod: 'shape')"]
+fn comptime_constructor_multi_arg_with_map_with_index() {
+    // Build a multi-arg constructor using Array.mapWithIndex over c.args —
+    // the decoder pattern.
+    let source = r#"
+type shape =
+  | Rectangle(float, float)
+
+@comptime
+let make = (type t) => {
+  switch @typeInfo(t) {
+  | Variant({constructors}) =>
+    let result = ref(None)
+    let _ = constructors
+    result := Some(@constructor(t, "Rectangle", [3.0, 4.0]))
+    switch result.contents { | Some(v) => v | None => @compileError("no ctor") }
+  | _ => @compileError("unsupported")
+  }
+}
+
+let rect: shape = make(shape)
+"#;
+    let result = compile_with_stdlib(source, "ctor_multi_mapidx.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== CTOR MULTI MAPIDX ===\n{}\n=== END ===", output);
+        }
+        Err(e) => panic!("multi-arg @constructor with mapWithIndex should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_constructor_multi_arg_array_literal() {
+    // @constructor with an array-literal payload builds a multi-arg variant.
+    let source = r#"
+type pair = Pair(int, string)
+
+let p: pair = @constructor(pair, "Pair", [42, "hello"])
+"#;
+    let result = compile_with_stdlib(source, "ctor_multi_literal.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== CONSTRUCTOR MULTI LITERAL ===\n{}\n=== END ===", output);
+            assert!(output.contains("Pair") || output.contains("42"),
+                "Expected Pair or 42 in output:\n{output}");
+            assert!(output.contains("hello"), "Expected 'hello' in output:\n{output}");
+        }
+        Err(e) => panic!("@constructor with array literal should compile: {e}"),
+    }
+}
+
+#[test]
+#[ignore = "blocked on ref(None) + Some + switch result.contents + @comptime type-param interaction (UndefinedMethod: 'shape')"]
+fn comptime_constructor_multi_arg_decoder() {
+    // Decode a JSON array into a multi-arg variant via
+    // @constructor(t, name, c.args->Array.mapWithIndex(...)).
+    let source = r#"
+type shape =
+  | Circle(float)
+  | Rectangle(float, float)
+
+exception DecodeError(string)
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | Float =>
+    switch json { | Number(n) => n | _ => throw(DecodeError("expected number")) }
+  | Variant({constructors}) =>
+    switch json {
+    | Array(items) =>
+      switch items[0] {
+      | Some(String(name)) =>
+        let result = ref(None)
+        constructors->Array.forEach(c => {
+          if name == c.name {
+            result := Some(@constructor(t, c.name, c.args->Array.mapWithIndex((argType, i) =>
+              decode(argType, Option.getExn(items[i+1]))
+            )))
+          }
+        })
+        switch result.contents {
+        | Some(v) => v
+        | None => throw(DecodeError("unknown variant"))
+        }
+      | _ => throw(DecodeError("expected [name, ...]"))
+      }
+    | _ => throw(DecodeError("expected array"))
+    }
+  | _ => @compileError("unsupported type")
+  }
+}
+
+let rect: shape = decode(shape, JSON.parseExn(`["Rectangle", 3.0, 4.0]`))
+"#;
+    let result = compile_with_stdlib(source, "ctor_multi_decoder.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== CONSTRUCTOR MULTI DECODER ===\n{}\n=== END ===", output);
+            // Should not have runtime .mapWithIndex
+            assert!(!output.contains(".mapWithIndex"),
+                "Should not have runtime .mapWithIndex:\n{output}");
+        }
+        Err(e) => panic!("multi-arg decoder should compile: {e}"),
+    }
+}
+
+#[test]
 fn comptime_array_for_each_with_index_unrolls() {
     // Array.forEachWithIndex on a comptime array binds the index as a
     // comptime int per iteration, so references like `i` get inlined.
@@ -463,6 +641,191 @@ let () = switch @typeInfo(user) {
                 "Should not have runtime .forEachWithIndex:\n{output}");
         }
         Err(e) => panic!("Array.forEachWithIndex should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_build_record_partial_spread_pipe() {
+    // @recordField({...field, optional: true}) — spread source spec and
+    // override a single attribute. Uses pipe `->` form for the loop.
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let partialUser =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildRecord(fields->Array.map(field =>
+      @recordField({...field, optional: true})
+    ))
+  | _ => @compileError("expected record")
+  }
+
+let patch: partialUser = { name: "Alice" }
+"#;
+    let result = compile_with_stdlib(source, "build_record_partial_pipe.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== BUILD RECORD PARTIAL PIPE ===\n{}\n=== END ===", output);
+            assert!(output.contains("Alice"), "Expected Alice:\n{output}");
+        }
+        Err(e) => panic!("@recordField spread (pipe) should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_encoder_flat_record() {
+    // Simpler version of comptime_encoder_recursive_records with no nested
+    // records — isolates whether the stack overflow is nesting-related.
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let rec encodeValue = (value) => {
+  switch @typeInfo(value) {
+  | String => "\"" ++ value ++ "\""
+  | Int => "int"
+  | Record({fields}) => {
+      let result = ref("{")
+      inline for field in fields {
+        let encoded = encodeValue(@field(value, field.name))
+        result := result.contents ++ field.name ++ ":" ++ encoded ++ ","
+      }
+      result.contents ++ "}"
+    }
+  | _ => @compileError("unsupported type")
+  }
+}
+
+let myUser: user = { name: "Alice", age: 30 }
+let enc = encodeValue(myUser)
+"#;
+    let output = compile_with_stdlib(source, "encode_flat.res").unwrap();
+    assert!(output.contains("name"), "Expected 'name':\n{output}");
+}
+
+#[test]
+fn comptime_decoder_result_minimal() {
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => Ok(s) | _ => Error("expected string") }
+  | Int =>
+    switch json { | Number(n) => Ok(Float.toInt(n)) | _ => Error("expected int") }
+  | Record({fields}) =>
+    switch json {
+    | Object(dict) => {
+        let err = ref(None)
+        let values = fields->Array.map(field =>
+          switch decode(field.typ, Dict.getUnsafe(dict, field.name)) {
+          | Ok(v) => v
+          | Error(e) => {
+              if err.contents == None { err := Some(e) }
+              %raw(`null`)
+            }
+          }
+        )
+        switch err.contents {
+        | None => Ok(@record(t, values))
+        | Some(e) => Error(e)
+        }
+      }
+    | _ => Error("expected object")
+    }
+  | _ => @compileError("decode: unsupported type")
+  }
+}
+
+let aliceJson = JSON.parseExn(`{"name":"Alice","age":30}`)
+let decoded = decode(user, aliceJson)
+"#;
+    let result = compile_with_stdlib(source, "decoder_result.res");
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("result-based decoder should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_playground_initial_compiles() {
+    // Compile the playground's INITIAL_CODE end-to-end.
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/comptime_fixtures");
+    let source = std::fs::read_to_string(fixtures_dir.join("playground_initial.res")).unwrap();
+    let result = compile_with_stdlib(&source, "playground_initial.res");
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("playground INITIAL_CODE should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_generic_partial() {
+    // Generic `partial<T>`: takes a type, returns a new record type with
+    // every field marked optional. Uses `{...field, optional: true}` spread.
+    let source = r#"
+type user = { name: string, age: int, email: string }
+type admin = { role: string, level: int }
+
+@comptime
+let partial = (type t) =>
+  switch @typeInfo(t) {
+  | Record({fields}) =>
+    @buildRecord(fields->Array.map(field =>
+      @recordField({...field, optional: true})
+    ))
+  | _ => @compileError("partial: expected record")
+  }
+
+@comptime
+let partialUser = partial(user)
+
+@comptime
+let partialAdmin = partial(admin)
+
+let u: partialUser = { name: "Alice" }
+let a: partialAdmin = { role: "root" }
+"#;
+    let result = compile_with_stdlib(source, "generic_partial.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== GENERIC PARTIAL ===\n{}\n=== END ===", output);
+            assert!(output.contains("Alice"), "Expected Alice:\n{output}");
+            assert!(output.contains("root"), "Expected root:\n{output}");
+        }
+        Err(e) => panic!("generic partial should compile: {e}"),
+    }
+}
+
+#[test]
+fn comptime_build_record_partial_spread() {
+    // @recordField({...field, optional: true}) — spread source field spec
+    // and override a single attribute. Produces `partial<T>` semantics.
+    let source = r#"
+type user = { name: string, age: int }
+
+@comptime
+let partialUser =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildRecord(Array.map(fields, field =>
+      @recordField({...field, optional: true})
+    ))
+  | _ => @compileError("expected record")
+  }
+
+let patch: partialUser = { name: "Alice" }
+"#;
+    let result = compile_with_stdlib(source, "build_record_partial_spread.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== BUILD RECORD PARTIAL SPREAD ===\n{}\n=== END ===", output);
+            assert!(output.contains("Alice"), "Expected Alice:\n{output}");
+        }
+        Err(e) => panic!("@recordField spread should compile: {e}"),
     }
 }
 
