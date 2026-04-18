@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 595 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 62 output diffs
+**Status:** 597 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 60 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **595 / 657**
+- JS snapshot parity: **597 / 657**
 - Compile errors: **0**
-- Output diffs: **62**
+- Output diffs: **60**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,51 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **595 / 657**
+- JS snapshot parity: **597 / 657**
 - Compile errors: **0**
-- Output diffs: **62**
+- Output diffs: **60**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: same-name export tail placement for qualified module-field
+  aliases with later top-level effects, staying in **Phase 3: Port JS IR
+  Lowering And Metadata** from `PLAN.md`
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml` (`handle_exports`)
+  - checked-in snapshots `tests/tests/src/bs_mutable_set_test.mjs`,
+    `tests/tests/src/bs_min_max_test.mjs`, and
+    `tests/tests/src/equal_box_test.mjs`
+- Rust changes in `compiler-rust/src/lambda/compile.rs`:
+  - keep already-declared same-name reusable export bindings instead of
+    needlessly rebinding them at the tail
+  - allow the late export-tail move across a later top-level effect only for
+    ML-module qualified replacements with no remaining uses, which matches the
+    `empty = Belt_MutableSetInt.make` / `fromArray = Belt_MutableSetInt.fromArray`
+    shapes without reopening the runtime-module alias regressions
+  - added focused regression coverage for both sides of that boundary:
+    runtime qualified aliases must stay materialized before later effects,
+    while ML qualified aliases may still tail-move even when the exported local
+    name differs from the underlying field name
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unused_later_effect' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_value_effect' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_field_name_to_tail_after_unused_later_effect' -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh bs_mutable_set_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh bs_min_max_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh equal_box_test --rust`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_mutable_set_test.res` is exact again; the checked-in
+    snapshot no longer appears under `temp/rust-parity/diffs`
+  - `tests/tests/src/bs_min_max_test.res` is exact again and also dropped out
+    of the current diff set
+  - `tests/tests/src/equal_box_test.res` still fails, but only on the older
+    strict-null/undefined folding drift; the runtime alias placement regression
+    is gone
+  - the authoritative wrapper baseline stays at **597 / 657**, **0** compile
+    errors, and **60** output diffs, so this slice improved focused file-set
+    composition without yet moving the aggregate total
 
 Latest iteration on **2026-04-18**:
 

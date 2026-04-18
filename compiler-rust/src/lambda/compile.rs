@@ -462,6 +462,10 @@ impl LambdaCompiler {
                 }));
                 continue;
             }
+            if keeps_declared_same_name_reusable_export_binding(block, &export, &value) {
+                exports.push(export);
+                continue;
+            }
             if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
                 exports.push(reused);
                 continue;
@@ -14735,6 +14739,9 @@ fn move_same_name_export_alias_to_export_tail(
     let blocked_by_prior_use = flattened[..index]
         .iter()
         .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
+    let has_remaining_use = remaining
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
     let blocked_by_unsafe_inline = matches!(initializer_kind, TailMoveInitializerKind::Qualified)
         && !qualified_tail_move_uses_are_safe_to_inline(remaining, target, &replacement);
     let blocked_by_later_initializer =
@@ -14745,7 +14752,9 @@ fn move_same_name_export_alias_to_export_tail(
         initializer_kind,
         &replacement,
         replacement_resolves_to_recursive_function(&flattened, &replacement),
-    );
+    ) && !(target.same(export)
+        && !has_remaining_use
+        && ml_module_field_tail_move_replacement(&replacement));
     if blocked_by_variable
         || blocked_by_literal_binding
         || blocked_by_direct_literal_reuse
@@ -15044,6 +15053,13 @@ fn same_name_ml_module_field_tail_move_replacement(
         &replacement.desc,
         ExpressionDesc::Var(VIdent::Qualified(module, Some(field)))
             if field == target_name && module.kind.eq(&Kind::Ml)
+    )
+}
+
+fn ml_module_field_tail_move_replacement(replacement: &Expression) -> bool {
+    matches!(
+        &replacement.desc,
+        ExpressionDesc::Var(VIdent::Qualified(module, _)) if module.kind.eq(&Kind::Ml)
     )
 }
 
@@ -15367,6 +15383,17 @@ fn direct_reused_same_name_export_alias_binding(
                 Some((index, ident.clone(), initializer.clone(), *property))
             }
             _ => None,
+        })
+}
+
+fn keeps_declared_same_name_reusable_export_binding(
+    block: &Block,
+    export: &Ident,
+    value: &Expression,
+) -> bool {
+    direct_reused_same_name_export_alias_binding(block, export, value)
+        .is_some_and(|(_, ident, _, property)| {
+            ident.same(export) && !matches!(property, LetKind::Variable)
         })
 }
 
@@ -20444,6 +20471,80 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unused_later_effect(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let belt_mutable_set_int = ModuleId {
+            id: Ident::create_persistent("Belt_MutableSetInt"),
+            kind: Kind::Runtime,
+            dynamic_import: false,
+        };
+        let exported = Ident::create_local("fromArray");
+        let effect = Ident::create_local("effect");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::qualified(
+                    belt_mutable_set_int.clone(),
+                    Some("fromArray".to_string()),
+                )),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(effect.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the runtime alias binding to remain ahead of the later effect");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(module.id.name(), "Belt_MutableSetInt");
+                assert_eq!(field, "fromArray");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the runtime module-field alias first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&effect)),
+                    other => panic!("expected the later effect call second, got {other:?}"),
+                }
+            }
+            other => panic!("expected the later effect statement second, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
         let mut compiler = LambdaCompiler::new();
         let file_js = ModuleId {
@@ -20939,6 +21040,77 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late same-name module-field alias second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_field_name_to_tail_after_unused_later_effect(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let module = ModuleId {
+            id: Ident::create_persistent("Belt_MutableSetInt"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let exported = Ident::create_local("empty");
+        let effect = Ident::create_persistent("effect");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::qualified(module.clone(), Some("make".to_string()))),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(effect.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the later effect followed by the late ML export alias");
+        };
+        match &first.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&effect)),
+                    other => panic!("expected the later effect call first, got {other:?}"),
+                }
+            }
+            other => panic!("expected the later effect statement first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module_id, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(module_id, &module);
+                assert_eq!(field, "make");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late ML module-field alias second, got {other:?}"),
         }
     }
 
