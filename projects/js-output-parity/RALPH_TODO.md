@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 84 output diffs
+**Status:** 575 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 82 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **575 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **82**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,68 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **575 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **82**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: allow OCaml-aligned late export-tail sinking for same-name
+  literal exports only when the source binding is an `Alias` and a later
+  top-level function binding still needs to stay ahead of that rebound export;
+  this was the live `Coercion` / `DerivingAccessors*` drift after the earlier
+  export-alias rewrites
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / top-level ordering rather
+  than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/Coercion.mjs`,
+    `tests/tests/src/DerivingAccessorsCurried.mjs`, and
+    `tests/tests/src/DerivingAccessorsUncurried.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, extended the export-tail
+    replacement path to recognize primitive literal initializers in
+    same-name alias chains
+  - tightened the late literal tail-move rule so it only fires for
+    `LetKind::Alias` bindings that still have a later top-level function
+    binding in the flattened block, instead of the earlier broader
+    literal/export-name heuristic
+  - removed the temporary debug tracing and added focused regression coverage
+    for the alias-literal positive case plus the `Coercion` /
+    `DerivingAccessors*` snapshot order guards
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coercion_rebinds_same_name_literal_exports_after_surviving_function_binding_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindings_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/Coercion.res -o /tmp/Coercion.mjs`
+  - `diff -u tests/tests/src/Coercion.mjs /tmp/Coercion.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `diff -u tests/tests/src/DerivingAccessorsCurried.mjs /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `diff -u tests/tests/src/DerivingAccessorsUncurried.mjs /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DisambiguateOptionalFields.res -o /tmp/DisambiguateOptionalFields.mjs`
+  - `diff -u tests/tests/src/DisambiguateOptionalFields.mjs /tmp/DisambiguateOptionalFields.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/UncurriedAlways.res -o /tmp/UncurriedAlways.mjs`
+  - `diff -u tests/tests/src/UncurriedAlways.mjs /tmp/UncurriedAlways.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ast_abstract_test.res -o /tmp/ast_abstract_test.mjs`
+  - `diff -u tests/tests/src/ast_abstract_test.mjs /tmp/ast_abstract_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/Coercion.res`,
+    `tests/tests/src/DerivingAccessorsCurried.res`, and
+    `tests/tests/src/DerivingAccessorsUncurried.res` are exact again; the
+    rebound literal exports now stay after the surviving `function foo` /
+    `function compose` bindings like the checked-in snapshots
+  - `tests/tests/src/DisambiguateOptionalFields.res`,
+    `tests/tests/src/UncurriedAlways.res`, and
+    `tests/tests/src/ast_abstract_test.res` stayed exact as the negative guard
+    set that previously caught the over-broad literal heuristic
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **573 / 657** -> **575 / 657** (**+2**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **84** -> **82** (**-2**)
 
 Latest iteration on **2026-04-18**:
 

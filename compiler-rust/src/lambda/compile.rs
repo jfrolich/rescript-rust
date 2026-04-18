@@ -14531,6 +14531,10 @@ fn move_same_name_export_alias_to_export_tail(
     let replacement =
         resolve_tail_move_replacement_expression(&flattened, &initializer, target);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
+    let blocked_by_literal_binding =
+        matches!(initializer_kind, TailMoveInitializerKind::Literal)
+            && (!matches!(property, LetKind::Alias)
+                || !has_later_toplevel_function_binding(&flattened[index + 1..]));
     let blocked_by_variable = matches!(property, LetKind::Variable);
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
@@ -14543,6 +14547,7 @@ fn move_same_name_export_alias_to_export_tail(
     let blocked_by_later_initializer =
         later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target);
     if blocked_by_variable
+        || blocked_by_literal_binding
         || blocked_by_kind
         || blocked_by_effects
         || blocked_by_self_mention
@@ -14574,7 +14579,12 @@ fn move_reused_same_name_export_binding_to_export_tail(
     };
     let replacement = resolve_tail_move_replacement_expression(&flattened, value, &reused);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
+    let blocked_by_literal_binding =
+        matches!(initializer_kind, TailMoveInitializerKind::Literal)
+            && (!matches!(property, LetKind::Alias)
+                || !has_later_toplevel_function_binding(&flattened[index + 1..]));
     if matches!(property, LetKind::Variable)
+        || blocked_by_literal_binding
         || matches!(initializer_kind, TailMoveInitializerKind::Other)
         || !js_expr_no_side_effects(&replacement)
         || flattened[..index]
@@ -14617,6 +14627,7 @@ fn same_name_export_alias_binding(
 enum TailMoveInitializerKind {
     Qualified,
     Function,
+    Literal,
     Other,
 }
 
@@ -14625,6 +14636,11 @@ fn same_name_export_initializer_kind(
     initializer: &Expression,
 ) -> TailMoveInitializerKind {
     match &initializer.desc {
+        ExpressionDesc::Number(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null => TailMoveInitializerKind::Literal,
         ExpressionDesc::Var(VIdent::Qualified(_, _)) => TailMoveInitializerKind::Qualified,
         ExpressionDesc::Var(VIdent::Id(target)) => {
             resolve_tail_move_initializer_kind(block, target)
@@ -14680,6 +14696,11 @@ fn resolve_tail_move_replacement_expression(
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
                 current = next.clone();
             }
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null => return value.clone(),
             _ => return Expression::var(current),
         }
     }
@@ -14716,6 +14737,11 @@ fn resolve_tail_move_initializer_kind(
             ExpressionDesc::Var(VIdent::Qualified(_, _)) => {
                 return Some(TailMoveInitializerKind::Qualified);
             }
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null => return Some(TailMoveInitializerKind::Literal),
             ExpressionDesc::Var(VIdent::Id(next)) => current = next.clone(),
             _ => return None,
         }
@@ -15005,6 +15031,22 @@ fn direct_reused_same_name_export_alias_binding(
             }
             _ => None,
         })
+}
+
+fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
+    block.iter().any(|stmt| {
+        matches!(
+            &stmt.desc,
+            StatementDesc::Variable(VariableDeclaration {
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            })
+        )
+    })
 }
 
 fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident) -> bool {
@@ -19154,6 +19196,86 @@ mod tests {
                 assert_eq!(*property, LetKind::Strict);
             }
             other => panic!("expected the late export binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused() {
+        let mut compiler = LambdaCompiler::new();
+        let declared = Ident::create_local("noParam");
+        let exported = Ident::create_local("noParam");
+        let compose = Ident::create_local("compose");
+        let a = Ident::create_local("a");
+        let accessor = Ident::create_local("accessor");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: declared.clone(),
+                value: Some(Expression::string("NoParam")),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: compose.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![a.clone(), accessor.clone()],
+                    body: vec![Statement::return_(Expression::call(
+                        Expression::var(accessor),
+                        vec![Expression::var(a)],
+                        CallInfo::default(),
+                    ))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(declared)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].name(), exported.name());
+        let [first, second] = block.as_slice() else {
+            panic!("expected the surviving function binding plus the late literal export");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&compose)),
+            other => panic!("expected the function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(txt, "NoParam");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late literal export binding second, got {other:?}"),
         }
     }
 
@@ -23718,6 +23840,12 @@ mod tests {
                 && !output.contains("let _noParamAlias = noParam;"),
             "unexpected redundant same-name export aliases remained in DerivingAccessorsCurried:\n{output}"
         );
+        let compose_idx = output.find("function compose").unwrap();
+        let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+        assert!(
+            compose_idx < no_param_idx,
+            "expected compose to remain before the rebound literal export in DerivingAccessorsCurried, got:\n{output}"
+        );
     }
 
     #[test]
@@ -23737,6 +23865,24 @@ mod tests {
                 && !output.contains("let doubleNum$1 = doubleNum;")
                 && !output.contains("let _noParamAlias = noParam;"),
             "unexpected redundant same-name export aliases remained in DerivingAccessorsUncurried:\n{output}"
+        );
+        let compose_idx = output.find("function compose").unwrap();
+        let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+        assert!(
+            compose_idx < no_param_idx,
+            "expected compose to remain before the rebound literal export in DerivingAccessorsUncurried, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn coercion_rebinds_same_name_literal_exports_after_surviving_function_binding_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("Coercion");
+        let foo_idx = output.find("function foo").unwrap();
+        let x_idx = output.find("let x = 1;").unwrap();
+        let xx_idx = output.find("let xx = 1;").unwrap();
+        assert!(
+            foo_idx < x_idx && x_idx < xx_idx,
+            "expected Coercion to keep the surviving function binding before the rebound literal exports, got:\n{output}"
         );
     }
 
