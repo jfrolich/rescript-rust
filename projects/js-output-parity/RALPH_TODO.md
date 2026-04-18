@@ -69,6 +69,50 @@ reproduces the following no-compile-error baseline in the dirty worktree:
 
 Latest iteration on **2026-04-18**:
 
+- Active slice: narrow the same-name export tail-move heuristic in
+  `coerce_toplevel_exports(...)` so later top-level functions only block the
+  move when they actually capture the exported binding, while qualified aliases
+  still stay materialized before later function bindings like OCaml
+- Active project phase remains **Phase 3: Port JS IR Lowering And Metadata**
+  from `PLAN.md`, and this iteration stayed in backend export/value
+  materialization rather than printer-only cleanup
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml` (`handle_exports`)
+  - checked-in snapshots `tests/tests/src/alias_test.mjs` and
+    `tests/tests/src/async_inline.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, added
+    `later_toplevel_function_mentions_ident(...)` so same-name export
+    materialization can distinguish a later function that actually captures the
+    target from one that is merely present later in the block
+  - narrowed `move_same_name_export_alias_to_export_tail(...)` so it now blocks
+    tail moves for later-function cases only when a later function body mentions
+    the target, or when the initializer is a qualified alias kept before a
+    later top-level function binding
+  - added focused regression coverage for both cases and kept the existing
+    literal-tail-move reuse expectations intact
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_function_body' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function_binding' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_when_reused' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh alias_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - the authoritative dirty-worktree baseline stayed at **595 / 657**, with
+    compile errors still at **0** and output diffs still at **62**, so the
+    narrower rule removed the earlier local regression without reopening the
+    broader parity count
+  - `tests/tests/src/alias_test.res` stayed exact after the change, confirming
+    same-name export reuse still tail-moves in the simple literal case
+  - `tests/tests/src/async_inline.res` still differs only in the remaining
+    `tci` / `tui` export-binding order, so the unresolved cluster is now the
+    narrower "later function present but no capture" case rather than the
+    broader "any later function blocks tail move" heuristic
+
+Latest iteration on **2026-04-18**:
+
 - Active slice: recover the remaining strict-`undefined` two-statement
   function-body tail shapes where the OCaml snapshots keep a positive success
   guard plus explicit `else`, instead of Rust's negative early-return suffix;

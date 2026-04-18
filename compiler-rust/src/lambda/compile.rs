@@ -14708,12 +14708,14 @@ fn move_same_name_export_alias_to_export_tail(
             | ExpressionDesc::Null
     );
     let binding_is_local_alias = matches!(&initializer.desc, ExpressionDesc::Var(VIdent::Id(_)));
+    let has_later_function_binding = has_later_toplevel_function_binding(remaining);
+    let later_function_mentions_target =
+        later_toplevel_function_mentions_ident(remaining, target);
     let later_initializer_mentions_target =
         later_toplevel_initializer_mentions_ident(remaining, target);
     let blocked_by_literal_binding =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
-            && (!matches!(property, LetKind::Alias)
-                || !has_later_toplevel_function_binding(&flattened[index + 1..]));
+            && (!matches!(property, LetKind::Alias) || !has_later_function_binding);
     let blocked_by_direct_literal_reuse =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && binding_is_direct_literal
@@ -14722,6 +14724,10 @@ fn move_same_name_export_alias_to_export_tail(
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && binding_is_local_alias
             && !prefer_materialized_root;
+    let blocked_by_later_function_capture = later_function_mentions_target;
+    let blocked_by_qualified_binding_before_later_function =
+        has_later_function_binding
+            && matches!(initializer_kind, TailMoveInitializerKind::Qualified);
     let blocked_by_variable = matches!(property, LetKind::Variable);
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
@@ -14744,6 +14750,8 @@ fn move_same_name_export_alias_to_export_tail(
         || blocked_by_literal_binding
         || blocked_by_direct_literal_reuse
         || blocked_by_literal_alias_without_materialized_root
+        || blocked_by_later_function_capture
+        || blocked_by_qualified_binding_before_later_function
         || blocked_by_kind
         || blocked_by_effects
         || blocked_by_self_mention
@@ -15375,6 +15383,20 @@ fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
                 ..
             })
         )
+    })
+}
+
+fn later_toplevel_function_mentions_ident(block: &[Statement], target: &Ident) -> bool {
+    block.iter().any(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { .. },
+                    ..
+                }),
+            ..
+        }) => statement_mentions_ident_anywhere(stmt, target),
+        _ => false,
     })
 }
 
@@ -19819,7 +19841,7 @@ mod tests {
             &mut block,
             ExtractedExports {
                 exports: vec![exported.clone()],
-                values: vec![Expression::var(declared)],
+                values: vec![Expression::var(declared.clone())],
             },
         );
         let exports = resolve_export_aliases(&block, exports);
@@ -19857,6 +19879,92 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late literal export binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_function_body() {
+        let mut compiler = LambdaCompiler::new();
+        let exported = Ident::create_local("bla2");
+        let concat = Ident::create_local("concat");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::string("")),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: concat.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![],
+                    body: vec![Statement::return_(Expression::var(exported.clone()))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the literal export plus the later function binding");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Str { txt, .. },
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(txt, "");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the exported literal binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { body, .. },
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&concat));
+                let [Statement {
+                    desc:
+                        StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(target)),
+                            ..
+                        }),
+                    ..
+                }] = body.as_slice()
+                else {
+                    panic!("expected the later function body to return the shared binding");
+                };
+                assert!(target.same(&exported));
+            }
+            other => panic!("expected the later function binding second, got {other:?}"),
         }
     }
 
@@ -20091,6 +20199,85 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late export binding to reuse the materialized root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function_binding() {
+        let mut compiler = LambdaCompiler::new();
+        let stdlib_lazy = ModuleId {
+            id: Ident::create_persistent("Stdlib_Lazy"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let exported = Ident::create_local("is_lazy_force");
+        let fib = Ident::create_local("fib");
+        let n = Ident::create_local("n");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::qualified(stdlib_lazy, Some("get".to_string()))),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: fib.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![n.clone()],
+                    body: vec![Statement::return_(Expression::var(n))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the qualified alias plus the later function binding");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(module.id.name(), "Stdlib_Lazy");
+                assert_eq!(field, "get");
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the qualified alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&fib)),
+            other => panic!("expected the later function binding second, got {other:?}"),
         }
     }
 
