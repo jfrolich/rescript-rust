@@ -69,6 +69,44 @@ reproduces the following no-compile-error baseline in the dirty worktree:
 
 Latest iteration on **2026-04-18**:
 
+- Active slice: restore the missing `%%dict_has` primitive lowering so the JS
+  backend emits the OCaml `prop in obj` expression instead of silently falling
+  back to `undefined`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration fixed a backend primitive/codegen omission rather than
+  reopening typedtree or lambda parity
+- OCaml / backend reference:
+  - `compiler/core/lam_compile_primitive.ml`
+  - `compiler/core/js_exp_make.ml`
+  - checked-in snapshot `tests/tests/src/stdlib/Stdlib_DictTests.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, added the missing
+    `Primitive::PdictHas` case in `compile_primitive(...)`, matching OCaml's
+    `E.in_ prop obj` lowering with `ExpressionDesc::In(prop, obj)`
+  - added focused lowering coverage for the primitive itself and a JS-pass
+    regression that preserves `typeof ("key1" in dict)` through the
+    flatten/external-shadow/tailcall-inline/flatten-and-mark-dead/shake pipeline
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::compile_dict_has_primitive_emits_in_operator_like_ocaml' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::js_pass_pipeline_preserves_dict_has_in_operator_through_typeof' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh stdlib/Stdlib_DictTests --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ExternalShadow --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/stdlib/Stdlib_DictTests.res` no longer drops
+    `Dict.has(...)` to `undefined`; the checked-in `in` operator and
+    `typeof ("key1" in dict)` shape are both back on the release path
+  - the remaining `Stdlib_DictTests` drift is now only the older
+    dict-pattern/guard-ordering cluster plus the `Object.fromEntries` formatting
+    indentation, confirming the missing primitive was a distinct backend bug
+  - the authoritative current dirty-worktree baseline stayed at
+    **593 / 657**, with compile errors still at **0** and output diffs still at
+    **64**, but the cached `Stdlib_DictTests` diff shrank from **96** lines to
+    **51** lines after the primitive fix
+
+Latest iteration on **2026-04-18**:
+
 - Active slice: stop preserving explicit positive success arms for strict
   `null` / `undefined` refinement guards, so `js_stmt_make.if_` can keep using
   the OCaml generic guard-plus-fallthrough rewrite for this cluster; this was

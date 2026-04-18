@@ -5832,6 +5832,13 @@ impl LambdaCompiler {
                 }
                 _ => Expression::undefined(false),
             },
+            PdictHas => match compiled_args.as_slice() {
+                [obj, prop] => Expression::new(ExpressionDesc::In(
+                    Box::new(prop.clone()),
+                    Box::new(obj.clone()),
+                )),
+                _ => Expression::undefined(false),
+            },
             Pduprecord => match compiled_args.as_slice() {
                 [source] => Expression::new(ExpressionDesc::Object(
                     Some(Box::new(source.clone())),
@@ -32934,6 +32941,69 @@ let fib3 = n => {
             }
             other => panic!("expected exported dict object literal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compile_dict_has_primitive_emits_in_operator_like_ocaml() {
+        let mut compiler = LambdaCompiler::new();
+        let dict = Ident::create_local("dict");
+        let compiled = compiler.compile_expr(&Lambda::prim(
+            Primitive::PdictHas,
+            vec![
+                Lambda::var(dict.clone()),
+                Lambda::const_(Constant::string("key1")),
+            ],
+            Location::none(),
+        ));
+
+        assert!(compiled.prelude.is_empty());
+        assert_eq!(print_expression(&compiled.expr), "\"key1\" in dict");
+    }
+
+    #[test]
+    fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
+        let dict = Ident::create_local("dict");
+        let result = Ident::create_local("result");
+        let deps = apply_js_shake_pass(apply_js_flatten_and_mark_dead_pass(
+            apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
+                DepsProgram {
+                    program: Program::new(
+                        vec![
+                            Statement::variable(VariableDeclaration {
+                                ident: dict.clone(),
+                                value: Some(Expression::new(ExpressionDesc::Object(None, vec![]))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                            Statement::variable(VariableDeclaration {
+                                ident: result.clone(),
+                                value: Some(Expression::new(ExpressionDesc::Typeof(Box::new(
+                                    Expression::new(ExpressionDesc::In(
+                                        Box::new(Expression::string("key1")),
+                                        Box::new(Expression::var(dict.clone())),
+                                    )),
+                                )))),
+                                property: LetKind::Strict,
+                                ident_info: IdentInfo::default(),
+                            }),
+                        ],
+                        vec![result.clone()],
+                    ),
+                    modules: vec![],
+                    side_effect: None,
+                },
+            ))),
+            false,
+        ));
+        let rendered = print_deps_program(&deps, None);
+        assert!(
+            rendered.contains("typeof (\"key1\" in dict)"),
+            "expected the JS pass pipeline to preserve the Dict.has `in` operator, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("typeof undefined"),
+            "unexpected dropped Dict.has `in` operator after the JS passes:\n{rendered}"
+        );
     }
 
     #[test]
