@@ -4062,6 +4062,11 @@ fn make_like_binding_name(name: &str) -> bool {
             .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
 }
 
+fn sync_component_wrapper_params_like_ocaml(params: &[Ident]) -> bool {
+    matches!(params, [props] if props.name() == "props")
+        || matches!(params, [props, ref_] if props.name() == "props" && ref_.name() == "ref")
+}
+
 fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
     params.len() == args.len()
         && params.iter().zip(args).all(|(param, arg)| match arg {
@@ -4093,7 +4098,7 @@ fn inline_recursive_component_internal_wrapper(
     if wrapper.attr.async_ || wrapper.attr.directive.is_some() || wrapper.attr.one_unit_arg {
         return None;
     }
-    if !matches!(wrapper.params.as_slice(), [param] if param.name() == "props") {
+    if !sync_component_wrapper_params_like_ocaml(&wrapper.params) {
         return None;
     }
 
@@ -4162,7 +4167,7 @@ fn eta_reduce_function_value(func: &LFunction, env: &SimplifyEnv) -> Option<Lamb
             let Some(known) = env.known_functions.get(id) else {
                 unreachable!("guard above checked the known function map");
             };
-            if matches!(func.params.as_slice(), [param] if param.name() == "props")
+            if sync_component_wrapper_params_like_ocaml(&func.params)
                 && make_like_binding_name(id.name())
                 && !known.attr.async_
                 && known.attr.directive.is_none()
@@ -14285,6 +14290,93 @@ mod tests {
         ));
         let Lambda::Llet(_, kept_module, module_value, _) = body.as_ref() else {
             panic!("expected the module binding after the component wrapper: {simplified:?}");
+        };
+        assert!(kept_module.same(&module_binding));
+        assert!(matches!(
+            module_value.as_ref(),
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                args,
+                ..
+            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if id.same(&component))
+        ));
+    }
+
+    #[test]
+    fn keeps_forward_ref_component_wrappers_materialized_for_js_backend() {
+        let make = Ident::create_local("make");
+        let component = Ident::create_local("ForwardRef$Jsx_preserve_test$B");
+        let module_binding = Ident::create_local("B");
+        let param = Ident::create_local("param");
+        let inner_ref = Ident::create_local("_ref");
+        let props = Ident::create_local("props");
+        let ref_ = Ident::create_local("ref");
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            make.clone(),
+            Lambda::function_(
+                2,
+                vec![param.clone(), inner_ref],
+                Lambda::unit(),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                component.clone(),
+                Lambda::function_(
+                    2,
+                    vec![props.clone(), ref_.clone()],
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(make.clone())),
+                        ap_args: vec![Lambda::var(props.clone()), Lambda::var(ref_.clone())],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Uncurry,
+                        },
+                        ap_transformed_jsx: false,
+                    }),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::let_(
+                    LetKind::Strict,
+                    module_binding.clone(),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::Module(vec!["make".to_string()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(component.clone())],
+                        Location::none(),
+                    ),
+                    Lambda::prim(
+                        Primitive::Pmakeblock(
+                            0,
+                            TagInfo::ModuleExport(vec![module_binding.clone()]),
+                            Mutable::Immutable,
+                        ),
+                        vec![Lambda::var(module_binding.clone())],
+                        Location::none(),
+                    ),
+                ),
+            ),
+        ));
+
+        let Lambda::Llet(_, kept_component, kept_component_value, body) = &simplified else {
+            panic!("expected the forwardRef wrapper binding first: {simplified:?}");
+        };
+        assert!(kept_component.same(&component));
+        assert!(matches!(
+            kept_component_value.as_ref(),
+            Lambda::Lfunction(crate::lambda::LFunction { params, body, .. })
+                if matches!(params.as_slice(), [wrapped_props, wrapped_ref]
+                    if wrapped_props.same(&props) && wrapped_ref.same(&ref_))
+                    && matches!(body.as_ref(), Lambda::Lconst(Constant::JsUndefined { is_unit: true }))
+        ));
+        let Lambda::Llet(_, kept_module, module_value, _) = body.as_ref() else {
+            panic!("expected the module binding after the forwardRef wrapper: {simplified:?}");
         };
         assert!(kept_module.same(&module_binding));
         assert!(matches!(

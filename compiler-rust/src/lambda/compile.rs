@@ -25358,6 +25358,21 @@ mod tests {
     }
 
     #[test]
+    fn forward_ref_regress_keeps_props_ref_wrapper_materialized_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("forwardRef_regress");
+        assert!(
+            output.contains("let make = React.forwardRef((props, ref) => props.children);"),
+            "expected forwardRef_regress to keep the OCaml-style props/ref wrapper materialized, got:\n{output}"
+        );
+        assert!(
+            !output.contains("function make(")
+                && !output.contains("React.forwardRef(make)")
+                && !output.contains("make$1 as make"),
+            "unexpected helper hoist or rebound export alias remained in forwardRef_regress:\n{output}"
+        );
+    }
+
+    #[test]
     fn belt_hashmap_test_keeps_exported_hash_alias_materialized_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("belt_hashmap_test");
         assert!(

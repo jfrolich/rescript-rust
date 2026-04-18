@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 69 output diffs
+**Status:** 589 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 68 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,56 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **588 / 657**
+- JS snapshot parity: **589 / 657**
 - Compile errors: **0**
-- Output diffs: **69**
+- Output diffs: **68**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: keep the OCaml-generated `forwardRef` props/ref wrapper
+  materialized through JS-backend eta reduction instead of collapsing it to the
+  underlying `make` helper; this was the remaining wrapper-shape drift behind
+  `forwardRef_regress`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend wrapper preservation / eta reduction rather
+  than printer formatting
+- OCaml / backend reference:
+  - checked-in snapshots `tests/tests/src/forwardRef_regress.mjs` and
+    `tests/tests/src/forwardRef_regress.ocaml.mjs`
+  - the React component wrapper construction in
+    `compiler-rust/src/parser/jsx_ppx.rs`, which already builds the OCaml-style
+    `(props, ref) => make(props, ref)` wrapper before backend cleanup
+- Rust changes:
+  - in `compiler-rust/src/lambda/simplify.rs`, added
+    `sync_component_wrapper_params_like_ocaml(...)` and widened the existing
+    sync-component wrapper guard from `[props]` to `[props, ref]`
+  - used that widened guard in both `eta_reduce_function_value(...)` and
+    `inline_recursive_component_internal_wrapper(...)` so `forwardRef`
+    wrappers are no longer collapsed to the helper identifier during backend
+    cleanup, while still allowing the helper body to inline into the surviving
+    wrapper
+  - added focused simplifier coverage for the two-arg wrapper case and a
+    checked-in JS snapshot regression test in
+    `compiler-rust/src/lambda/compile.rs`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::simplify::tests::keeps_forward_ref_component_wrappers_materialized_for_js_backend' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::simplify::tests::keeps_sync_component_props_wrappers_materialized_for_js_backend' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::forward_ref_regress_keeps_props_ref_wrapper_materialized_like_snapshot' -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh forwardRef_regress --diff`
+  - `timeout 30 ./scripts/test_js_single.sh module_parameter_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh offset --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/forwardRef_regress.res` is exact again; Rust now emits
+    `let make = React.forwardRef((props, ref) => props.children);` and no
+    longer hoists `function make(param, _ref)` or re-exports `make$1 as make`
+  - `tests/tests/src/module_parameter_test.res` and `offset.res` stayed exact,
+    so widening the component-wrapper guard did not reopen the surrounding
+    export-tail or wrapper-inlining fixes
+  - the authoritative current dirty-worktree baseline improved from
+    **588 / 657** to **589 / 657**, with output diffs reduced from **69** to
+    **68** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 
