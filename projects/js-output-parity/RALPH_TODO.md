@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 75 output diffs
+**Status:** 585 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 72 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **72**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,68 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **582 / 657**
+- JS snapshot parity: **585 / 657**
 - Compile errors: **0**
-- Output diffs: **75**
+- Output diffs: **72**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: allow OCaml-aligned late export-tail moves only when the later
+  top-level effect still contains a real remaining alias use to rewrite, and
+  then only for the two verified-safe cases from the snapshots: direct-call
+  function aliases and same-name ML module-field aliases
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / later-effect ordering
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/gpr_3142_test.mjs`,
+    `tests/tests/src/gpr_3548_test.mjs`,
+    `tests/tests/src/acyc/a4_a5.mjs`,
+    `tests/tests/src/async_inline.mjs`,
+    `tests/tests/src/block_alias_test.mjs`, and
+    `tests/tests/src/string_set.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, replaced the broad
+    later-top-level-effect export-tail guard with
+    `later_toplevel_effect_allows_tail_move(...)`, which now requires an
+    actual remaining alias use before allowing the tail move
+  - added `qualified_tail_move_uses_are_safe_to_inline(...)` plus the
+    same-name ML module-field detection helper so include/module-field aliases
+    like `A3_a4.v` and `Set_gen.empty` can follow the OCaml tail-move path
+    without reopening the import-attribute / higher-order alias regressions
+  - added focused synthetic coverage for the new direct-call function-alias and
+    same-name ML module-field alias cases
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effect_only_calls_it -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_value_effect -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3142_test`
+  - `timeout 30 ./scripts/test_js_single.sh gpr_3548_test`
+  - `timeout 30 ./scripts/test_js_single.sh src/acyc/a4_a5.res`
+  - `timeout 30 ./scripts/test_js_single.sh string_set`
+  - `timeout 30 ./scripts/test_js_single.sh belt_hashmap_test`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline`
+  - `timeout 30 ./scripts/test_js_single.sh block_alias_test`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/gpr_3142_test.res`,
+    `gpr_3548_test.res`, and `acyc/a4_a5.res` are exact again; the Rust
+    backend now matches OCaml by moving those export-only aliases to the late
+    export section while rewriting the real remaining internal uses back to the
+    underlying function/module-field bindings
+  - prior alias-order guards `tests/tests/src/async_inline.res`,
+    `block_alias_test.res`, and `belt_hashmap_test.res` stayed exact after the
+    tightened "must have a remaining use" restriction, so the relaxed
+    later-effect rule no longer shifts unused aliases like `broken$2` or `f`
+    past the later `describe`/top-level effect boundary
+  - `tests/tests/src/string_set.res` improved materially but still fails on an
+    unrelated loop-state materialization drift (`let match = s2` / `_s2 = match`)
+    rather than the export-tail alias cluster
+  - the authoritative current dirty-worktree baseline improved from
+    **582 / 657** to **585 / 657**, with output diffs reduced from **75** to
+    **72** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 

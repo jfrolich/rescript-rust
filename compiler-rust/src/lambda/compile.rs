@@ -14572,16 +14572,15 @@ fn move_same_name_export_alias_to_export_tail(
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
     let blocked_by_self_mention = expression_mentions_ident_anywhere(&replacement, target);
+    let remaining = &flattened[index + 1..];
     let blocked_by_prior_use = flattened[..index]
         .iter()
         .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
     let blocked_by_unsafe_inline = matches!(initializer_kind, TailMoveInitializerKind::Qualified)
-        && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], target);
-    let blocked_by_later_initializer =
-        later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target);
-    let blocked_by_later_effect = later_toplevel_effect_statement(&flattened[index + 1..])
-        && !(matches!(initializer_kind, TailMoveInitializerKind::Function)
-            && uses_ident_before_first_toplevel_effect(&flattened[index + 1..], target));
+        && !qualified_tail_move_uses_are_safe_to_inline(remaining, target, &replacement);
+    let blocked_by_later_initializer = later_toplevel_initializer_mentions_ident(remaining, target);
+    let blocked_by_later_effect =
+        !later_toplevel_effect_allows_tail_move(remaining, target, initializer_kind, &replacement);
     if blocked_by_variable
         || blocked_by_literal_binding
         || blocked_by_kind
@@ -14616,13 +14615,13 @@ fn move_reused_same_name_export_binding_to_export_tail(
     };
     let replacement = resolve_tail_move_replacement_expression(&flattened, value, &reused);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
+    let remaining = &flattened[index + 1..];
     let blocked_by_literal_binding =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && (!matches!(property, LetKind::Alias)
-                || !has_later_toplevel_function_binding(&flattened[index + 1..]));
-    let blocked_by_later_effect = later_toplevel_effect_statement(&flattened[index + 1..])
-        && !(matches!(initializer_kind, TailMoveInitializerKind::Function)
-            && uses_ident_before_first_toplevel_effect(&flattened[index + 1..], &reused));
+                || !has_later_toplevel_function_binding(remaining));
+    let blocked_by_later_effect =
+        !later_toplevel_effect_allows_tail_move(remaining, &reused, initializer_kind, &replacement);
     if matches!(property, LetKind::Variable)
         || blocked_by_literal_binding
         || matches!(initializer_kind, TailMoveInitializerKind::Other)
@@ -14631,8 +14630,8 @@ fn move_reused_same_name_export_binding_to_export_tail(
             .iter()
             .any(|stmt| statement_mentions_ident_anywhere(stmt, &reused))
         || (matches!(initializer_kind, TailMoveInitializerKind::Qualified)
-            && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], &reused))
-        || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], &reused)
+            && !qualified_tail_move_uses_are_safe_to_inline(remaining, &reused, &replacement))
+        || later_toplevel_initializer_mentions_ident(remaining, &reused)
         || blocked_by_later_effect
     {
         return None;
@@ -14799,6 +14798,51 @@ enum TailMoveUseContext {
 fn tail_move_uses_are_safe_to_inline(block: &[Statement], target: &Ident) -> bool {
     block.iter()
         .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
+}
+
+fn qualified_tail_move_uses_are_safe_to_inline(
+    block: &[Statement],
+    target: &Ident,
+    replacement: &Expression,
+) -> bool {
+    same_name_ml_module_field_tail_move_replacement(replacement, target.name())
+        || tail_move_uses_are_safe_to_inline(block, target)
+}
+
+fn same_name_ml_module_field_tail_move_replacement(
+    replacement: &Expression,
+    target_name: &str,
+) -> bool {
+    matches!(
+        &replacement.desc,
+        ExpressionDesc::Var(VIdent::Qualified(module, Some(field)))
+            if field == target_name && module.kind.eq(&Kind::Ml)
+    )
+}
+
+fn later_toplevel_effect_allows_tail_move(
+    block: &[Statement],
+    target: &Ident,
+    initializer_kind: TailMoveInitializerKind,
+    replacement: &Expression,
+) -> bool {
+    if !later_toplevel_effect_statement(block) {
+        return true;
+    }
+    if !block
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+    {
+        return false;
+    }
+
+    match initializer_kind {
+        TailMoveInitializerKind::Function => tail_move_uses_are_safe_to_inline(block, target),
+        TailMoveInitializerKind::Qualified => {
+            qualified_tail_move_uses_are_safe_to_inline(block, target, replacement)
+        }
+        TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
+    }
 }
 
 fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, target: &Ident) -> bool {
@@ -19765,6 +19809,128 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effect_only_calls_it()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let converter = Ident::create_local("tToJs");
+        let exported = Ident::create_local("v");
+        let sink = Ident::create_persistent("sink");
+        let param = Ident::create_local("param");
+        let arg = Ident::create_local("arg");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: converter.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param.clone()],
+                    body: vec![Statement::return_(Expression::var(param))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(converter.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink),
+                vec![Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![arg.clone()],
+                    body: vec![Statement::return_(Expression::call(
+                        Expression::var(exported.clone()),
+                        vec![Expression::var(arg)],
+                        CallInfo::default(),
+                    ))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the function binding, later effect, and late export alias");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration { ident, .. }) => {
+                assert!(ident.same(&converter));
+            }
+            other => panic!("expected the underlying function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(_, args, _),
+                ..
+            }) => {
+                let [effect_closure] = args.as_slice() else {
+                    panic!("expected the later effect to keep one closure argument");
+                };
+                match &effect_closure.desc {
+                    ExpressionDesc::Fun { body, .. } => {
+                        let [Statement {
+                            desc:
+                                StatementDesc::Return(Expression {
+                                    desc: ExpressionDesc::Call(func, _, _),
+                                    ..
+                                }),
+                            ..
+                        }] = body.as_slice()
+                        else {
+                            panic!("expected the closure body to stay a direct function call");
+                        };
+                        match &func.desc {
+                            ExpressionDesc::Var(VIdent::Id(ident)) => {
+                                assert!(ident.same(&converter));
+                            }
+                            other => panic!(
+                                "expected the closure call to inline back to the underlying function, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("expected the later effect arg to stay a closure, got {other:?}"),
+                }
+            }
+            other => panic!("expected the later effect second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&converter));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late export alias binding third, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_function_target() {
         let mut compiler = LambdaCompiler::new();
         let process = Ident::create_local("process");
@@ -19822,6 +19988,85 @@ mod tests {
                 assert!(target.same(&process));
             }
             other => panic!("expected the exported alias binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_value_effect()
+    {
+        let mut compiler = LambdaCompiler::new();
+        let module = ModuleId {
+            id: Ident::create_persistent("A3_a4"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let exported = Ident::create_local("v");
+        let sink = Ident::create_persistent("sink");
+        let qualified = Expression::qualified(module.clone(), Some("v".to_string()));
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(qualified.clone()),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink),
+                vec![Expression::var(exported.clone())],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(exported.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the rewritten later effect plus the late export alias");
+        };
+        match &first.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(_, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the later effect to keep one argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Var(VIdent::Qualified(module_id, Some(field))) => {
+                        assert_eq!(field, "v");
+                        assert_eq!(module_id, &module);
+                    }
+                    other => panic!(
+                        "expected the later effect to inline to the module field access, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the later effect first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module_id, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert_eq!(field, "v");
+                assert_eq!(module_id, &module);
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late same-name module-field alias second, got {other:?}"),
         }
     }
 
