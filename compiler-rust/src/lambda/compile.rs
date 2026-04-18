@@ -14546,6 +14546,9 @@ fn move_same_name_export_alias_to_export_tail(
         && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], target);
     let blocked_by_later_initializer =
         later_toplevel_initializer_mentions_ident(&flattened[index + 1..], target);
+    let blocked_by_later_effect = later_toplevel_effect_statement(&flattened[index + 1..])
+        && !(matches!(initializer_kind, TailMoveInitializerKind::Function)
+            && uses_ident_before_first_toplevel_effect(&flattened[index + 1..], target));
     if blocked_by_variable
         || blocked_by_literal_binding
         || blocked_by_kind
@@ -14554,6 +14557,7 @@ fn move_same_name_export_alias_to_export_tail(
         || blocked_by_prior_use
         || blocked_by_unsafe_inline
         || blocked_by_later_initializer
+        || blocked_by_later_effect
     {
         return None;
     }
@@ -14583,6 +14587,9 @@ fn move_reused_same_name_export_binding_to_export_tail(
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && (!matches!(property, LetKind::Alias)
                 || !has_later_toplevel_function_binding(&flattened[index + 1..]));
+    let blocked_by_later_effect = later_toplevel_effect_statement(&flattened[index + 1..])
+        && !(matches!(initializer_kind, TailMoveInitializerKind::Function)
+            && uses_ident_before_first_toplevel_effect(&flattened[index + 1..], &reused));
     if matches!(property, LetKind::Variable)
         || blocked_by_literal_binding
         || matches!(initializer_kind, TailMoveInitializerKind::Other)
@@ -14593,6 +14600,7 @@ fn move_reused_same_name_export_binding_to_export_tail(
         || (matches!(initializer_kind, TailMoveInitializerKind::Qualified)
             && !tail_move_uses_are_safe_to_inline(&flattened[index + 1..], &reused))
         || later_toplevel_initializer_mentions_ident(&flattened[index + 1..], &reused)
+        || blocked_by_later_effect
     {
         return None;
     }
@@ -15056,6 +15064,29 @@ fn later_toplevel_initializer_mentions_ident(block: &[Statement], target: &Ident
         }) => expression_mentions_ident_outside_nested_functions(value, target),
         _ => false,
     })
+}
+
+fn later_toplevel_effect_statement(block: &[Statement]) -> bool {
+    block.iter().any(statement_has_toplevel_effect)
+}
+
+fn uses_ident_before_first_toplevel_effect(block: &[Statement], target: &Ident) -> bool {
+    let effect_index = block
+        .iter()
+        .position(statement_has_toplevel_effect)
+        .unwrap_or(block.len());
+    block[..effect_index]
+        .iter()
+        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
+}
+
+fn statement_has_toplevel_effect(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => {
+            value.as_ref().is_some_and(|expr| !js_expr_no_side_effects(expr))
+        }
+        _ => !js_statement_no_side_effects(stmt),
+    }
 }
 
 fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target: &Ident) -> bool {
@@ -18861,7 +18892,8 @@ mod tests {
     }
 
     #[test]
-    fn coerce_toplevel_exports_moves_same_name_function_alias_binding_to_tail_when_reused() {
+    fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_effect_when_reused(
+    ) {
         let mut compiler = LambdaCompiler::new();
         let target = Ident::create_local("tToJs");
         let declared_alias = Ident::create_local("v");
@@ -18899,14 +18931,14 @@ mod tests {
             &mut block,
             ExtractedExports {
                 exports: vec![exported.clone()],
-                values: vec![Expression::var(declared_alias)],
+                values: vec![Expression::var(declared_alias.clone())],
             },
         );
         let exports = resolve_export_aliases(&block, exports);
 
-        assert_eq!(exports, vec![exported.clone()]);
+        assert_eq!(exports, vec![declared_alias.clone()]);
         let [first, second, third] = block.as_slice() else {
-            panic!("expected the function binding, internal use, and late export alias binding");
+            panic!("expected the function binding, preserved alias, and later top-level effect");
         };
         match &first.desc {
             StatementDesc::Variable(VariableDeclaration {
@@ -18923,29 +18955,6 @@ mod tests {
             other => panic!("expected the function binding to remain first, got {other:?}"),
         };
         match &second.desc {
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Call(func, args, _),
-                ..
-            }) => {
-                let [arg] = args.as_slice() else {
-                    panic!("expected the internal call to keep a single argument");
-                };
-                match &arg.desc {
-                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
-                    other => panic!(
-                        "expected the internal call argument to stay as \"a\", got {other:?}"
-                    ),
-                }
-                match &func.desc {
-                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
-                    other => panic!(
-                        "expected the call to use the underlying target directly, got {other:?}"
-                    ),
-                }
-            }
-            other => panic!("expected the internal call to remain second, got {other:?}"),
-        }
-        match &third.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
                 value:
@@ -18956,16 +18965,39 @@ mod tests {
                 property,
                 ..
             }) => {
-                assert!(ident.same(&exported));
+                assert!(ident.same(&declared_alias));
                 assert!(rebound_target.same(&target));
                 assert_eq!(*property, LetKind::Alias);
             }
-            other => panic!("expected the late export alias binding third, got {other:?}"),
+            other => panic!("expected the preserved alias binding second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the later top-level call to keep a single argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                    other => panic!(
+                        "expected the later top-level call argument to stay as \"a\", got {other:?}"
+                    ),
+                }
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&declared_alias)),
+                    other => panic!(
+                        "expected the later top-level call to keep using the preserved alias, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the later top-level call third, got {other:?}"),
         }
     }
 
     #[test]
-    fn coerce_toplevel_exports_moves_same_name_function_alias_chain_to_tail_using_underlying_target()
+    fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_effect()
     {
         let mut compiler = LambdaCompiler::new();
         let target = Ident::create_local("tToJs");
@@ -19011,15 +19043,15 @@ mod tests {
             &mut block,
             ExtractedExports {
                 exports: vec![exported.clone()],
-                values: vec![Expression::var(declared_alias)],
+                values: vec![Expression::var(declared_alias.clone())],
             },
         );
         let exports = resolve_export_aliases(&block, exports);
 
-        assert_eq!(exports, vec![exported.clone()]);
+        assert_eq!(exports, vec![declared_alias.clone()]);
         let [first, second, third, fourth] = block.as_slice() else {
             panic!(
-                "expected the original function, renamed alias, internal call, and late export alias"
+                "expected the original function, renamed alias chain, preserved same-name alias, and later top-level effect"
             );
         };
         match &first.desc {
@@ -19050,27 +19082,6 @@ mod tests {
             other => panic!("expected the renamed same-name alias second, got {other:?}"),
         }
         match &third.desc {
-            StatementDesc::Exp(Expression {
-                desc: ExpressionDesc::Call(func, args, _),
-                ..
-            }) => {
-                let [arg] = args.as_slice() else {
-                    panic!("expected the internal call to keep one argument");
-                };
-                match &arg.desc {
-                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
-                    other => panic!("expected the internal call arg to stay as \"a\", got {other:?}"),
-                }
-                match &func.desc {
-                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
-                    other => panic!(
-                        "expected the internal call to collapse through the renamed self-alias, got {other:?}"
-                    ),
-                }
-            }
-            other => panic!("expected the internal call third, got {other:?}"),
-        }
-        match &fourth.desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident,
                 value:
@@ -19081,11 +19092,36 @@ mod tests {
                 property,
                 ..
             }) => {
-                assert!(ident.same(&exported));
-                assert!(rebound_target.same(&target));
+                assert!(ident.same(&declared_alias));
+                assert!(rebound_target.name() == target.name());
                 assert_eq!(*property, LetKind::Alias);
             }
-            other => panic!("expected the late export alias binding fourth, got {other:?}"),
+            other => panic!("expected the preserved same-name alias third, got {other:?}"),
+        }
+        match &fourth.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                let [arg] = args.as_slice() else {
+                    panic!("expected the later top-level call to keep one argument");
+                };
+                match &arg.desc {
+                    ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
+                    other => panic!(
+                        "expected the later top-level call arg to stay as \"a\", got {other:?}"
+                    ),
+                }
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => {
+                        assert!(ident.same(&declared_alias))
+                    }
+                    other => panic!(
+                        "expected the later top-level call to keep using the preserved alias chain, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected the later top-level call fourth, got {other:?}"),
         }
     }
 
@@ -19276,6 +19312,81 @@ mod tests {
                 assert_eq!(*property, LetKind::Alias);
             }
             other => panic!("expected the late literal export binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_effects() {
+        let mut compiler = LambdaCompiler::new();
+        let set_gen = ModuleId {
+            id: Ident::create_persistent("Set_gen"),
+            kind: Kind::Ml,
+            dynamic_import: false,
+        };
+        let declared = Ident::create_local("empty");
+        let exported = Ident::create_local("empty");
+        let effect = Ident::create_local("effect");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: declared.clone(),
+                value: Some(Expression::qualified(
+                    set_gen,
+                    Some("empty".to_string()),
+                )),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(effect.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(declared.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].name(), exported.name());
+        let [first, second] = block.as_slice() else {
+            panic!("expected the original binding to stay ahead of the later effect");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(module, Some(field))),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&declared));
+                assert_eq!(module.id.name(), "Set_gen");
+                assert_eq!(field, "empty");
+                assert_eq!(*property, LetKind::Strict);
+            }
+            other => panic!("expected the module-field binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&effect)),
+                    other => panic!("expected the later effect call to stay second, got {other:?}"),
+                }
+            }
+            other => panic!("expected the later effect statement second, got {other:?}"),
         }
     }
 
@@ -23883,6 +23994,30 @@ mod tests {
         assert!(
             foo_idx < x_idx && x_idx < xx_idx,
             "expected Coercion to keep the surviving function binding before the rebound literal exports, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn block_alias_test_keeps_exported_alias_before_mocha_effects_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("block_alias_test");
+        let alias_idx = output.find("let f = Primitive_object.equal;").unwrap();
+        let describe_idx = output.find("Mocha.describe(").unwrap();
+        assert!(
+            alias_idx < describe_idx,
+            "expected block_alias_test to keep the exported alias before Mocha.describe, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn ffi_arity_test_keeps_exported_alias_before_later_effects_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("ffi_arity_test");
+        let alias_idx = output.find("let abc_u = abc;").unwrap();
+        let call_idx = output
+            .rfind("((function(){console.log(\"forgiving arity\")})());")
+            .unwrap();
+        assert!(
+            alias_idx < call_idx,
+            "expected ffi_arity_test to keep abc_u before the later top-level effects, got:\n{output}"
         );
     }
 

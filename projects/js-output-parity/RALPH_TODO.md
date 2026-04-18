@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 575 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 82 output diffs
+**Status:** 582 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 75 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **575 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **82**
+- Output diffs: **75**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,11 +63,64 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **575 / 657**
+- JS snapshot parity: **582 / 657**
 - Compile errors: **0**
-- Output diffs: **82**
+- Output diffs: **75**
 
 Latest iteration on **2026-04-18**:
+
+- Active slice: keep same-name export aliases ahead of later top-level effects
+  unless the alias is a function binding whose remaining uses are all before
+  that first later effect boundary; this was the backend export-order cluster
+  behind `block_alias_test`, `ffi_arity_test`, `float_test`, `bigint_test`,
+  and the temporary `ast_abstract_test` regression from the earlier broad
+  later-effect guard
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`,
+  and this iteration stayed in backend export coercion / top-level ordering
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/block_alias_test.mjs`,
+    `tests/tests/src/ffi_arity_test.mjs`,
+    `tests/tests/src/float_test.mjs`,
+    `tests/tests/src/bigint_test.mjs`, and
+    `tests/tests/src/ast_abstract_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, added
+    `statement_has_toplevel_effect`, `later_toplevel_effect_statement`, and
+    `uses_ident_before_first_toplevel_effect`
+  - used those helpers to stop same-name export tail moves from crossing a
+    later top-level effect by default, while still allowing the OCaml-aligned
+    function-alias case when the remaining internal uses occur entirely before
+    that effect boundary
+  - updated the focused synthetic regression coverage so the alias-preserving
+    cases assert the preserved pre-effect binding shape instead of the older
+    tail-sinking assumption, and kept snapshot guards for
+    `block_alias_test` / `ffi_arity_test`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_effects -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml keeps_exported_alias_before -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml keeps_same_name_function_alias -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - release direct-diff checks for `tests/tests/src/block_alias_test.res`,
+    `ffi_arity_test.res`, `float_test.res`, `bigint_test.res`,
+    `ast_abstract_test.res`, `relative_path.res`, and `Coercion.res`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/block_alias_test.res`,
+    `ffi_arity_test.res`, `float_test.res`, `bigint_test.res`,
+    and `ast_abstract_test.res` are exact again; same-name export aliases now
+    stay before later `Mocha.describe` / top-level call effects unless the
+    remaining internal use happens earlier in the file, which restores the
+    `ast_abstract_test` function-alias collapse without regressing the earlier
+    export-order fixes
+  - guard files `tests/tests/src/relative_path.res` and
+    `tests/tests/src/Coercion.res` stayed exact
+  - authoritative baseline improved from **575 / 657** to **582 / 657** with
+    output diffs reduced from **82** to **75** and compile errors still at
+    **0**
+
+Previous iteration on **2026-04-18**:
 
 - Active slice: allow OCaml-aligned late export-tail sinking for same-name
   literal exports only when the source binding is an `Alias` and a later
