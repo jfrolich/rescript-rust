@@ -394,7 +394,11 @@ impl LambdaCompiler {
         let mut exports = Vec::with_capacity(extracted.exports.len());
         let mut rebound_exports = Vec::new();
 
-        for (export, value) in extracted.exports.into_iter().zip(extracted.values) {
+        let extracted_len = extracted.exports.len();
+        for index in 0..extracted_len {
+            let export = extracted.exports[index].clone();
+            let value = extracted.values[index].clone();
+            let later_exports = &extracted.exports[index + 1..];
             if let Some((late_value, property)) =
                 move_same_name_export_alias_to_export_tail(block, &export, &value)
             {
@@ -454,6 +458,15 @@ impl LambdaCompiler {
             }
             if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
                 exports.push(reused);
+                continue;
+            }
+            if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
+                block,
+                &export,
+                &value,
+                later_exports,
+            ) {
+                exports.push(inserted_export);
                 continue;
             }
 
@@ -9485,6 +9498,61 @@ fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) ->
         .all(statement_allows_undefined_export_reuse)
 }
 
+fn insert_rebound_export_before_equivalent_later_binding(
+    block: &mut Block,
+    export: &Ident,
+    value: &Expression,
+    later_exports: &[Ident],
+) -> Option<Ident> {
+    if !matches!(
+        value.desc,
+        ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null
+    ) {
+        return None;
+    }
+
+    let insert_index = block.iter().position(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(initializer),
+            ..
+        }) => {
+            later_exports.iter().any(|later| later.same(ident))
+                && ocaml_eq_expression(initializer, value)
+        }
+        _ => false,
+    })?;
+
+    if !block[insert_index..].iter().all(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(initializer),
+            ..
+        }) => {
+            later_exports.iter().any(|later| later.same(ident))
+                && ocaml_eq_expression(initializer, value)
+        }
+        _ => false,
+    }) {
+        return None;
+    }
+
+    block.insert(
+        insert_index,
+        Statement::variable(VariableDeclaration {
+            ident: export.clone(),
+            value: Some(value.clone()),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        }),
+    );
+    Some(export.clone())
+}
+
 fn reusable_same_name_export_binding(
     block: &Block,
     export: &Ident,
@@ -18068,6 +18136,81 @@ mod tests {
                 ..
             }) => assert!(ident.same(&second)),
             other => panic!("expected the later retained binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_deps_program_keeps_exported_constant_binding_before_exported_alias_of_same_constant_like_test_small()
+     {
+        let mut compiler = LambdaCompiler::new();
+        let fib = Ident::create_local("fib");
+        let u = Ident::create_local("u");
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            fib.clone(),
+            Lambda::const_(Constant::int(3)),
+            Lambda::let_(
+                LetKind::Strict,
+                u.clone(),
+                Lambda::var(fib.clone()),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![fib.clone(), u.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(fib.clone()), Lambda::var(u.clone())],
+                    Location::none(),
+                ),
+            ),
+        );
+
+        let deps = compiler.compile_deps_program(&lam);
+
+        let rendered = print_deps_program(&deps, None);
+
+        let [first_export, second_export] = deps.program.exports.as_slice() else {
+            panic!("expected two exports");
+        };
+        assert!(
+            first_export.same(&fib),
+            "expected fib to remain the first export, exports={:?}\n{rendered}",
+            deps.program.exports
+        );
+        assert!(
+            second_export.same(&u),
+            "expected u to remain the second export, exports={:?}\n{rendered}",
+            deps.program.exports
+        );
+
+        let [first_stmt, second_stmt] = deps.program.block.as_slice() else {
+            panic!("expected the preserved constant binding plus its exported alias");
+        };
+
+        match &first_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&fib)),
+            other => panic!("expected fib = 3 to remain first, got {other:?}\n{rendered}"),
+        }
+
+        match &second_stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Number(Number::Int { i: 3, .. }),
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&u)),
+            other => panic!("expected u = 3 to remain second, got {other:?}\n{rendered}"),
         }
     }
 

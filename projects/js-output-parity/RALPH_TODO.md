@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 84 output diffs
+**Status:** 574 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 83 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,21 +52,64 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **574 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **83**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 ## Current Worktree Status
 
-A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
-reproduces a no-compile-error but substantially regressed baseline in the
-current dirty worktree:
+A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
+reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **573 / 657**
+- JS snapshot parity: **574 / 657**
 - Compile errors: **0**
-- Output diffs: **84**
+- Output diffs: **83**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: preserve OCaml’s ordering for rebound exported literal constants
+  when an earlier export and a later exported sibling collapse to the same
+  literal, which was the live `test_small` mismatch in the export-coercion
+  backend handoff
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion rather than printer
+  formatting
+- OCaml / backend reference:
+  - checked-in snapshots `tests/tests/src/test_small.mjs` and
+    `tests/tests/src/gpr_977_test.mjs`
+  - Rust-side export coercion in `compiler-rust/src/lambda/compile.rs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, taught top-level export coercion
+    to insert an earlier rebound literal export before a terminal tail of later
+    exported siblings with the same literal initializer, instead of always
+    appending that rebound binding after the whole block
+  - added focused regression coverage
+    `compile_deps_program_keeps_exported_constant_binding_before_exported_alias_of_same_constant_like_test_small`
+    so the `fib` / `u` export-order case is pinned directly in the backend
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release compile_deps_program_keeps_exported_constant_binding_before_exported_alias_of_same_constant_like_test_small -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_977_keeps_exported_constant_name_while_inlining_non_export_uses_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/test_small.res -o /tmp/test_small.mjs`
+  - `diff -u tests/tests/src/test_small.mjs /tmp/test_small.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_977_test.res -o /tmp/gpr_977_test.mjs`
+  - `diff -u tests/tests/src/gpr_977_test.mjs /tmp/gpr_977_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/key_word_property.res -o /tmp/key_word_property.mjs`
+  - `diff -u tests/tests/src/key_word_property.mjs /tmp/key_word_property.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_small.res` is exact again and no longer appears in
+    the authoritative diff set
+  - `tests/tests/src/gpr_977_test.res` stayed exact as the constant-export
+    guard
+  - `tests/tests/src/key_word_property.res` still differs, confirming the
+    remaining import/export-shape ordering issue is a separate cluster
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **573 / 657** -> **574 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **84** -> **83** (**-1**)
 
 Latest iteration on **2026-04-18**:
 
