@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 572 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 85 output diffs
+**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 84 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **572 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **85**
+- Output diffs: **84**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -64,9 +64,58 @@ A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
 reproduces a no-compile-error but substantially regressed baseline in the
 current dirty worktree:
 
-- JS snapshot parity: **572 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **85**
+- Output diffs: **84**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: preserve OCaml-style distinct imported value aliases when a
+  later same-name export alias is sunk into the export tail, which was the
+  remaining `relative_path` mismatch in the export-coercion handoff
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, but
+  this iteration was again in backend export-tail coercion rather than
+  printer-only formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - `compiler/core/lam_pass_remove_alias.ml`
+  - checked-in snapshots `tests/tests/src/relative_path.mjs`,
+    `tests/tests/src/gpr_3142_test.mjs`, and
+    `tests/tests/src/ImportAttributes.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, threaded the rebound export
+    identifier through `resolve_tail_move_replacement_expression(...)` so the
+    helper only collapses to a qualified module-field import when the moved
+    binding is itself that rebound export
+  - kept distinct imported aliases materialized in value position during late
+    export-tail sinking, which preserves `let foo = FileJs.foo; let bar = foo;`
+    for `relative_path` instead of rebinding `bar` directly to `FileJs.foo`
+  - added focused regression coverage
+    `coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail`
+    and
+    `relative_path_keeps_exported_import_alias_chain_materialized_like_snapshot`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release relative_path_keeps_exported_import_alias_chain_materialized_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/relative_path.res -o /tmp/relative_path.mjs`
+  - `diff -u tests/tests/src/relative_path.mjs /tmp/relative_path.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/gpr_3142_test.res -o /tmp/gpr_3142_test.mjs`
+  - `diff -u tests/tests/src/gpr_3142_test.mjs /tmp/gpr_3142_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ImportAttributes.res -o /tmp/ImportAttributes.mjs`
+  - `diff -u tests/tests/src/ImportAttributes.mjs /tmp/ImportAttributes.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/relative_path.res` is exact again and no longer appears in
+    the authoritative diff set
+  - `tests/tests/src/gpr_3142_test.res` and
+    `tests/tests/src/ImportAttributes.res` stayed exact as broader guards
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **572 / 657** -> **573 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **85** -> **84** (**-1**)
 
 Latest iteration on **2026-04-18**:
 

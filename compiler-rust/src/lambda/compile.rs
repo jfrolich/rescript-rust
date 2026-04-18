@@ -420,6 +420,7 @@ impl LambdaCompiler {
                         let resolved = resolve_tail_move_replacement_expression(
                             block,
                             &Expression::var(target.clone()),
+                            target,
                         );
                         match resolved.desc {
                             ExpressionDesc::Var(VIdent::Id(resolved_target)) => {
@@ -9171,7 +9172,9 @@ fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
 }
 
 fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -> Option<Ident> {
-    match resolve_tail_move_replacement_expression(block, &Expression::var(export.clone())).desc {
+    match resolve_tail_move_replacement_expression(block, &Expression::var(export.clone()), export)
+        .desc
+    {
         ExpressionDesc::Var(VIdent::Id(target))
             if !target.same(export) && block_declares_initialized_ident(block, &target) =>
         {
@@ -14349,7 +14352,8 @@ fn move_same_name_export_alias_to_export_tail(
     else {
         return None;
     };
-    let replacement = resolve_tail_move_replacement_expression(&flattened, &initializer);
+    let replacement =
+        resolve_tail_move_replacement_expression(&flattened, &initializer, target);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     let blocked_by_variable = matches!(property, LetKind::Variable);
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
@@ -14392,7 +14396,7 @@ fn move_reused_same_name_export_binding_to_export_tail(
     else {
         return None;
     };
-    let replacement = resolve_tail_move_replacement_expression(&flattened, value);
+    let replacement = resolve_tail_move_replacement_expression(&flattened, value, &reused);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     if matches!(property, LetKind::Variable)
         || matches!(initializer_kind, TailMoveInitializerKind::Other)
@@ -14457,6 +14461,7 @@ fn same_name_export_initializer_kind(
 fn resolve_tail_move_replacement_expression(
     block: &Block,
     initializer: &Expression,
+    rebound: &Ident,
 ) -> Expression {
     let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
         return initializer.clone();
@@ -14490,7 +14495,11 @@ fn resolve_tail_move_replacement_expression(
         match &value.desc {
             ExpressionDesc::Fun { .. } => return Expression::var(current),
             ExpressionDesc::Var(VIdent::Qualified(module, field)) => {
-                return Expression::qualified(module.clone(), field.clone());
+                return if current.same(rebound) {
+                    Expression::qualified(module.clone(), field.clone())
+                } else {
+                    Expression::var(current)
+                };
             }
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
                 current = next.clone();
@@ -18887,6 +18896,86 @@ mod tests {
     }
 
     #[test]
+    fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
+        let mut compiler = LambdaCompiler::new();
+        let file_js = ModuleId {
+            id: Ident::create_persistent("FileJs"),
+            kind: Kind::External {
+                name: "./File.js".to_string(),
+                default: false,
+                import_attributes: None,
+            },
+            dynamic_import: false,
+        };
+        let foo = Ident::create_local("foo");
+        let bar = Ident::create_local("bar");
+        let exported = Ident::create_local("bar");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: foo.clone(),
+                value: Some(Expression::qualified(
+                    file_js,
+                    Some("foo".to_string()),
+                )),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: bar.clone(),
+                value: Some(Expression::var(foo.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(bar)],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second] = block.as_slice() else {
+            panic!("expected the imported alias plus the late export alias");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Qualified(_, Some(field))),
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&foo));
+                assert_eq!(field, "foo");
+            }
+            other => panic!("expected the imported alias binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&foo));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late export alias to reuse foo, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_top_level_initializer()
      {
         let mut compiler = LambdaCompiler::new();
@@ -23257,6 +23346,20 @@ mod tests {
         assert!(
             !output.contains("each: O.forEach") && !output.contains("each: each$1"),
             "unexpected inlined nested module-field alias remained in Import:\n{output}"
+        );
+    }
+
+    #[test]
+    fn relative_path_keeps_exported_import_alias_chain_materialized_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("relative_path");
+        assert!(
+            output.contains("let foo = FileJs.foo;\n")
+                && output.contains("let bar = foo;\n"),
+            "expected relative_path to keep the exported import alias chain materialized, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let bar = FileJs.foo;"),
+            "unexpected direct qualified import rebound remained in relative_path:\n{output}"
         );
     }
 
