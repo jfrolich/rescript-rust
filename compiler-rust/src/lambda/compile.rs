@@ -22223,6 +22223,21 @@ mod tests {
     }
 
     #[test]
+    fn bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
+        assert!(
+            output.contains(
+                "Belt_MutableSetInt.eq(cc, Belt_MutableSetInt.fromArray(Array_data_util.randomRange(0, 120)))"
+            ),
+            "expected bs_mutable_set_test to call Belt_MutableSetInt.fromArray directly at the checked site, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let f = Belt_MutableSetInt.fromArray;"),
+            "unexpected callee alias binding remained in bs_mutable_set_test:\n{output}"
+        );
+    }
+
+    #[test]
     fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
         let output = compile_checked_in_test_file_to_js("gpr_3142_test");
         assert!(

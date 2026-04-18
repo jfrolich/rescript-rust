@@ -1646,6 +1646,7 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     eta_reducible_module_field_read(&substitution)
                         && (preserve_exported_eta_alias
                             || preserve_local_module_field_eta_alias
+                            || env.preserved_export_bindings.contains(id)
                             || env
                                 .preserved_local_module_module_field_call_bindings
                                 .contains(id));
@@ -1662,6 +1663,11 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                             propagated.insert(export_target);
                         }
                     }
+                    if let Some(call_substitution) = binding_call_substitution(&substitution, env) {
+                        body_env
+                            .call_substitutions
+                            .insert(id.clone(), call_substitution);
+                    }
                     if allow_call_only_eta_alias_substitution {
                         body_env
                             .call_substitutions
@@ -1677,6 +1683,13 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     if inlineable_named_function(&value).is_some()
                         && analysis::lfunction_can_be_inlined(&func)
                     {
+                        body_env.functions.insert(id.clone(), func);
+                    }
+                } else if let Lambda::Lvar(target) = &value {
+                    if let Some(func) = env.known_functions.get(target).cloned() {
+                        body_env.known_functions.insert(id.clone(), func);
+                    }
+                    if let Some(func) = env.functions.get(target).cloned() {
                         body_env.functions.insert(id.clone(), func);
                     }
                 }
@@ -1924,6 +1937,31 @@ fn resolve_transitive_substitution(id: &Ident, env: &SimplifyEnv) -> Option<Lamb
             }
             Some(value) => Some(value.clone()),
             None => None,
+        };
+
+        visiting.remove(id);
+        resolved
+    }
+
+    resolve(id, env, &mut HashSet::new())
+}
+
+fn resolve_callee_substitution(id: &Ident, env: &SimplifyEnv) -> Option<Lambda> {
+    fn resolve(id: &Ident, env: &SimplifyEnv, visiting: &mut HashSet<Ident>) -> Option<Lambda> {
+        if !visiting.insert(id.clone()) {
+            return Some(Lambda::var(id.clone()));
+        }
+
+        let resolved = if let Some(value) = env.call_substitutions.get(id) {
+            Some(value.clone())
+        } else {
+            match env.substitutions.get(id) {
+                Some(Lambda::Lvar(next)) => {
+                    resolve(next, env, visiting).or_else(|| Some(Lambda::var(next.clone())))
+                }
+                Some(value) => callee_alias_substitution(value),
+                None => None,
+            }
         };
 
         visiting.remove(id);
@@ -3896,10 +3934,7 @@ fn simplify_apply(apply: &Apply, env: &SimplifyEnv, exports: &HashSet<Ident>) ->
     // callee later exposes an Lvar, OCaml rebuilds the apply instead of retrying
     // the inlining decision at that new shape.
     let func = match apply.ap_func.as_ref() {
-        Lambda::Lvar(id) => env
-            .call_substitutions
-            .get(id)
-            .cloned()
+        Lambda::Lvar(id) => resolve_callee_substitution(id, env)
             .unwrap_or_else(|| simplify_with_env(&apply.ap_func, env, exports)),
         Lambda::Lprim(info)
             if !env.allow_direct_function_beta_reduce
@@ -5652,6 +5687,30 @@ fn captured_call_substitution_allowed(value: &Lambda) -> bool {
                 ..
             }) if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)])
         )
+}
+
+fn callee_alias_substitution(value: &Lambda) -> Option<Lambda> {
+    match value {
+        Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            args,
+            ..
+        }) if matches!(
+            args.as_slice(),
+            [Lambda::LglobalModule(_, _) | Lambda::Lvar(_)]
+        ) =>
+        {
+            Some(value.clone())
+        }
+        _ => None,
+    }
+}
+
+fn binding_call_substitution(substitution: &Lambda, env: &SimplifyEnv) -> Option<Lambda> {
+    match substitution {
+        Lambda::Lvar(target) => resolve_callee_substitution(target, env),
+        _ => callee_alias_substitution(substitution),
+    }
 }
 
 fn plain_string_constant(lam: &Lambda) -> Option<String> {
@@ -12770,6 +12829,119 @@ mod tests {
                 )
         ));
     }
+
+    #[test]
+    fn exported_module_field_alias_calls_nested_in_apply_arguments_like_bs_mutable_set_test() {
+        let belt_mutable_set = Ident::create_persistent("Belt_MutableSetInt");
+        let from_array = Ident::create_local("fromArray");
+        let f = Ident::create_local("f");
+        let consumer = Ident::create_local("consume");
+        let input = Ident::create_local("input");
+        let result = Ident::create_local("result");
+
+        let direct_callee = Lambda::prim(
+            Primitive::Pfield(
+                0,
+                FieldDbgInfo::Module {
+                    name: "fromArray".to_string(),
+                },
+            ),
+            vec![Lambda::LglobalModule(belt_mutable_set.clone(), false)],
+            Location::none(),
+        );
+
+        let simplified = simplify_for_js_backend(&Lambda::let_(
+            LetKind::Strict,
+            from_array.clone(),
+            direct_callee.clone(),
+            Lambda::let_(
+                LetKind::Strict,
+                result.clone(),
+                Lambda::function_(
+                    1,
+                    vec![input.clone()],
+                    Lambda::let_(
+                        LetKind::Strict,
+                        f.clone(),
+                        Lambda::var(from_array.clone()),
+                        Lambda::Lapply(Apply {
+                            ap_func: Box::new(Lambda::var(consumer.clone())),
+                            ap_args: vec![Lambda::Lapply(Apply {
+                                ap_func: Box::new(Lambda::var(f.clone())),
+                                ap_args: vec![Lambda::var(input.clone())],
+                                ap_info: ApInfo {
+                                    loc: Location::none(),
+                                    inlined: InlineAttribute::Default,
+                                    status: ApplyStatus::Uncurry,
+                                },
+                                ap_transformed_jsx: false,
+                            })],
+                            ap_info: ApInfo {
+                                loc: Location::none(),
+                                inlined: InlineAttribute::Default,
+                                status: ApplyStatus::Uncurry,
+                            },
+                            ap_transformed_jsx: false,
+                        }),
+                    ),
+                    FunctionAttribute::default(),
+                ),
+                Lambda::prim(
+                    Primitive::Pmakeblock(
+                        0,
+                        TagInfo::ModuleExport(vec![from_array.clone(), result.clone()]),
+                        Mutable::Immutable,
+                    ),
+                    vec![Lambda::var(from_array.clone()), Lambda::var(result.clone())],
+                    Location::none(),
+                ),
+            ),
+        ));
+
+        let Some(from_array_value) = find_binding_value(&simplified, &from_array) else {
+            panic!("expected the exported fromArray binding to remain materialized");
+        };
+        assert!(matches!(
+            from_array_value,
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                args,
+                ..
+            }) if name == "fromArray"
+                && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&belt_mutable_set))
+        ));
+
+        let Some(result_value) = find_binding_value(&simplified, &result) else {
+            panic!("expected the wrapper function binding to remain before exports");
+        };
+        let Lambda::Lfunction(func) = result_value else {
+            panic!("expected the retained result binding to stay a function");
+        };
+        assert!(
+            find_binding_value(func.body.as_ref(), &f).is_none(),
+            "expected the inner callee alias to inline away even inside apply arguments"
+        );
+        assert!(matches!(
+            func.body.as_ref(),
+            Lambda::Lapply(Apply { ap_func, ap_args, .. })
+                if matches!(ap_func.as_ref(), Lambda::Lvar(id) if id.same(&consumer))
+                    && matches!(
+                        ap_args.as_slice(),
+                        [Lambda::Lapply(Apply { ap_func, ap_args, .. })]
+                            if matches!(
+                                ap_func.as_ref(),
+                                Lambda::Lprim(crate::lambda::PrimInfo {
+                                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                                    args,
+                                    ..
+                                }) if name == "fromArray"
+                                    && matches!(args.as_slice(), [Lambda::LglobalModule(id, false)] if id.same(&belt_mutable_set))
+                            )
+                                && matches!(ap_args.as_slice(), [Lambda::Lvar(id)] if id.same(&input))
+                    )
+        ));
+    }
+
 
     #[test]
     fn local_module_blocks_keep_function_calls_materialized_like_pr6726() {

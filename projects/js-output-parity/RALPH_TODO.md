@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-17
-**Status:** 601 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 56 output diffs
+**Last Updated:** 2026-04-18
+**Status:** 602 / 657 authoritative JS snapshot baseline in the current dirty worktree; 0 compile errors and 55 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -44,7 +44,7 @@ JS backend only.
 
 ## Current Baseline
 
-Latest authoritative wrapper run on **2026-04-17** using:
+Latest authoritative wrapper run on **2026-04-18** using:
 
 ```bash
 timeout 1800 ./scripts/test_js_output_parity.sh
@@ -52,20 +52,72 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **601 / 657**
+- JS snapshot parity: **602 / 657**
 - Compile errors: **0**
-- Output diffs: **56**
+- Output diffs: **55**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
 ## Current Worktree Status
 
-A fresh rebuild + authoritative wrapper rerun on **2026-04-17** now
+A fresh rebuild + authoritative wrapper rerun on **2026-04-18** now
 reproduces a stable no-compile-error baseline in the current dirty worktree:
 
-- JS snapshot parity: **601 / 657**
+- JS snapshot parity: **602 / 657**
 - Compile errors: **0**
-- Output diffs: **56**
+- Output diffs: **55**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: keep OCaml-style callee alias elimination alive inside nested
+  apply arguments for exported module-field helpers, which was the live
+  mutable-set cluster behind `bs_mutable_set_test` /
+  `bs_poly_mutable_set_test` rather than a printer-only issue
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, but
+  this iteration fixed an OCaml-aligned post-lowering simplifier prerequisite
+  feeding the late backend
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_remove_alias.ml`
+  - `compiler/core/lam_util.ml`
+  - checked-in snapshots `tests/tests/src/bs_mutable_set_test.mjs` and
+    `tests/tests/src/bs_poly_mutable_set_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/simplify.rs`, added
+    `resolve_callee_substitution(...)` and callee-only alias helpers so nested
+    apply arguments can still resolve transitive exported aliases like
+    `f -> fromArray -> Belt_MutableSetInt.fromArray` after value substitutions
+    are stripped
+  - populated `body_env.call_substitutions` from transitive callee aliases
+    during let-binding simplification instead of only recording the immediate
+    alias, which matches the OCaml alias-removal behavior needed by the
+    snapshot cluster
+  - propagated known-function metadata through plain variable aliases in the
+    same let-binding path so later simplify/apply decisions keep seeing the
+    original callee shape
+  - added focused regression coverage
+    `exported_module_field_alias_calls_nested_in_apply_arguments_like_bs_mutable_set_test`
+    and the checked-in snapshot guard
+    `bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release exported_module_field_alias_calls_nested_in_apply_arguments_like_bs_mutable_set_test -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 600 cargo build --manifest-path rewatch/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_mutable_set_test.res -o /tmp/bs_mutable_set_test.mjs`
+  - `diff -u tests/tests/src/bs_mutable_set_test.mjs /tmp/bs_mutable_set_test.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/bs_poly_mutable_set_test.res -o /tmp/bs_poly_mutable_set_test.mjs`
+  - `diff -u tests/tests/src/bs_poly_mutable_set_test.mjs /tmp/bs_poly_mutable_set_test.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/bs_poly_mutable_set_test.res` is exact again
+  - `tests/tests/src/bs_mutable_set_test.res` no longer keeps the inner
+    `let f = Belt_MutableSetInt.fromArray;` alias in the union/intersect/diff
+    section; the remaining diff there is a separate top-level binding placement
+    issue (`empty` / `fromArray` hoisting), not the nested callee alias bug
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **601 / 657** -> **602 / 657** (**+1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **56** -> **55** (**-1**)
 
 Latest iteration on **2026-04-17**:
 
