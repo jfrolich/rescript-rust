@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 587 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 70 output diffs
+**Status:** 588 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 69 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,58 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **587 / 657**
+- JS snapshot parity: **588 / 657**
 - Compile errors: **0**
-- Output diffs: **70**
+- Output diffs: **69**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: allow OCaml-aligned late export-tail moves for same-name
+  recursive function aliases even when a later top-level effect remains, but
+  keep blocking that move for non-recursive functions when there are no
+  surviving later uses; this was the remaining export-tail ordering drift
+  behind `test_fib`
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / final statement ordering
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/test_fib.mjs`,
+    `tests/tests/src/async_inline.mjs`, and
+    `tests/tests/src/set_gen.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, threaded recursive-function
+    awareness into `later_toplevel_effect_allows_tail_move(...)` from both
+    same-name export-tail paths
+  - added `replacement_resolves_to_recursive_function(...)` so late export-tail
+    moves across later top-level effects only reopen for aliases that resolve
+    to a recursive local function binding, matching the OCaml backend behavior
+    more closely on the remaining `let b = fib;` cluster
+  - added focused synthetic coverage for the positive recursive case and the
+    negative non-recursive guard
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_without_remaining_use' -- --exact`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'lambda::compile::tests::later_toplevel_effect_blocks_tail_move_for_non_recursive_function_without_remaining_use' -- --exact`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh test_fib --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ffi_arity_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 30 ./scripts/test_js_single.sh set_gen --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/test_fib.res` is exact again; Rust now leaves the
+    recursive `fib` binding in place, keeps the later top-level effect ahead of
+    the final export alias, and matches the checked-in OCaml JS snapshot
+  - direct repro for `tests/tests/src/ffi_arity_test.res` is also exact on the
+    release path, confirming the same export-tail rule now matches OCaml on a
+    second recursive-alias shape even though the authoritative net delta for
+    this iteration was only one file
+  - `tests/tests/src/async_inline.res` and `set_gen.res` remain distinct
+    backend-ordering / lowering clusters, so this recursive-only rule did not
+    collapse the broader non-recursive wrapper drift
+  - the authoritative current dirty-worktree baseline improved from
+    **587 / 657** to **588 / 657**, with output diffs reduced from **70** to
+    **69** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 

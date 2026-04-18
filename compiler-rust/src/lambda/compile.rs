@@ -14718,8 +14718,13 @@ fn move_same_name_export_alias_to_export_tail(
         && !qualified_tail_move_uses_are_safe_to_inline(remaining, target, &replacement);
     let blocked_by_later_initializer =
         later_initializer_mentions_target && !matches!(initializer_kind, TailMoveInitializerKind::Literal);
-    let blocked_by_later_effect =
-        !later_toplevel_effect_allows_tail_move(remaining, target, initializer_kind, &replacement);
+    let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
+        remaining,
+        target,
+        initializer_kind,
+        &replacement,
+        replacement_resolves_to_recursive_function(&flattened, &replacement),
+    );
     if blocked_by_variable
         || blocked_by_literal_binding
         || blocked_by_direct_literal_reuse
@@ -14762,8 +14767,13 @@ fn move_reused_same_name_export_binding_to_export_tail(
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && (!matches!(property, LetKind::Alias)
                 || !has_later_toplevel_function_binding(remaining));
-    let blocked_by_later_effect =
-        !later_toplevel_effect_allows_tail_move(remaining, &reused, initializer_kind, &replacement);
+    let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
+        remaining,
+        &reused,
+        initializer_kind,
+        &replacement,
+        replacement_resolves_to_recursive_function(&flattened, &replacement),
+    );
     if matches!(property, LetKind::Variable)
         || blocked_by_literal_binding
         || matches!(initializer_kind, TailMoveInitializerKind::Other)
@@ -15019,6 +15029,7 @@ fn later_toplevel_effect_allows_tail_move(
     target: &Ident,
     initializer_kind: TailMoveInitializerKind,
     replacement: &Expression,
+    replacement_is_recursive_function: bool,
 ) -> bool {
     if !later_toplevel_effect_statement(block) {
         return true;
@@ -15026,11 +15037,12 @@ fn later_toplevel_effect_allows_tail_move(
     if matches!(initializer_kind, TailMoveInitializerKind::Literal) {
         return true;
     }
-    if !block
+    let has_remaining_use = block
         .iter()
-        .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
-    {
-        return false;
+        .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
+    if !has_remaining_use {
+        return matches!(initializer_kind, TailMoveInitializerKind::Function)
+            && replacement_is_recursive_function;
     }
 
     match initializer_kind {
@@ -15040,6 +15052,26 @@ fn later_toplevel_effect_allows_tail_move(
         }
         TailMoveInitializerKind::Literal | TailMoveInitializerKind::Other => false,
     }
+}
+
+fn replacement_resolves_to_recursive_function(block: &Block, replacement: &Expression) -> bool {
+    let ExpressionDesc::Var(VIdent::Id(binding)) = &replacement.desc else {
+        return false;
+    };
+    block.iter().any(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value:
+                Some(Expression {
+                    desc: ExpressionDesc::Fun { body, .. },
+                    ..
+                }),
+            ..
+        }) if ident.same(binding) => body
+            .iter()
+            .any(|stmt| statement_mentions_ident_anywhere(stmt, binding)),
+        _ => false,
+    })
 }
 
 fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, target: &Ident) -> bool {
@@ -19501,6 +19533,126 @@ mod tests {
             }
             other => panic!("expected the later top-level call fourth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_without_remaining_use(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let fib = Ident::create_local("fib");
+        let exported = Ident::create_local("b");
+        let n = Ident::create_local("n");
+        let sink = Ident::create_persistent("sink");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: fib.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![n.clone()],
+                    body: vec![Statement::return_(Expression::call(
+                        Expression::var(fib.clone()),
+                        vec![Expression::var(n)],
+                        CallInfo::default(),
+                    ))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(fib.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::exp(Expression::call(
+                Expression::var(sink.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(fib.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].name(), exported.name());
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the recursive function, later effect, and late export alias");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { .. },
+                        ..
+                    }),
+                ..
+            }) => assert!(ident.same(&fib)),
+            other => panic!("expected the recursive function binding first, got {other:?}"),
+        }
+        match &second.desc {
+            StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Call(func, args, _),
+                ..
+            }) => {
+                assert!(args.is_empty());
+                match &func.desc {
+                    ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&sink)),
+                    other => panic!("expected the later effect call second, got {other:?}"),
+                }
+            }
+            other => panic!("expected the later effect second, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(target.same(&fib));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the late recursive export alias third, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn later_toplevel_effect_blocks_tail_move_for_non_recursive_function_without_remaining_use() {
+        let target = Ident::create_local("abc_u");
+        let replacement = Expression::var(Ident::create_local("abc"));
+        let sink = Ident::create_persistent("sink");
+        let remaining = vec![
+            Statement::exp(Expression::call(
+                Expression::var(sink.clone()),
+                vec![],
+                CallInfo::default(),
+            )),
+        ];
+
+        assert!(!later_toplevel_effect_allows_tail_move(
+            &remaining,
+            &target,
+            TailMoveInitializerKind::Function,
+            &replacement,
+            false,
+        ));
     }
 
     #[test]
