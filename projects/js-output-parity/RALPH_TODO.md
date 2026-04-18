@@ -69,6 +69,48 @@ reproduces the following no-compile-error baseline in the dirty worktree:
 
 Latest iteration on **2026-04-18**:
 
+- Active slice: return-path `Lstaticcatch` lowering when the handler itself
+  contains nested staticcatch structure; this stayed in **Phase 3: Port JS IR
+  Lowering And Metadata** from `PLAN.md`
+- OCaml / backend reference:
+  - `compiler/core/lam_compile.ml` (`flat_catches`, `flatten_nested_caches`,
+    `compile_staticcatch`)
+  - checked-in snapshots `tests/tests/src/js_exception_catch_test.mjs`,
+    `tests/tests/src/exception_rebound_err_test.mjs`, and
+    `tests/tests/src/gpr_3875_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, replaced the
+    return-staticcatch handler jump predicate with a dedicated
+    `return_handler_requires_explicit_staticcatch_jump(...)` analysis so nested
+    handler staticcatchs are evaluated in return context instead of inheriting
+    the broader effect/assignment heuristic
+  - kept the existing multi-exit shared-handler rule intact, so repeated exits
+    still materialize an explicit `exit` temp when that matches the OCaml
+    backend's shared-handler lowering
+  - added a stable unit regression covering the exact nested return-handler
+    staticcatch shape that previously forced an unnecessary outer `exit` temp
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml nested_return_handler_staticcatchs_lower_without_forcing_outer_exit_temp -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml return_staticcatchs_share_nontrivial_handlers_across_multiple_exit_sites -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 600 cargo build --manifest-path rewatch/Cargo.toml --release`
+  - direct checked-in `.ast` snapshot diffs from `tests/tests/lib/bs` for
+    `js_exception_catch_test`, `exception_rebound_err_test`, and `gpr_3875_test`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/js_exception_catch_test.res` improved: the emitted catch
+    ladder no longer materializes the trivial outer `let exit = 0; if (exit === 1)`
+    wrapper, reducing the file to a smaller remaining structural diff
+  - `tests/tests/src/exception_rebound_err_test.res` is unchanged in this
+    iteration and still emits the same `exit`-guarded suffix
+  - `tests/tests/src/gpr_3875_test.res` is also unchanged, preserving the
+    checked-in shared-handler `exit` temp shape
+  - the authoritative dirty-worktree baseline improved from **596 / 657** to
+    **597 / 657**, with output diffs reduced from **61** to **60** and compile
+    errors still at **0**
+
+Latest iteration on **2026-04-18**:
+
 - Active slice: same-name export tail placement for qualified module-field
   aliases with later top-level effects, staying in **Phase 3: Port JS IR
   Lowering And Metadata** from `PLAN.md`
