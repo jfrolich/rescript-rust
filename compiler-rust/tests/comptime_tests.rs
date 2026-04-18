@@ -2287,10 +2287,19 @@ let patch: partialUser = { name: "Alice" }
 }
 
 #[test]
-fn parens_for_type_args_error() {
-    let source = std::fs::read_to_string("/tmp/test_parens.res").unwrap();
-    match compile_with_stdlib(&source, "parens.res") {
-        Ok(o) => eprintln!("OK: {o}"),
-        Err(e) => eprintln!("FAIL: {e}"),
+fn parens_for_type_args_outside_comptime_call_errors() {
+    // `list(int)` is only valid syntax when it's a @comptime type-builder
+    // call on the RHS of a type declaration. In a value annotation (or any
+    // other core-type position), the typer must still tell the user to use
+    // angle brackets.
+    let source = r#"
+let x: list(int) = list{1, 2, 3}
+"#;
+    match compile_with_stdlib(source, "parens.res") {
+        Ok(_) => panic!("parens in value annotation should error"),
+        Err(e) => assert!(
+            e.contains("angle brackets"),
+            "expected angle-brackets error, got: {e}"
+        ),
     }
 }

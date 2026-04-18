@@ -791,26 +791,27 @@ fn parse_type_constr_with_start(
     let lid_end_idx = p.prev_end_pos_idx();
     let lid_loc = p.mk_loc_idx(start_pos_idx, lid_end_idx);
 
-    // Parse optional type arguments
-    // OCaml: parse_type_constructor_args handles both < and ( as opening tokens
-    // ReScript also accepts `foo(args)` — desugars to `foo<args>`. This lets
-    // a `type bar = partial(user)` manifest route through the comptime type-
-    // builder path without a parser error when `partial` is a @comptime
-    // function.
-    let args = if p.token == Token::LessThan || p.token == Token::Lparen {
+    // Parse optional type arguments. ReScript accepts `foo<args>`; it also
+    // parses `foo(args)` so a `type bar = partial(user)` manifest can route
+    // through the comptime type-builder path. For non-comptime uses the
+    // typer emits "Type parameters require angle brackets" — we mark the
+    // parens case with the internal `_paren_type_args` attribute so the
+    // typer knows when to complain.
+    let (args, used_parens) = if p.token == Token::LessThan || p.token == Token::Lparen {
         let opening = p.token.clone();
         p.set_diamond_mode();
         p.next();
         let args = parse_type_args(p);
-        if p.token == Token::Rparen && opening == Token::Lparen {
+        let parens = p.token == Token::Rparen && opening == Token::Lparen;
+        if parens {
             p.next(); // consume )
         } else {
             p.expect(Token::GreaterThan);
         }
         p.pop_diamond_mode();
-        args
+        (args, parens)
     } else {
-        vec![]
+        (vec![], false)
     };
 
     // Check for multiple inline records in type constructor args (OCaml line 4462)
@@ -852,7 +853,15 @@ fn parse_type_constr_with_start(
         .into_iter()
         .map(|a| p.arena_mut().push_core_type(a))
         .collect();
-    ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc)
+    let mut constr = ast_helper::make_type_constr(lid_idx, args_idx, lid_loc, ptyp_loc);
+    if used_parens {
+        let attr_name_idx = p.arena_mut().intern_string("_paren_type_args");
+        constr.ptyp_attributes.push((
+            crate::parse_arena::Located { txt: attr_name_idx, loc: p.mk_loc_idx(start_pos_idx, ptyp_end_idx) },
+            crate::parser::ast::Payload::PStr(Box::new(vec![])),
+        ));
+    }
+    constr
 }
 
 /// Parse a type constructor (path with optional type arguments).
