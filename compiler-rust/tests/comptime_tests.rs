@@ -2040,3 +2040,20 @@ let decoded = try Some(decode(user, j)) catch { | DecodeError(_) => None }
         Err(e) => panic!("decoder with user type should compile: {e}"),
     }
 }
+
+#[test]
+fn comptime_inline_direct_call() {
+    let source = r#"
+@comptime.inline
+let upperCase = (value) => String.toUpperCase(value)
+
+let upperStr = upperCase("Bla")
+"#;
+    let result = compile_with_stdlib(source, "comptime_inline_direct.res");
+    match result {
+        Ok(output) => {
+            eprintln!("=== INLINE DIRECT ===\n{}\n=== END ===", output);
+        }
+        Err(e) => panic!("compile failed: {e}"),
+    }
+}

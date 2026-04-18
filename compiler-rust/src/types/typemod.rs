@@ -9178,7 +9178,8 @@ fn type_structure_item<'a>(
             let bindings_to_check: Vec<_> = if has_comptime {
                 bindings.iter().filter(|vb| {
                     !vb.pvb_attributes.iter().any(|(name, _)| {
-                        arena.get_string(name.txt) == "comptime"
+                        let attr = arena.get_string(name.txt);
+                        attr == "comptime" || attr == "comptime.inline"
                     })
                 }).cloned().collect()
             } else {
@@ -9197,7 +9198,8 @@ fn type_structure_item<'a>(
             if has_comptime {
                 for vb in bindings {
                     let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
-                        arena.get_string(name.txt) == "comptime"
+                        let attr = arena.get_string(name.txt);
+                        attr == "comptime" || attr == "comptime.inline"
                     });
                     if is_comptime {
                         let pat = arena.get_pat(vb.pvb_pat);

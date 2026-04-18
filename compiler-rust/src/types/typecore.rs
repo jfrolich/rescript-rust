@@ -21383,6 +21383,15 @@ fn try_comptime_application(
     // Check if it's a registered comptime function
     let comptime_fn = tctx.comptime_functions.get(&func_name)?.clone();
 
+    // @comptime.inline: evaluate the call via the embedded JS engine and fold
+    // to a Texp_constant. Falls through on failure so callers without a JS
+    // translation still get a clear downstream error instead of silent miscompile.
+    if comptime_fn.is_inline {
+        if let Some(folded) = try_inline_fold_call(tctx, env, &comptime_fn, args, expected_ty) {
+            return Some(folded);
+        }
+    }
+
     // Safety: depth limit as fallback (monomorph cache is the primary guard)
     static COMPTIME_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let depth = COMPTIME_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -23052,6 +23061,75 @@ fn resolve_typeinfo_in_builder(
     Ok(crate::types::comptime::build_type_info(
         ctx, env, resolved_ty, &mut vec![],
     ))
+}
+
+/// Try to fold an @comptime.inline call by translating the function body and
+/// arguments to JavaScript, evaluating via the embedded Boa engine, and
+/// returning the result as a Texp_constant. Returns None if any part of the
+/// body or arguments can't be translated, in which case the caller falls
+/// through to the normal specialization path.
+fn try_inline_fold_call(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    comptime_fn: &crate::types::comptime::ComptimeFunction,
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    expected_ty: TypeExprRef,
+) -> Option<TypeCoreResult<Expression>> {
+    use crate::types::comptime_inline as ci;
+
+    // Translate each argument to a JS literal. Arguments can be plain parse-
+    // tree constants, identifiers bound to comptime values, or anything else
+    // the simple JS translator accepts.
+    let mut arg_js: Vec<String> = Vec::with_capacity(args.len());
+    for (_label, arg_idx) in args.iter() {
+        let arg_expr = tctx.arena.get_expr(*arg_idx);
+        if let Some(js) = ci::translate_simple_expr_to_js(arg_expr, tctx.arena) {
+            arg_js.push(js);
+        } else {
+            return None;
+        }
+    }
+
+    // Translate the function body (a Pexp_fun) to JS.
+    let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
+    let body_js = ci::translate_simple_expr_to_js(body_expr, tctx.arena)?;
+
+    let program = format!("({})({})", body_js, arg_js.join(", "));
+    let value = match ci::evaluate_js(&program) {
+        ci::InlineEvalResult::Value(v) => v,
+        ci::InlineEvalResult::Error(_) => return None,
+    };
+
+    // Convert the ComptimeValue result back to a Texp_constant.
+    let (constant, folded_ty) = match value {
+        crate::types::comptime::ComptimeValue::String(s) => (
+            Constant::String(s.into(), None),
+            tctx.type_ctx.predef_string(),
+        ),
+        crate::types::comptime::ComptimeValue::Int(n) => (
+            Constant::Int(n),
+            tctx.type_ctx.predef_int(),
+        ),
+        _ => return None,
+    };
+
+    // Unify the constant's natural type with the call-site expected type so
+    // downstream inference still sees a consistent shape.
+    let _ = crate::types::ctype::unify(
+        tctx.type_ctx,
+        &mut tctx.unify_state,
+        folded_ty,
+        expected_ty,
+    );
+    let _ = env;
+
+    Some(Ok(Expression::new(
+        ExpressionDesc::Texp_constant(constant),
+        LocIdx(0),
+        folded_ty,
+        EnvRef(0),
+        Attributes::new(),
+    )))
 }
 
 /// Build a Texp_apply calling a generated monomorphized function.
