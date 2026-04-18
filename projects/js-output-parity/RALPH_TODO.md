@@ -69,6 +69,57 @@ reproduces the following no-compile-error baseline in the dirty worktree:
 
 Latest iteration on **2026-04-18**:
 
+- Active slice: preserve the declared same-name export alias for eta-reduced
+  function wrappers only when the block already has multiple materialized
+  bindings for that source name, so `async_inline` keeps the OCaml export
+  identity without reopening the broader accessor/function-alias regressions
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in backend export coercion / export-identity handling
+  rather than printer formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - `compiler/core/js_dump_import_export.ml`
+  - `compiler/core/js_shake.ml`
+  - checked-in snapshots `tests/tests/src/async_inline.mjs`,
+    `tests/tests/src/DerivingAccessorsCurried.mjs`, and
+    `tests/tests/src/ast_abstract_test.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, narrowed the declared same-name
+    function-export preservation rule to blocks with multiple materialized
+    same-name roots instead of keeping every same-name function alias
+  - added `count_materialized_same_name_binding_roots(...)` and used it in
+    both top-level export coercion and final export-alias resolution
+  - added focused regression coverage in
+    `coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multiple_materialized_roots`
+    plus the checked-in snapshot guard
+    `async_inline_keeps_same_name_export_alias_for_eta_reduced_async_wrapper_like_snapshot`
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multiple_materialized_roots -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml resolve_export_aliases_prefers_underlying_declared_same_name_target_over_self_alias -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml async_inline_keeps_same_name_export_alias_for_eta_reduced_async_wrapper_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindings_like_snapshot -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bindings_like_snapshot -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh async_inline --diff`
+  - `timeout 30 ./scripts/test_js_single.sh DerivingAccessorsCurried --diff`
+  - `timeout 30 ./scripts/test_js_single.sh ast_abstract_test --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/async_inline.res` is exact again on the harness path; Rust
+    now keeps the checked-in `broken$2 = broken$1` export alias shape instead
+    of collapsing the export to the helper binding
+  - `tests/tests/src/DerivingAccessorsCurried.res` and
+    `tests/tests/src/ast_abstract_test.res` stayed exact under the narrowed
+    rule, so the earlier broad function-alias regression is back out
+  - the authoritative current dirty-worktree baseline stays at
+    **582 / 657**, with **75** output diffs and **0** compile errors
+- Keep this change because it matches OCaml’s export-identity behavior at the
+  JS backend boundary: when a same-name export group already has multiple
+  materialized roots, the chosen exported ident must stay materialized instead
+  of being rewritten to one underlying helper
+
+Latest iteration on **2026-04-18**:
+
 - Active slice: keep same-name export aliases ahead of later top-level effects
   unless the alias is a function binding whose remaining uses are all before
   that first later effect boundary; this was the backend export-order cluster

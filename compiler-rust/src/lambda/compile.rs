@@ -416,8 +416,12 @@ impl LambdaCompiler {
                 if target.name() == export.name() {
                     if declared.contains(&export) {
                         exports.push(
-                            resolve_declared_same_name_self_alias_target(block, &export)
-                                .unwrap_or(export),
+                            if keeps_declared_same_name_function_export_alias(block, &export) {
+                                export
+                            } else {
+                                resolve_declared_same_name_self_alias_target(block, &export)
+                                    .unwrap_or(export)
+                            },
                         );
                         continue;
                     }
@@ -9178,11 +9182,40 @@ fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     exports
         .into_iter()
         .map(|export| {
+            if keeps_declared_same_name_function_export_alias(block, &export) {
+                return export;
+            }
             resolve_declared_same_name_self_alias_target(block, &export)
                 .or_else(|| reusable_declared_same_name_export_alias(block, &export))
                 .unwrap_or_else(|| resolve_export_alias(&export, &aliases, &declared))
         })
         .collect()
+}
+
+fn keeps_declared_same_name_function_export_alias(block: &Block, export: &Ident) -> bool {
+    block_declares_initialized_ident(block, export)
+        && matches!(
+            resolve_tail_move_initializer_kind(block, export),
+            Some(TailMoveInitializerKind::Function)
+        )
+        && count_materialized_same_name_binding_roots(block, export.name()) > 1
+}
+
+fn count_materialized_same_name_binding_roots(block: &Block, name: &str) -> usize {
+    flatten_toplevel_block(block)
+        .into_iter()
+        .filter(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                ..
+            }) if ident.name() == name => !matches!(
+                &initializer.desc,
+                ExpressionDesc::Var(VIdent::Id(target)) if target.name() == ident.name()
+            ),
+            _ => false,
+        })
+        .count()
 }
 
 fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -> Option<Ident> {
@@ -18817,6 +18850,110 @@ mod tests {
     }
 
     #[test]
+    fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multiple_materialized_roots(
+    ) {
+        let mut compiler = LambdaCompiler::new();
+        let source_level_broken = Ident::create_local("broken");
+        let target = Ident::create_local("broken");
+        let exported = Ident::create_local("broken");
+        let do_something_async = Ident::create_local("doSomethingAsync");
+        let param = Ident::create_local("param");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: source_level_broken.clone(),
+                value: Some(Expression::var(do_something_async.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: true,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        let exports = compiler.coerce_toplevel_exports(
+            &mut block,
+            ExtractedExports {
+                exports: vec![exported.clone()],
+                values: vec![Expression::var(target.clone())],
+            },
+        );
+        let exports = resolve_export_aliases(&block, exports);
+
+        assert_eq!(exports, vec![exported.clone()]);
+        let [first, second, third] = block.as_slice() else {
+            panic!("expected the earlier same-name binding, async target, and alias bindings to remain");
+        };
+        match &first.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(alias_target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&source_level_broken));
+                assert!(alias_target.same(&do_something_async));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!(
+                "expected the earlier source-level same-name binding first, got {other:?}"
+            ),
+        };
+        match &second.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Fun { async_, .. },
+                        ..
+                    }),
+                ..
+            }) => {
+                assert!(ident.same(&target));
+                assert!(*async_);
+            }
+            other => panic!("expected the original async function binding first, got {other:?}"),
+        }
+        match &third.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value:
+                    Some(Expression {
+                        desc: ExpressionDesc::Var(VIdent::Id(alias_target)),
+                        ..
+                    }),
+                property,
+                ..
+            }) => {
+                assert!(ident.same(&exported));
+                assert!(alias_target.same(&target));
+                assert_eq!(*property, LetKind::Alias);
+            }
+            other => panic!("expected the exported async alias binding second, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_var_value() {
         let mut compiler = LambdaCompiler::new();
         let target = Ident::create_persistent("tToJs");
@@ -24304,6 +24441,23 @@ mod tests {
         assert!(
             !output.contains("async function useNext() {\n  return next(3);\n}"),
             "unexpected retained wrapped helper call remained in async_await:\n{output}"
+        );
+    }
+
+    #[test]
+    fn async_inline_keeps_same_name_export_alias_for_eta_reduced_async_wrapper_like_snapshot() {
+        let output = compile_checked_in_test_file_to_js("async_inline");
+        assert!(
+            output.contains("let broken$2 = broken$1;"),
+            "expected async_inline to keep the eta-reduced async wrapper export alias binding, got:\n{output}"
+        );
+        assert!(
+            output.contains("broken$2 as broken,"),
+            "expected async_inline to export the preserved alias binding, got:\n{output}"
+        );
+        assert!(
+            !output.contains("broken$1 as broken,"),
+            "unexpected direct export of the underlying async helper in async_inline:\n{output}"
         );
     }
 
