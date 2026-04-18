@@ -2444,6 +2444,12 @@ impl JsPrinter {
             return;
         }
 
+        if let Some(rewritten) = try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts)
+        {
+            self.print_function_body(&rewritten, return_unit);
+            return;
+        }
+
         if let Some(rewritten) = try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts)
         {
             self.print_function_body(&rewritten, return_unit);
@@ -3133,6 +3139,91 @@ fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block)
     }
 
     None
+}
+
+fn try_function_body_positive_strict_undefined_tail_if_rewrite(stmts: &Block) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+        return None;
+    };
+
+    let StatementDesc::If(test, then_, else_) = &unwrap_single_block_stmt(guard_stmt).desc else {
+        return None;
+    };
+    if !else_.is_empty() {
+        return None;
+    }
+
+    let positive_test = negate_positive_strict_undefined_guard(test)?;
+    let fallback = single_wrapped_return_expr(then_)?;
+    if matches!(fallback.desc, ExpressionDesc::Undefined { .. }) {
+        return None;
+    }
+
+    let success_stmt = unwrap_single_block_stmt(success_stmt);
+    let success_supported = matches!(success_stmt.desc, StatementDesc::Return(_))
+        || stmt_is_simple_total_return_if(success_stmt);
+    if !success_supported {
+        return None;
+    }
+
+    Some(Statement {
+        desc: StatementDesc::If(
+            positive_test,
+            vec![success_stmt.clone()],
+            vec![Statement::return_(fallback.clone())],
+        ),
+        comment: guard_stmt.comment.clone(),
+    })
+}
+
+fn try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts: &Block) -> Option<Block> {
+    if stmts.len() < 2 {
+        return None;
+    }
+
+    for start in 0..stmts.len() - 1 {
+        let suffix = stmts[start..].to_vec();
+        if let Some(rewritten_stmt) = try_function_body_positive_strict_undefined_tail_if_rewrite(&suffix)
+        {
+            let mut rewritten = stmts[..start].to_vec();
+            rewritten.push(rewritten_stmt);
+            return Some(rewritten);
+        }
+    }
+
+    None
+}
+
+fn negate_positive_strict_undefined_guard(cond: &Expression) -> Option<Expression> {
+    match &cond.desc {
+        ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+            if matches!(right.as_ref().desc, ExpressionDesc::Undefined { .. }) =>
+        {
+            Some(Expression::bin(
+                BinOp::NotEqEq,
+                left.as_ref().clone(),
+                right.as_ref().clone(),
+            ))
+        }
+        ExpressionDesc::Bin(BinOp::EqEqEq, left, right)
+            if matches!(left.as_ref().desc, ExpressionDesc::Undefined { .. }) =>
+        {
+            Some(Expression::bin(
+                BinOp::NotEqEq,
+                right.as_ref().clone(),
+                left.as_ref().clone(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn stmt_is_simple_total_return_if(stmt: &Statement) -> bool {
+    let StatementDesc::If(_, then_, else_) = &unwrap_single_block_stmt(stmt).desc else {
+        return false;
+    };
+
+    single_wrapped_return_expr(then_).is_some() && single_wrapped_return_expr(else_).is_some()
 }
 
 fn try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts: &Block) -> Option<Block> {
@@ -5452,6 +5543,86 @@ mod tests {
             printer.into_output(),
             "if (typeof state !== \"object\") {\n  return 0;\n} else {\n  return 0 + state._0 | 0;\n}"
         );
+    }
+
+    #[test]
+    fn test_print_function_body_rewrites_strict_undefined_guard_return_suffix_into_positive_nested_guards()
+    {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let block = vec![
+            Statement::new(StatementDesc::If(
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(x.clone()),
+                    Expression::undefined(false),
+                ),
+                vec![Statement::return_(Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(y.clone()),
+                    Expression::undefined(false),
+                ))],
+                vec![],
+            )),
+            Statement::new(StatementDesc::If(
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(y.clone()),
+                    Expression::undefined(false),
+                ),
+                vec![Statement::return_(Expression::bool(false))],
+                vec![],
+            )),
+            Statement::return_(Expression::bin(
+                BinOp::EqEqEq,
+                Expression::var(x),
+                Expression::var(y),
+            )),
+        ];
+
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&block, false);
+
+        assert_eq!(
+            printer.into_output(),
+            "if (x !== undefined) {\n  if (y !== undefined) {\n    return x === y;\n  } else {\n    return false;\n  }\n} else {\n  return y === undefined;\n}"
+        );
+    }
+
+    #[test]
+    fn test_print_function_body_keeps_bound_success_tail_on_strict_undefined_guard() {
+        let match_id = Ident::create_local("match");
+        let tmp = Ident::create_local("tmp");
+        let block = vec![
+            Statement::new(StatementDesc::If(
+                Expression::bin(
+                    BinOp::EqEqEq,
+                    Expression::var(match_id.clone()),
+                    Expression::undefined(false),
+                ),
+                vec![Statement::return_(Expression::string("no"))],
+                vec![],
+            )),
+            Statement::variable(VariableDeclaration {
+                ident: tmp.clone(),
+                value: Some(Expression::var(match_id)),
+                property: crate::lambda::LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::new(StatementDesc::If(
+                Expression::bin(BinOp::EqEqEq, Expression::var(tmp), Expression::null()),
+                vec![Statement::return_(Expression::string("yes"))],
+                vec![],
+            )),
+            Statement::return_(Expression::string("no")),
+        ];
+
+        let mut printer = JsPrinter::new();
+        printer.print_function_body(&block, false);
+        let rendered = printer.into_output();
+
+        assert!(rendered.starts_with("if (match === undefined) {"));
+        assert!(rendered.contains("let tmp = match;"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 64 output diffs
+**Status:** 595 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 62 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **593 / 657**
+- JS snapshot parity: **595 / 657**
 - Compile errors: **0**
-- Output diffs: **64**
+- Output diffs: **62**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,61 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **593 / 657**
+- JS snapshot parity: **595 / 657**
 - Compile errors: **0**
-- Output diffs: **64**
+- Output diffs: **62**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: recover the remaining strict-`undefined` two-statement
+  function-body tail shapes where the OCaml snapshots keep a positive success
+  guard plus explicit `else`, instead of Rust's negative early-return suffix;
+  this targeted the lingering `big_polyvar_test` `eq` helper drift without
+  reopening the broader `pattern_match_json` bound-success-tail cluster
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in the late JS function-body rewrite stage rather than
+  typedtree, raw lambda, or optimized lambda parity
+- OCaml / backend reference:
+  - `compiler/core/js_exp_make.ml`
+  - `compiler/core/js_stmt_make.ml`
+  - checked-in snapshots `tests/tests/src/big_polyvar_test.mjs`,
+    `tests/tests/src/LetUnwrap.mjs`, and
+    `tests/tests/src/pattern_match_json.mjs`
+- Rust changes:
+  - in `compiler-rust/src/js_ir/printer.rs`, added a narrow
+    `try_function_body_positive_strict_undefined_tail_suffix_rewrite(...)`
+    pass that only rewrites a **two-statement** strict-`=== undefined`
+    guard-return suffix when the success tail is either a plain `return` or a
+    simple `if` whose branches both return
+  - kept that rewrite ahead of the existing guard/else suffix merge so a
+    `big_polyvar_test`-style inner strict-undefined suffix is rewritten first,
+    which then exposes the outer strict-undefined suffix for the same rewrite
+    on the next function-body pass
+  - added focused printer coverage for the nested `big_polyvar_test` shape and
+    a guard test that leaves the `pattern_match_json`-style bound-success tail
+    untouched
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::printer::tests::test_print_function_body_rewrites_strict_undefined_guard_return_suffix_into_positive_nested_guards' -- --exact --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --lib 'js_ir::printer::tests::test_print_function_body_keeps_bound_success_tail_on_strict_undefined_guard' -- --exact --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 30 ./scripts/test_js_single.sh big_polyvar_test --diff`
+  - `timeout 30 ./scripts/test_js_single.sh LetUnwrap --diff`
+  - `timeout 30 ./scripts/test_js_single.sh pattern_match_json --diff`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/big_polyvar_test.res` is exact again; the emitted `eq`
+    helper now matches the checked-in positive nested `!== undefined` guard
+    shape and its cached diff file disappeared entirely
+  - `tests/tests/src/pattern_match_json.res` stayed exact, confirming the new
+    rewrite does not reopen the bound-success-tail cluster fixed in the prior
+    `js_stmt_make.if_` normalization iteration
+  - `tests/tests/src/LetUnwrap.res` dropped its option-branch hunk and now only
+    differs in the remaining result-path inversion (`32` diff lines still
+    cached), so the strict-undefined option tail drift was a separate late-stage
+    issue from the `Ok`/`Error` result guard shape
+  - the authoritative current dirty-worktree baseline improved from
+    **592 / 657** to **595 / 657**, with output diffs reduced from **65** to
+    **62** and compile errors still at **0**
 
 Latest iteration on **2026-04-18**:
 
