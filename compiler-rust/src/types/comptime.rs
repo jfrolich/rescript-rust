@@ -64,8 +64,11 @@ pub const DEFAULT_FUEL: usize = 100_000;
 /// pair during specialization emits a self-reference instead of
 /// expanding again.
 pub struct MonomorphCache {
-    /// Completed specializations: (func_name, type_key) → generated name.
-    completed: HashMap<(String, TypeInfo), String>,
+    /// Specializations keyed by (func_name, type_key). The Ident is allocated
+    /// at `begin` so in-progress (recursive) and completed lookups all share
+    /// the same identifier as the eventual let-binding — call sites and the
+    /// definition must agree or the JS printer will rename them apart.
+    idents: HashMap<(String, TypeInfo), (String, Ident)>,
     /// In-progress specializations (for recursion detection).
     in_progress: HashSet<(String, TypeInfo)>,
     /// Generated function bodies to emit as structure items.
@@ -95,18 +98,30 @@ pub struct GeneratedFunction {
 impl MonomorphCache {
     pub fn new() -> Self {
         Self {
-            completed: HashMap::new(),
+            idents: HashMap::new(),
             in_progress: HashSet::new(),
             generated: Vec::new(),
         }
     }
 
-    /// Check if a specialization is already completed.
-    /// Returns the generated function name if so.
-    pub fn lookup(&self, func_name: &str, type_key: &TypeInfo) -> Option<&str> {
-        self.completed
+    /// Look up the shared identity of a specialization by key.
+    /// Returns the generated name and the Ident that both the let-binding
+    /// and every call site must use.
+    pub fn lookup_ident(&self, func_name: &str, type_key: &TypeInfo) -> Option<(String, Ident)> {
+        self.idents
             .get(&(func_name.to_string(), type_key.clone()))
-            .map(|s| s.as_str())
+            .cloned()
+    }
+
+    /// Check if a specialization is already completed.
+    pub fn lookup(&self, func_name: &str, type_key: &TypeInfo) -> Option<String> {
+        self.idents
+            .get(&(func_name.to_string(), type_key.clone()))
+            .filter(|_| {
+                !self.in_progress
+                    .contains(&(func_name.to_string(), type_key.clone()))
+            })
+            .map(|(name, _)| name.clone())
     }
 
     /// Check if a specialization is currently in progress (recursion).
@@ -115,12 +130,25 @@ impl MonomorphCache {
             .contains(&(func_name.to_string(), type_key.clone()))
     }
 
-    /// Mark a specialization as in-progress. Returns the generated name.
-    pub fn begin(&mut self, func_name: &str, type_key: &TypeInfo) -> String {
+    /// Mark a specialization as in-progress and allocate its identifier so
+    /// that recursive references resolve to the same Ident.
+    pub fn begin(
+        &mut self,
+        func_name: &str,
+        type_key: &TypeInfo,
+        make_ident: impl FnOnce(&str) -> Ident,
+    ) -> (String, Ident) {
+        let key = (func_name.to_string(), type_key.clone());
+        // If already registered (e.g. recursive re-entry), reuse the ident.
+        if let Some(pair) = self.idents.get(&key) {
+            self.in_progress.insert(key);
+            return pair.clone();
+        }
         let generated_name = make_monomorph_name(func_name, type_key);
-        self.in_progress
-            .insert((func_name.to_string(), type_key.clone()));
-        generated_name
+        let ident = make_ident(&generated_name);
+        self.idents.insert(key.clone(), (generated_name.clone(), ident.clone()));
+        self.in_progress.insert(key);
+        (generated_name, ident)
     }
 
     /// Complete a specialization: move from in-progress to completed.
@@ -128,13 +156,10 @@ impl MonomorphCache {
         &mut self,
         func_name: &str,
         type_key: &TypeInfo,
-        generated_name: String,
         func: GeneratedFunction,
     ) {
         self.in_progress
             .remove(&(func_name.to_string(), type_key.clone()));
-        self.completed
-            .insert((func_name.to_string(), type_key.clone()), generated_name);
         self.generated.push(func);
     }
 }

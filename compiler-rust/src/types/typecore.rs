@@ -21475,8 +21475,6 @@ fn try_comptime_application(
         first_value_type.unwrap_or(crate::types::comptime::TypeInfo::Unit)
     };
 
-    let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
-
     // Collect the runtime args (non-type args) for the call site
     let runtime_args: Vec<_> = typed_args.iter()
         .filter(|(_, _, is_type)| !is_type)
@@ -21484,24 +21482,20 @@ fn try_comptime_application(
         .collect();
 
     // ── Phase 2: Check monomorphization cache ──
-
-    // Already completed? Just emit a call.
-    if tctx.monomorph_cache.lookup(&func_name, &type_key).is_some() {
+    // Any prior specialization (completed OR in-progress for recursion)
+    // has a registered ident — reuse it so the call site shares identity
+    // with the eventual let-binding.
+    if let Some((gen_name, gen_ident)) = tctx.monomorph_cache.lookup_ident(&func_name, &type_key) {
         tctx.comptime_bindings = saved_bindings;
         COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
-    }
-
-    // Recursive: in-progress for the same type? Emit forward reference.
-    if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
-        tctx.comptime_bindings = saved_bindings;
-        COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+        return Some(Ok(make_comptime_call(tctx, &gen_name, &gen_ident, &runtime_args, expected_ty)));
     }
 
     // ── Phase 3: Specialize — produce a named monomorphized function ──
 
-    tctx.monomorph_cache.begin(&func_name, &type_key);
+    let (gen_name, gen_ident) = tctx
+        .monomorph_cache
+        .begin(&func_name, &type_key, |name| ctx.create_ident(name));
 
     // Set up environment with argument bindings
     let mut spec_env = env.clone();
@@ -21542,16 +21536,14 @@ fn try_comptime_application(
         Ok(typed_body) => {
             let return_type = typed_body.exp_type;
             let recursive = contains_ident_reference(&typed_body, &gen_name);
-            let gen_ident = ctx.create_ident(&gen_name);
 
             let param_ident = runtime_param_ident.unwrap_or_else(|| ctx.create_ident(&runtime_param_name));
             tctx.monomorph_cache.complete(
                 &func_name,
                 &type_key,
-                gen_name.clone(),
                 crate::types::comptime::GeneratedFunction {
                     name: gen_name.clone(),
-                    ident: gen_ident,
+                    ident: gen_ident.clone(),
                     body: typed_body,
                     param_name: runtime_param_name,
                     param_ident,
@@ -21561,7 +21553,7 @@ fn try_comptime_application(
                 },
             );
 
-            Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)))
+            Some(Ok(make_comptime_call(tctx, &gen_name, &gen_ident, &runtime_args, expected_ty)))
         }
         Err(_) => None,
     }
@@ -23065,13 +23057,13 @@ fn resolve_typeinfo_in_builder(
 /// Build a Texp_apply calling a generated monomorphized function.
 fn make_comptime_call(
     tctx: &TypeCheckContext<'_>,
-    gen_name: &str,
+    _gen_name: &str,
+    gen_ident: &crate::ident::Ident,
     runtime_args: &[Expression],
     expected_ty: TypeExprRef,
 ) -> Expression {
     let ctx = tctx.type_ctx;
-    let func_ident = crate::ident::Ident::create_persistent(gen_name);
-    let func_path = crate::types::Path::Pident(func_ident.clone());
+    let func_path = crate::types::Path::Pident(gen_ident.clone());
 
     // Create Texp_ident for the generated function
     let func_type = if runtime_args.is_empty() {

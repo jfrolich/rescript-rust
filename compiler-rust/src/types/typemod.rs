@@ -8441,6 +8441,23 @@ pub fn type_structure<'a>(
     arena: &'a ParseArena,
     items: &[ParsedStructureItem],
 ) -> TypeModResult<(Structure, Env)> {
+    // Scope the monomorph cache's pending generated list to this structure.
+    // `type_structure` is re-entered while loading stdlib/external module
+    // signatures; without this, a nested call would drain the outer module's
+    // pending specializations into its own structure and lose them.
+    let saved_generated: Vec<crate::types::comptime::GeneratedFunction> =
+        std::mem::take(&mut tctx.monomorph_cache.generated);
+    let result = type_structure_inner(tctx, env, arena, items);
+    tctx.monomorph_cache.generated = saved_generated;
+    result
+}
+
+fn type_structure_inner<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    items: &[ParsedStructureItem],
+) -> TypeModResult<(Structure, Env)> {
     // Check for @@config(no_export) and apply the no_export transformation
     // like OCaml's js_implementation.ml no_export function.
     if has_no_export_config(arena, items) && !items.is_empty() {
