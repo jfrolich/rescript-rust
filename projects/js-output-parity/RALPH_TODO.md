@@ -1,7 +1,7 @@
 # Ralph TODO: JS Output Parity
 
 **Last Updated:** 2026-04-18
-**Status:** 574 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 83 output diffs
+**Status:** 573 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 84 output diffs
 
 ## Branch Reset (2026-04-16)
 
@@ -52,9 +52,9 @@ timeout 1800 ./scripts/test_js_output_parity.sh
 
 reported:
 
-- JS snapshot parity: **574 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **83**
+- Output diffs: **84**
 - Diff artifacts written under `temp/rust-parity/diffs`
 - Spice PPX guard: **skipped by harness in this environment** because `SPICE_PPX` was not found at the configured path
 
@@ -63,9 +63,59 @@ reported:
 A fresh rebuild + authoritative wrapper rerun on **2026-04-18** currently
 reproduces the following no-compile-error baseline in the dirty worktree:
 
-- JS snapshot parity: **574 / 657**
+- JS snapshot parity: **573 / 657**
 - Compile errors: **0**
-- Output diffs: **83**
+- Output diffs: **84**
+
+Latest iteration on **2026-04-18**:
+
+- Active slice: rewrite exported alias initializers through same-name export
+  alias chains after export resolution, which was the live
+  `DerivingAccessorsCurried` / `DerivingAccessorsUncurried` export-tail drift
+  after the earlier `lam_coercion` fixes
+- Active project phase remains **Phase 4: Port JS Passes** from `PLAN.md`, and
+  this iteration stayed in the backend export-coercion / post-coercion cleanup
+  path rather than printer-only formatting
+- OCaml / backend reference:
+  - `compiler/core/lam_coercion.ml`
+  - checked-in snapshots `tests/tests/src/DerivingAccessorsCurried.mjs`,
+    `tests/tests/src/DerivingAccessorsUncurried.mjs`, and
+    `tests/tests/src/ExternalShadow.mjs`
+- Rust changes:
+  - in `compiler-rust/src/lambda/compile.rs`, added a post-`resolve_export_aliases`
+    rewrite that follows same-name alias chains for exported top-level bindings
+    and reuses the underlying function binding or primitive literal initializer
+    instead of keeping redundant rebound helpers alive
+  - scoped that rewrite to exported bindings only, so ordinary non-export alias
+    chains are left untouched
+  - added focused regression coverage for both the positive exported-alias case
+    and the non-export guard case, plus file-level guards for the deriving
+    accessor snapshots
+- Verified focused guards for this slice:
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release rewrite_toplevel_variable_initializers_through_rewriteable_aliases -- --nocapture`
+  - `timeout 600 cargo test --manifest-path compiler-rust/Cargo.toml --release deriving_accessors_ -- --nocapture`
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsCurried.res -o /tmp/DerivingAccessorsCurried.mjs`
+  - `diff -u tests/tests/src/DerivingAccessorsCurried.mjs /tmp/DerivingAccessorsCurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/DerivingAccessorsUncurried.res -o /tmp/DerivingAccessorsUncurried.mjs`
+  - `diff -u tests/tests/src/DerivingAccessorsUncurried.mjs /tmp/DerivingAccessorsUncurried.mjs`
+  - `timeout 10 ./compiler-rust/target/release/bsc -I tests/tests/lib/ocaml -bs-package-name rescript-tests -bs-module-type esmodule tests/tests/src/ExternalShadow.res -o /tmp/ExternalShadow.mjs`
+  - `diff -u tests/tests/src/ExternalShadow.mjs /tmp/ExternalShadow.mjs`
+  - `timeout 1800 ./scripts/test_js_output_parity.sh`
+- Focused outcome:
+  - `tests/tests/src/DerivingAccessorsCurried.res` and
+    `tests/tests/src/DerivingAccessorsUncurried.res` no longer emit the
+    redundant late-export helper bindings `myField$1`, `num$1`,
+    `doubleNum$1`, or `_noParamAlias = noParam`; both files now match the
+    snapshot on that alias-materialization detail
+  - the remaining accessor drift is now just the separate earlier placement of
+    `let noParam = "NoParam";`
+  - `tests/tests/src/ExternalShadow.res` stayed exact as the broader export
+    alias guard
+- Topline impact in this current dirty worktree:
+  - JS snapshot parity: **574 / 657** -> **573 / 657** (**-1**)
+  - Compile errors: **0** -> **0** (**no change**)
+  - Output diffs: **83** -> **84** (**+1**)
 
 Latest iteration on **2026-04-18**:
 

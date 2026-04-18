@@ -343,6 +343,7 @@ impl LambdaCompiler {
             vec![]
         };
         let exports = resolve_export_aliases(&block, exports);
+        rewrite_toplevel_variable_initializers_through_rewriteable_aliases(&mut block, &exports);
         let side_effect = module_side_effect_reason(&simplified);
 
         let mut deps = apply_js_flatten_and_mark_dead_pass(
@@ -9261,6 +9262,113 @@ fn collect_export_aliases(block: &Block, aliases: &mut HashMap<Ident, Ident>) {
     }
 }
 
+fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
+    block: &mut Block,
+    exports: &[Ident],
+) {
+    if exports.is_empty() {
+        return;
+    }
+
+    let exported_idents: HashSet<Ident> = exports.iter().cloned().collect();
+    let mut flattened = flatten_toplevel_block(block);
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        for index in 0..flattened.len() {
+            let Some((ident, target, current_value)) = (match &flattened[index].desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(target)),
+                            ..
+                        }),
+                    ..
+                }) if exported_idents.contains(ident) => Some((
+                    ident.clone(),
+                    target.clone(),
+                    variable_initializer(&flattened[index]).cloned(),
+                )),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let Some(current_value) = current_value else {
+                continue;
+            };
+
+            let Some(replacement) =
+                resolve_rewriteable_toplevel_alias_initializer(&flattened, &target)
+            else {
+                continue;
+            };
+
+            if ocaml_eq_expression(&current_value, &replacement) {
+                continue;
+            }
+
+            let StatementDesc::Variable(VariableDeclaration { value, .. }) =
+                &mut flattened[index].desc
+            else {
+                continue;
+            };
+            *value = Some(replacement);
+            debug_assert!(exported_idents.contains(&ident));
+            changed = true;
+        }
+    }
+
+    *block = flattened;
+}
+
+fn resolve_rewriteable_toplevel_alias_initializer(
+    block: &Block,
+    start: &Ident,
+) -> Option<Expression> {
+    let mut current = start.clone();
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+
+        let value = flatten_toplevel_block(block)
+            .into_iter()
+            .find_map(|stmt| match stmt.desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value: Some(initializer),
+                    ..
+                }) if ident.same(&current) => Some(initializer),
+                _ => None,
+            })?;
+
+        match value.desc {
+            ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
+                current = next;
+            }
+            ExpressionDesc::Fun { .. } => return Some(Expression::var(current)),
+            ExpressionDesc::Number(_)
+            | ExpressionDesc::Str { .. }
+            | ExpressionDesc::Bool(_)
+            | ExpressionDesc::Undefined { .. }
+            | ExpressionDesc::Null => return Some(value),
+            _ => return None,
+        }
+    }
+}
+
+fn variable_initializer(stmt: &Statement) -> Option<&Expression> {
+    match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => value.as_ref(),
+        _ => None,
+    }
+}
+
 fn max_ident_stamp_in_block(block: &Block) -> i32 {
     block.iter().fold(0, |max_stamp, stmt| {
         max_stamp.max(max_ident_stamp_in_statement(stmt))
@@ -16285,6 +16393,17 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to compile {module_name}.res: {err:#}"))
     }
 
+    fn find_variable_initializer<'a>(block: &'a Block, ident: &Ident) -> Option<&'a Expression> {
+        block.iter().find_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident: binding,
+                value: Some(value),
+                ..
+            }) if binding.same(ident) => Some(value),
+            _ => None,
+        })
+    }
+
     #[test]
     fn gpr_1760_test_keeps_checked_division_and_mod_effects_like_ocaml() {
         let output = compile_checked_in_test_file_to_js("gpr_1760_test");
@@ -19407,6 +19526,129 @@ mod tests {
                 }
             }
             other => panic!("expected the effect statement second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_rewrites_function_and_literal_aliases(
+    ) {
+        let target = Ident::create_local("myField");
+        let exported_same_name_alias = Ident::create_local("myField");
+        let no_param = Ident::create_local("noParam");
+        let field_alias = Ident::create_local("_myFieldAlias");
+        let no_param_alias = Ident::create_local("_noParamAlias");
+        let param = Ident::create_local("param");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported_same_name_alias.clone(),
+                value: Some(Expression::var(target.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: no_param.clone(),
+                value: Some(Expression::string("NoParam")),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: field_alias.clone(),
+                value: Some(Expression::var(exported_same_name_alias)),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: no_param_alias.clone(),
+                value: Some(Expression::var(no_param)),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
+            &mut block,
+            &[field_alias.clone(), no_param_alias.clone()],
+        );
+
+        let Some(field_alias_value) = find_variable_initializer(&block, &field_alias) else {
+            panic!("expected the field alias binding to remain");
+        };
+        match &field_alias_value.desc {
+            ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&target)),
+            other => panic!("expected _myFieldAlias to rewrite to myField, got {other:?}"),
+        }
+
+        let Some(no_param_alias_value) = find_variable_initializer(&block, &no_param_alias) else {
+            panic!("expected the noParam alias binding to remain");
+        };
+        match &no_param_alias_value.desc {
+            ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "NoParam"),
+            other => panic!("expected _noParamAlias to inline the literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_skips_non_export_aliases(
+    ) {
+        let target = Ident::create_local("myField");
+        let exported_same_name_alias = Ident::create_local("myField");
+        let non_export_alias = Ident::create_local("_myFieldAlias");
+        let param = Ident::create_local("param");
+        let mut block = vec![
+            Statement::variable(VariableDeclaration {
+                ident: target.clone(),
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![Statement::return_(Expression::undefined(false))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: LetKind::Strict,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: exported_same_name_alias.clone(),
+                value: Some(Expression::var(target)),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: non_export_alias.clone(),
+                value: Some(Expression::var(exported_same_name_alias.clone())),
+                property: LetKind::Alias,
+                ident_info: IdentInfo::default(),
+            }),
+        ];
+
+        rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
+            &mut block,
+            &[exported_same_name_alias.clone()],
+        );
+
+        let Some(non_export_alias_value) = find_variable_initializer(&block, &non_export_alias)
+        else {
+            panic!("expected the non-export alias binding to remain");
+        };
+        match &non_export_alias_value.desc {
+            ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&exported_same_name_alias)),
+            other => panic!("expected non-export alias to stay as a variable alias, got {other:?}"),
         }
     }
 
@@ -23455,6 +23697,46 @@ mod tests {
         assert!(
             !output.contains("let v = ({") && !output.contains("}).d;"),
             "unexpected materialized fresh-record projection remained in checked-in fixture output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindings_like_snapshot(
+    ) {
+        let output = compile_checked_in_test_file_to_js("DerivingAccessorsCurried");
+        assert!(
+            output.contains("let _myFieldAlias = myField;")
+                && output.contains("let _noParamAlias = \"NoParam\";")
+                && output.contains("let _numAlias = num;")
+                && output.contains("let _doubleNumAlias = doubleNum;"),
+            "expected DerivingAccessorsCurried to reuse the underlying exported bindings in later alias initializers, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let myField$1 = myField;")
+                && !output.contains("let num$1 = num;")
+                && !output.contains("let doubleNum$1 = doubleNum;")
+                && !output.contains("let _noParamAlias = noParam;"),
+            "unexpected redundant same-name export aliases remained in DerivingAccessorsCurried:\n{output}"
+        );
+    }
+
+    #[test]
+    fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bindings_like_snapshot(
+    ) {
+        let output = compile_checked_in_test_file_to_js("DerivingAccessorsUncurried");
+        assert!(
+            output.contains("let _myFieldAlias = myField;")
+                && output.contains("let _noParamAlias = \"NoParam\";")
+                && output.contains("let _numAlias = num;")
+                && output.contains("let _doubleNumAlias = doubleNum;"),
+            "expected DerivingAccessorsUncurried to reuse the underlying exported bindings in later alias initializers, got:\n{output}"
+        );
+        assert!(
+            !output.contains("let myField$1 = myField;")
+                && !output.contains("let num$1 = num;")
+                && !output.contains("let doubleNum$1 = doubleNum;")
+                && !output.contains("let _noParamAlias = noParam;"),
+            "unexpected redundant same-name export aliases remained in DerivingAccessorsUncurried:\n{output}"
         );
     }
 
