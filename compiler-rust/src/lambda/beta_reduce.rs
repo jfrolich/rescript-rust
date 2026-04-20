@@ -508,7 +508,7 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
     }
 }
 
-fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
+pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
     match lam {
         Lambda::Lvar(id) | Lambda::LglobalModule(id, _) => id.stamp(),
         Lambda::Lconst(_) => 0,

@@ -1,7 +1,80 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-20
-**Status:** 589 / 657 authoritative JS snapshot baseline; 4 compile errors and 64 output diffs. PERFORMANCE_PLAN Phase 4 (collect_occurs + simplify_lets ports) complete as additive infrastructure, not yet wired in.
+**Last Updated:** 2026-04-21
+**Status:** 589 / 657 authoritative JS snapshot baseline; 4 compile errors and 64 output diffs. `pass_exits::simplify_exits` (Lam_pass_exits.ml port) wired in; net parity unchanged but a real bug (lost `for` loop in `test_static_catch_ident`) is fixed and 5 files now pass that didn't before, balanced by 5 new fall-through-merge regressions downstream.
+
+## Iteration on 2026-04-21
+
+- Active slice: port `Lam_pass_exits.simplify_exits` and
+  `Lam_exit_count.count_helper` to Rust, then wire into the JS pipeline in
+  place of the partial `simplify_static_exits_for_js_backend`. This addresses
+  a discoverable bug where `tests/tests/src/test_static_catch_ident.res`
+  produced JS that DROPPED the `for` loop body of the catch handler entirely
+  (output had `throw x` falling through where the loop should run).
+- OCaml / backend reference:
+  - `compiler/core/lam_exit_count.ml` (count_helper, count_default,
+    count_exit, incr_exit)
+  - `compiler/core/lam_pass_exits.ml` (no_bounded_variables,
+    subst_helper, simplify_exits)
+  - `compiler/core/lam_subst.ml` (already mirrored by
+    `compiler-rust/src/lambda/subst.rs`)
+  - `compiler/core/lam_analysis.ml:143-185, 207` (size +
+    exit_inline_size, both already in
+    `compiler-rust/src/lambda/analysis.rs`)
+- Rust additions / changes:
+  - `compiler-rust/src/lambda/pass_exits.rs` — `count_helper`,
+    `no_bounded_variables`, `subst_helper`, `simplify_exits`. Each match
+    arm cites the OCaml line that justifies it.
+  - `compiler-rust/src/lambda/beta_reduce.rs` — promoted
+    `max_ident_stamp_in_lambda` to `pub(crate)` so `pass_exits` can build
+    its `IdGenerator` for `Ident::rename` calls.
+  - `compiler-rust/src/lambda/mod.rs` — registered new module.
+  - `compiler-rust/src/lambda/simplify.rs` — both call sites of
+    `simplify_static_exits_for_js_backend` now call
+    `pass_exits::simplify_exits`. Old function definition left in place
+    (dead) so the parity-tracking unit tests at lines 14934 / 14967 still
+    have a reference; will delete in a follow-up if no callers regress.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … ExternalShadow.res` byte-clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … test_static_catch_ident.res` now byte-matches the snapshot (previously dropped the for loop).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` — **589 / 657**
+    (same headline number; 4 errors + 64 diffs).
+- Outcome:
+  - JS snapshot parity: **589 / 657** (no headline movement).
+  - Compile errors: **4** (same upstream typechecker errors).
+  - Output diffs: **64**.
+  - File-set churn vs prior baseline:
+    - Newly passing (5): `exception_raise_test`, `extensible_variant_test`,
+      `gpr_2931_test`, `test_static_catch_ident`, `variant`.
+    - Newly failing (5): `DictPatternMatchingOptimization`, `gpr_2413_test`,
+      `gpr_3609_test`, `LetUnwrap`-style restructuring,
+      `NondetPatterMatch`, `VariantPatternMatchingSpreads`.
+- Root cause of the new failures (single cluster, not 5 separate bugs):
+  When the OCaml-aligned `subst_helper` inlines a static catch's small
+  handler at multiple raise sites (e.g. `i_occur=4`, `size < 5`), each
+  switch arm now holds its own copy of the same Lambda. OCaml's downstream
+  `compile_string_switch_*` / `compile_switch_*` then merges adjacent
+  `Lam.eq_approx`-equal arms into shared fall-through cases. Rust HAS the
+  equivalent `stable_group_switch_cases` + `lambda_eq_approx`, and they
+  ARE called from `compile_string_switch_effect_block` (compile.rs:5449)
+  via `grouped_switch_cases`, but the merging is not collapsing the
+  inlined arms into shared `case "X":\ncase "Y":` form. The arms hold
+  identical `Lambda::Lapply(console.log, [Lconst("hello")])` after my
+  pass, so `lambda_eq_approx` should return true. The breakage point is
+  therefore inside the variant tag-string switch lowering path — likely
+  the call site at compile.rs:5449 builds `grouped_switch_cases` but the
+  per-clause body emission still produces a body for every clause rather
+  than only the last in each group. That diagnosis needs a single-file
+  re-check in the next iteration before any code change.
+- Next iteration: investigate `compile_string_switch_effect_block`
+  (compile.rs:5422) and `grouped_switch_cases` (compile.rs:200-260) to
+  confirm whether merged groups actually emit `should_break = false` and
+  empty-clause leading members. If the grouping is correct but the
+  printer emits per-arm bodies anyway, the break is in
+  `js_ir::printer` for `StringSwitch`. Either way, do not back out the
+  `pass_exits` port — it is OCaml-aligned and fixes the
+  `test_static_catch_ident` correctness bug.
 
 ## Iteration on 2026-04-20 (evening)
 

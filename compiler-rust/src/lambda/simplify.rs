@@ -10,6 +10,7 @@ use crate::lambda::analysis;
 use crate::lambda::beta_reduce;
 use crate::lambda::closure;
 use crate::lambda::compat::{FieldDbgInfo, LetKind};
+use crate::lambda::pass_exits;
 use crate::lambda::compile_context::BoxedNullable;
 use crate::lambda::constant::Constant;
 use crate::lambda::free_variables::free_variables;
@@ -328,7 +329,7 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
 }
 
 pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
-    let exits_simplified = simplify_static_exits_for_js_backend(lam);
+    let exits_simplified = pass_exits::simplify_exits(lam);
     let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let mut preserved_export_bindings = collect_exported_apply_bindings(&flattened, &exports);
@@ -432,7 +433,7 @@ fn simplify_for_js_backend_once(
     allow_named_function_inlining: bool,
     preserve_direct_wrapper_values: bool,
 ) -> Lambda {
-    let exits_simplified = simplify_static_exits_for_js_backend(lam);
+    let exits_simplified = pass_exits::simplify_exits(lam);
     let flattened = deep_flatten_for_js_backend(&exits_simplified);
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
