@@ -7877,6 +7877,17 @@ impl LambdaCompiler {
             return false;
         }
 
+        // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017) uses the
+        // pseudo-jmp path only when `in_staticcatch=false` (lam_compile.ml:939).
+        // Any staticcatch that OCaml compiles while `in_staticcatch=true` takes
+        // the full exit_id path (lam_compile.ml:963-1017). Rust's proxy for
+        // `in_staticcatch=true` is: we are already inside another staticcatch
+        // that chose the explicit-jump (`with_static_jump_handler`) path.
+        // Forcing explicit-jump here matches OCaml's nested-catch emission.
+        if !self.static_jump_handlers.is_empty() {
+            return true;
+        }
+
         self.return_handler_requires_explicit_staticcatch_jump(handler)
             || (lambda_has_multiple_static_raises_to_label(body, label, bindings.len())
                 && lambda_contains_static_raise_to_other_label(handler, label)
