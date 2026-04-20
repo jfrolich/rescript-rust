@@ -2000,9 +2000,12 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
-            let should_break = !compiled_body.is_empty()
-                && !block_terminates(&compiled_body)
-                && lambda_has_exit(body);
+            // Mirror OCaml's `lam_compile.ml` pseudo-jmp emission: when a
+            // case body resolved away through a fallthrough static-raise
+            // handler, OCaml still prints an explicit `break;` to exit the
+            // switch so the subsequent appended handler reads cleanly.
+            let should_break =
+                !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -5260,9 +5263,12 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
-            let should_break = !compiled_body.is_empty()
-                && !block_terminates(&compiled_body)
-                && lambda_has_exit(body);
+            // Mirror OCaml's `lam_compile.ml` pseudo-jmp emission: when a
+            // case body resolved away through a fallthrough static-raise
+            // handler, OCaml still prints an explicit `break;` to exit the
+            // switch so the subsequent appended handler reads cleanly.
+            let should_break =
+                !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
