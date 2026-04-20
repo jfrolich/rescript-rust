@@ -196,8 +196,14 @@ since that's the next biggest chunk of logic in the monolith.
 
 ## Constraints
 
+- **CRITICAL: Every line of Rust must trace to a specific line in OCaml source.**
+  Never add logic that cannot be directly attributed to a concrete location in the
+  OCaml codebase. If you cannot point to the exact OCaml function and line number
+  that justifies a piece of Rust code, do not write it. No "this seems like it
+  might be needed", no "this helps with parity", no invented workarounds. If OCaml
+  doesn't do it, we don't do it.
 - **Direct port of OCaml.** Every pass must correspond 1:1 to an OCaml pass. If
-  code doesn't exist in OCaml, delete it. Do not invent Rust-specific workarounds.
+  code doesn't exist in OCaml, delete it.
 - **Regressions are fine** as long as we're getting closer to the OCaml
   implementation. Parity will come from architectural correctness, not hacks.
 - **Match OCaml's efficiency.** Each pass is O(n). No quadratic algorithms,
