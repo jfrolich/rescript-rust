@@ -1,7 +1,60 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (afternoon)
-**Status:** 591 / 657 authoritative JS snapshot baseline; 4 compile errors and 62 output diffs. `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port) wired in **and** `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx` so `lambda_eq_approx` no longer rejects `PjsCall` arms. Net +2 vs the prior baseline; bug-fix gain on `test_static_catch_ident` is preserved.
+**Last Updated:** 2026-04-21 (evening)
+**Status:** 592 / 657 authoritative JS snapshot baseline; 4 compile errors and 61 output diffs. Three OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, and `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering. Net +3 vs the original 589 baseline; bug-fix gain on `test_static_catch_ident` (lost `for` loop) is preserved.
+
+## Iteration on 2026-04-21 (evening)
+
+- Active slice: act on the previous iteration's gpr_2413 hypothesis —
+  the only difference between Rust and OCaml output for that file was
+  a missing `break;` on the last case in an empty fall-through group.
+- OCaml / backend reference:
+  - `compiler/core/lam_compile.ml` (pseudo-jmp lowering of
+    `Lstaticcatch` emits an explicit `break;` so the trailing handler
+    reads cleanly even when the case body resolved to empty).
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs:1987-2031` and
+    `compile.rs:5251-5295` — `grouped_return_string_clauses` and the
+    named-string return variant: drop the `!compiled_body.is_empty()`
+    gate from the `should_break` predicate. The two surviving
+    conditions already exclude bodies that themselves terminate
+    (return/throw) and bodies whose source has no static raise (so a
+    no-op case would not gain a spurious break).
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … ExternalShadow.res` byte-clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … test_static_catch_ident.res` byte-clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … NondetPatterMatch.res` byte-clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … gpr_2413_test.res` byte-clean (newly fixed).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **592 / 657**.
+- Outcome:
+  - JS snapshot parity: **592 / 657** (+1 vs prior 591 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **61** (-1 vs prior 62).
+  - Newly passing: `gpr_2413_test`.
+- Remaining failure clusters:
+  - **gpr_3609_test** — extra `let intValue = state._0` binding kept
+    where OCaml inlines into the immediately-following arithmetic.
+    Source is in `simplify_with_env`'s alias decisions, NOT in the
+    backend.
+  - **DictPatternMatchingOptimization** — deeper restructuring around
+    nested `let exit$N = 0` chains. Likely needs the
+    `compile_staticcatch` pseudo_jmp port (OCaml's first arm at
+    `lam_compile.ml:938-962`) which currently only fires in Rust when
+    `bindings.is_empty()`.
+  - **LetUnwrap** — early-return-on-error vs nested-if shape. Same
+    pseudo_jmp gap as DictPatternMatchingOptimization.
+  - Smaller printer/lowering clusters across ~58 other files.
+- Next iteration: the largest expected gain is the
+  `compile_staticcatch` pseudo_jmp branch for `bindings != []` in tail
+  position with a single code_table — that should unblock the
+  LetUnwrap + DictPatternMatchingOptimization + ~3-5 related files at
+  once. See OCaml `lam_compile.ml:937-962` for the exact match
+  pattern (`EffectCall (Maybe_tail_is_return Tail_with_name
+  {in_staticcatch=false}), [code_table] when
+  no_static_raise_in_handler code_table`).
+
+## Iteration on 2026-04-21 (afternoon)
 
 ## Iteration on 2026-04-21 (afternoon)
 
