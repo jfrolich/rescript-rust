@@ -32,6 +32,7 @@ pub mod compile_context;
 pub mod constant;
 pub mod convert;
 pub mod free_variables;
+pub mod pass_count;
 pub mod primitive;
 pub mod print;
 pub mod sexp_lambda;
