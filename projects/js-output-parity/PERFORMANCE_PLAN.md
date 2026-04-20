@@ -215,6 +215,67 @@ since that's the next biggest chunk of logic in the monolith.
 | Env scope enter/exit | 7 HashMap remove+insert | Not needed |
 | Pre-computed tables | 6 separate pre-passes | 1 collect_info + 1 collect_occurs |
 
+## Rust-specific logic not in OCaml
+
+`simplify.rs` contains ~114 functions. Many have no OCaml equivalent — they were
+added across 360 parity commits to match OCaml's JS output without matching its
+architecture. These fall into categories:
+
+### Export tail ordering (~30 functions)
+Functions like `collect_exported_idents`, `collect_exported_apply_bindings`,
+`collect_exported_var_alias_bindings`, `collect_exported_constant_payload_bindings`,
+`exported_alias_target`, `lambda_exports_ident`, `preserve_exported_eta_alias_binding`,
+`preserve_exported_simplified_var_alias_binding`, etc.
+
+**Where it belongs in OCaml:** `Lam_coercion.coerce_and_group_big_lambda` handles
+export grouping/ordering AFTER the simplification pipeline. The Rust code currently
+does it DURING simplification because there's no separate coercion pass yet.
+
+**Plan:** Keep export logic as a separate Rust-specific pass that runs after the
+OCaml-aligned pipeline. Eventually port `Lam_coercion` properly, which should
+subsume most of this logic.
+
+### Local module preservation (~15 functions)
+`collect_local_module_materialized_alias_bindings`, `lambda_uses_ident_in_local_module_block`,
+`preserve_local_module_materialized_alias_binding`, etc.
+
+**Where it belongs:** These prevent the simplifier from breaking local module
+structure before export grouping. Once `Lam_coercion` is ported, most of these
+guards become unnecessary.
+
+**Plan:** Keep as a post-pipeline fixup pass until coercion is ported.
+
+### Direct wrapper beta reduction (~10 functions)
+`inlineable_direct_wrapper_function`, `reduce_direct_wrapper_application_once`,
+`sync_component_wrapper_params_like_ocaml`, `inline_recursive_component_internal_wrapper`.
+
+**Where it belongs:** Partially in `remove_alias` (function inlining), partially
+Rust-specific for JSX component wrappers.
+
+**Plan:** Function inlining goes into `remove_alias`. JSX-specific wrapper logic
+stays as a small separate pass or lives in the coercion layer.
+
+### Eta reduction
+`eta_reduce_function_value` — reduces `function(x) { return f(x) }` to `f`.
+
+**Where it belongs:** Not a separate OCaml pass. OCaml handles this implicitly
+through its alias/inlining pipeline. Keep in `remove_alias` or as a small
+standalone post-pass.
+
+## Parity regression expectations
+
+The 593/657 baseline was achieved by 360 surgical commits tuning the monolithic
+simplifier. Decomposing it into separate passes WILL temporarily regress parity
+because the tunings depend on the specific order of operations within the monolith.
+
+**Strategy:**
+- Phase 1 (splitting) may regress parity — that's expected
+- Target: get back to 593/657 (or better) after all OCaml-aligned passes are in place
+- Each OCaml pass is simpler and more predictable than the monolith, so parity
+  fixes on top of the new architecture will be easier to reason about
+- Do NOT try to preserve 593/657 at every micro-step — that leads to adding back
+  the same monolithic workarounds
+
 ## Reference files
 
 | OCaml file | Rust target | Role |
