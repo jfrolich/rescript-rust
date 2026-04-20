@@ -3,6 +3,77 @@
 **Last Updated:** 2026-04-20
 **Status:** 589 / 657 authoritative JS snapshot baseline; 4 compile errors and 64 output diffs. PERFORMANCE_PLAN Phase 4 (collect_occurs + simplify_lets ports) complete as additive infrastructure, not yet wired in.
 
+## Iteration on 2026-04-20 (evening)
+
+- Active slice: attempt to complete the "wire `pass_lets_dce::simplify_lets`
+  into the live JS pipeline" step flagged as the next iteration in the
+  previous entry.
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_lets_dce.ml`
+  - `compiler/core/lam_compile_main.ml` (pipeline order)
+- Experiment: swapped `simplify_alias_bindings_like_lets_dce` in
+  `compiler-rust/src/lambda/simplify.rs:389` for
+  `pass_lets_dce::simplify_lets`. Built clean, but the full sweep regressed
+  to **583 / 657** (-6 files) with new diffs spread across 6 files beyond
+  the known 64.
+- Root cause identified: `lam_pass_lets_dce.ml` at lines 24-43 interleaves
+  `Lam_pass_eliminate_ref.eliminate_ref` *inside* `simplify_lets` — it
+  processes the body before rewriting `Pfield/Pmakeblock` ref cells into
+  `Lvar`/`Lassign`, so the RHS of inner `Llet(tmp, Pfield(0, [Lvar a]), …)`
+  stays as a `Pfield` (not a `Lvar`) while the first arm decides whether
+  to substitute. The existing Rust pipeline eliminates refs earlier inside
+  `simplify_for_js_backend_once`, so by the time `pass_lets_dce` runs, the
+  binding is already `Llet(Strict, tmp, Lvar a, …)`. The unconditional
+  Strict/Alias/StrictOpt + `Lvar` substitution arm
+  (lam_pass_lets_dce.ml:21-23, matching my port at pass_lets_dce.rs:70-81)
+  then folds `tmp → a`, turning the mutating `fib` inner loop into
+  `a = b; b = b + a | 0;` which reads the NEW `a` instead of the old one
+  (visible in `tests/tests/src/fib.res`).
+- Verified guards during the swap experiment:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … ExternalShadow.res` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … LetUnwrap.res` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … fib.res` showed the
+    incorrect substitution described above.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured 583/657.
+- Action taken: reverted the swap in
+  `compiler-rust/src/lambda/simplify.rs:388-392` back to
+  `simplify_alias_bindings_like_lets_dce(&lets_dce_style, &preserved_local_module_module_alias_bindings)`.
+  Rebuilt; re-verified ExternalShadow + fib clean.
+- Outcome:
+  - JS snapshot parity: **589 / 657** (baseline preserved; no code changed
+    in the repo this iteration beyond the RALPH_TODO update).
+  - Compile errors: **4** (same pre-existing upstream typechecker errors).
+  - Output diffs: **64**.
+- Takeaway: Phase 4 wire-up cannot be a drop-in replacement of
+  `simplify_alias_bindings_like_lets_dce`. It requires one of:
+  1. Moving the existing Rust ref-elimination (currently embedded in
+     `simplify_for_js_backend_once`) out of the monolith and into the
+     ported `pass_lets_dce::simplify_lets`, preserving OCaml's interleaved
+     semantics where eliminate_ref runs AFTER the body simplification.
+  2. Porting `Lam_coercion.coerce_and_group_big_lambda` so that exports
+     become real `Lvar` uses in the lambda, letting `collect_occurs` count
+     them naturally (removing the need for the
+     `preserved_local_module_module_alias_bindings` set entirely).
+  3. Porting Phase 2/3 first (`Lam_pass_collect` + `Lam_pass_remove_alias`)
+     so the monolithic `simplify_with_env` shrinks before the
+     `simplify_lets` boundary is reconsidered.
+- Secondary observation on the 4 upstream compile errors: rechecked each
+  (defunctor_make_test, functor_ffi, inline_map2_test, int_map) — all fail
+  with `CoreError(ExprTypeClash | UndefinedMethod)` from the typechecker,
+  not from JS output lowering. PLAN.md treats typedtree parity as
+  out-of-scope for this project, so they remain an unresolved upstream
+  follow-up rather than a JS backend task.
+- Next iteration: prefer Phase 2/3 port (`lam_pass_collect` +
+  `lam_pass_remove_alias`) over another Phase 4 wire-up attempt, since
+  that shrinks the monolith without requiring pipeline restructuring.
+  Alternatively pursue a concrete printer/lowering diff cluster (e.g.
+  bal_set_mini's `else if` chaining) once an OCaml-aligned rule is
+  identified — the current suspicion is that OCaml's `S.if_` line 249
+  flattens too, so the preserved `else if` snapshot shape probably comes
+  from a later re-nesting pass (`Js_pass_flatten`?) that Rust has not yet
+  ported. Do NOT assume printer rule alone will explain it.
+
 ## Iteration on 2026-04-20
 
 - Active slice: PERFORMANCE_PLAN.md Phase 4 — port `lam_pass_count.ml`,
