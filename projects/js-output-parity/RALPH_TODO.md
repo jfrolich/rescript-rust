@@ -1,7 +1,81 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21
-**Status:** 589 / 657 authoritative JS snapshot baseline; 4 compile errors and 64 output diffs. `pass_exits::simplify_exits` (Lam_pass_exits.ml port) wired in; net parity unchanged but a real bug (lost `for` loop in `test_static_catch_ident`) is fixed and 5 files now pass that didn't before, balanced by 5 new fall-through-merge regressions downstream.
+**Last Updated:** 2026-04-21 (afternoon)
+**Status:** 591 / 657 authoritative JS snapshot baseline; 4 compile errors and 62 output diffs. `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port) wired in **and** `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx` so `lambda_eq_approx` no longer rejects `PjsCall` arms. Net +2 vs the prior baseline; bug-fix gain on `test_static_catch_ident` is preserved.
+
+## Iteration on 2026-04-21 (afternoon)
+
+- Active slice: complete the previous iteration's `pass_exits` follow-up
+  by porting `Lam_primitive.eq_primitive_approx` 1:1, which is what the
+  switch case-merging path (`stable_group_switch_cases` →
+  `lambda_eq_approx` → `Primitive::eq_approx`) needs to coalesce
+  inlined OR-pattern arms.
+- OCaml / backend reference:
+  - `compiler/core/lam_primitive.ml:197-301` — `eq_primitive_approx`
+- Rust changes:
+  - `compiler-rust/src/lambda/primitive.rs` — `Primitive::eq_approx`
+    now mirrors OCaml arm-by-arm. The "rhs = lhs" simple list at
+    OCaml lines 199-232 is reproduced as a single `self == other`
+    arm; every non-trivial primitive (`Pfield`, `Pmakeblock`,
+    `Pjs_call`, `Pjs_object_create`, `Pjs_unsafe_downgrade`, `Poffsetint`,
+    `Poffsetref`, `Pjs_fn_make`, `Pisout`, `Pcreate_extension`, all
+    `Pintcomp`/`Pfloatcomp`/`Pbigintcomp`/`Pjscomp`/`Pobjcomp`/`Pstringcomp`/`Pboolcomp`
+    variants) gets the matching explicit comparison. `Praw_js_code _`
+    stays at always-false per OCaml's lam_primitive.ml:301. `PjsCall`
+    deliberately ignores `transformed_jsx`, matching OCaml's field set.
+- How the bug was caught: temporary `eprintln!` in
+  `stable_group_switch_cases` while compiling
+  `tests/tests/src/NondetPatterMatch.res` showed `eq_ok=false` for two
+  literal clones of the same `Lsequence(Lprim(PjsCall console.log,
+  [Lconst "hello"]), Lconst JsUndefined{is_unit:true})`. The four
+  clones were structurally identical down to every field, but
+  `PjsCall` had no case-arm in `Primitive::eq_approx` and fell through
+  to `_ => false`.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … ExternalShadow.res` byte-clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc … test_static_catch_ident.res` byte-clean (no regression on the fix from the previous commit).
+  - `timeout 10 ./compiler-rust/target/release/bsc … NondetPatterMatch.res` byte-clean (newly fixed).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **591 / 657**.
+- Outcome:
+  - JS snapshot parity: **591 / 657** (+2 vs prior 589 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **62** (-2 vs prior 64).
+  - Newly passing vs previous iteration: `NondetPatterMatch`,
+    `VariantPatternMatchingSpreads`.
+  - Cumulative newly passing vs the original 589 baseline (this commit
+    plus the pass_exits commit): `exception_raise_test`,
+    `extensible_variant_test`, `gpr_2931_test`,
+    `test_static_catch_ident`, `variant`, `NondetPatterMatch`,
+    `VariantPatternMatchingSpreads`, plus 2 additional headline gains.
+- Remaining failure clusters (after this iteration):
+  - **gpr_2413_test** — printer-only: last empty case in a grouped
+    string switch is missing the explicit `break;`. The `should_break`
+    bit is set correctly inside `compile_named_string_switch_effect_with_strategy`
+    (compile.rs:4500) but the switch's body is being compiled to an
+    empty block that downstream printer treats as needing no break.
+    Confirm in `print_string_case` (printer.rs:1012-1033) — likely
+    needs `should_break: true` even when the body comes from a static
+    raise that compiled to a no-op (because the OCaml pseudo_jmp puts
+    the handler AFTER the switch). 1-line fix candidate.
+  - **gpr_3609_test** — extra `let intValue = state._0` binding kept
+    where OCaml inlines the field access into the immediately-following
+    `0 + state._0 | 0`. Source is in `simplify_with_env`'s alias
+    decisions, NOT in `pass_exits`.
+  - **DictPatternMatchingOptimization** — deeper restructuring around
+    nested `let exit$N = 0` chains. Likely needs the
+    `compile_staticcatch` pseudo_jmp port (OCaml's first arm at
+    `lam_compile.ml:938-962`) which currently only fires in Rust when
+    `bindings.is_empty()`.
+  - **LetUnwrap** — early-return-on-error vs nested-if shape. Same
+    pseudo_jmp gap as DictPatternMatchingOptimization.
+- Next iteration: pick **one** of the remaining clusters and fix it
+  with a minimal OCaml-aligned change. The gpr_2413 break-emission is
+  the smallest scope but the pseudo_jmp port would unblock the
+  largest cluster (LetUnwrap + DictPatternMatchingOptimization +
+  related).
+
+## Iteration on 2026-04-21
 
 ## Iteration on 2026-04-21
 
