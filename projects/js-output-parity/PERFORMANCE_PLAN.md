@@ -196,14 +196,14 @@ since that's the next biggest chunk of logic in the monolith.
 
 ## Constraints
 
-- **No parity regressions.** Every change must preserve the current 593/657 (or
-  improve it). Run `./scripts/test_js_output_parity.sh` after each phase.
-- **Match OCaml's architecture.** Each pass should correspond to an OCaml pass.
-  This makes the code reviewable against OCaml source and prevents re-introducing
-  the monolithic anti-pattern.
-- **Match or beat OCaml's efficiency.** Each pass is O(n). No quadratic algorithms,
+- **Direct port of OCaml.** Every pass must correspond 1:1 to an OCaml pass. If
+  code doesn't exist in OCaml, delete it. Do not invent Rust-specific workarounds.
+- **Regressions are fine** as long as we're getting closer to the OCaml
+  implementation. Parity will come from architectural correctness, not hacks.
+- **Match OCaml's efficiency.** Each pass is O(n). No quadratic algorithms,
   no unnecessary allocations, no per-binding body walks.
-- **Incremental delivery.** Each phase is independently valuable and testable.
+- Run `./scripts/test_js_output_parity.sh` after each phase to track progress
+  (not as a gate — regressions are acceptable).
 
 ## Complexity targets
 
@@ -215,66 +215,31 @@ since that's the next biggest chunk of logic in the monolith.
 | Env scope enter/exit | 7 HashMap remove+insert | Not needed |
 | Pre-computed tables | 6 separate pre-passes | 1 collect_info + 1 collect_occurs |
 
-## Rust-specific logic not in OCaml
+## This is a direct port — delete everything not in OCaml
 
-`simplify.rs` contains ~114 functions. Many have no OCaml equivalent — they were
-added across 360 parity commits to match OCaml's JS output without matching its
-architecture. These fall into categories:
+`simplify.rs` contains ~114 functions. Most have no OCaml equivalent — they were
+added across 360 parity commits trying to match OCaml's JS output without matching
+its architecture. **All of this Rust-specific logic should be deleted.** The new
+implementation is a direct port of the OCaml passes, nothing more.
 
-### Export tail ordering (~30 functions)
-Functions like `collect_exported_idents`, `collect_exported_apply_bindings`,
-`collect_exported_var_alias_bindings`, `collect_exported_constant_payload_bindings`,
-`exported_alias_target`, `lambda_exports_ident`, `preserve_exported_eta_alias_binding`,
-`preserve_exported_simplified_var_alias_binding`, etc.
+Functions to delete (non-exhaustive):
+- All `collect_exported_*` functions (~30 functions for export tail ordering)
+- All `preserve_local_module_*` / `collect_local_module_*` functions
+- `inlineable_direct_wrapper_function`, `reduce_direct_wrapper_application_once`
+- `inline_recursive_component_internal_wrapper`, `sync_component_wrapper_params_like_ocaml`
+- `eta_reduce_function_value`
+- `alias_use_info`, `alias_occurs_as_apply_callee`, `alias_occurs_as_apply_argument`
+- `single_use_switch_scrutinee_alias_from_mutated_source`
+- `collect_mutated_idents`
+- `preserve_exported_eta_alias_binding`, `preserve_exported_simplified_var_alias_binding`
+- `export_only_single_use_allocating_constant_candidate`
+- `refine_let_binding` (OCaml uses `Lam_util.refine_let` — port that instead)
+- The entire `SimplifyEnv` struct and its save/restore mechanism
+- Everything in `simplify_with_env` that doesn't map to an OCaml pass
 
-**Where it belongs in OCaml:** `Lam_coercion.coerce_and_group_big_lambda` handles
-export grouping/ordering AFTER the simplification pipeline. The Rust code currently
-does it DURING simplification because there's no separate coercion pass yet.
-
-**Plan:** Keep export logic as a separate Rust-specific pass that runs after the
-OCaml-aligned pipeline. Eventually port `Lam_coercion` properly, which should
-subsume most of this logic.
-
-### Local module preservation (~15 functions)
-`collect_local_module_materialized_alias_bindings`, `lambda_uses_ident_in_local_module_block`,
-`preserve_local_module_materialized_alias_binding`, etc.
-
-**Where it belongs:** These prevent the simplifier from breaking local module
-structure before export grouping. Once `Lam_coercion` is ported, most of these
-guards become unnecessary.
-
-**Plan:** Keep as a post-pipeline fixup pass until coercion is ported.
-
-### Direct wrapper beta reduction (~10 functions)
-`inlineable_direct_wrapper_function`, `reduce_direct_wrapper_application_once`,
-`sync_component_wrapper_params_like_ocaml`, `inline_recursive_component_internal_wrapper`.
-
-**Where it belongs:** Partially in `remove_alias` (function inlining), partially
-Rust-specific for JSX component wrappers.
-
-**Plan:** Function inlining goes into `remove_alias`. JSX-specific wrapper logic
-stays as a small separate pass or lives in the coercion layer.
-
-### Eta reduction
-`eta_reduce_function_value` — reduces `function(x) { return f(x) }` to `f`.
-
-**Where it belongs:** Not a separate OCaml pass. OCaml handles this implicitly
-through its alias/inlining pipeline. Keep in `remove_alias` or as a small
-standalone post-pass.
-
-## Parity regression expectations
-
-The 593/657 baseline was achieved by 360 surgical commits tuning the monolithic
-simplifier. Decomposing it into separate passes WILL temporarily regress parity
-because the tunings depend on the specific order of operations within the monolith.
-
-**Strategy:**
-- Phase 1 (splitting) may regress parity — that's expected
-- Target: get back to 593/657 (or better) after all OCaml-aligned passes are in place
-- Each OCaml pass is simpler and more predictable than the monolith, so parity
-  fixes on top of the new architecture will be easier to reason about
-- Do NOT try to preserve 593/657 at every micro-step — that leads to adding back
-  the same monolithic workarounds
+If it's not in OCaml, it's not needed. Parity regressions from deleting this
+code are expected and acceptable — once the OCaml pipeline is faithfully ported,
+parity will come from architectural correctness rather than per-file workarounds.
 
 ## Reference files
 
