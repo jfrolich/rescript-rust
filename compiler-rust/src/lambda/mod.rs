@@ -35,6 +35,7 @@ pub mod free_variables;
 pub mod lam_hit;
 pub mod lam_util;
 pub mod pass_count;
+pub mod pass_eliminate_ref;
 pub mod primitive;
 pub mod print;
 pub mod sexp_lambda;
