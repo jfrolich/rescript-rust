@@ -1,5 +1,25 @@
 # JS Output Parity Plan
 
+## PREREQUISITE — MUST COMPLETE FIRST
+
+**Before doing ANY other JS output parity work, complete the performance plan in
+[PERFORMANCE_PLAN.md](./PERFORMANCE_PLAN.md) in full.** This decomposes the
+monolithic `simplify.rs` into the same separate passes OCaml uses. No parity
+fixing, no new features, no other work until the OCaml-aligned pipeline is in place.
+
+## CRITICAL RULE — Direct OCaml Port Only
+
+**Never add or delete a line of Rust code unless it directly corresponds to a
+specific line in the OCaml source code.** Every function, every branch, every
+condition must be traceable to a concrete location in the OCaml codebase. This
+applies to ALL work in this project, not just the performance plan:
+
+- No invented workarounds or heuristics
+- No "this helps with parity" logic that doesn't exist in OCaml
+- No Rust-specific optimizations or cleverness
+- If you cannot cite the OCaml file and line number, do not write the code
+- If existing Rust code has no OCaml equivalent, delete it
+
 ## Goal
 
 Achieve **100% byte-for-byte emitted JavaScript parity** between the Rust compiler
