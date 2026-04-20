@@ -1,7 +1,58 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-18
-**Status:** 593 / 657 authoritative JS snapshot baseline in the current dirty worktree after the latest rebuild; 0 compile errors and 64 output diffs
+**Last Updated:** 2026-04-20
+**Status:** 589 / 657 authoritative JS snapshot baseline; 4 compile errors and 64 output diffs. PERFORMANCE_PLAN Phase 4 (collect_occurs + simplify_lets ports) complete as additive infrastructure, not yet wired in.
+
+## Iteration on 2026-04-20
+
+- Active slice: PERFORMANCE_PLAN.md Phase 4 — port `lam_pass_count.ml`,
+  `lam_util.refine_let`, `lam_pass_eliminate_ref.ml`, and
+  `lam_pass_lets_dce.ml` as separate, OCaml-aligned modules. All purely
+  additive; no callers wired up yet, so emitted JS is unchanged.
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_count.ml`
+  - `compiler/core/lam_util.ml` (refine_let + helpers)
+  - `compiler/core/lam_hit.ml` (hit_variable)
+  - `compiler/core/lam_pass_eliminate_ref.ml`
+  - `compiler/core/lam_pass_lets_dce.ml`
+- Rust additions:
+  - `compiler-rust/src/lambda/pass_count.rs` — `UsedInfo`, `OccTbl`,
+    `collect_occurs`. 1:1 port; every match arm cites OCaml line numbers.
+  - `compiler-rust/src/lambda/lam_hit.rs` — `hit_variable`, conservative
+    occurrence check used by `refine_let` and `eliminate_ref`.
+  - `compiler-rust/src/lambda/lam_util.rs` — `refine_let` plus
+    `is_block_constructor` and `is_safe_to_alias`. All six rewrite clauses
+    cite OCaml lines (Return, Prim, Call, Alias, Strict λ, Strict Pure).
+  - `compiler-rust/src/lambda/pass_eliminate_ref.rs` — `eliminate_ref` with
+    the `RealReference` Rust analogue of OCaml's exception.
+  - `compiler-rust/src/lambda/pass_lets_dce.rs` — `simplify_lets`. Drives
+    every `Llet` arm directly off the precomputed occ table, so each
+    decision is O(1) lookup instead of the per-binding body walks the live
+    `simplify_alias_bindings_like_lets_dce` does.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+    after each step.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` after each step.
+- Outcome:
+  - JS snapshot parity: **589 / 657** (unchanged — purely additive).
+  - Compile errors: **4** (defunctor_make_test, functor_ffi, inline_map2_test,
+    int_map — all upstream typechecker `ExprTypeClash`/`UndefinedMethod`,
+    not regressions caused by this iteration).
+  - Output diffs: **64** (unchanged).
+  - `cargo test` for the new modules' #[cfg(test)] blocks cannot run yet
+    because of the unrelated duplicate `mod tests` in
+    `compiler-rust/src/cmi/persistent_env.rs`. The lib still builds.
+- Next iteration: wire `pass_lets_dce::simplify_lets` into the live JS
+  pipeline in place of `simplify::simplify_alias_bindings_like_lets_dce`,
+  then begin PERFORMANCE_PLAN Phase 2/3 (port `lam_pass_collect` and
+  `lam_pass_remove_alias` so the existing per-binding body-walk logic in
+  `simplify_with_env` can also be replaced with O(1) ident_tbl lookups).
+- Open follow-up: 4 upstream typechecker compile errors emerged since the
+  documented 0-error baseline (defunctor_make_test, functor_ffi,
+  inline_map2_test, int_map). PLAN.md says typedtree parity is 657/657 and
+  these stages are out of scope for this project; they should be
+  investigated before further JS work risks compounding on top of a broken
+  upstream.
 
 ## Branch Reset (2026-04-16)
 
