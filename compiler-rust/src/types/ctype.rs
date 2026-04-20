@@ -7575,9 +7575,7 @@ mod tests {
     use crate::context::IdGenerator;
     use crate::ident::Ident;
     use crate::types::asttypes::PrivateFlag;
-    use crate::types::decl::{
-        ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
-    };
+    use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind};
 
     #[test]
     fn test_unify_same_type() {

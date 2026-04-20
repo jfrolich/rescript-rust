@@ -54,6 +54,38 @@ const STAMP_NONE: i32 = 34;
 const STAMP_SOME: i32 = 35;
 const STAMP_CTOR_UNKNOWN: i32 = 36;
 
+// Comptime type reflection types
+const STAMP_TYPE_INFO: i32 = 37;
+const STAMP_FIELD_INFO: i32 = 38;
+const STAMP_CONSTRUCTOR_INFO: i32 = 39;
+
+// typeInfo constructors
+const STAMP_TI_INT: i32 = 40;
+const STAMP_TI_FLOAT: i32 = 41;
+const STAMP_TI_STRING: i32 = 42;
+const STAMP_TI_BOOL: i32 = 43;
+const STAMP_TI_UNIT: i32 = 44;
+const STAMP_TI_CHAR: i32 = 45;
+const STAMP_TI_BIGINT: i32 = 46;
+const STAMP_TI_RECORD: i32 = 47;
+const STAMP_TI_VARIANT: i32 = 48;
+const STAMP_TI_ARRAY: i32 = 49;
+const STAMP_TI_OPTION: i32 = 50;
+const STAMP_TI_FUNCTION: i32 = 51;
+const STAMP_TI_EXTERNAL: i32 = 52;
+const STAMP_TI_OPAQUE: i32 = 53;
+const STAMP_TI_UNKNOWN: i32 = 54;
+
+// fieldInfo labels
+const STAMP_FI_NAME: i32 = 55;
+const STAMP_FI_TYP: i32 = 56;
+const STAMP_FI_OPTIONAL: i32 = 57;
+const STAMP_FI_MUTABLE: i32 = 58;
+
+// constructorInfo labels
+const STAMP_CI_NAME: i32 = 59;
+const STAMP_CI_ARGS: i32 = 60;
+
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
 pub const PREDEF_STAMP_BARRIER: i32 = 999;
@@ -118,6 +150,49 @@ pub fn ident_unknown() -> Ident {
 pub fn ident_promise() -> Ident {
     make_ident("promise", STAMP_PROMISE)
 }
+
+// Comptime type reflection idents
+pub fn ident_type_info() -> Ident {
+    make_ident("typeInfo", STAMP_TYPE_INFO)
+}
+pub fn ident_field_info() -> Ident {
+    make_ident("fieldInfo", STAMP_FIELD_INFO)
+}
+pub fn ident_constructor_info() -> Ident {
+    make_ident("constructorInfo", STAMP_CONSTRUCTOR_INFO)
+}
+
+// typeInfo constructor idents
+pub fn ident_ti_int() -> Ident { make_ident("Int", STAMP_TI_INT) }
+pub fn ident_ti_float() -> Ident { make_ident("Float", STAMP_TI_FLOAT) }
+pub fn ident_ti_string() -> Ident { make_ident("String", STAMP_TI_STRING) }
+pub fn ident_ti_bool() -> Ident { make_ident("Bool", STAMP_TI_BOOL) }
+pub fn ident_ti_unit() -> Ident { make_ident("Unit", STAMP_TI_UNIT) }
+pub fn ident_ti_char() -> Ident { make_ident("Char", STAMP_TI_CHAR) }
+pub fn ident_ti_bigint() -> Ident { make_ident("Bigint", STAMP_TI_BIGINT) }
+pub fn ident_ti_record() -> Ident { make_ident("Record", STAMP_TI_RECORD) }
+pub fn ident_ti_variant() -> Ident { make_ident("Variant", STAMP_TI_VARIANT) }
+pub fn ident_ti_array() -> Ident { make_ident("Array", STAMP_TI_ARRAY) }
+pub fn ident_ti_option() -> Ident { make_ident("Option", STAMP_TI_OPTION) }
+pub fn ident_ti_function() -> Ident { make_ident("Function", STAMP_TI_FUNCTION) }
+pub fn ident_ti_external() -> Ident { make_ident("External", STAMP_TI_EXTERNAL) }
+pub fn ident_ti_opaque() -> Ident { make_ident("Opaque", STAMP_TI_OPAQUE) }
+pub fn ident_ti_unknown() -> Ident { make_ident("TiUnknown", STAMP_TI_UNKNOWN) }
+
+// fieldInfo label idents
+pub fn ident_fi_name() -> Ident { make_ident("name", STAMP_FI_NAME) }
+pub fn ident_fi_typ() -> Ident { make_ident("typ", STAMP_FI_TYP) }
+pub fn ident_fi_optional() -> Ident { make_ident("optional", STAMP_FI_OPTIONAL) }
+pub fn ident_fi_mutable() -> Ident { make_ident("mutable_", STAMP_FI_MUTABLE) }
+
+// constructorInfo label idents
+pub fn ident_ci_name() -> Ident { make_ident("name", STAMP_CI_NAME) }
+pub fn ident_ci_args() -> Ident { make_ident("args", STAMP_CI_ARGS) }
+
+// Paths
+pub fn path_type_info() -> Path { Path::pident(ident_type_info()) }
+pub fn path_field_info() -> Path { Path::pident(ident_field_info()) }
+pub fn path_constructor_info() -> Path { Path::pident(ident_constructor_info()) }
 
 // ============================================================================
 // Predef exception idents
@@ -288,6 +363,9 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
+        "typeInfo" => Some(ident_type_info()),
+        "fieldInfo" => Some(ident_field_info()),
+        "constructorInfo" => Some(ident_constructor_info()),
         _ => None,
     }
 }

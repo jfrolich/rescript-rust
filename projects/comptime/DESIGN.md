@@ -45,32 +45,39 @@ Unlike macro systems that generate code as strings or AST, comptime uses **parti
 
 ```rescript
 @comptime
-let encode = (comptime T: type, value: T): Js.Json.t => {
-  switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Float => JSON.Encode.float(value)
+  | Bool => JSON.Encode.bool(value)
   | Record({fields}) =>
-    let obj = Js.Dict.empty()
+    let dict = Dict.make()
     inline for field in fields {
-      Js.Dict.set(obj, field.name, encode(field.typ, @field(value, field.name)))
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
     }
-    Js.Json.object_(obj)
-  | _ => @compileError(`Cannot encode ${@typeName(T)}`)
+    JSON.Encode.object(dict)
+  | _ => @compileError("unsupported type")
   }
 }
 
 // Call site:
-let json = encode(user, myUser)
+let json = encode(myUser)
 ```
 
-The compiler evaluates the `switch @typeInfo(T)` at compile time, picks the matching branch, unrolls `inline for`, recursively specializes each `encode` call. What comes out is concrete code with no type dispatch:
+The compiler evaluates the `switch @typeInfo(value)` at compile time using the known type at each call site, picks the matching branch, unrolls `inline for`, recursively specializes each `encode` call. What comes out is concrete code with no type dispatch:
 
 ```javascript
 // Generated output — no runtime type info, no loops, no generics
-var obj = Js_dict.empty();
-Js_dict.set(obj, "name", Js_json.string(myUser.name));
-Js_dict.set(obj, "age", Js_json.number(myUser.age));
-var json = Js_json.object_(obj);
+// Since JSON.Encode.* are all %identity, they compile to nothing!
+let dict = {};
+dict["name"] = myUser.name;
+dict["age"] = myUser.age;
+let dict$1 = {};
+dict$1["street"] = myUser.address.street;
+dict$1["city"] = myUser.address.city;
+dict["address"] = dict$1;
+let json = dict;
 ```
 
 No code generation step. No strings, no AST builders, no quasi-quotation. The function body **is** the template. Comptime evaluation **is** specialization.
@@ -149,10 +156,10 @@ Parameters marked `comptime` must be known at compile time. Non-comptime paramet
 
 ```rescript
 @comptime
-let encode = (comptime T: type, value: T): Js.Json.t => {
+let encode = (comptime T: type, value: T): JSON.t => {
   switch @typeInfo(T) {
-  | String => Js.Json.string(value)     // value is runtime
-  | Int => Js.Json.number(Int.toFloat(value))
+  | String => JSON.Encode.string(value)     // value is runtime
+  | Int => JSON.Encode.int(value)
   | _ => @compileError(`Cannot encode ${@typeName(T)}`)
   }
 }
@@ -193,6 +200,88 @@ inline for field in fields {
 Console.log("id")
 Console.log("name")
 Console.log("email")
+```
+
+### Comptime Types
+
+Comptime functions (value → value) use `@comptime` on `let` bindings. For type-level computation (type → type), use `@comptime` on a type declaration:
+
+```rescript
+@comptime
+type keyOf<'T> = {
+  switch @typeInfo('T) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name->String.capitalize, as: field.name})
+    })
+  | _ => @compileError("@keyOf requires a record type")
+  }
+}
+
+type user = { name: string, age: int, email: string }
+type user_key = keyOf<user>
+// Produces:
+// type user_key =
+//   | @as("name") Name
+//   | @as("age") Age
+//   | @as("email") Email
+```
+
+The type parameter `'T` must be fully resolved at the call site — `keyOf<user>` works, `keyOf<'a>` is a compile error. This is consistent with comptime value functions: comptime parameters must be known at compile time.
+
+**Two kinds of comptime, same model:**
+
+| | Value-level | Type-level |
+|---|---|---|
+| **Syntax** | `@comptime let f = (comptime T: type, value: T) => ...` | `@comptime type f<'T> = ...` |
+| **Input** | Comptime params + runtime values | Type parameters (must be concrete) |
+| **Output** | Specialized runtime code | A new type declaration |
+| **Usage** | `f(myType, myValue)` | `type t = f<myType>` |
+| **Body** | Mix of comptime decisions + runtime expressions | Comptime only — type-building directives |
+
+#### Type-Building Builtins
+
+Comptime type bodies use these builtins to construct types:
+
+**`@buildVariant`** — build a variant type from `@variantCase` entries:
+
+```rescript
+@buildVariant(
+  @variantCase({name: "Active", as: "active"}),
+  @variantCase({name: "Inactive"}),
+  @variantCase({name: "Suspended", deprecated: "Use Inactive instead"}),
+)
+```
+
+**`@variantCase`** — describe a single variant constructor. Takes a record:
+
+```rescript
+@variantCase({
+  name: string,                          // required: constructor name
+  as?: string,                           // @as("...") JS representation
+  payload?: typeInfo,                    // constructor argument type(s)
+  deprecated?: string,                  // @deprecated("...")
+})
+```
+
+**`@buildRecord`** — build a record type from field descriptions:
+
+```rescript
+@buildRecord(inline for field in fields {
+  @recordField({name: field.name, typ: field.typ, optional: true})
+})
+```
+
+**`@recordField`** — describe a single record field:
+
+```rescript
+@recordField({
+  name: string,                          // required: field name
+  typ: typeInfo,                         // required: field type
+  optional?: bool,                       // x?: int
+  mutable_?: bool,                       // mutable x: int
+  as?: string,                           // @as("userName")
+})
 ```
 
 ---
@@ -426,10 +515,10 @@ These are fundamentally different:
 
 ```rescript
 @comptime
-let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+let rec encodeField = (comptime T: type, value: T): JSON.t => {
   switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
   | Record({fields}) => ...
   | Opaque(_) =>
     // There IS a definition, but it's hidden.
@@ -660,7 +749,7 @@ type user = { name: string, age: int }
 
 let json = encode_user(myUser)
 //         ^^^^^^^^^^^
-//         hover: (user) => Js.Json.t
+//         hover: (user) => JSON.t
 //         go-to-def: → generated by @encoder (Spice.res:15)
 ```
 
@@ -727,34 +816,34 @@ A derive handler is a comptime function registered to an attribute name:
 ```rescript
 @comptime.derive("encoder")
 let encoder = (comptime T: type) => {
-  (value: T): Js.Json.t => {
+  (value: T): JSON.t => {
     switch @typeInfo(T) {
     | Record({fields}) =>
-      let obj = Js.Dict.empty()
+      let obj = Dict.make()
       inline for field in fields {
         let key = @getAttr(field, "json.key")->Option.getOr(field.name)
-        Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+        Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
       }
-      Js.Json.object_(obj)
+      JSON.Encode.object(obj)
     | _ => @compileError(`@encoder requires a record type`)
     }
   }
 }
 
 @comptime
-let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+let rec encodeField = (comptime T: type, value: T): JSON.t => {
   switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
-  | Float => Js.Json.number(value)
-  | Bool => Js.Json.boolean(value)
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Float => JSON.Encode.float(value)
+  | Bool => JSON.Encode.bool(value)
   | Option(inner) =>
     switch value {
     | Some(v) => encodeField(inner, v)
-    | None => Js.Json.null
+    | None => JSON.Null
     }
   | Array(elem) =>
-    value->Array.map(v => encodeField(elem, v))->Js.Json.array
+    value->Array.map(v => encodeField(elem, v))->JSON.Encode.array
   | External({bindings}) =>
     switch bindings->Array.find(b =>
       switch b { | Method({jsName: "toJSON"}) => true | _ => false }
@@ -792,19 +881,19 @@ The user's file effectively becomes:
 type user = { name: string, @json.key("user_age") age: int, email: option<string> }
 
 // generated by @encoder — fully specialized, no type dispatch at runtime
-let encode_user = (value: user): Js.Json.t => {
-  let obj = Js.Dict.empty()
-  Js.Dict.set(obj, "name", Js.Json.string(value.name))
-  Js.Dict.set(obj, "user_age", Js.Json.number(Int.toFloat(value.age)))
-  Js.Dict.set(obj, "email", switch value.email {
-    | Some(v) => Js.Json.string(v)
-    | None => Js.Json.null
+let encode_user = (value: user): JSON.t => {
+  let obj = Dict.make()
+  Dict.set(obj, "name", JSON.Encode.string(value.name))
+  Dict.set(obj, "user_age", JSON.Encode.int(value.age))
+  Dict.set(obj, "email", switch value.email {
+    | Some(v) => JSON.Encode.string(v)
+    | None => JSON.Null
   })
-  Js.Json.object_(obj)
+  JSON.Encode.object(obj)
 }
 
 // generated by @decoder
-let decode_user = (json: Js.Json.t): result<user, string> => { ... }
+let decode_user = (json: JSON.t): result<user, string> => { ... }
 ```
 
 ### Decoder Example
@@ -812,14 +901,14 @@ let decode_user = (json: Js.Json.t): result<user, string> => { ... }
 ```rescript
 @comptime.derive("decoder")
 let decoder = (comptime T: type) => {
-  (json: Js.Json.t): result<T, string> => {
+  (json: JSON.t): result<T, string> => {
     switch @typeInfo(T) {
     | Record({fields}) =>
-      switch Js.Json.classify(json) {
+      switch JSON.Classify.classify(json) {
       | JSONObject(dict) =>
         inline for field in fields {
           let key = @getAttr(field, "json.key")->Option.getOr(field.name)
-          let raw = Js.Dict.get(dict, key)
+          let raw = Dict.get(dict, key)
           switch (raw, field.optional) {
           | (None, false) => return Error(`Missing field: ${key}`)
           | _ => ()
@@ -873,26 +962,26 @@ type user = {
 ```rescript
 // Codec.res - Generic JSON codec generator
 @comptime
-let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
+let rec encodeField = (comptime T: type, value: T): JSON.t => {
   switch @typeInfo(T) {
-  | String => Js.Json.string(value)
-  | Int => Js.Json.number(Int.toFloat(value))
-  | Float => Js.Json.number(value)
-  | Bool => Js.Json.boolean(value)
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Float => JSON.Encode.float(value)
+  | Bool => JSON.Encode.bool(value)
   | Option(inner) =>
     switch value {
     | Some(v) => encodeField(inner, v)
-    | None => Js.Json.null
+    | None => JSON.Null
     }
   | Array(elem) =>
-    value->Array.map(v => encodeField(elem, v))->Js.Json.array
+    value->Array.map(v => encodeField(elem, v))->JSON.Encode.array
   | Record({fields}) =>
-    let obj = Js.Dict.empty()
+    let obj = Dict.make()
     inline for field in fields {
       let key = @getAttr(field, "json.key")->Option.getOr(field.name)
-      Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+      Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
     }
-    Js.Json.object_(obj)
+    JSON.Encode.object(obj)
   | External({bindings}) =>
     switch bindings->Array.find(b =>
       switch b { | Method({jsName: "toJSON"}) => true | _ => false }
@@ -908,51 +997,51 @@ let rec encodeField = (comptime T: type, value: T): Js.Json.t => {
 
 @comptime.derive("encoder")
 let encoder = (comptime T: type) => {
-  (value: T): Js.Json.t => {
+  (value: T): JSON.t => {
     switch @typeInfo(T) {
     | Record({fields}) =>
-      let obj = Js.Dict.empty()
+      let obj = Dict.make()
       inline for field in fields {
         let key = @getAttr(field, "json.key")->Option.getOr(field.name)
-        Js.Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
+        Dict.set(obj, key, encodeField(field.typ, @field(value, field.name)))
       }
-      Js.Json.object_(obj)
+      JSON.Encode.object(obj)
     | _ => @compileError(`@encoder requires a record type`)
     }
   }
 }
 
 @comptime
-let rec decodeField = (comptime T: type, json: Js.Json.t): result<T, string> => {
+let rec decodeField = (comptime T: type, json: JSON.t): result<T, string> => {
   switch @typeInfo(T) {
   | String =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONString(s) => Ok(s)
-    | _ => Error(`Expected string, got ${Js.Json.stringify(json)}`)
+    | _ => Error(`Expected string, got ${JSON.Encode.stringify(json)}`)
     }
   | Int =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONNumber(n) => Ok(Int.fromFloat(n))
     | _ => Error(`Expected int`)
     }
   | Float =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONNumber(n) => Ok(n)
     | _ => Error(`Expected float`)
     }
   | Bool =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONTrue => Ok(true)
     | JSONFalse => Ok(false)
     | _ => Error(`Expected bool`)
     }
   | Option(inner) =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONNull => Ok(None)
     | _ => decodeField(inner, json)->Result.map(v => Some(v))
     }
   | Array(elem) =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONArray(arr) =>
       arr->Array.map(v => decodeField(elem, v))->Array.reduce(Ok([]), (acc, r) =>
         switch (acc, r) {
@@ -964,11 +1053,11 @@ let rec decodeField = (comptime T: type, json: Js.Json.t): result<T, string> => 
     | _ => Error("Expected array")
     }
   | Record({fields}) =>
-    switch Js.Json.classify(json) {
+    switch JSON.Classify.classify(json) {
     | JSONObject(dict) =>
       inline for field in fields {
         let key = @getAttr(field, "json.key")->Option.getOr(field.name)
-        let raw = Js.Dict.get(dict, key)
+        let raw = Dict.get(dict, key)
         switch (raw, field.optional) {
         | (Some(v), _) =>
           switch decodeField(field.typ, v) {

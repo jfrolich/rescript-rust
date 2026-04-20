@@ -1086,6 +1086,8 @@ pub struct FundefTermParam {
     pub pat: Pattern,
     /// Start position index (enables sharing with OCaml's pointer identity).
     pub start_pos_idx: PosIdx,
+    /// Whether this parameter is marked `comptime`.
+    pub comptime: bool,
 }
 
 /// A type parameter in a function definition (for newtypes).
@@ -1113,6 +1115,11 @@ pub enum FundefParameter {
     Term(FundefTermParam),
     /// Type parameter (newtype).
     Type(FundefTypeParam),
+    /// Comptime type parameter: `comptime T: type`.
+    ComptimeType {
+        name: StringLoc,
+        start_pos_idx: PosIdx,
+    },
 }
 
 /// Extract type and term parameters from a list of function definition parameters.
@@ -1131,6 +1138,25 @@ pub fn extract_fundef_params(
                 type_acc = match type_acc {
                     Some(mut tpa) => {
                         tpa.attrs.extend(tp.attrs);
+                        tpa.locs.extend(tp.locs);
+                        Some(tpa)
+                    }
+                    None => Some(tp),
+                };
+            }
+            FundefParameter::ComptimeType { name, start_pos_idx } => {
+                // Comptime type params are treated as type params for now,
+                // with the name added to the type param list.
+                // The comptime semantics are handled during type checking.
+                let tp = FundefTypeParam {
+                    attrs: Attributes::new(),
+                    locs: vec![name],
+                    start_pos_idx,
+                    paren_start_pos_idx: None,
+                    paren_end_pos_idx: None,
+                };
+                type_acc = match type_acc {
+                    Some(mut tpa) => {
                         tpa.locs.extend(tp.locs);
                         Some(tpa)
                     }

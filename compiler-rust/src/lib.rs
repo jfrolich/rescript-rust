@@ -55,11 +55,16 @@ pub mod parse_arena;
 pub mod parser;
 pub mod raw_lambda;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_vfs;
 
 // Re-exports for convenience
+#[cfg(feature = "native")]
 pub use cache::ModuleCache;
 pub use config::CompilerConfig;
-pub use context::{CompilationContext, IdGenerator};
+#[cfg(feature = "native")]
+pub use context::CompilationContext;
+pub use context::IdGenerator;
 pub use diagnostics::DiagnosticsContext;
 pub use ident::Ident;
 pub use lambda::Lambda;

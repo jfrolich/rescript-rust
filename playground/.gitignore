@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Override root .gitignore that excludes *.jsx (ReScript build artifacts)
+!*.jsx

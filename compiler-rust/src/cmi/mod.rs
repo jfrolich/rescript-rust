@@ -14,6 +14,7 @@
 pub mod cmi_format;
 pub mod marshal_reader;
 pub mod persistent_env;
+pub mod portable_types;
 pub mod sig_reader;
 
 pub use cmi_format::CmiInfos;
