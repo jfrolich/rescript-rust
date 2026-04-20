@@ -1,7 +1,80 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (evening)
-**Status:** 592 / 657 authoritative JS snapshot baseline; 4 compile errors and 61 output diffs. Three OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, and `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering. Net +3 vs the original 589 baseline; bug-fix gain on `test_static_catch_ident` (lost `for` loop) is preserved.
+**Last Updated:** 2026-04-21 (late evening)
+**Status:** 593 / 657 authoritative JS snapshot baseline; 4 compile errors and 60 output diffs. Four OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering, and `return_staticcatch_requires_explicit_jump` now forces explicit-jump when nested in another staticcatch (matching OCaml's `in_staticcatch=true` gate in `lam_compile.ml:937-939`). Net +4 vs the original 589 baseline; bug-fix gain on `test_static_catch_ident` (lost `for` loop) is preserved.
+
+## Iteration on 2026-04-21 (late evening)
+
+- Active slice: the previous iteration diagnosed DictPatternMatchingOptimization
+  as needing the `compile_staticcatch` pseudo_jmp port. After instrumenting the
+  return-path dispatch, the root cause turned out to be different: nested
+  staticcatches were incorrectly routing through the Rust-only
+  `with_static_handler` + `resolve_static_raise` inline-handler shortcut,
+  duplicating the handler at every static_raise site. OCaml has exactly two
+  paths in `compile_staticcatch` (lam_compile.ml:937-1017) — pseudo-jmp only
+  when `in_staticcatch=false`, and otherwise the full `exit_id` mechanism.
+  There is no compile-time "inline handler at raise site" path in OCaml.
+- OCaml / backend reference:
+  - `compiler/core/lam_compile.ml:937-943` (pseudo-jmp gate requires
+    `in_staticcatch=false`)
+  - `compiler/core/lam_compile.ml:963-1017` (explicit-jump path: always emits
+    `let exit = 0` + per-raise assignments + post-body `if (exit === N)` test)
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs` —
+    `return_staticcatch_requires_explicit_jump` now returns true when
+    `self.static_jump_handlers` is non-empty, matching OCaml's
+    `in_staticcatch=true` → explicit-jump rule. The `with_static_handler`
+    shortcut is only taken at the outermost staticcatch in the return chain.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for ExternalShadow, test_static_catch_ident,
+    NondetPatterMatch, gpr_2413_test, VariantPatternMatchingSpreads,
+    DictPatternMatchingOptimization (newly fixed).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **593 / 657**.
+- Outcome:
+  - JS snapshot parity: **593 / 657** (+1 vs prior 592 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **60** (-1 vs prior 61).
+  - Newly passing: `DictPatternMatchingOptimization`.
+- Remaining failure clusters:
+  - **gpr_3609_test** — extra `let intValue = state._0` binding kept where
+    OCaml inlines the Pfield into the immediately-following `0 + state._0 | 0`.
+    Source is in the alias-simplification pass, NOT in the backend.
+  - **LetUnwrap / getXWithResult** — nested two-case (`Ok`/`Error`) variant
+    switch: OCaml inverts the outer test to `if (y.TAG !== "Ok") return y;
+    let y$1 = y._0; ...` while Rust keeps `if (y.TAG === "Ok") { ... } return
+    y;`. No Lstaticcatch involved — the divergence is in the case-ordering
+    heuristic inside the named-variant switch lowering
+    (`compile_named_string_switch_return` → `compile_small_string_switch_return`
+    at compile.rs:4067-4099). OCaml appears to prefer the smaller-body case
+    as the `then` branch when that branch terminates.
+  - **Stdlib_IntlTests** — option pattern with nested guard: OCaml emits the
+    `let exit = 0` / `if (exit === 1) {handler}` pair; Rust still inlines the
+    handler at both match arms. Same root cause as DictPatternMatchingOptimization
+    before this iteration's fix, but at the *outermost* staticcatch inside a
+    `try/catch` handler (OCaml is in `Tail_in_try`, not `Tail_with_name`, so
+    pseudo-jmp doesn't fire and it takes explicit-jump). Rust's
+    `static_jump_handlers` is empty there, so the new nested gate does not
+    catch it; would need a complementary "inside a try handler" or
+    "non-tail-with-name" check.
+  - **bal_set_mini / js_json_test / similar printer-level diffs** — the
+    `simplify_if_statement` rewrite at `js_ir/mod.rs:1505-1513` flattens
+    `if (cond) {return X;} else {return Y;}` into early-return form, whereas
+    OCaml preserves the `else if ... else` chain. This is a Rust-only
+    shortcut; removing it would be OCaml-aligned but risks broad regressions.
+- Next iteration: pick **one** of:
+  1. The Stdlib_IntlTests style (outermost-but-non-tail-with-name): likely a
+     single-condition extension of the new
+     `!self.static_jump_handlers.is_empty()` gate — also apply in
+     `compile_effect_block`'s LstaticCatch arm (compile.rs:1233-1243) which
+     still takes the inline shortcut.
+  2. The `js_ir/mod.rs:1505` `simplify_if_statement` flatten-on-terminal-then
+     rule: narrow it so it only fires in contexts where OCaml's printer
+     would agree. Requires identifying a positive guard that mirrors OCaml's
+     decision locus.
+  3. The switch case-ordering question for LetUnwrap: trace OCaml's
+     `compile_named_string_switch` to see why Ok gets swapped to the else
+     branch when its body is the larger one.
 
 ## Iteration on 2026-04-21 (evening)
 
