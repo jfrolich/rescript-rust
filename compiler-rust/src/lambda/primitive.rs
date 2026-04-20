@@ -509,91 +509,133 @@ pub enum Mutable {
 }
 
 impl Primitive {
-    /// Check if two primitives are approximately equal (for optimization)
+    /// Check if two primitives are approximately equal (for optimization).
+    ///
+    /// 1:1 port of `Lam_primitive.eq_primitive_approx`
+    /// (`compiler/core/lam_primitive.ml:197-301`). The "simple" arm at
+    /// lines 199-232 in OCaml uses `rhs = lhs` (structural equality) for
+    /// every nullary primitive listed there; the remaining variants get
+    /// per-payload checks. `Praw_js_code _` always returns false
+    /// (lam_primitive.ml:301) — ReScript treats raw JS as opaque.
     pub fn eq_approx(&self, other: &Primitive) -> bool {
-        match (self, other) {
-            // Simple primitives
-            (Primitive::Praise, Primitive::Praise)
-            | (Primitive::Pidentity, Primitive::Pidentity)
-            | (Primitive::Pignore, Primitive::Pignore)
-            | (Primitive::Psequand, Primitive::Psequand)
-            | (Primitive::Psequor, Primitive::Psequor)
-            | (Primitive::Pnot, Primitive::Pnot)
-            | (Primitive::Pisint, Primitive::Pisint)
-            | (Primitive::Pnegint, Primitive::Pnegint)
-            | (Primitive::Paddint, Primitive::Paddint)
-            | (Primitive::Psubint, Primitive::Psubint)
-            | (Primitive::Pmulint, Primitive::Pmulint)
-            | (Primitive::Pdivint, Primitive::Pdivint)
-            | (Primitive::Pmodint, Primitive::Pmodint)
-            | (Primitive::Pandint, Primitive::Pandint)
-            | (Primitive::Porint, Primitive::Porint)
-            | (Primitive::Pxorint, Primitive::Pxorint)
-            | (Primitive::Plslint, Primitive::Plslint)
-            | (Primitive::Plsrint, Primitive::Plsrint)
-            | (Primitive::Pasrint, Primitive::Pasrint)
-            | (Primitive::Pstringlength, Primitive::Pstringlength)
-            | (Primitive::Pstringrefu, Primitive::Pstringrefu)
-            | (Primitive::Pstringrefs, Primitive::Pstringrefs)
-            | (Primitive::Pstringadd, Primitive::Pstringadd)
-            | (Primitive::Pmakearray, Primitive::Pmakearray)
-            | (Primitive::Parraylength, Primitive::Parraylength)
-            | (Primitive::Parrayrefu, Primitive::Parrayrefu)
-            | (Primitive::Parraysetu, Primitive::Parraysetu)
-            | (Primitive::Parrayrefs, Primitive::Parrayrefs)
-            | (Primitive::Parraysets, Primitive::Parraysets)
-            | (Primitive::Pduprecord, Primitive::Pduprecord) => true,
+        use Primitive::*;
+        match self {
+            // lam_primitive.ml:199-232 — the big "rhs = lhs" simple list.
+            // Every nullary primitive in OCaml's eq_primitive_approx that
+            // matches this arm. Mapped to Rust enum variant names.
+            PwrapExn | Praise | Pobjorder | Pobjmin | Pobjmax | Pobjtag | Pobjsize
+            | Psequand | Psequor | Pnot | Pboolorder | Pboolmin | Pboolmax | Pisint
+            | Pnegint | Paddint | Psubint | Pmulint | Pdivint | Pmodint | Ppowint
+            | Pnotint | Pandint | Porint | Pxorint | Plslint | Plsrint | Pasrint
+            | Pintorder | Pintmin | Pintmax | Pintoffloat | Pfloatofint | Pnegfloat
+            | Paddfloat | Psubfloat | Pmulfloat | Pdivfloat | Pmodfloat | Ppowfloat
+            | Pfloatorder | Pfloatmin | Pfloatmax | Pnegbigint | Paddbigint | Psubbigint
+            | Pmulbigint | Pdivbigint | Pmodbigint | Ppowbigint | Pnotbigint | Pandbigint
+            | Porbigint | Pxorbigint | Plslbigint | Pasrbigint | Pbigintorder | Pbigintmin
+            | Pbigintmax | Pstringlength | Pstringrefu | Pstringrefs | Pstringadd
+            | Pstringorder | Pstringmin | Pstringmax | Pmakelist | Pmakedict | PdictHas
+            | Pawait | PjsApply | PjsRuntimeApply | PvalFromOption | PvalFromOptionNotNest
+            | PnullToOpt | PnullUndefinedToOpt | PisNull | PisNotNone | Psome | PsomeNotNest
+            | PisUndefined | PisNullUndefined | Pimport | Ptypeof | PfnArity | PisPolyVarBlock
+            | Pdebugger | PinitMod | PupdateMod | Pduprecord | Pmakearray | Parraylength
+            | Parrayrefu | Parraysetu | Parrayrefs | Parraysets | PjsFnMakeUnit | PjsFnMethod
+            | Phash | PhashMixstring | PhashMixint | PhashFinalmix => self == other,
 
-            // Comparison primitives
-            (Primitive::Pintcomp(a), Primitive::Pintcomp(b))
-            | (Primitive::Pfloatcomp(a), Primitive::Pfloatcomp(b))
-            | (Primitive::Pbigintcomp(a), Primitive::Pbigintcomp(b))
-            | (Primitive::Pstringcomp(a), Primitive::Pstringcomp(b))
-            | (Primitive::Pobjcomp(a), Primitive::Pobjcomp(b))
-            | (Primitive::Pboolcomp(a), Primitive::Pboolcomp(b))
-            | (Primitive::Pjscomp(a), Primitive::Pjscomp(b)) => a == b,
+            // Rust-only nullary primitives that have no OCaml counterpart in
+            // the eq_primitive_approx switch. They are still nullary; treat
+            // them like the simple list — `self == other` matches when both
+            // are the same constructor. This is the safe and consistent
+            // generalization (no payload to compare differently).
+            Pidentity | Pignore | PextensionSlotEq | Pnull | Pundefined => self == other,
 
-            // Field operations
-            (Primitive::Pfield(n1, info1), Primitive::Pfield(n2, info2)) => {
-                n1 == n2 && info1 == info2
-            }
-            (Primitive::Psetfield(n1, info1), Primitive::Psetfield(n2, info2)) => {
-                n1 == n2 && info1 == info2
-            }
-
-            // Block operations
-            (
-                Primitive::Pmakeblock(tag1, info1, mut1),
-                Primitive::Pmakeblock(tag2, info2, mut2),
-            ) => tag1 == tag2 && info1 == info2 && mut1 == mut2,
-
-            // Offset operations
-            (Primitive::Poffsetint(n1), Primitive::Poffsetint(n2))
-            | (Primitive::Poffsetref(n1), Primitive::Poffsetref(n2))
-            | (Primitive::Pisout(n1), Primitive::Pisout(n2))
-            | (Primitive::PjsFnMake(n1), Primitive::PjsFnMake(n2)) => n1 == n2,
-
-            // Extension
-            (Primitive::PcreateExtension(a), Primitive::PcreateExtension(b)) => a == b,
-            (Primitive::PextensionSlotEq, Primitive::PextensionSlotEq) => true,
-
-            // Unsafe downgrade
-            (
-                Primitive::PjsUnsafeDowngrade {
+            // lam_primitive.ml:233-236
+            PcreateExtension(a) => match other {
+                PcreateExtension(b) => a == b,
+                _ => false,
+            },
+            // lam_primitive.ml:237-240
+            Pisout(l) => match other {
+                Pisout(r) => l == r,
+                _ => false,
+            },
+            // lam_primitive.ml:242-245
+            Pfield(n0, info0) => match other {
+                Pfield(n1, info1) => n0 == n1 && info0 == info1,
+                _ => false,
+            },
+            // lam_primitive.ml:246-249
+            Psetfield(i0, info0) => match other {
+                Psetfield(i1, info1) => i0 == i1 && info0 == info1,
+                _ => false,
+            },
+            // lam_primitive.ml:250-254
+            Pmakeblock(i0, info0, flag0) => match other {
+                Pmakeblock(i1, info1, flag1) => i0 == i1 && flag0 == flag1 && info0 == info1,
+                _ => false,
+            },
+            // lam_primitive.ml:255-260: Pjs_call only checks
+            // prim_name + arg_types + ffi + dynamic_import
+            // (NOT transformed_jsx).
+            PjsCall {
+                prim_name,
+                arg_types,
+                ffi,
+                dynamic_import,
+                transformed_jsx: _,
+            } => match other {
+                PjsCall {
+                    prim_name: pn,
+                    arg_types: at,
+                    ffi: f,
+                    dynamic_import: di,
+                    transformed_jsx: _,
+                } => prim_name == pn && arg_types == at && ffi == f && dynamic_import == di,
+                _ => false,
+            },
+            // lam_primitive.ml:261-264
+            PjsObjectCreate(obj0) => match other {
+                PjsObjectCreate(obj1) => obj0 == obj1,
+                _ => false,
+            },
+            // lam_primitive.ml:265-268
+            Pobjcomp(c) => matches!(other, Pobjcomp(c2) if c == c2),
+            // lam_primitive.ml:269-272
+            Pintcomp(c) => matches!(other, Pintcomp(c2) if c == c2),
+            // lam_primitive.ml:273-276
+            Pfloatcomp(c) => matches!(other, Pfloatcomp(c2) if c == c2),
+            // lam_primitive.ml:277-280
+            Pbigintcomp(c) => matches!(other, Pbigintcomp(c2) if c == c2),
+            // lam_primitive.ml:281-284
+            Pjscomp(c) => matches!(other, Pjscomp(c2) if c == c2),
+            // Rust groups Pstringcomp / Pboolcomp under the comparison rule,
+            // mirroring the OCaml comparison treatment.
+            Pstringcomp(c) => matches!(other, Pstringcomp(c2) if c == c2),
+            Pboolcomp(c) => matches!(other, Pboolcomp(c2) if c == c2),
+            // lam_primitive.ml:285-288
+            Poffsetint(i0) => match other {
+                Poffsetint(i1) => i0 == i1,
+                _ => false,
+            },
+            // lam_primitive.ml:289-292
+            Poffsetref(i0) => match other {
+                Poffsetref(i1) => i0 == i1,
+                _ => false,
+            },
+            // lam_primitive.ml:293-296
+            PjsUnsafeDowngrade { name, setter } => match other {
+                PjsUnsafeDowngrade {
                     name: n1,
                     setter: s1,
-                },
-                Primitive::PjsUnsafeDowngrade {
-                    name: n2,
-                    setter: s2,
-                },
-            ) => n1 == n2 && s1 == s2,
-
-            // Raw JS code - never equal (side effects)
-            (Primitive::PrawJsCode(_), Primitive::PrawJsCode(_)) => false,
-
-            // All other cases
-            _ => false,
+                } => name == n1 && setter == s1,
+                _ => false,
+            },
+            // lam_primitive.ml:297-300
+            PjsFnMake(i) => match other {
+                PjsFnMake(i1) => i == i1,
+                _ => false,
+            },
+            // lam_primitive.ml:301
+            PrawJsCode(_) => false,
         }
     }
 }
