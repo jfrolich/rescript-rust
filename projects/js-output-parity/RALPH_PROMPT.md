@@ -1,11 +1,27 @@
 # Ralph Loop: JS Output Parity
 
+## ⚠️ MANDATORY FIRST TASK — DELETE THE MONOLITH
+
+**Before doing ANYTHING else, you MUST delete `simplify_with_env` and the entire
+`SimplifyEnv` struct from `compiler-rust/src/lambda/simplify.rs`.** Delete all
+~114 helper functions that only feed the monolith. This is ~15,000 lines of code
+that must go.
+
+Then wire up the OCaml pipeline from `lam_compile_main.ml:148-200` using:
+- Passes you already ported: `pass_exits`, `pass_lets_dce`, `pass_count`
+- Stubs (identity functions) for passes not yet ported: `collect_info`, `remove_alias`, `alpha_conversion`, `deep_flatten`
+
+**Parity WILL regress. That is expected and required.** Do NOT try to preserve
+the current score. Do NOT add workarounds. Fix regressions only by porting more
+OCaml code faithfully.
+
+Read `PERFORMANCE_PLAN.md` for the full plan and `PLAN.md` for constraints.
+
+---
+
 You are working on achieving **100% emitted JavaScript parity** between the
 Rust compiler and the OCaml reference implementation using the checked-in JS
 snapshots.
-
-Read `PLAN.md` first. Follow the active phase there instead of inventing your
-own order.
 
 ## Current Baseline
 
@@ -71,16 +87,14 @@ Parity numbers are navigation tools, not the definition of correctness.
 
 For each iteration:
 
-1. Run the authoritative JS baseline.
-2. Re-check the current phase in `PLAN.md`.
-3. Pick one root-cause cluster: compile errors, import/export shape, function/app lowering, JS-pass cleanup, or printer-only drift.
-4. Read the corresponding OCaml implementation first.
-5. Port the OCaml behavior into Rust.
-6. Run one small internal file and one broader guard file.
-7. Re-run the authoritative baseline.
-8. If the change is verified OCaml-aligned, commit it immediately.
-9. Update `RALPH_TODO.md` with the new baseline and findings.
-10. Continue from the new baseline.
+1. **Check: is `simplify_with_env` deleted?** If NO, delete it now. That is your
+   only task until it's gone.
+2. **Check: is the OCaml pipeline wired up?** If NO, wire it up with stubs.
+3. **Check: are all passes from PERFORMANCE_PLAN.md ported?** If NO, port the
+   next one (collect_info, remove_alias, deep_flatten, alpha_conversion).
+4. Only after ALL of the above are done: pick parity clusters and fix them by
+   reading the OCaml source and porting behavior faithfully.
+5. Run the authoritative baseline, commit, update RALPH_TODO.md.
 
 Only stop if:
 
