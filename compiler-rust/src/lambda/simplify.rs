@@ -1619,7 +1619,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
             let binding_is_exported = lambda_exports_ident(body, id);
             let mut kind = *kind;
             let mut value_env =
-                if binding_is_exported && inlineable_local_function(original_value).is_some() {
+                if binding_is_exported
+                    && inlineable_local_function(original_value).is_some()
+                    && env.allow_named_function_inlining
+                {
                     let mut next = env.clone();
                     next.delay_dead_let_cleanup = true;
                     next
