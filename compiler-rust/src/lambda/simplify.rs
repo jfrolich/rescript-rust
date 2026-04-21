@@ -37,6 +37,15 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // `is_export_id` guard in `Lam_pass_remove_alias.simplify_alias`
     // (lam_pass_remove_alias.ml:211).
     let mut meta = LamStats::new(extract_export_idents(lam));
+    // Seed the shared rename counter past every stamp already present in the
+    // lambda so `Ident.rename` (via beta-reduce) never collides with existing
+    // stamps. OCaml's Ident.rename reads from a global mutable counter; this
+    // mirrors that. Without the seed, two beta reductions of the same function
+    // at distinct call sites renamed their parameters to the same fresh stamp
+    // (e.g. two `let prim` declarations at module top level in
+    // `coercion_module_alias_test`, which is invalid JS).
+    meta.id_gen
+        .set_current_stamp(crate::lambda::beta_reduce::max_ident_stamp_in_lambda(lam));
 
     // lam_compile_main.ml:148 — initial deep_flatten.
     let lam = deep_flatten(lam);

@@ -88,6 +88,16 @@ pub struct LamStats {
     pub exports: Vec<Ident>,
     /// Identifier kind table
     pub ident_tbl: IdentTable,
+    /// Shared stamp counter for `Ident::rename` calls across the pipeline.
+    ///
+    /// OCaml's `Ident.rename` consults a single global mutable counter, so every
+    /// freshly-renamed ident gets a stamp unused anywhere else. The Rust pipeline
+    /// previously created a new `IdGenerator::with_start_stamp(max_ident_stamp(..))`
+    /// inside each beta-reduce call, which made two inlinings of the same function
+    /// produce colliding stamps (e.g. two `let prim` bindings at module top level
+    /// in `coercion_module_alias_test`). Threading this shared counter through the
+    /// simplify pipeline preserves OCaml's invariant.
+    pub id_gen: std::sync::Arc<crate::context::IdGenerator>,
 }
 
 impl LamStats {
@@ -98,6 +108,7 @@ impl LamStats {
             export_idents,
             exports,
             ident_tbl: HashMap::new(),
+            id_gen: std::sync::Arc::new(crate::context::IdGenerator::new()),
         }
     }
 

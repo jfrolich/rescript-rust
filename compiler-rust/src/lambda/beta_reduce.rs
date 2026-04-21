@@ -222,11 +222,31 @@ pub fn propagate_beta_reduce_with_meta(
     body: &Lambda,
     args: &[Lambda],
 ) -> Lambda {
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
+    propagate_beta_reduce_with_meta_and_id_gen(ident_tbl, &id_gen, params, body, args)
+}
+
+/// Variant of [`propagate_beta_reduce_with_meta`] that uses a caller-supplied
+/// `IdGenerator`. OCaml's `Ident.rename` consults a single global mutable
+/// stamp counter, so every renamed ident gets a fresh stamp unused anywhere
+/// else in the program. Using a fresh `IdGenerator::with_start_stamp(..)` per
+/// beta-reduce call made two inlinings of the same function (e.g. a shared
+/// `let l = x => console.log(x)`) rename their parameters to the same new
+/// stamp, which the JS printer then emitted as two `let prim = …` declarations
+/// at module top level — invalid JS. Threading the pipeline-wide generator
+/// from [`crate::lambda::compile_context::LamStats::id_gen`] preserves the
+/// OCaml invariant.
+pub fn propagate_beta_reduce_with_meta_and_id_gen(
+    ident_tbl: &mut IdentTable,
+    id_gen: &IdGenerator,
+    params: &[Ident],
+    body: &Lambda,
+    args: &[Lambda],
+) -> Lambda {
     if let Some(result) = simple_beta_reduce(params, body, args) {
         return result;
     }
 
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
     let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
     let mut substitution: Subst = HashMap::new();
 
@@ -236,14 +256,14 @@ pub fn propagate_beta_reduce_with_meta(
                 substitution.insert(param.clone(), arg.clone());
             }
             _ => {
-                let new_param = param.rename(&id_gen);
+                let new_param = param.rename(id_gen);
                 rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
                 substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
             }
         }
     }
 
-    let new_body = rewrite_bounded_vars(&mut substitution, body, &id_gen);
+    let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
     let mut result = new_body;
     for (param, arg) in rest_bindings.into_iter().rev() {
         register_bound_param_kind(ident_tbl, &param, &arg);
@@ -285,12 +305,28 @@ pub fn propagate_beta_reduce_with_map_and_meta(
     body: &Lambda,
     args: &[Lambda],
 ) -> Lambda {
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
+    propagate_beta_reduce_with_map_and_meta_and_id_gen(
+        ident_tbl, &id_gen, stats, params, body, args,
+    )
+}
+
+/// Variant of [`propagate_beta_reduce_with_map_and_meta`] that uses a
+/// caller-supplied `IdGenerator`, matching OCaml's global-counter semantics for
+/// `Ident.rename` across repeated inlinings. See
+/// [`propagate_beta_reduce_with_meta_and_id_gen`] for the rationale.
+pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
+    ident_tbl: &mut IdentTable,
+    id_gen: &IdGenerator,
+    stats: &StatsMap,
+    params: &[Ident],
+    body: &Lambda,
+    args: &[Lambda],
+) -> Lambda {
     // Try simple beta reduce first
     if let Some(result) = simple_beta_reduce(params, body, args) {
         return result;
     }
-
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp(params, body, args));
 
     // Categorize arguments
     let mut rest_bindings: Vec<(Ident, Lambda)> = Vec::new();
@@ -304,7 +340,7 @@ pub fn propagate_beta_reduce_with_map_and_meta(
             }
             // Global modules need to be bound (for proper module loading)
             Lambda::LglobalModule(_, _) => {
-                let new_param = param.rename(&id_gen);
+                let new_param = param.rename(id_gen);
                 rest_bindings.push((new_param.clone(), arg.clone()));
                 substitution.insert(param.clone(), Lambda::var(new_param));
             }
@@ -319,7 +355,7 @@ pub fn propagate_beta_reduce_with_map_and_meta(
                     }
                 }
                 // Bind to a new variable
-                let new_param = param.rename(&id_gen);
+                let new_param = param.rename(id_gen);
                 rest_bindings.push((new_param.clone(), bound_param_binding(arg)));
                 substitution.insert(param.clone(), bound_param_substitution(new_param, arg));
             }
@@ -327,7 +363,7 @@ pub fn propagate_beta_reduce_with_map_and_meta(
     }
 
     // Apply substitution to body
-    let new_body = rewrite_bounded_vars(&mut substitution, body, &id_gen);
+    let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
 
     // Wrap with let bindings (in reverse order for proper scoping)
     let mut result = new_body;

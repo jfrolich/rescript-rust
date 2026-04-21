@@ -96,9 +96,11 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
 /// opaque to subsequent `field_flatten_get` lookups.
 pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
+    let id_gen = meta.id_gen.clone();
     let result = Simplifier {
         ident_tbl: &mut meta.ident_tbl,
         export_idents: &export_idents,
+        id_gen: &id_gen,
         jsx_preserve: false,
     }
     .simpl(lam);
@@ -111,9 +113,11 @@ pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
 /// inside `simpl` only fires when this flag is true (lam_pass_remove_alias.ml:54-62).
 pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: bool) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
+    let id_gen = meta.id_gen.clone();
     let result = Simplifier {
         ident_tbl: &mut meta.ident_tbl,
         export_idents: &export_idents,
+        id_gen: &id_gen,
         jsx_preserve,
     }
     .simpl(lam);
@@ -124,6 +128,10 @@ pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: 
 struct Simplifier<'a> {
     ident_tbl: &'a mut crate::lambda::compile_context::IdentTable,
     export_idents: &'a std::collections::HashSet<crate::ident::Ident>,
+    /// Shared stamp counter used for `Ident.rename` during beta reduction.
+    /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
+    /// collide across independent beta reductions of the same function.
+    id_gen: &'a crate::context::IdGenerator,
     jsx_preserve: bool,
 }
 
@@ -383,8 +391,9 @@ impl<'a> Simplifier<'a> {
                         // lam_pass_remove_alias.ml:188-197 — functor:
                         // always beta-reduce (callers are expected to
                         // be at most one site).
-                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta(
+                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
                             self.ident_tbl,
+                            self.id_gen,
                             &func.params,
                             &func.body,
                             &ap_args,
@@ -408,8 +417,9 @@ impl<'a> Simplifier<'a> {
                         if allow {
                             match rec_flag {
                                 RecFlag::Rec => {
-                                    crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta(
+                                    crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                                         self.ident_tbl,
+                                        self.id_gen,
                                         &param_map,
                                         &func.params,
                                         &func.body,
@@ -425,8 +435,9 @@ impl<'a> Simplifier<'a> {
                                     if ap_args.iter().any(|lam| hit_variable(v, lam)) {
                                         normal(self)
                                     } else {
-                                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta(
+                                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                                             self.ident_tbl,
+                                            self.id_gen,
                                             &param_map,
                                             &func.params,
                                             &func.body,
@@ -463,8 +474,9 @@ impl<'a> Simplifier<'a> {
                 if args.len() == func_clone.params.len()
                     && lfunction_can_be_inlined(&func_clone)
                 {
-                    let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta(
+                    let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
                         self.ident_tbl,
+                        self.id_gen,
                         &func_clone.params,
                         &func_clone.body,
                         &args,
