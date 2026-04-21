@@ -238,7 +238,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 return if no_side_effects(&new_l1) {
                     new_l2
                 } else {
-                    Lambda::Lsequence(Box::new(new_l1), Box::new(new_l2))
+                    Lambda::seq(new_l1, new_l2)
                 };
             }
             let new_l1 = lets_helper(state, l1);
@@ -255,21 +255,11 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             refine_let(*kind, v.clone(), new_l1, simplified_body)
         }
 
-        // Llet (StrictOpt, ...) was handled above. The remaining `Llet` arms
-        // (e.g. an unanticipated combination) fall through to a general form
-        // mirroring lam_pass_lets_dce.ml:21 catch-all branches indirectly via
-        // refine_let. In practice every kind has been matched.
-        Lambda::Llet(kind, v, l1, l2) => {
-            let new_l1 = lets_helper(state, l1);
-            let new_l2 = lets_helper(state, l2);
-            refine_let(*kind, v.clone(), new_l1, new_l2)
-        }
-
         // Lsequence (lam_pass_lets_dce.ml:134).
         Lambda::Lsequence(l1, l2) => {
             let s1 = lets_helper(state, l1);
             let s2 = lets_helper(state, l2);
-            Lambda::Lsequence(Box::new(s1), Box::new(s2))
+            Lambda::seq(s1, s2)
         }
 
         // Lapply with inlineable Lfunction body (lam_pass_lets_dce.ml:135-139):

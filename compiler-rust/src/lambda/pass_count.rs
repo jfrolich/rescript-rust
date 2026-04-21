@@ -303,14 +303,6 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     occ
 }
 
-/// Convenience wrapper used by `Lam_pass_lets_dce` (lam_pass_lets_dce.ml:208-214):
-/// returns the recorded info for `v` or `dummy_info()` when absent.
-pub fn lookup(occ: &OccTbl, v: &Ident) -> UsedInfo {
-    occ.get(v)
-        .map(|cell| *cell.borrow())
-        .unwrap_or_else(dummy_info)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

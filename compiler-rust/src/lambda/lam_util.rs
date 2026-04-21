@@ -116,12 +116,6 @@ pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lam
     }
 }
 
-/// Convenience for OCaml's `Lam.let_ Variable v e l` shape used by
-/// `Lam_pass_lets_dce` when `eliminate_ref` succeeds.
-pub fn let_variable(param: Ident, arg: Lambda, body: Lambda) -> Lambda {
-    Lambda::let_(LetKind::Variable, param, arg, body)
-}
-
 /// Direct port of `Lam_util.field_flatten_get` (lam_util.ml:202-232).
 ///
 /// Resolves a `Pfield(i, info)` access on a known identifier by consulting
