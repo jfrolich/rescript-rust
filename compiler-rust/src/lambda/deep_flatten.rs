@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::compat::LetKind;
+use crate::lambda::lam_util::refine_let;
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
@@ -23,10 +24,14 @@ enum FlattenGroup {
 /// (compiler/core/lam_pass_deep_flatten.ml).
 pub fn deep_flatten(lam: &Lambda) -> Lambda {
     fn lambda_of_groups(rev_bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
+        // lam_pass_deep_flatten.ml:108 — fold each Single back through
+        // `Lam_util.refine_let` so Strict bindings whose RHS is safe to alias
+        // (e.g. module field reads) are downgraded to Alias. Without this the
+        // later `simplify_lets` Alias arm cannot inline single-use bindings.
         rev_bindings
             .into_iter()
             .fold(result, |acc, group| match group {
-                FlattenGroup::Single(kind, ident, lam) => Lambda::let_(kind, ident, lam, acc),
+                FlattenGroup::Single(kind, ident, lam) => refine_let(kind, ident, lam, acc),
                 FlattenGroup::Recursive(bindings) => Lambda::letrec(bindings, acc),
                 FlattenGroup::Nop(lam) => Lambda::seq(lam, acc),
             })
