@@ -42,6 +42,22 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Share IdGenerator across beta-reduce calls**: Each
+  `propagate_beta_reduce_with_{meta,map_and_meta}` created its own
+  `IdGenerator::with_start_stamp(max_ident_stamp(..))` and used it to rename
+  parameters when an argument had to be bound to a fresh let. Two invocations
+  on the same function produced colliding fresh stamps — e.g. two
+  inlinings of `let l = x => console.log(x)` both renamed `prim/1015` to
+  `prim/1016`, and the printer's `(name, stamp)` key emitted both bindings as
+  `let prim = …`. For `coercion_module_alias_test` this produced invalid JS
+  (SyntaxError: Identifier 'prim' has already been declared). OCaml's
+  `Ident.rename` consults a single global counter; mirror that by threading a
+  pipeline-wide `IdGenerator` on `LamStats::id_gen`, seeded in
+  `simplify_for_js_backend_with_jsx_preserve` from
+  `max_ident_stamp_in_lambda(initial lam)`, and add `_and_id_gen` variants of
+  the two helpers that `Simplifier` now calls in `pass_remove_alias.rs`. JS
+  snapshot parity: **632 / 657 -> 634 / 657 (+2)**; output diffs: **21 -> 19**.
+  `coercion_module_alias_test.res` and `functors.res` now match.
 - **Fix `take_return_tail_expr` propagating wrong error block**: When the
   recursive call tried to convert `if (cond) { then_ending_in_return } return y`
   into `return cond ? then : y`, the `?` operator propagated the inner-then
@@ -157,8 +173,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (fix take_return_tail_expr error propagation, +2 parity)
-**Status:** 632 / 657 authoritative JS snapshot baseline; 4 compile errors and 21 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
+**Last Updated:** 2026-04-21 (share IdGenerator across beta-reduce, +2 parity)
+**Status:** 634 / 657 authoritative JS snapshot baseline; 4 compile errors and 19 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
