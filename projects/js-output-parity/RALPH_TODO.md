@@ -1,7 +1,46 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (late night #2, Variable-kind substitution guard)
-**Status:** 615 / 657 authoritative JS snapshot baseline; 4 compile errors and 38 output diffs (unchanged). Variable-kind substitution guard landed — `test_simple_ref` diff shrunk from 16 lines to 4 lines (not_real_escape now emits at source position) but still fails because `coerce_toplevel_exports`' trailing rebind path also folds `Lvar a` through `resolve_tail_move_replacement_expression` into the Number literal `0`.
+**Last Updated:** 2026-04-21 (Variable-kind tail-move guard + eta-reduction tightening)
+**Status:** 617 / 657 authoritative JS snapshot baseline; 4 compile errors and 36 output diffs. Net +2 vs prior 615 baseline: `test_simple_ref` (Variable-kind tail-move) and `set_gen` (Lsequence eta-reduction) both pass byte-clean.
+
+## Iteration on 2026-04-21 (morning, Variable-kind tail-move guards + Lsequence eta tightening)
+
+- Active slice 1: `test_simple_ref` — even after the late-night #2 Variable-kind substitution guard at the simplify level, the JS-IR-level `coerce_toplevel_exports` cluster was still folding `let not_real_escape = a` (where `let a = 0` is `LetKind::Variable`) into `let not_real_escape = 0`, then DCE'ing `let a = 0`. The fix needed to live in `compiler-rust/src/lambda/compile.rs`, not `simplify.rs`.
+- OCaml / backend references for slice 1:
+  - `compiler/core/lam_pass_lets_dce.ml:21-23` — unconditional Lvar substitution applies only to Strict / Alias / StrictOpt, never Variable.
+  - The same restriction must hold for any downstream chain-walking helper that follows a `let exp = id` alias to its source binding.
+- Rust changes for slice 1 (all in `compiler-rust/src/lambda/compile.rs`):
+  - `resolve_rewriteable_toplevel_alias_initializer`: stop walking the chain when the binding has `LetKind::Variable`. Return `None` (no replacement). Previously walked through Variable-kind bindings and folded their `Lconst` initial value into export aliases.
+  - `resolve_tail_move_replacement_expression`: stop walking the chain when the binding has `LetKind::Variable`. Return `Var(current)` (use the variable, not the folded value).
+- Active slice 2: `set_gen` — `let check = tree => ignore(check_height_and_diff(tree))` was being eta-reduced to `let check = check_height_and_diff`, but OCaml keeps the explicit wrapper.
+- OCaml / backend references for slice 2:
+  - OCaml's eta-reduction (in `lam_pass_remove_alias` and friends) only reduces `fun x -> f x` (direct `Lapply` body), never `fun x -> (f x; ())` (Lsequence-with-trailing-undefined). The latter changes observable semantics: the wrapper had a unit return type but `f` may return a non-unit value that callers then see.
+- Rust changes for slice 2 (in `compiler-rust/src/lambda/simplify.rs`):
+  - `eta_reduce_function_value`: dropped the `Lsequence(_, Lconst JsUndefined)` arm. Only the direct `Lapply` body is eligible for eta-reduction now.
+- Active slice 3 (alignment-only, no parity move): `substitution_candidate` was returning `Lconst` substitutions for any non-Variable binding kind. OCaml's `lam_pass_lets_dce.ml:50-65` only inlines basic-literal constants inside the `Llet (Alias, ...)` arm; the `Strict | StrictOpt | Variable` arms (lines 74-133) refine the let and never substitute uses.
+- Rust changes for slice 3 (in `compiler-rust/src/lambda/simplify.rs`):
+  - `substitution_candidate`: gate the `Lconst` arm to `kind == LetKind::Alias`. No parity move in this iteration; the change is an OCaml-aligned guard for downstream work.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `tests/tests/src/test_simple_ref.res` byte-clean.
+  - `tests/tests/src/set_gen.res` byte-clean.
+  - `tests/tests/src/Coercion.res` byte-clean (unchanged).
+  - `tests/tests/src/DerivingAccessorsCurried.res` byte-clean (unchanged).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **617 / 657**.
+- Outcome:
+  - JS snapshot parity: **617 / 657** (+2 vs prior 615 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **38 -> 36**.
+  - Newly passing (net +2, zero regressions): `test_simple_ref`, `set_gen`.
+- Investigation notes (not yet acted on) for the export-coercion-position cluster:
+  - For `async_inline.res`, the `let tci = 3` (Alias-bound Lconst) hits `move_same_name_export_alias_to_export_tail` and gets moved to a trailing rebind because `blocked_by_literal_binding` allows the move when `(property == Alias && has_later_function_binding)`. OCaml does NOT do this tail-move for tci.
+  - For `tests/tests/src/DerivingAccessorsCurried.res`, the analogous `let noParam = "NoParam"` IS tail-moved by OCaml. So the same heuristic fires correctly there.
+  - The OCaml-level differentiator is unclear without a `-dlambda` dump of the post-coercion lambda for both files. The deployed OCaml `bsc.exe` doesn't expose the dlambda flag, so deeper analysis is blocked until a dune-built `bsc` with debug flags is available.
+- Next iteration candidates:
+  1. **Pobjcomp nullish alignment** (equal_box_test, test_zero_nullable line 256-258): port OCaml's `eq_null_undefined_boolean` unwrapping of `Optional_block` so `Some(3) !== null` lowers to `3 !== null` literal comparison instead of folding to `true`.
+  2. **Static-handler exit numbering** (gpr_3875_test, gpr_1698_test): Rust's exit IDs differ from OCaml's (often `exit = 1` vs `exit = 2`). Suggests an off-by-one in handler counter init.
+  3. **Nested if-else / early-return shape** (js_json_test, exception_rebound_err_test, fun_pattern_match): port OCaml's `js_pass_flatten_and_mark_dead.ml` early-return shape rule.
+  4. **Export-coercion position cluster** (async_inline, lazy_test, derive_projector_test, test_non_export, test_zero_nullable, exception_rebound_err_test, ...): blocked on OCaml lambda dump access; need to determine the differentiator between noParam-moves and tci-stays-put cases.
 
 ## Iteration on 2026-04-21 (late night #2, Variable-kind alias substitution guard)
 
