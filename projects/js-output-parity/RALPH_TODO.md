@@ -42,6 +42,29 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Emit `Pnegfloat` as `0. - x` (lam_compile_primitive.ml:179)**: OCaml's
+  `Pnegfloat` arm uses `E.float_minus E.zero_float_lit args` — a float-literal
+  `0.` as the left operand. The printer's unary-minus shortcut emits `- x`
+  with a space when LHS is `0.`, vs `-x` when LHS is integer `0`. Rust's port
+  built `Bin(Minus, int_expr(0), arg)` producing `-x`. Switch to
+  `Expression::number(Number::float("0."))`. JS snapshot parity: **634 / 657**
+  (unchanged; mario_game.res hunk count dropped 725 → 698 lines).
+- **Fold `let id; id = expr` into `let id = expr` for stringswitch**:
+  OCaml's `compile_stringswitch` (lam_compile.ml:872-876) threads the
+  `Declare (kind, id)` continuation straight through
+  `compile_string_cases` → `compile_general_cases` →
+  `morph_declare_to_assign` → `S.if_`, so the two-case Complete arm folds
+  `[id = then; id = else]` into `let id = cond ? then : else` via the
+  `declaration` parameter (js_stmt_make.ml:251-286,304-312). Rust's
+  `compile_string_switch_binding_block` always prepended `let id;` before
+  the assignment block, even when the assignment collapsed to a single
+  `id = cond ? a : b;`. Added
+  `prepend_declaration_or_fold_final_assignment` that replaces the final
+  `id = expr;` with `let id = expr;` when present, otherwise prepends the
+  bare declaration. Left `compile_switch_binding_block` alone —
+  `compile_switch` (lam_compile.ml:784-787) unconditionally pre-emits
+  `let id;`. JS snapshot parity: **634 / 657** (unchanged);
+  reasonReactRouter.res diff shrinks 59 → 49 lines.
 - **Share IdGenerator across beta-reduce calls**: Each
   `propagate_beta_reduce_with_{meta,map_and_meta}` created its own
   `IdGenerator::with_start_stamp(max_ident_stamp(..))` and used it to rename
@@ -173,7 +196,7 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (share IdGenerator across beta-reduce, +2 parity)
+**Last Updated:** 2026-04-21 (Pnegfloat = `0. - x`, stringswitch declaration fold)
 **Status:** 634 / 657 authoritative JS snapshot baseline; 4 compile errors and 19 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
