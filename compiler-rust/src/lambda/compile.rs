@@ -1231,15 +1231,16 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if !bindings.is_empty()
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
-                {
-                    self.compile_staticcatch_effect_block(*label, bindings, body, handler)
-                } else {
-                    self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_effect_block(body)
-                    })
-                }
+                // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017) only
+                // takes the pseudo-jmp path when the continuation is
+                // `EffectCall (Maybe_tail_is_return (Tail_with_name
+                // {in_staticcatch = false}))`. For an `EffectCall Not_tail`
+                // continuation — which is where `compile_effect_block` sits —
+                // it always falls through to the explicit-jump arm at
+                // lam_compile.ml:963-1017. Mirror that by always taking the
+                // Rust explicit-jump path here; the inline `with_static_handler`
+                // shortcut is a Rust-only optimization with no OCaml analog.
+                self.compile_staticcatch_effect_block(*label, bindings, body, handler)
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_effect_block(body);
