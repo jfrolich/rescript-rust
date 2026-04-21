@@ -1332,14 +1332,79 @@ impl LambdaCompiler {
         cases: &[(String, Lambda)],
         default: Option<&Lambda>,
     ) -> Block {
+        let assignment = self.compile_string_switch_assignment_block(id, scrut, cases, default);
+
+        // lam_compile.ml:1326-1349 — in `Declare (kind, id)` continuation
+        // OCaml first compiles the branches with `NeedValue Not_tail`; when
+        // both reduce to pure expressions it emits
+        // `S.define_variable ~kind id (E.econd e out1 out2)` instead of
+        // separating the declaration from an assignment. `Lstringswitch`
+        // reaches the same shape when the two-case `compile_small_string_switch_assignment`
+        // path lands on `compile_test_assignment_block` and produces the
+        // single `id = cond ? a : b;` statement. Fold that back into a
+        // declare-with-initializer so Rust matches OCaml's `let id = ...`
+        // emit in `compile_declared_if_block` line 4883-4890.
+        if let Some(initializer) =
+            self.take_single_leading_result_assignment(id, assignment.as_slice())
+        {
+            let (leading_prelude, init_expr) = initializer;
+            let mut block = leading_prelude;
+            block.push(Statement::variable(VariableDeclaration {
+                ident: id.clone(),
+                value: Some(init_expr),
+                property: kind,
+                ident_info: IdentInfo::default(),
+            }));
+            return block;
+        }
+
         let mut declared = vec![Statement::variable(VariableDeclaration {
             ident: id.clone(),
             value: None,
             property: kind,
             ident_info: IdentInfo::default(),
         })];
-        declared.extend(self.compile_string_switch_assignment_block(id, scrut, cases, default));
+        declared.extend(assignment);
         declared
+    }
+
+    /// Split a compiled assignment block into
+    /// `(leading side-effect-free prelude, initializer expr)` when the only
+    /// `id`-write in the block is a trailing `id = expr;` statement with no
+    /// post-write statements. Mirrors OCaml's `Declare (kind, id)` fold in
+    /// `compile_ifthenelse` / `compile_stringswitch`: when the compiled
+    /// branches reduce to a pure value, `S.define_variable` replaces the
+    /// separate `declare_variable` / assignment pair.
+    fn take_single_leading_result_assignment(
+        &self,
+        id: &Ident,
+        block: &[Statement],
+    ) -> Option<(Block, Expression)> {
+        let (last, prefix) = block.split_last()?;
+        let StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+            ..
+        }) = &last.desc
+        else {
+            return None;
+        };
+        let ExpressionDesc::Var(crate::js_ir::VIdent::Id(target)) = &lhs.desc else {
+            return None;
+        };
+        if !target.same(id) {
+            return None;
+        }
+        // The trailing rhs must not reference the declared ident; the prelude
+        // must also not mention it (it was only introduced by this binding).
+        if expression_mentions_ident(rhs, id) {
+            return None;
+        }
+        for stmt in prefix {
+            if statement_mentions_ident(stmt, id) {
+                return None;
+            }
+        }
+        Some((prefix.to_vec(), rhs.as_ref().clone()))
     }
 
     fn compile_short_circuit_expr(
