@@ -360,13 +360,164 @@ impl Lambda {
         Lambda::Lletrec(bindings, Box::new(body))
     }
 
-    /// Create a primitive operation
+    /// Create a primitive operation. Direct port of OCaml's
+    /// `Lam.prim` smart constructor (compiler/core/lam.ml:479-582):
+    /// folds constants on unary/binary numeric and string ops, and
+    /// collapses module aliasing makeblocks. Every fold below cites the
+    /// exact OCaml line that justifies it.
     pub fn prim(primitive: Primitive, args: Vec<Lambda>, loc: Location) -> Self {
-        Lambda::Lprim(PrimInfo {
-            primitive,
-            args,
-            loc,
-        })
+        let default = |primitive: Primitive, args: Vec<Lambda>, loc: Location| -> Lambda {
+            Lambda::Lprim(PrimInfo {
+                primitive,
+                args,
+                loc,
+            })
+        };
+
+        match args.as_slice() {
+            // lam.ml:482-498 — single-arg constant folds.
+            [Lambda::Lconst(a)] => match (&primitive, a) {
+                // lam.ml:484
+                (Primitive::Pnegint, Constant::Int { i, .. }) => {
+                    Lambda::Lconst(Constant::int(i.wrapping_neg()))
+                }
+                // lam.ml:487-488 — Pintoffloat (float as string -> int via parse).
+                (Primitive::Pintoffloat, Constant::Float(s)) => match s.parse::<f64>() {
+                    Ok(f) => Lambda::Lconst(Constant::int(f as i32)),
+                    Err(_) => default(primitive, args, loc),
+                },
+                // lam.ml:491-492 — Pstringlength on bare string literal.
+                (
+                    Primitive::Pstringlength,
+                    Constant::String { s, delim: None },
+                ) => Lambda::Lconst(Constant::int(s.len() as i32)),
+                // lam.ml:496-497
+                (Primitive::Pnot, Constant::JsTrue) => Lambda::false_(),
+                (Primitive::Pnot, Constant::JsFalse) => Lambda::true_(),
+                _ => default(primitive, args, loc),
+            },
+            // lam.ml:499-548 — two-arg constant folds.
+            [Lambda::Lconst(a), Lambda::Lconst(b)] => match (&primitive, a, b) {
+                // lam.ml:501-502
+                (
+                    Primitive::Pintcomp(cmp),
+                    Constant::Int { i: ai, .. },
+                    Constant::Int { i: bi, .. },
+                ) => Lambda::Lconst(if cmp.cmp_int32(*ai, *bi) {
+                    Constant::JsTrue
+                } else {
+                    Constant::JsFalse
+                }),
+                // lam.ml:503-506 — Pfloatcomp (parsed from string).
+                (Primitive::Pfloatcomp(cmp), Constant::Float(af), Constant::Float(bf)) => {
+                    match (af.parse::<f64>(), bf.parse::<f64>()) {
+                        (Ok(av), Ok(bv)) => Lambda::Lconst(if cmp.cmp_float(av, bv) {
+                            Constant::JsTrue
+                        } else {
+                            Constant::JsFalse
+                        }),
+                        _ => default(primitive, args, loc),
+                    }
+                }
+                // lam.ml:508-513 — Pintcomp Eq/Neq on two pointers (poly-variant tags).
+                (
+                    Primitive::Pintcomp(op @ (Comparison::Eq | Comparison::Neq)),
+                    Constant::Pointer(ai),
+                    Constant::Pointer(bi),
+                ) => {
+                    let eq = ai == bi;
+                    let result = match op {
+                        Comparison::Eq => eq,
+                        Comparison::Neq => !eq,
+                        _ => unreachable!(),
+                    };
+                    Lambda::Lconst(if result {
+                        Constant::JsTrue
+                    } else {
+                        Constant::JsFalse
+                    })
+                }
+                // lam.ml:514-532 — int arithmetic (skip Pdivint/Pmodint when bb=0).
+                (
+                    Primitive::Paddint
+                    | Primitive::Psubint
+                    | Primitive::Pmulint
+                    | Primitive::Pdivint
+                    | Primitive::Pmodint
+                    | Primitive::Pandint
+                    | Primitive::Porint
+                    | Primitive::Pxorint
+                    | Primitive::Plslint
+                    | Primitive::Plsrint
+                    | Primitive::Pasrint,
+                    Constant::Int { i: aa, .. },
+                    Constant::Int { i: bb, .. },
+                ) => match &primitive {
+                    Primitive::Paddint => Lambda::Lconst(Constant::int(aa.wrapping_add(*bb))),
+                    Primitive::Psubint => Lambda::Lconst(Constant::int(aa.wrapping_sub(*bb))),
+                    Primitive::Pmulint => Lambda::Lconst(Constant::int(aa.wrapping_mul(*bb))),
+                    Primitive::Pdivint => {
+                        if *bb == 0 {
+                            default(primitive, args, loc)
+                        } else {
+                            Lambda::Lconst(Constant::int(aa.wrapping_div(*bb)))
+                        }
+                    }
+                    Primitive::Pmodint => {
+                        if *bb == 0 {
+                            default(primitive, args, loc)
+                        } else {
+                            Lambda::Lconst(Constant::int(aa.wrapping_rem(*bb)))
+                        }
+                    }
+                    Primitive::Pandint => Lambda::Lconst(Constant::int(aa & bb)),
+                    Primitive::Porint => Lambda::Lconst(Constant::int(aa | bb)),
+                    Primitive::Pxorint => Lambda::Lconst(Constant::int(aa ^ bb)),
+                    Primitive::Plslint => {
+                        Lambda::Lconst(Constant::int(aa.wrapping_shl(*bb as u32)))
+                    }
+                    Primitive::Plsrint => {
+                        let result = (*aa as u32).wrapping_shr(*bb as u32) as i32;
+                        Lambda::Lconst(Constant::int(result))
+                    }
+                    Primitive::Pasrint => {
+                        Lambda::Lconst(Constant::int(aa.wrapping_shr(*bb as u32)))
+                    }
+                    _ => unreachable!(),
+                },
+                // lam.ml:533-538 — Psequand / Psequor on JsTrue/JsFalse pairs.
+                (Primitive::Psequand, Constant::JsFalse, Constant::JsTrue | Constant::JsFalse) => {
+                    Lambda::false_()
+                }
+                (Primitive::Psequand, Constant::JsTrue, Constant::JsTrue) => Lambda::true_(),
+                (Primitive::Psequand, Constant::JsTrue, Constant::JsFalse) => Lambda::false_(),
+                (Primitive::Psequor, Constant::JsTrue, Constant::JsTrue | Constant::JsFalse) => {
+                    Lambda::true_()
+                }
+                (Primitive::Psequor, Constant::JsFalse, Constant::JsTrue) => Lambda::true_(),
+                (Primitive::Psequor, Constant::JsFalse, Constant::JsFalse) => Lambda::false_(),
+                // lam.ml:539-542
+                (
+                    Primitive::Pstringadd,
+                    Constant::String { s: a_s, delim: None },
+                    Constant::String { s: b_s, delim: None },
+                ) => Lambda::Lconst(Constant::String {
+                    s: format!("{}{}", a_s, b_s),
+                    delim: None,
+                }),
+                // lam.ml:543-547 — Pstringrefs / Pstringrefu on (String, Int).
+                (
+                    Primitive::Pstringrefs | Primitive::Pstringrefu,
+                    Constant::String { s, delim: None },
+                    Constant::Int { i: idx, .. },
+                ) => match s.as_bytes().get(*idx as usize) {
+                    Some(byte) => Lambda::Lconst(Constant::Char(*byte as i32)),
+                    None => default(primitive, args, loc),
+                },
+                _ => default(primitive, args, loc),
+            },
+            _ => default(primitive, args, loc),
+        }
     }
 
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
