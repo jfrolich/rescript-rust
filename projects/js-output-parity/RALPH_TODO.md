@@ -1,5 +1,9 @@
 # Ralph TODO: JS Output Parity
 
+## Current baseline (2026-04-21): **635 / 657** (96.7%)
+- 4 compile errors (typecheck failures, upstream)
+- 18 output diffs (down from 19)
+
 ## ⚠️ THE MONOLITH IS GONE — ALL OCAML PIPELINE STAGES PORTED
 
 **The mandatory deletion happened.** `simplify_with_env`, `SimplifyEnv`, and
@@ -64,8 +68,15 @@ Your next steps, in order:
        `compile.rs:5468, 5486, 5527, 5559, 5594` (other
        `push_effect_expression(&mut block, scrut_expr)` callers — those
        may correspond to the specific match paths that drop the check).
-     - **Adjacent let reordering** (bs_set_int_test): OCaml orders
-       `let i$2 = range(50,100); let s = ...` differently from Rust.
+     - ~~**Adjacent let reordering** (bs_set_int_test)~~: FIXED in
+       commit 34e7fc097 — `propagate_beta_reduce` was iterating
+       `rest_bindings.into_iter().rev()` to mirror OCaml's
+       `Ext_list.fold_right`, but OCaml builds rest_bindings via
+       `fold_left2 + prepend` (reversing param order), while Rust uses
+       `push` (preserving param order). The combination of OCaml's
+       prepend+fold_right is equivalent to Rust's push+forward-iter.
+       Removing `.rev()` produces the same nested-Llet order as OCaml,
+       so the last param/arg pair becomes the outermost binding.
      - **Module-level Pmakeblock binding inlined** (variantsMatching):
        OCaml keeps `let CustomizeTags_d = {TAG:"qq", _0:42}; ... let
        CustomizeTags = {... d: CustomizeTags_d, ...}`. Rust inlines the
