@@ -6,6 +6,7 @@ Last year Rescript 12 was released.
 Big milestone. Finally feels like a mature language.
 
 
+
 The thing I worked on Rewatch was upstreamed. ReScript now has it's own bespoke build system and file watcher.
 
 
@@ -193,3 +194,134 @@ To accomplish something like that in ReScript it would be GREAT if the build sys
 
 
  */
+
+// ── Comptime playground ─────────────────────────────────────────────────
+// Functions marked @comptime run at compile time. @typeInfo introspects a
+// type; inline for unrolls loops. Each call monomorphizes to a specialized
+// function — recursive types produce self-recursive code, no infinite
+// expansion.
+
+type address = { street: string, city: string }
+type status = Active | Inactive | Pending
+type user = { name: string, age: int, active: bool, status: status, address: address }
+type tree = { value: string, children: array<tree> }
+
+exception DecodeError(string)
+
+// %identity casts let us bridge a simple enum-variant value to its runtime
+// int tag (and back) without a runtime pattern match. Safe only for
+// no-payload variants.
+external tagOfVariant: 'a => int = "%identity"
+external variantOfTag: int => 'a = "%identity"
+
+// ── 1. Zero-overhead JSON encoder ───────────────────────────────────────
+// encode(alice) produces a specialized encode$user function. Since the
+// JSON.Encode.* helpers are %identity, the output reduces to plain Dict
+// assignments — no runtime type dispatch.
+
+@comptime
+let rec encode = (value): JSON.t => {
+  switch @typeInfo(value) {
+  | String => JSON.Encode.string(value)
+  | Int => JSON.Encode.int(value)
+  | Bool => JSON.Encode.bool(value)
+  | Record({fields}) =>
+    let dict = Dict.make()
+    inline for field in fields {
+      Dict.set(dict, field.name, encode(@field(value, field.name)))
+    }
+    JSON.Encode.object(dict)
+  | Variant({constructors}) =>
+    // Simple enum variants: emit the constructor name as a string.
+    // The runtime tag indexes into a comptime-populated names array.
+    let names = []
+    inline for c in constructors {
+      Array.push(names, c.name)
+    }
+    JSON.Encode.string(Array.getUnsafe(names, tagOfVariant(value)))
+  | Array(_) => JSON.Encode.array(Array.map(value, v => encode(v)))
+  | _ => @compileError("encode: unsupported type")
+  }
+}
+
+let alice: user = {
+  name: "Alice",
+  age: 30,
+  active: true,
+  status: Active,
+  address: {street: "Main St", city: "NYC"},
+}
+
+let aliceJson = encode(alice)
+
+// Recursive types: encode$tree calls itself via Array.map.
+let myTree: tree = {
+  value: "root",
+  children: [
+    {value: "child1", children: []},
+    {value: "child2", children: []},
+  ],
+}
+let treeJson = encode(myTree)
+
+// ── 2. Decoder with explicit type parameter ─────────────────────────────
+// The decoder has no value to infer from, so it takes a comptime type
+// parameter: decode(user, json) specializes to decode$user. On mismatch
+// it throws DecodeError; wrap the call in try/catch to get an option.
+
+@comptime
+let rec decode = (type t, json: JSON.t) => {
+  switch @typeInfo(t) {
+  | String =>
+    switch json { | String(s) => s | _ => throw(DecodeError("expected string")) }
+  | Int =>
+    switch json { | Number(n) => Float.toInt(n) | _ => throw(DecodeError("expected int")) }
+  | Bool =>
+    switch json { | Boolean(b) => b | _ => throw(DecodeError("expected bool")) }
+  | Record({fields}) =>
+    switch json {
+    | Object(dict) =>
+      @record(t, inline for field in fields {
+        decode(field.typ, Dict.getUnsafe(dict, field.name))
+      })
+    | _ => throw(DecodeError("expected object"))
+    }
+  | Variant({constructors}) =>
+    switch json {
+    | String(s) =>
+      let result = ref(None)
+      let idx = ref(0)
+      inline for c in constructors {
+        if s == c.name { result := Some(variantOfTag(idx.contents)) }
+        idx := idx.contents + 1
+      }
+      switch result.contents {
+      | Some(v) => v
+      | None => throw(DecodeError("unknown variant: " ++ s))
+      }
+    | _ => throw(DecodeError("expected variant string"))
+    }
+  | _ => @compileError("decode: unsupported type")
+  }
+}
+
+let decodedAlice = try Some(decode(user, aliceJson)) catch {
+| DecodeError(_) => None
+}
+
+// ── 3. Type-level comptime: keys of a record as a variant ───────────────
+// @buildVariant consumes a list of @variantCase specs to emit a real
+// variant type at compile time.
+
+@comptime
+let userKey =
+  switch @typeInfo(user) {
+  | Record({fields}) =>
+    @buildVariant(inline for field in fields {
+      @variantCase({name: field.name})
+    })
+  | _ => @compileError("expected record")
+  }
+
+let k1: userKey = Name
+let k2: userKey = Age
