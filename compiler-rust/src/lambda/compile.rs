@@ -1658,6 +1658,13 @@ impl LambdaCompiler {
         }
 
         let then_block = self.compile_return_block(then_);
+        // Pre-flatten the body so `Return (Seq(expr, undefined))` shapes produced
+        // by unit-returning primitives (Psetfield, Parraysets, etc.) split into
+        // `[Exp expr; Return undefined]`. This mirrors OCaml's `js_pass_flatten`
+        // line 88 (`Return (Seq _)`) running before the printer examines the
+        // if-body, so the trailing-Return-undefined guard catches the common
+        // `if !cond { side_effect }` shape.
+        let then_block = flatten_block(then_block);
         if !self.js_block_is_simple_unit_return_tail(&then_block) {
             return None;
         }
