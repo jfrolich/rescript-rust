@@ -68,14 +68,23 @@ Your next steps, in order:
        literal last statement (easy), and (b) port `unnest_block` to
        Rust's compile paths that correspond to OCaml's `output_as_block`
        call sites — this is the harder part, since Rust's compile
-       architecture differs from `Js_output.t`. Attempted in session
-       2026-04-22 but incomplete: adding `peel_single_block_statement`
-       to `compile_if_effect_block` was not sufficient because the
-       `Lifthenelse` for `test_seq` / etc. doesn't route through that
-       function (it goes through the `Lswitch` path for list-variant
-       dispatch). The full fix needs the Rust equivalent of OCaml's
-       `output_as_block` applied at every place the legacy backend
-       would construct a `J.block` from a `Js_output.t`.
+       architecture differs from `Js_output.t`.
+
+       Second attempt 2026-04-22 (session 2): combined (a) +
+       partial (b) — added `unnest_block` (porting js_output.ml:77-80)
+       and called it at the entry of `simplify_if_statement`. Net
+       result: 637 -> 633 (-4), bdd / js_json_test pass but 7 other
+       tests regress (test_seq, string_set, stringmatch, set_gen,
+       inline_map_demo, nested_pattern_match_test, flexible_array_test).
+       Reverted because the unnest at `simplify_if_statement` only
+       peels single-element Block wrappers, not multi-statement
+       blocks ending in a Block. The full fix needs unnest to be
+       applied at every `Block` materialization site — i.e. the Rust
+       equivalent of OCaml's `Js_output.t` materialization through
+       `output_as_block`. Search for all `Statement::block(...)` /
+       direct `StatementDesc::Block(...)` constructions in the compile
+       pipeline and apply unnest_block at each one. Track which sites
+       feed into `simplify_if_statement` and which feed elsewhere.
      - **Nested-if && merge with empty else** (reasonReactRouter.push/replace,
        stdlib_Stdlib_DictTests.inferDictByPattern). Rust's
        `simplify_if_statement` has `!nested_else.is_empty()` guards
@@ -163,7 +172,7 @@ Your next steps, in order:
            uses `Declare(Alias, id)` for any non-Lvar/non-Pmakeblock
            recursive binding) and has zero parity impact on its own —
            applied as part of this investigation.
-     - **Static-catch handler duplication** (test_list, gpr_4280_test,
+     - **Static-catch handler duplication** (test_list, ~~gpr_4280_test~~,
        bdd, mario_game): Rust's compile path produces multiple call
        sites for what should be a shared `(catch ... with handler)`
        fall-through. Concrete example in `test_list.stable_sort.sort`:
@@ -190,30 +199,16 @@ Your next steps, in order:
        JS-emission stage flattening static_catch into duplicated branches
        instead of hoisting the handler to the function tail.
 
-       Investigation 2026-04-21 third pass on `gpr_4280_test`:
-         * OCaml's `compile_staticcatch` (lam_compile.ml:934-947) calls
-           `flatten_nested_caches` to turn a chain of nested
-           `Lstaticcatch (Lstaticcatch ...)` into a single
-           `code_table` list, then takes the pseudo-jmp inline path
-           only when `[code_table]` (length one). Two or more handlers
-           in the chain force the explicit-jump path (lam_compile.ml:963+).
-         * `gpr_4280_test`'s lambda has 4 nested `Lstaticcatch`
-           entries from the OR-pattern match. OCaml emits an
-           explicit-jump shape (`let onboardingRoute; let exit = 0; ...
-           if (exit === 2) {...} ...; console.log(onboardingRoute);
-           div(...); return 0;`).
-         * Rust processes each `LstaticCatch` independently and the
-           outermost takes the inline path (`with_static_handler`),
-           duplicating the handler at each `Lstaticraise` site.
-         * Tried adding `if matches!(body, Lambda::LstaticCatch(_, _, _))
-           { return true; }` to `return_staticcatch_requires_explicit_jump`,
-           but the debug print showed all three staticcatches that
-           reach the function had `body = if` (not `LstaticCatch`) —
-           the lowering inserts an `Lifthenelse` between the outer
-           `Lstaticcatch` and the inner `Lstaticcatch`. So the
-           naive nested check never fires; we'd need to peek through
-           the if-tree to spot the inner staticcatches, matching
-           OCaml's `flatten_nested_caches` semantics. **Open work.**
+       ~~Investigation 2026-04-21 third pass on `gpr_4280_test`~~:
+       FIXED 2026-04-22 (commit 7adaa779f) — by extending the
+       in_staticcatch proxy to include `static_handlers` and
+       `fallthrough_return_handlers`, switching the inline path to
+       use `compile_fallthrough_staticcatch_return_block` when
+       conditions match OCaml's `no_static_raise_in_handler`, and
+       seeding `next_static_jump_exit_code` from the combined depth
+       of all three handler stacks (mirroring OCaml's
+       `HandlerMap.cardinal m + 1`). See "Completed since last
+       update" below.
 4. ~~Address issues in existing ports listed at the top of PERFORMANCE_PLAN.md~~:
    commit 0382c4696 cleaned up `pass_lets_dce` (`Lambda::seq` instead of raw
    `Lsequence`, dropped unreachable catch-all `Llet`, dropped dead
