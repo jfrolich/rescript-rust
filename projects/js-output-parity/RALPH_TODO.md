@@ -42,6 +42,22 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Fix `take_return_tail_expr` propagating wrong error block**: When the
+  recursive call tried to convert `if (cond) { then_ending_in_return } return y`
+  into `return cond ? then : y`, the `?` operator propagated the inner-then
+  block on failure instead of the original block. This corrupted the else-
+  branch in `compile_test_return_block`, so `simplify_if_statement` received
+  only the inner throw fragment and emitted it unconditionally after the outer
+  `if`, dropping the trailing `if`-guard and final `return`. Concretely, for
+  `switch s | "" if len < 0 => assert(false) | "" => 1 | _ if len == 0 =>
+  assert(false) | "A" => 2 | _ => 3`, the compiled `s === ""` branch
+  correctly emitted `if (len >= 0) return 1; throw …`, but the else branch
+  (after stringswitch simplification into `if (len === 0) { throw } return
+  s === "A" ? 2 : 3`) was replaced with just `throw` — returning an incorrect
+  assertion failure for `s = "A"`. Replace the `?` with an explicit match that
+  returns `Err(block)` on recursive failure. JS snapshot parity: **630 / 657
+  -> 632 / 657 (+2)**; output diffs: **23 -> 21**.  `stringmatch_test.res` and
+  `gpr_1150.res` now match.
 - **Fold only `EqEqEq` in `Expression::bin`, match OCaml's `bin` asymmetry**:
   OCaml's `Js_exp_make.bin` (js_exp_make.ml:623-631) routes `EqEqEq`
   through `triple_equal` — which folds literal-vs-literal and nullish
@@ -141,8 +157,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (fold only EqEqEq in Expression::bin, +1 parity)
-**Status:** 630 / 657 authoritative JS snapshot baseline; 4 compile errors and 23 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on.
+**Last Updated:** 2026-04-21 (fix take_return_tail_expr error propagation, +2 parity)
+**Status:** 632 / 657 authoritative JS snapshot baseline; 4 compile errors and 21 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 

@@ -4982,8 +4982,10 @@ impl LambdaCompiler {
         if let [stmt] = prefix.as_slice() {
             if let StatementDesc::If(cond, then_block, else_block) = &stmt.desc {
                 if else_block.is_empty() {
-                    let then_expr = self.take_return_tail_expr(then_block.clone())?;
-                    return Ok(Expression::cond(cond.clone(), then_expr, expr));
+                    if let Ok(then_expr) = self.take_return_tail_expr(then_block.clone()) {
+                        return Ok(Expression::cond(cond.clone(), then_expr, expr));
+                    }
+                    return Err(block);
                 }
             }
         }
