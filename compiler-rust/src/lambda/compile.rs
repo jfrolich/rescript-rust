@@ -1588,6 +1588,29 @@ impl LambdaCompiler {
                 }
                 if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
+                } else if !bindings.is_empty()
+                    && !lambda_contains_static_raise(handler)
+                    && !lambda_contains_staticcatch(handler)
+                    && lambda_contains_static_raise_to_label(body, *label, bindings.len())
+                {
+                    // OCaml's `compile_staticcatch` inline path
+                    // (lam_compile.ml:937-962) declares the bindings, compiles
+                    // the body with `EffectCall (in_staticcatch tail_type)`
+                    // (so each `LstaticRaise` to this label assigns the
+                    // bindings and falls through), then appends the handler
+                    // ONCE after the body. Rust's `with_static_handler` path
+                    // duplicates the handler at every `LstaticRaise` site via
+                    // `resolve_static_raise`, which produces redundant copies
+                    // of the handler when the body has multiple raise sites.
+                    // Use the fallthrough mechanism (matches OCaml's body
+                    // compilation under the in_staticcatch=true continuation)
+                    // when bindings are present and the handler is itself
+                    // raise-free, mirroring `no_static_raise_in_handler`
+                    // (lam_compile_context.ml:80) plus the additional Rust
+                    // safety check that the handler has no nested staticcatch.
+                    self.compile_fallthrough_staticcatch_return_block(
+                        *label, bindings, body, handler,
+                    )
                 } else {
                     self.with_static_handler(*label, bindings, handler, |this| {
                         this.compile_return_block(body)
@@ -8080,11 +8103,20 @@ impl LambdaCompiler {
         // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017) uses the
         // pseudo-jmp path only when `in_staticcatch=false` (lam_compile.ml:939).
         // Any staticcatch that OCaml compiles while `in_staticcatch=true` takes
-        // the full exit_id path (lam_compile.ml:963-1017). Rust's proxy for
-        // `in_staticcatch=true` is: we are already inside another staticcatch
-        // that chose the explicit-jump (`with_static_jump_handler`) path.
-        // Forcing explicit-jump here matches OCaml's nested-catch emission.
-        if !self.static_jump_handlers.is_empty() {
+        // the full exit_id path (lam_compile.ml:963-1017). `in_staticcatch=true`
+        // is set inside the body of BOTH the inline path (lam_compile.ml:952)
+        // and the explicit-jump path (lam_compile.ml:1002), so Rust must force
+        // explicit-jump for any staticcatch encountered while another inline-
+        // path or explicit-jump-path staticcatch's body is being compiled. The
+        // handler-inline at a `LstaticRaise` site (compile.rs:2122) pops the
+        // matching entry from `static_handlers` first, so the handler body sees
+        // the depth as it was at the outer Lstaticcatch's entry — matching
+        // OCaml's `compile_lambda lambda_cxt handler` (lam_compile.ml:962),
+        // which uses the original `lambda_cxt` for the handler.
+        if !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+            || !self.fallthrough_return_handlers.is_empty()
+        {
             return true;
         }
 
@@ -8378,8 +8410,21 @@ impl LambdaCompiler {
     }
 
     fn next_static_jump_exit_code(&self) -> i32 {
-        i32::try_from(self.static_jump_handlers.len() + 1)
-            .expect("static jump handler depth fits in i32")
+        // OCaml's `add_jmps` (lam_compile_context.ml:89-98) seeds the order_id
+        // with `HandlerMap.cardinal m + 1` — i.e. the size of the existing
+        // jmp_table plus one. The OCaml jmp_table accumulates entries from
+        // BOTH the inline path's `add_pseudo_jmp` (lam_compile.ml:944-946)
+        // and the explicit-jump path's `add_jmps` (lam_compile.ml:965-966),
+        // so a nested explicit-jump staticcatch sees the outer pseudo-jmp
+        // entries in its seed count. Rust's three handler stacks are the
+        // moral equivalents: `static_handlers` (pure inline), `static_jump_handlers`
+        // (explicit-jump), and `fallthrough_return_handlers` (inline with
+        // fallthrough rewriting). Counting all three keeps the exit-code
+        // numbering byte-identical with OCaml when staticcatches are nested.
+        let depth = self.static_handlers.len()
+            + self.static_jump_handlers.len()
+            + self.fallthrough_return_handlers.len();
+        i32::try_from(depth + 1).expect("static jump handler depth fits in i32")
     }
 
     fn compile_static_raise_jump_block(&mut self, label: i32, args: &[Lambda]) -> Option<Block> {

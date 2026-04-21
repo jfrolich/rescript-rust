@@ -1,8 +1,8 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-21): **636 / 657** (96.8%)
+## Current baseline (2026-04-22): **637 / 657** (97.0%)
 - 4 compile errors (typecheck failures, upstream)
-- 17 output diffs (down from 18)
+- 16 output diffs (down from 17)
 
 ## ⚠️ THE MONOLITH IS GONE — ALL OCAML PIPELINE STAGES PORTED
 
@@ -222,6 +222,41 @@ Your next steps, in order:
    OCaml's global-counter semantics.
 
 ## Completed since last update
+- **OCaml `in_staticcatch=true` propagation + inline-with-fallthrough path**
+  (gpr_4280_test cluster, 2026-04-22):
+  Three coordinated changes that together align `compile_staticcatch`'s
+  inline path and nested-staticcatch handling with OCaml's
+  `compile_staticcatch` (lam_compile.ml:937-1017):
+  1. `return_staticcatch_requires_explicit_jump` (compile.rs:8087+) now
+     forces the explicit-jump path whenever ANY of `static_handlers`,
+     `static_jump_handlers`, or `fallthrough_return_handlers` is
+     non-empty. OCaml's `in_staticcatch=true` is set on BOTH the inline
+     path (lam_compile.ml:952) and the explicit-jump path
+     (lam_compile.ml:1002), so any nested staticcatch must take the
+     explicit-jump arm. The previous proxy only checked
+     `static_jump_handlers`, missing inline-path nesting.
+  2. `compile_return_block`'s last `LstaticCatch` arm
+     (compile.rs:1591+) now prefers
+     `compile_fallthrough_staticcatch_return_block` over
+     `with_static_handler` when bindings are non-empty and the handler
+     has no nested staticraise/staticcatch. The fallthrough path
+     declares the bindings, compiles the body with raises rewritten to
+     binding-assignments + fallthrough, and emits the handler ONCE
+     after the body — exactly what OCaml's inline path does
+     (lam_compile.ml:957-962). The old `with_static_handler` mechanism
+     duplicated the handler at every `LstaticRaise` site via
+     `resolve_static_raise`.
+  3. `next_static_jump_exit_code` (compile.rs:8412+) now seeds the
+     order_id from the combined depth of all three handler stacks,
+     mirroring OCaml's `add_jmps` (lam_compile_context.ml:89-98) which
+     reads from `HandlerMap.cardinal m + 1` where `m` accumulates BOTH
+     pseudo-jmp (`add_pseudo_jmp`) and explicit-jmp (`add_jmps`)
+     entries. This recovers the byte-identical `exit = 2; if (exit === 2)`
+     numbering when an inner explicit-jump is nested inside an outer
+     fallthrough.
+  - JS snapshot parity: **636 / 657 -> 637 / 657 (+1)**; output diffs:
+    **17 -> 16**. `gpr_4280_test.res` now matches; `gpr_3875_test.res`
+    diff shrinks 48 → 43 lines and `rbset.res` shrinks 597 → 526.
 - **Recover `tmp === null;` bare comparison for option_optimisation**:
   OCaml's `compile_general_cases` (lam_compile.ml:558) emits `S.if_ (test
   === id1) then else` for two-case Complete dispatches. When both cases
@@ -411,8 +446,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (pass cleanups + shared id_gen in simplify_exits)
-**Status:** 634 / 657 authoritative JS snapshot baseline; 4 compile errors and 19 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
+**Last Updated:** 2026-04-22 (in_staticcatch propagation + inline-with-fallthrough path)
+**Status:** 637 / 657 authoritative JS snapshot baseline; 4 compile errors and 16 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
