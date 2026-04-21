@@ -15104,9 +15104,22 @@ fn move_same_name_export_alias_to_export_tail(
         later_toplevel_function_mentions_ident(remaining, target);
     let later_initializer_mentions_target =
         later_toplevel_initializer_mentions_ident(remaining, target);
+    // A Literal+Alias binding existing in the block means `Lam_pass_lets_dce`
+    // entered the Strict arm (lam_pass_lets_dce.ml:121-133) and `refine_let`
+    // downgraded to Alias (lam_util.ml:118-124) without substituting the
+    // value. That is the exact shape OCaml keeps in source order via
+    // `Lam_coercion` (the `Lvar id` matching-name arm at lam_coercion.ml:100),
+    // so we must not relocate the binding. The Alias-arm substitution path in
+    // OCaml always removes the binding, in which case this function never
+    // fires (the `find_same_name` below would not locate a declaration to
+    // move). So any surviving Literal+Alias is a preserved source-order
+    // binding and must stay put.
     let blocked_by_literal_binding =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
-            && (!matches!(property, LetKind::Alias) || !has_later_function_binding);
+            && !matches!(property, LetKind::Alias);
+    let blocked_by_literal_alias_preserved_in_block =
+        matches!(initializer_kind, TailMoveInitializerKind::Literal)
+            && matches!(property, LetKind::Alias);
     let blocked_by_direct_literal_reuse =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && binding_is_direct_literal
@@ -15144,6 +15157,7 @@ fn move_same_name_export_alias_to_export_tail(
         && ml_module_field_tail_move_replacement(&replacement));
     if blocked_by_variable
         || blocked_by_literal_binding
+        || blocked_by_literal_alias_preserved_in_block
         || blocked_by_direct_literal_reuse
         || blocked_by_literal_alias_without_materialized_root
         || blocked_by_later_function_capture
