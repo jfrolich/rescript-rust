@@ -411,6 +411,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
         &lets_dce_style,
         &preserved_local_module_module_alias_bindings,
     );
+    let lets_dce_aliases = resolve_exported_lvar_alias_chains(&lets_dce_aliases);
 
     simplify_for_js_backend_once(
         &lets_dce_aliases,
@@ -1129,6 +1130,68 @@ fn deep_flatten_for_js_backend(lam: &Lambda) -> Lambda {
     }
 
     aux(lam)
+}
+
+/// Walk exported Lvar-to-Lvar alias chains top-down and rewrite each binding's
+/// value to the chain endpoint while preserving every binding.
+///
+/// OCaml's `Lam_pass_lets_dce.ml:21-23` substitutes `let (Strict | Alias |
+/// StrictOpt) v = Lvar w` unconditionally, then `Lam_coercion.handle_exports`
+/// re-creates exported bindings as `Single (Alias, new_id, Lvar <chain
+/// endpoint>)`. On the Rust JS path we keep exported alias bindings in place
+/// (Rust's coerce_toplevel_exports does not rebuild them), so chains like
+/// `let a1 = a0 in let a2 = a1 in let a3 = a2` stay chained. This pass
+/// flattens those chains so each binding's value points directly at the
+/// chain endpoint, matching OCaml's post-handle_exports output (`a1 = a0;
+/// a2 = a0; a3 = a0; ...`). The binding identifiers themselves and the
+/// makeblock export references are left untouched.
+fn resolve_exported_lvar_alias_chains(lam: &Lambda) -> Lambda {
+    fn walk(lam: &Lambda, chain: &mut std::collections::HashMap<Ident, Ident>) -> Lambda {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                let rewritten_value = if let Lambda::Lvar(target) = value.as_ref() {
+                    let mut current = target.clone();
+                    while let Some(next) = chain.get(&current) {
+                        if next.same(&current) {
+                            break;
+                        }
+                        current = next.clone();
+                    }
+                    if matches!(
+                        *kind,
+                        LetKind::Strict | LetKind::Alias | LetKind::StrictOpt
+                    ) && !current.same(id)
+                    {
+                        chain.insert(id.clone(), current.clone());
+                    }
+                    if current.same(target) {
+                        value.as_ref().clone()
+                    } else {
+                        Lambda::var(current)
+                    }
+                } else {
+                    walk(value, chain)
+                };
+                let rewritten_body = walk(body, chain);
+                chain.remove(id);
+                Lambda::let_(*kind, id.clone(), rewritten_value, rewritten_body)
+            }
+            Lambda::Lletrec(bindings, body) => Lambda::letrec(
+                bindings
+                    .iter()
+                    .map(|(id, expr)| (id.clone(), walk(expr, chain)))
+                    .collect(),
+                walk(body, chain),
+            ),
+            Lambda::Lsequence(first, second) => {
+                Lambda::seq(walk(first, chain), walk(second, chain))
+            }
+            _ => lam.clone(),
+        }
+    }
+
+    let mut chain = std::collections::HashMap::new();
+    walk(lam, &mut chain)
 }
 
 fn simplify_direct_function_applications_like_lets_dce(lam: &Lambda) -> Lambda {
