@@ -156,6 +156,31 @@ Your next steps, in order:
        duplication isn't from pass_exits inlining. It's from the
        JS-emission stage flattening static_catch into duplicated branches
        instead of hoisting the handler to the function tail.
+
+       Investigation 2026-04-21 third pass on `gpr_4280_test`:
+         * OCaml's `compile_staticcatch` (lam_compile.ml:934-947) calls
+           `flatten_nested_caches` to turn a chain of nested
+           `Lstaticcatch (Lstaticcatch ...)` into a single
+           `code_table` list, then takes the pseudo-jmp inline path
+           only when `[code_table]` (length one). Two or more handlers
+           in the chain force the explicit-jump path (lam_compile.ml:963+).
+         * `gpr_4280_test`'s lambda has 4 nested `Lstaticcatch`
+           entries from the OR-pattern match. OCaml emits an
+           explicit-jump shape (`let onboardingRoute; let exit = 0; ...
+           if (exit === 2) {...} ...; console.log(onboardingRoute);
+           div(...); return 0;`).
+         * Rust processes each `LstaticCatch` independently and the
+           outermost takes the inline path (`with_static_handler`),
+           duplicating the handler at each `Lstaticraise` site.
+         * Tried adding `if matches!(body, Lambda::LstaticCatch(_, _, _))
+           { return true; }` to `return_staticcatch_requires_explicit_jump`,
+           but the debug print showed all three staticcatches that
+           reach the function had `body = if` (not `LstaticCatch`) —
+           the lowering inserts an `Lifthenelse` between the outer
+           `Lstaticcatch` and the inner `Lstaticcatch`. So the
+           naive nested check never fires; we'd need to peek through
+           the if-tree to spot the inner staticcatches, matching
+           OCaml's `flatten_nested_caches` semantics. **Open work.**
 4. ~~Address issues in existing ports listed at the top of PERFORMANCE_PLAN.md~~:
    commit 0382c4696 cleaned up `pass_lets_dce` (`Lambda::seq` instead of raw
    `Lsequence`, dropped unreachable catch-all `Llet`, dropped dead
