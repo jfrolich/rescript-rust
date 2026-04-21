@@ -6320,8 +6320,18 @@ fn plain_string_value(lam: &Lambda, env: &SimplifyEnv) -> Option<String> {
 }
 
 fn can_substitute_constant_unconditionally(constant: &Constant) -> bool {
+    // Mirrors OCaml's basic-literal inline list in
+    // `compiler/core/lam_pass_lets_dce.ml:52-56`, which allows the
+    // `Llet (Alias, ...)` arm to unconditionally substitute these constants
+    // regardless of use count. Const_js_null is intentionally excluded so
+    // exported `let a = null` bindings survive with their name (e.g.
+    // `a !== undefined` is not folded to `true` via downstream nullish
+    // folding).
     !constant.is_allocating()
-        && !matches!(constant, Constant::String { .. } | Constant::ImmString(_))
+        && !matches!(
+            constant,
+            Constant::String { .. } | Constant::ImmString(_) | Constant::JsNull
+        )
 }
 
 fn exported_alias_target(value: &Lambda) -> Option<Ident> {

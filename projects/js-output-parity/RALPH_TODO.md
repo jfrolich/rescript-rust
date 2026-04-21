@@ -25,8 +25,32 @@ line in OCaml source. No invented logic.
 
 ---
 
-**Last Updated:** 2026-04-21 (Variable-kind tail-move guard + eta-reduction tightening)
-**Status:** 617 / 657 authoritative JS snapshot baseline; 4 compile errors and 36 output diffs. Net +2 vs prior 615 baseline: `test_simple_ref` (Variable-kind tail-move) and `set_gen` (Lsequence eta-reduction) both pass byte-clean.
+**Last Updated:** 2026-04-21 (Const_js_null inline exclusion)
+**Status:** 618 / 657 authoritative JS snapshot baseline; 4 compile errors and 35 output diffs. Net +1 vs prior 617 baseline: `test_zero_nullable` passes byte-clean.
+
+## Iteration on 2026-04-21 (Const_js_null inline exclusion)
+
+- Active slice: `test_zero_nullable` — Rust was folding `let a = null; let res = a != b` (where `b = undefined`) into `let res = true; let Null_undefined_neq_a = null;`. OCaml emits `let a = null; let res = a !== undefined;` because it does NOT inline `a` into uses.
+- Diagnosis: Rust's `substitution_candidate` in `simplify.rs` was adding `a -> Lconst JsNull` to `body_env.substitutions` via `can_substitute_constant_unconditionally(JsNull) == true`, inlining at both use sites. With the literal `null` reaching the `!==` comparison with `undefined`, `compile_nullish_strict_comparison` correctly folded to `true` — but the source `a` reference was lost, leaving `Null_undefined_neq_a` as a reborn tail rebind.
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_lets_dce.ml:52-56` — the always-inlinable constants list for the `Llet (Alias, ...)` arm: `Const_int | Const_char | Const_float | Const_bigint | Const_pointer | Const_js_true | Const_js_false | Const_js_undefined _`. `Const_js_null` and `Const_module_alias` are intentionally excluded.
+  - `compiler/core/js_exp_make.ml:1758-1771` — `neq_null_undefined_boolean` falls through to raw `Bin NotEqEq` when one side is a Var (because OCaml never inlines `let a = null` at multi-use sites). This preserves the `a !== undefined` emission.
+- Rust change (in `compiler-rust/src/lambda/simplify.rs`):
+  - `can_substitute_constant_unconditionally`: added `| Constant::JsNull` to the exclusion `matches!` pattern. The function now rejects JsNull (matching OCaml's Const_js_null exclusion). Still permits JsUndefined/JsTrue/JsFalse/Int/NativeInt/Char/Float/BigInt/Pointer/ModuleAlias as before.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Byte-clean for `test_zero_nullable` (newly passing), `ExternalShadow`, `LetUnwrap`, `DerivingAccessorsCurried` (no regressions).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **618 / 657**.
+- Outcome:
+  - JS snapshot parity: **618 / 657** (+1 vs prior 617 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **36 -> 35**.
+  - Newly passing: `test_zero_nullable`.
+- Next iteration candidates (unchanged from prior):
+  1. **Pobjcomp nullish alignment** (equal_box_test): port OCaml's `eq_null_undefined_boolean` unwrapping of `Optional_block` so `Some(3) !== null` lowers to `3 !== null` literal comparison instead of folding to `true`.
+  2. **Static-handler exit numbering** (gpr_3875_test, gpr_1698_test): Rust's exit IDs differ from OCaml's (often `exit = 1` vs `exit = 2`). Suggests an off-by-one in handler counter init.
+  3. **Nested if-else / early-return shape** (js_json_test, exception_rebound_err_test, fun_pattern_match): port OCaml's `js_pass_flatten_and_mark_dead.ml` early-return shape rule.
+  4. **Export-coercion position cluster** (async_inline, lazy_test, derive_projector_test, test_non_export, exception_rebound_err_test, ...): blocked on OCaml lambda dump access; need to determine the differentiator between noParam-moves and tci-stays-put cases.
 
 ## Iteration on 2026-04-21 (morning, Variable-kind tail-move guards + Lsequence eta tightening)
 
