@@ -1,7 +1,35 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (late evening)
-**Status:** 593 / 657 authoritative JS snapshot baseline; 4 compile errors and 60 output diffs. Four OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering, and `return_staticcatch_requires_explicit_jump` now forces explicit-jump when nested in another staticcatch (matching OCaml's `in_staticcatch=true` gate in `lam_compile.ml:937-939`). Net +4 vs the original 589 baseline; bug-fix gain on `test_static_catch_ident` (lost `for` loop) is preserved.
+**Last Updated:** 2026-04-21 (night)
+**Status:** 594 / 657 authoritative JS snapshot baseline; 4 compile errors and 59 output diffs. Five OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering, `return_staticcatch_requires_explicit_jump` now forces explicit-jump when nested in another staticcatch (matching OCaml's `in_staticcatch=true` gate in `lam_compile.ml:937-939`), and `compile_assign_to_target_block` now handles `LstaticRaise` explicitly so the Assign continuation never appends a spurious `target = undefined` after a static raise. Net +5 vs the original 589 baseline.
+
+## Iteration on 2026-04-21 (night)
+
+- Active slice: a 10-line diff on `gpr_2316_test` had Rust emitting `x = undefined;` inside the try body right after `e = arg; exit = 1;`. Matched OCaml's actual output, which emits only the two lines and lets the post-body `if (exit === 1)` block write `x`.
+- OCaml / backend reference:
+  - `compiler/core/lam_compile.ml:887-904` — `compile_staticraise` fold: emits only argument assignments + `exit = order_id`, and IGNORES the enclosing continuation. Under `Assign bind`, nothing is written to `bind`; under `Declare (kind, id)`, the declaration is left to the staticcatch shell.
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs` — `compile_assign_to_target_block` grew an explicit `Lambda::LstaticRaise` arm (mirroring the existing arm in `compile_return_block` at compile.rs:1467). Returns the jump block when a jump handler is registered; recurses on the inlined handler when `resolve_static_raise` resolves one; otherwise falls back to the generic assign form.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for ExternalShadow, test_static_catch_ident, NondetPatterMatch, gpr_2413_test, VariantPatternMatchingSpreads, DictPatternMatchingOptimization, and gpr_2316_test (newly fixed).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **594 / 657**.
+- Outcome:
+  - JS snapshot parity: **594 / 657** (+1 vs prior 593 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **59** (-1 vs prior 60).
+  - Newly passing: `gpr_2316_test`.
+- Remaining failure clusters (largely unchanged from the previous iteration):
+  - **gpr_3609_test** — extra `let intValue = state._0` binding where OCaml inlines. Source is in `simplify_with_env`'s alias decisions, NOT the backend.
+  - **LetUnwrap / getXWithResult** — case-ordering heuristic inside `compile_small_string_switch_return` at compile.rs:4067-4099. OCaml inverts the outer Ok/Error test when the then-branch terminates; Rust keeps source order.
+  - **Stdlib_IntlTests** — option pattern with nested guard. Handler duplicated at two match arms; OCaml uses explicit-jump pair. `static_jump_handlers` is empty for the outermost staticcatch, so the nested gate does not fire; needs a non-tail-with-name complement.
+  - **bal_set_mini / js_json_test / gpr_4280_test / gpr_3875_test / record_extension_test** — the `simplify_if_statement` rewrite at `js_ir/mod.rs:1505-1513` flattens `if (cond) {return X;} else {return Y;}` into early-return form, whereas OCaml preserves the `else if ... else` chain. Rust-only shortcut.
+  - **async_inline / lazy_test / test_simple_ref / ast_abstract_test / webpack_config / derive_projector_test** — export-coercion path creates extra `let x$1 = ...` aliases and reorders trailing simple-constant exports to the end of the block. Deep `coerce_toplevel_exports` work in compile.rs:374-498 — wire-up blocker for the ported `pass_lets_dce` (tracked in the 2026-04-20 evening iteration).
+  - **test_google_closure / option_optimisation / ticker / tuple_alloc** — broader simplify aggressiveness mismatches (Rust-specific folding of small inlineable functions, option-wrap removal). Not straightforwardly backend-aligned.
+- Next iteration candidates:
+  1. **Stdlib_IntlTests style** — lift the `in_staticcatch` gate to also apply in `compile_effect_block`, `compile_assign_to_target_block`, and `compile_let_binding`. OCaml only takes the pseudo-jmp path when the continuation is `Tail_with_name {in_staticcatch=false}`; all other contexts (Declare, Assign, EffectCall Not_tail, EffectCall Tail_in_try) take explicit-jump. This may regress files that rely on the Rust-only `with_static_handler` inline path.
+  2. **`simplify_if_statement` narrow** — identify a positive guard so the flatten-on-terminal-then rule at `js_ir/mod.rs:1505-1513` matches OCaml's `S.if_` precisely. OCaml's `js_stmt_make.ml:233-298` has overlapping rules that don't always flatten; need to understand which ones fire in bal_set_mini where the `else if ... else` chain is preserved.
+  3. **Switch case-ordering** — trace `compile_named_string_switch_return` / `compile_small_string_switch_return` (compile.rs:4067-4099) against OCaml's `compile_string_cases` to see why OCaml inverts the outer Ok/Error test in LetUnwrap.
 
 ## Iteration on 2026-04-21 (late evening)
 
