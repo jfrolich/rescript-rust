@@ -2043,24 +2043,29 @@ impl JsPrinter {
                             }
                         }
                     }
-                    TagInfo::PolyVar(name) => {
+                    TagInfo::PolyVar(_) => {
+                        // OCaml's `js_dump.ml:901-912` for `Caml_block(el, _, _,
+                        // Blk_poly_var _)` emits `{NAME: el[0]; VAL: el[1]}` —
+                        // the NAME slot is whatever expression sits at
+                        // elements[0] (a `Const_int n` for numeric polyvar
+                        // names like `#1`, a `Const_string "Foo"` otherwise).
+                        // Printing the `name` string verbatim as done
+                        // previously emitted `NAME: "1"` for `#1` instead of
+                        // `NAME: 1`.
                         self.print_object_literal(
                             level,
                             None,
-                            std::iter::once((false, None)).chain(
+                            std::iter::once((false, elements.first())).chain(
                                 elements.get(1).into_iter().map(|value| (true, Some(value))),
                             ),
                             |this, (is_value, value)| {
+                                let value = value.expect("polyvar block element must exist");
                                 if is_value {
                                     this.write("VAL: ");
-                                    this.print_expression(
-                                        value.expect("polyvar value property must exist"),
-                                        1,
-                                    );
                                 } else {
                                     this.write("NAME: ");
-                                    this.print_string(name);
                                 }
+                                this.print_expression(value, 1);
                             },
                         );
                     }
