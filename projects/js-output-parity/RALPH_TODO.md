@@ -42,7 +42,40 @@ Your next steps, in order:
 3. **Investigate parity clusters from the remaining output-diff failures.**
    Remaining diffs cluster into:
      - **if/else vs early-return** (ticker, constrainedAsDict, reasonReactRouter,
-       fun_pattern_match). See item 2 above — architectural.
+       fun_pattern_match, bdd, js_json_test, record_regression). See item 2
+       above — architectural.
+
+       Investigation 2026-04-22: root cause identified for the bdd cluster.
+       OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+       inspects the LITERAL last statement of a block — it does NOT recurse
+       into a trailing `Block` statement. Rust's `last_statement`
+       (js_ir/mod.rs:2065-2073) DOES recurse. This causes Rust's rule 7 to
+       fire in cases where OCaml keeps the if/else shape.
+       - For `Lswitch` paths (bdd, js_json_test): `compile_cases` returns
+         a raw `J.block` with `[BlockStmt]` wrapping inner rule-7 results.
+         OCaml's rule 7 sees the Block (not a terminal) → preserves else.
+         Rust's recursive `last_statement` unwraps Block → sees trailing
+         throw → fires rule 7 → incorrectly hoists else out.
+       - For `Lifthenelse` paths (test_seq, stringmatch, flexible_array,
+         inline_map_demo, nested_pattern_match_test, set_gen, test_set,
+         string_set): OCaml uses `Js_output.output_as_block` which calls
+         `unnest_block` (js_output.ml:77-80) — flattens a single-element
+         `[BlockStmt]` into its inner statements before passing to
+         `S.if_`. OCaml's rule 7 then sees the flat block and fires.
+         Rust doesn't unnest here, so naively making `last_statement`
+         non-recursive would break these tests (regression of 7+ tests).
+       Fix requires BOTH: (a) make `block_last_is_terminal` inspect the
+       literal last statement (easy), and (b) port `unnest_block` to
+       Rust's compile paths that correspond to OCaml's `output_as_block`
+       call sites — this is the harder part, since Rust's compile
+       architecture differs from `Js_output.t`. Attempted in session
+       2026-04-22 but incomplete: adding `peel_single_block_statement`
+       to `compile_if_effect_block` was not sufficient because the
+       `Lifthenelse` for `test_seq` / etc. doesn't route through that
+       function (it goes through the `Lswitch` path for list-variant
+       dispatch). The full fix needs the Rust equivalent of OCaml's
+       `output_as_block` applied at every place the legacy backend
+       would construct a `J.block` from a `Js_output.t`.
      - **Nested-if && merge with empty else** (reasonReactRouter.push/replace,
        stdlib_Stdlib_DictTests.inferDictByPattern). Rust's
        `simplify_if_statement` has `!nested_else.is_empty()` guards
