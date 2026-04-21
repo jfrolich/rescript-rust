@@ -978,17 +978,20 @@ fn fold_int_comparison(op: BinOp, left: &Expression, right: &Expression) -> Opti
 }
 
 fn fold_strict_comparison(op: BinOp, left: &Expression, right: &Expression) -> Option<bool> {
-    let equality = match op {
-        BinOp::EqEqEq => true,
-        BinOp::NotEqEq => false,
-        _ => return None,
-    };
-
-    if let Some(equal) = fold_strict_equality(left, right) {
-        return Some(if equality { equal } else { !equal });
+    // OCaml's `Js_exp_make.bin` (js_exp_make.ml:623-631) routes only
+    // `EqEqEq` through `triple_equal` (which folds literal-vs-literal and
+    // nullish pairs). `NotEqEq` falls through to the default arm and emits
+    // a raw `Bin` node — there is no symmetric fold. Match that so
+    // `Pjscomp Cneq (Const_int 0, Const_int 0)` and friends emit
+    // `0 !== 0` rather than collapsing to `false` (which downstream folds
+    // away the OCaml-preserved dead branch). Callers that need a symmetric
+    // Cneq fold on typed operands (e.g. `compile_int_comparison`'s Int/Int
+    // short-circuit) perform their own fold before reaching here.
+    if !matches!(op, BinOp::EqEqEq) {
+        return None;
     }
 
-    None
+    fold_strict_equality(left, right)
 }
 
 fn rewrite_length_bin_comparison(
