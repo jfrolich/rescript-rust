@@ -565,76 +565,77 @@ impl JsPrinter {
             }
 
             StatementDesc::ForRange(init, end, id, direction, body) => {
+                // OCaml's js_dump.ml:1415 threads its Ext_pp_scope cxt through
+                // the for-body without calling sub_scope — sub_scope only runs
+                // on function entry (js_dump.ml:369). Keeping the body in the
+                // current scope lets inner `let v` bindings see the outer
+                // next_suffix counters so stamp-distinct shadowing vars get
+                // their `$N` rename (matches Ext_pp_scope.add_ident's
+                // cardinal-based counter).
                 let id_name = self.ident_name(id);
                 let finish_binding = for_range_finish_needs_binding(end).then(|| {
                     self.fresh_scoped_name(format!("{}_finish", convert_ident_name(id.name())))
                 });
-                let mut reserved_printed_names = vec![id_name.clone()];
-                if let Some(finish_name) = &finish_binding {
-                    reserved_printed_names.push(finish_name.clone());
+
+                self.write("for ");
+                self.write_char('(');
+
+                match (init, finish_binding.as_deref()) {
+                    (Some(init_expr), Some(finish_name)) => {
+                        self.write("let ");
+                        self.write(&id_name);
+                        self.write(" = ");
+                        self.print_expression(init_expr, 1);
+                        self.write(", ");
+                        self.write(finish_name);
+                        self.write(" = ");
+                        self.print_expression(end, 1);
+                    }
+                    (Some(init_expr), None) => {
+                        self.write("let ");
+                        self.write(&id_name);
+                        self.write(" = ");
+                        self.print_expression(init_expr, 1);
+                    }
+                    (None, Some(finish_name)) => {
+                        self.write("let ");
+                        self.write(finish_name);
+                        self.write(" = ");
+                        self.print_expression(end, 1);
+                    }
+                    (None, None) => {}
                 }
 
-                self.with_local_ident_scope(&reserved_printed_names, |this| {
-                    this.write("for ");
-                    this.write_char('(');
+                self.semi();
+                self.space();
 
-                    match (init, finish_binding.as_deref()) {
-                        (Some(init_expr), Some(finish_name)) => {
-                            this.write("let ");
-                            this.write(&id_name);
-                            this.write(" = ");
-                            this.print_expression(init_expr, 1);
-                            this.write(", ");
-                            this.write(finish_name);
-                            this.write(" = ");
-                            this.print_expression(end, 1);
-                        }
-                        (Some(init_expr), None) => {
-                            this.write("let ");
-                            this.write(&id_name);
-                            this.write(" = ");
-                            this.print_expression(init_expr, 1);
-                        }
-                        (None, Some(finish_name)) => {
-                            this.write("let ");
-                            this.write(finish_name);
-                            this.write(" = ");
-                            this.print_expression(end, 1);
-                        }
-                        (None, None) => {}
+                self.write(&id_name);
+                match direction {
+                    ForDirection::Upto => self.write(" <= "),
+                    ForDirection::Downto => self.write(" >= "),
+                    ForDirection::Up => self.write(" < "),
+                }
+                if let Some(finish_name) = finish_binding.as_deref() {
+                    self.write(finish_name);
+                } else {
+                    self.print_expression(end, 0);
+                }
+                self.semi();
+                self.space();
+
+                match direction {
+                    ForDirection::Upto | ForDirection::Up => {
+                        self.write("++");
+                        self.write(&id_name);
                     }
-
-                    this.semi();
-                    this.space();
-
-                    this.write(&id_name);
-                    match direction {
-                        ForDirection::Upto => this.write(" <= "),
-                        ForDirection::Downto => this.write(" >= "),
-                        ForDirection::Up => this.write(" < "),
+                    ForDirection::Downto => {
+                        self.write("--");
+                        self.write(&id_name);
                     }
-                    if let Some(finish_name) = finish_binding.as_deref() {
-                        this.write(finish_name);
-                    } else {
-                        this.print_expression(end, 0);
-                    }
-                    this.semi();
-                    this.space();
+                }
 
-                    match direction {
-                        ForDirection::Upto | ForDirection::Up => {
-                            this.write("++");
-                            this.write(&id_name);
-                        }
-                        ForDirection::Downto => {
-                            this.write("--");
-                            this.write(&id_name);
-                        }
-                    }
-
-                    this.write(") ");
-                    this.print_brace_block(body);
-                });
+                self.write(") ");
+                self.print_brace_block(body);
             }
 
             StatementDesc::Continue => {
