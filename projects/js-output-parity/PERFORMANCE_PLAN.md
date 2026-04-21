@@ -1,5 +1,45 @@
 # JS Output Simplify Performance Plan
 
+## ⚠️ AGENT STATUS AND MANDATORY NEXT STEPS (2026-04-21)
+
+Phase 4 ports are done (pass_count, pass_lets_dce, pass_eliminate_ref, pass_exits,
+lam_hit, lam_util). But the agent went off-plan: instead of continuing to decompose
+the monolith, it added 30+ parity-fix commits to the OLD monolithic `simplify_with_env`.
+**This is the opposite of what this plan requires.**
+
+### What MUST happen next — in this order, no exceptions:
+
+1. **DELETE `simplify_with_env` and the entire `SimplifyEnv` machinery.**
+   The monolithic function, all 114 helper functions that feed it, the SimplifyEnv
+   struct, the save/restore mechanism — all of it goes. Do not keep it "alongside"
+   the new passes. Do not try to preserve the 615/657 parity score. Rip it out.
+
+2. **Wire up the OCaml pipeline from `lam_compile_main.ml:148-200`.**
+   The entry point should call the ported passes in the exact same order as OCaml.
+   The passes that still need porting (collect_info, remove_alias, alpha_conversion,
+   deep_flatten) should be stubbed as identity functions until ported.
+
+3. **Port the remaining passes** (Phases 2, 3, 6 from below). Each one replaces
+   a stub with a real port.
+
+4. **Do NOT add parity fixes that aren't direct OCaml ports.** If parity regresses
+   after deleting the monolith, that's expected. Fix it by porting more OCaml code
+   faithfully, not by inventing workarounds.
+
+### Issues to fix in existing ports:
+
+- `pass_exits.rs`: `IdGenerator` initialized from `max_ident_stamp_in_lambda` —
+  OCaml uses a global mutable stamp counter (`Ident.rename`). This local
+  approximation may cause stamp collisions. Fix to match OCaml's behavior.
+- `pass_lets_dce.rs`: Uses raw `Lambda::Lsequence(Box::new(...), Box::new(...))`
+  instead of `Lambda::seq()` smart constructor. OCaml uses `Lam.seq`. Fix it.
+- `pass_lets_dce.rs`: Remove unreachable catch-all `Llet` arm — not in OCaml.
+- `pass_count.rs`: Remove `lookup` convenience wrapper — not in OCaml. Let
+  `pass_lets_dce` do its own lookup like OCaml's `count_var` in `apply_lets`.
+- `lam_util.rs`: Remove dead `let_variable` helper — not in OCaml.
+
+---
+
 ## Problem
 
 `simplify.rs` is the main post-lowering lambda simplification pass and is currently

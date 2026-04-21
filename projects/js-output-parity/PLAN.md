@@ -7,6 +7,11 @@
 monolithic `simplify.rs` into the same separate passes OCaml uses. No parity
 fixing, no new features, no other work until the OCaml-aligned pipeline is in place.
 
+**Specifically: `simplify_with_env` and the entire `SimplifyEnv` struct MUST BE
+DELETED.** Not kept alongside. Not gradually migrated. Deleted. The 15,000-line
+monolithic simplifier is replaced by the OCaml-aligned pass pipeline. If parity
+regresses, fix it by porting more OCaml code, not by keeping the monolith alive.
+
 ## CRITICAL RULE — Direct OCaml Port Only
 
 **Never add or delete a line of Rust code unless it directly corresponds to a
@@ -19,6 +24,8 @@ applies to ALL work in this project, not just the performance plan:
 - No Rust-specific optimizations or cleverness
 - If you cannot cite the OCaml file and line number, do not write the code
 - If existing Rust code has no OCaml equivalent, delete it
+- **Do NOT add parity fixes to the old monolithic code.** That code is being
+  deleted. Any time spent fixing it is wasted.
 
 ## Goal
 

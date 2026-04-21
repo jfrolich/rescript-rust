@@ -1,5 +1,30 @@
 # Ralph TODO: JS Output Parity
 
+## ⚠️ STOP — READ THIS BEFORE DOING ANYTHING
+
+**The monolithic `simplify_with_env` and `SimplifyEnv` must be DELETED NOW.**
+
+You have been adding parity fixes to the old monolithic code. **Stop doing that.**
+Every commit you add to the monolith is wasted work because it's about to be deleted.
+
+Your next steps, in order:
+1. Delete `simplify_with_env`, `SimplifyEnv`, and ALL ~114 helper functions that
+   only exist to feed the monolith (see PERFORMANCE_PLAN.md for the full list).
+2. Wire up the OCaml pipeline from `lam_compile_main.ml:148-200` using the passes
+   you already ported (pass_exits, pass_lets_dce) plus stubs for the ones not yet
+   ported (collect_info → identity, remove_alias → identity, alpha_conversion → identity).
+3. Port the remaining passes: collect_info, remove_alias, deep_flatten, alpha_conversion.
+4. Fix the issues in existing ports (see PERFORMANCE_PLAN.md top section).
+
+**Do NOT add any more parity fixes to the old code. Do NOT try to preserve the
+617/657 score. Regressions are expected and acceptable.**
+
+Read [PERFORMANCE_PLAN.md](./PERFORMANCE_PLAN.md) and [PLAN.md](./PLAN.md) for
+the full constraints — especially: every line of Rust must trace to a specific
+line in OCaml source. No invented logic.
+
+---
+
 **Last Updated:** 2026-04-21 (Variable-kind tail-move guard + eta-reduction tightening)
 **Status:** 617 / 657 authoritative JS snapshot baseline; 4 compile errors and 36 output diffs. Net +2 vs prior 615 baseline: `test_simple_ref` (Variable-kind tail-move) and `set_gen` (Lsequence eta-reduction) both pass byte-clean.
 
