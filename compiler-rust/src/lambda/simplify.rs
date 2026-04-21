@@ -54,7 +54,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:159 — simplify_exits.
-    let lam = simplify_exits(&lam);
+    let lam = simplify_exits(&lam, &meta.id_gen);
 
     // lam_compile_main.ml:161 — collect_info before simplify_alias.
     collect_info(&mut meta, &lam);
@@ -81,7 +81,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = alpha_conversion(&meta, &lam);
 
     // lam_compile_main.ml:182 — simplify_exits.
-    let lam = simplify_exits(&lam);
+    let lam = simplify_exits(&lam, &meta.id_gen);
 
     // lam_compile_main.ml:183 — collect_info.
     collect_info(&mut meta, &lam);
@@ -96,7 +96,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = simplify_lets(&lam);
 
     // lam_compile_main.ml:200 — final simplify_exits.
-    simplify_exits(&lam)
+    simplify_exits(&lam, &meta.id_gen)
 }
 
 /// Walks `lam` and returns the idents carried in the top-level

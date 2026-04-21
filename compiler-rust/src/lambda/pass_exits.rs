@@ -419,11 +419,23 @@ fn subst_helper(
 }
 
 /// `Lam_pass_exits.simplify_exits` (lam_pass_exits.ml:241-243).
-pub fn simplify_exits(lam: &Lambda) -> Lambda {
+///
+/// Uses `id_gen` for the `Ident.rename` calls in the `Lstaticraise` arm
+/// (lam_pass_exits.ml:193). OCaml's `Ident.rename` reads from a single
+/// global mutable counter, so the caller should thread a pipeline-wide
+/// `IdGenerator` to avoid collisions with later beta-reduction renames.
+pub fn simplify_exits(lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
     let counts = count_helper(lam);
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_lambda(lam));
     let mut subst: SubstTbl = HashMap::new();
-    subst_helper(&mut subst, &counts, &id_gen, lam)
+    subst_helper(&mut subst, &counts, id_gen, lam)
+}
+
+/// Standalone entry point that seeds its own `IdGenerator` from the lambda's
+/// max stamp — used by tests that don't have a pipeline-level counter.
+#[cfg(test)]
+pub fn simplify_exits_standalone(lam: &Lambda) -> Lambda {
+    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_lambda(lam));
+    simplify_exits(lam, &id_gen)
 }
 
 #[cfg(test)]
@@ -441,7 +453,7 @@ mod tests {
             (1, vec![]),
             Box::new(handler),
         );
-        let simplified = simplify_exits(&lam);
+        let simplified = simplify_exits_standalone(&lam);
         assert_eq!(simplified, body);
     }
 
@@ -455,7 +467,7 @@ mod tests {
             (1, vec![]),
             Box::new(handler.clone()),
         );
-        let simplified = simplify_exits(&lam);
+        let simplified = simplify_exits_standalone(&lam);
         assert_eq!(simplified, handler);
     }
 
@@ -470,7 +482,7 @@ mod tests {
             (1, vec![x.clone()]),
             Box::new(handler),
         );
-        let simplified = simplify_exits(&lam);
+        let simplified = simplify_exits_standalone(&lam);
         match simplified {
             Lambda::Llet(LetKind::Strict, _, _, body) => {
                 assert!(matches!(*body, Lambda::Lvar(_)));
