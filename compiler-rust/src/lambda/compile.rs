@@ -120,10 +120,33 @@ fn short_circuit_primitive<'a>(
     }
 }
 
+/// Direct port of `call_info_of_ap_status` (lam_compile.ml:34-40).
+///
+/// - `App_infer_full` → `{arity = Full; call_info = Call_ml}`.
+/// - `App_na` → `{arity = NA; call_info = Call_ml}`.
+/// - `App_uncurry` → `{arity = Full; call_info = Call_na}`.
+///
+/// The printer's eta-reduction rewrite (js_dump.ml:299-344) gates on
+/// `call_info = Call_ml | Call_builtin_runtime` AND `arity = Full`.
 fn call_info_of_apply_status(call_transformed_jsx: bool, status: ApplyStatus) -> CallInfo {
+    use crate::js_ir::{CallArity, CallKind};
     match status {
-        ApplyStatus::InferFull | ApplyStatus::Na | ApplyStatus::Uncurry => CallInfo {
+        ApplyStatus::InferFull => CallInfo {
             call_transformed_jsx,
+            kind: CallKind::MlCall,
+            arity: CallArity::Full,
+            ..CallInfo::default()
+        },
+        ApplyStatus::Na => CallInfo {
+            call_transformed_jsx,
+            kind: CallKind::MlCall,
+            arity: CallArity::Na,
+            ..CallInfo::default()
+        },
+        ApplyStatus::Uncurry => CallInfo {
+            call_transformed_jsx,
+            kind: CallKind::Na,
+            arity: CallArity::Full,
             ..CallInfo::default()
         },
     }

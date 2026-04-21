@@ -365,6 +365,35 @@ pub enum ForDirection {
     Up,
 }
 
+/// Kind of call, matching OCaml's `Js_call_info.call_info`
+/// (js_call_info.ml:27-34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallKind {
+    /// Plain ML expression call. Mirrors OCaml's `Call_ml`.
+    MlCall,
+    /// Built-in runtime call. Mirrors OCaml's `Call_builtin_runtime`.
+    BuiltinRuntime,
+    /// External / FFI / uncurried call. Mirrors OCaml's `Call_na`. Printer
+    /// must not apply the `pp_function` eta-reduction rewrite to these
+    /// (js_dump.ml:299-344 gates on `Call_ml | Call_builtin_runtime`).
+    #[default]
+    Na,
+}
+
+/// Arity-known flag carried on the call site, matching OCaml's
+/// `Js_call_info.arity` (js_call_info.ml:25). `Na` means unknown arity; the
+/// `pp_function` rewrite wraps such calls with `Curry.__N(...)`. Rust does
+/// not currently emit the Curry wrapper, so the printer's rewrite is gated
+/// on `Full` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallArity {
+    /// Full application (arity matches).
+    Full,
+    /// Arity unknown.
+    #[default]
+    Na,
+}
+
 /// Call information for function calls
 #[derive(Debug, Clone, Default)]
 pub struct CallInfo {
@@ -373,6 +402,10 @@ pub struct CallInfo {
     /// Whether this call came from a transformed JSX node that should print
     /// back to preserved JSX syntax.
     pub call_transformed_jsx: bool,
+    /// Call kind (ML / runtime / NA). Mirrors OCaml's `Js_call_info.call_info`.
+    pub kind: CallKind,
+    /// Arity-known flag. Mirrors OCaml's `Js_call_info.arity`.
+    pub arity: CallArity,
     /// Additional metadata
     pub comment: Option<String>,
 }

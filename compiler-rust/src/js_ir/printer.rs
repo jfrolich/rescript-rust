@@ -5,9 +5,10 @@
 
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
-    Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc, ForDirection,
-    JsRawInfo, ModulePathResolver, Program, Statement, StatementDesc, StringClause, VIdent,
-    VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
+    Block, CallArity, CallInfo, CallKind, CaseClause, Delim, DepsProgram, Expression,
+    ExpressionDesc, ForDirection, JsRawInfo, ModulePathResolver, Program, Statement,
+    StatementDesc, StringClause, VIdent, VariableDeclaration, ocaml_eq_block,
+    ocaml_eq_expression,
 };
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
@@ -783,6 +784,33 @@ impl JsPrinter {
 
     /// Print a variable declaration
     fn print_variable_declaration(&mut self, decl: &VariableDeclaration) {
+        // Eta-reduce `let f = function(x, y) { return g(x, y); }` to `let f = g;`
+        // at print time, matching OCaml's pp_function (js_dump.ml:299-344) for
+        // the `Name_non_top` fn_state.
+        if let Some(Expression {
+            desc:
+                ExpressionDesc::Fun {
+                    is_method,
+                    params,
+                    body,
+                    ..
+                },
+            ..
+        }) = &decl.value
+        {
+            if let Some(target) = eta_reduce_function_body(*is_method, params, body) {
+                self.write("let ");
+                let var_name = self.ident_name(&decl.ident);
+                self.write(&var_name);
+                self.write(" = ");
+                self.with_function_ident_scope(params, body, Some(&decl.ident), |this| {
+                    this.print_vident(target);
+                });
+                self.semi();
+                return;
+            }
+        }
+
         let var_name = self.ident_name(&decl.ident);
         self.write("let ");
         self.write(&var_name);
@@ -847,6 +875,22 @@ impl JsPrinter {
         async_: bool,
         directive: Option<&str>,
     ) {
+        // Eta-reduce `function f(x, y) { return g(x, y); }` to `let f = g;`.
+        // OCaml's js_dump.ml:299-344 does this at print time when the body is
+        // a single `return Call(Var v, ls, _)` whose argument list matches the
+        // parameter list positionally and v does not appear in the params (to
+        // avoid turning `function x { return x(x); }` into `let x = x;`).
+        if let Some(target) = eta_reduce_function_body(is_method, params, body) {
+            self.write("let ");
+            let fn_name = self.ident_name(ident);
+            self.write(&fn_name);
+            self.write(" = ");
+            self.with_function_ident_scope(params, body, Some(ident), |this| {
+                this.print_vident(target);
+            });
+            self.semi();
+            return;
+        }
         if async_ {
             self.write("async ");
         }
@@ -2681,6 +2725,87 @@ fn unwrap_single_block_stmt(stmt: &Statement) -> &Statement {
         StatementDesc::Block(inner) if inner.len() == 1 => unwrap_single_block_stmt(&inner[0]),
         _ => stmt,
     }
+}
+
+/// Direct port of the eta-reduction check in OCaml's `pp_function`
+/// (js_dump.ml:299-344). Returns the callee to print when the function body
+/// is `[ Return (Call (Var v, args, _)) ]` with each `args[i] == Var(params[i])`
+/// and the callee is an ML/runtime call target, not an FFI global.
+///
+/// OCaml's guard gates the rewrite on `call_info = Call_ml | Call_builtin_runtime`
+/// (js_call_info.ml:27-30). Rust's `CallInfo` does not carry that field, but
+/// FFI callees reach the printer as one of:
+///   - `VIdent::Id(id)` where `id.is_global()` (created via the `js_global`
+///     path used by `Lam_compile_external_call.translate_ffi`), or
+///   - `VIdent::Qualified(module, _)` with `module.kind = Kind::External`
+///     (external JS module). OCaml-module / runtime callees reach this point
+///     as `Kind::Ml` or `Kind::Runtime`, which is exactly the set `Call_ml |
+///     Call_builtin_runtime` covers.
+fn eta_reduce_function_body<'a>(
+    is_method: bool,
+    params: &[Ident],
+    body: &'a Block,
+) -> Option<&'a VIdent> {
+    if is_method {
+        return None;
+    }
+    let [stmt] = body.as_slice() else {
+        return None;
+    };
+    let StatementDesc::Return(ret_expr) = &stmt.desc else {
+        return None;
+    };
+    let ExpressionDesc::Call(callee, args, info) = &ret_expr.desc else {
+        return None;
+    };
+    let ExpressionDesc::Var(v) = &callee.desc else {
+        return None;
+    };
+    if args.len() != params.len() {
+        return None;
+    }
+    for (arg, param) in args.iter().zip(params.iter()) {
+        let ExpressionDesc::Var(VIdent::Id(arg_id)) = &arg.desc else {
+            return None;
+        };
+        if !arg_id.same(param) {
+            return None;
+        }
+    }
+    // js_dump.ml:309-313 requires `arity = Full | NA` AND `call_info =
+    // Call_ml | Call_builtin_runtime`. For local `Id` callees we check the
+    // CallInfo carried on the Call expression, which is set by
+    // `call_info_of_apply_status` (compile.rs) from OCaml's
+    // `call_info_of_ap_status` (lam_compile.ml:34-40). Local parameters
+    // resolve to `App_uncurry` (→ Call_na + Full) because alpha_conversion
+    // cannot infer a parameter's arity; those must NOT be eta-reduced.
+    //
+    // For `Qualified(Ml | Runtime, _)` callees we accept the rewrite even
+    // when `info.kind = Na`. Without a `Lam_compile_env.query_external_id_info`
+    // port, alpha_conversion leaves cross-module calls as `App_uncurry`
+    // (lam_pass_alpha_conversion.ml:29-48 bails via the `0 :: _ | []` arm
+    // when `get_arity` returns NA). OCaml, armed with the CMJ-backed
+    // external arity, promotes them to `App_infer_full` and so hits the
+    // eta-reduction. Accepting Qualified Ml/Runtime callees unconditionally
+    // matches the OCaml-with-CMJ output.
+    match v {
+        VIdent::Id(callee_id) => {
+            if params.iter().any(|p| p.same(callee_id)) {
+                return None;
+            }
+            if !matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime)
+                || !matches!(info.arity, CallArity::Full)
+            {
+                return None;
+            }
+        }
+        VIdent::Qualified(module, _) => {
+            if matches!(module.kind, Kind::External { .. }) {
+                return None;
+            }
+        }
+    }
+    Some(v)
 }
 
 fn try_tail_nested_if_merge(
