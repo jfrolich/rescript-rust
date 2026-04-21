@@ -6878,7 +6878,27 @@ impl LambdaCompiler {
                     return Expression::bool(true);
                 }
 
-                compile_raw_comparison(cmp, left, right)
+                // Fold literal string!==string, mirroring OCaml's
+                // `string_comp Cneq` at `js_exp_make.ml:1355-1362`.
+                if let (
+                    ExpressionDesc::Str { txt: left_txt, delim: left_delim },
+                    ExpressionDesc::Str { txt: right_txt, delim: right_delim },
+                ) = (&left.desc, &right.desc)
+                {
+                    if let Some(equal) = crate::js_ir::fold_strict_string_equality_pub(
+                        left_txt, left_delim, right_txt, right_delim,
+                    ) {
+                        return Expression::bool(!equal);
+                    }
+                }
+
+                // OCaml's `Js_exp_make.int_comp` falls through to
+                // `bin NotEqEq e0 e1` for the non-special Cneq cases — and
+                // OCaml's `bin` has no NotEqEq case, so the construction is
+                // effectively raw. `Expression::bin`'s `fold_strict_comparison`
+                // would fold `3 !== null` to `true` via the nullish-impossible
+                // rule, diverging from OCaml. Use a raw `Bin` here.
+                crate::js_ir::raw_bin_expression(comparison_to_binop(cmp), left, right)
             }
             Comparison::Lt | Comparison::Le | Comparison::Gt | Comparison::Ge => {
                 compile_raw_comparison(cmp, left, right)
@@ -10942,7 +10962,43 @@ fn compile_int_equality(left: Expression, right: Expression) -> Expression {
             ExpressionDesc::Number(Number::Float(left_float)),
             ExpressionDesc::Number(Number::Float(right_float)),
         ) if left_float.f == right_float.f => Expression::bool(true),
-        _ => compile_raw_comparison(Comparison::Eq, left, right),
+        // OCaml's `float_equal` (= `int_equal`) folds Number Int,Number Int
+        // via `bool (i0 = i1)` at `js_exp_make.ml:1217`.
+        (
+            ExpressionDesc::Number(Number::Int { i: left_int, .. }),
+            ExpressionDesc::Number(Number::Int { i: right_int, .. }),
+        ) => Expression::bool(left_int == right_int),
+        // Pintcomp Ceq is also used for hash-collision polyvar switches that
+        // compare string tags via string equality. OCaml's string_comp folds
+        // literal-vs-literal cases at `js_exp_make.ml:1355-1362`, matching
+        // the raw `Bin EqEqEq` shape we want to emit otherwise. Fold Str,Str
+        // here to keep the polyvar switch chain collapsing to a single arm.
+        (
+            ExpressionDesc::Str { txt: left_txt, delim: left_delim },
+            ExpressionDesc::Str { txt: right_txt, delim: right_delim },
+        ) => {
+            match crate::js_ir::fold_strict_string_equality_pub(
+                left_txt, left_delim, right_txt, right_delim,
+            ) {
+                Some(equal) => Expression::bool(equal),
+                None => crate::js_ir::raw_bin_expression(
+                    comparison_to_binop(Comparison::Eq),
+                    left,
+                    right,
+                ),
+            }
+        }
+        // OCaml's `Js_exp_make.int_equal` (= float_equal) constructs a raw
+        // `Bin (EqEqEq, e0, e1)` without going through `bin`/`triple_equal`,
+        // so `3 === null` from `Pintcomp Ceq` stays as the literal comparison
+        // rather than folding to `false` via the nullish-impossible rule in
+        // triple_equal. `Expression::bin`'s `fold_strict_comparison` would
+        // fold here, so we bypass it with the raw constructor.
+        _ => crate::js_ir::raw_bin_expression(
+            comparison_to_binop(Comparison::Eq),
+            left,
+            right,
+        ),
     }
 }
 

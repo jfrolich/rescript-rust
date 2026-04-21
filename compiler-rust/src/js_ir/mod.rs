@@ -1055,6 +1055,15 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
     None
 }
 
+pub(crate) fn fold_strict_string_equality_pub(
+    left_txt: &str,
+    left_delim: &Delim,
+    right_txt: &str,
+    right_delim: &Delim,
+) -> Option<bool> {
+    fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim)
+}
+
 fn fold_strict_string_equality(
     left_txt: &str,
     left_delim: &Delim,
@@ -2113,7 +2122,7 @@ fn negate_condition(cond: Expression) -> Expression {
     Expression::not(cond)
 }
 
-fn raw_bin_expression(op: BinOp, left: Expression, right: Expression) -> Expression {
+pub(crate) fn raw_bin_expression(op: BinOp, left: Expression, right: Expression) -> Expression {
     Expression::new(ExpressionDesc::Bin(op, Box::new(left), Box::new(right)))
 }
 
