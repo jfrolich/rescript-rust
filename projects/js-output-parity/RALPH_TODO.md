@@ -49,9 +49,40 @@ Your next steps, in order:
        counter starts from a different seed.
      - **Dead pure comparison kept** (option_optimisation): OCaml emits
        a trailing `tmp === null;` statement that Rust eliminates via some
-       downstream pass.
+       downstream pass. Investigation (2026-04-21): `push_effect_expression`
+       (`compile.rs:10296`) drops every side-effect-free expression, but
+       OCaml's `S.exp` (js_stmt_make.ml:45-53) only drops Number/Undefined.
+       Adding a faithful `push_s_exp` helper and using it in
+       `compile_if_effect_block`'s `(None, None)` arm and
+       `compile_if_unit_return_tail_block` was neutral — the
+       `tmp === null;` for option_optimisation doesn't flow through either
+       path. The expression is generated inside pattern-match compilation
+       via a path that pre-drops the bare comparison before any of the
+       checked code paths see it. Likely origin: the switch / match code
+       path calls `push_effect_expression` on the scrutinee after
+       simplifying the inner ifs. Search for bare comparison emission via
+       `compile.rs:5468, 5486, 5527, 5559, 5594` (other
+       `push_effect_expression(&mut block, scrut_expr)` callers — those
+       may correspond to the specific match paths that drop the check).
      - **Adjacent let reordering** (bs_set_int_test): OCaml orders
        `let i$2 = range(50,100); let s = ...` differently from Rust.
+     - **Module-level Pmakeblock binding inlined** (variantsMatching):
+       OCaml keeps `let CustomizeTags_d = {TAG:"qq", _0:42}; ... let
+       CustomizeTags = {... d: CustomizeTags_d, ...}`. Rust inlines the
+       block literals directly into the outer record. Investigation
+       (2026-04-21): `pass_lets_dce` correctly converts
+       `Strict + Pmakeblock(pure)` → `StrictOpt + Pmakeblock` (via
+       `lam_util::refine_let` lam_util.ml:131-136), so after
+       `simplify_lets` both bindings are preserved in the lambda. The
+       inlining must happen further down; `flatten_and_mark_dead_block`
+       at `compile.rs:12395-12453` inserts into the `substitution` map
+       but only `try_substitute_caml_block_projection`
+       (compile.rs:13007-13028) consumes it and only on
+       `ArrayIndex` / `StaticIndex` projections, not on bare `Var` refs.
+       Some later pass (or earlier lowering choice) must be rewriting
+       `Pmakeblock(..., Lvar CustomizeTags_d, ...)` with the inlined
+       block at raw-lambda → Lambda lowering time. Bisect by dumping
+       the Lambda between each pipeline stage.
 4. ~~Address issues in existing ports listed at the top of PERFORMANCE_PLAN.md~~:
    commit 0382c4696 cleaned up `pass_lets_dce` (`Lambda::seq` instead of raw
    `Lsequence`, dropped unreachable catch-all `Llet`, dropped dead
