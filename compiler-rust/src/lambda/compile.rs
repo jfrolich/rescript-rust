@@ -10959,7 +10959,14 @@ fn compile_nullish_strict_comparison(
         return Expression::bool(matches!(cmp, Comparison::Neq));
     }
 
-    Expression::bin(comparison_to_binop(cmp), left, right)
+    // OCaml's `eq_null_undefined_boolean` / `neq_null_undefined_boolean`
+    // (js_exp_make.ml:1743-1771) construct the final comparison via raw
+    // `{expression_desc = Bin (EqEqEq | NotEqEq, a, b); ...}`. This bypasses
+    // the `triple_equal` fold that would otherwise collapse
+    // `Optional_block === Undefined` to `false_`. Use `raw_bin_expression`
+    // here to match that behavior — an `Expression::bin` call would route
+    // through `fold_strict_equality` and incorrectly fold the comparison.
+    crate::js_ir::raw_bin_expression(comparison_to_binop(cmp), left, right)
 }
 
 fn compile_raw_comparison(cmp: Comparison, left: Expression, right: Expression) -> Expression {

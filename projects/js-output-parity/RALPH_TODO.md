@@ -19,7 +19,7 @@ Your next steps, in order:
    unconditionally in the printer; wiring up `query_external_id_info` would
    also flip cross-module calls from `App_uncurry` to `App_infer_full` in
    alpha_conversion, matching OCaml more precisely.
-2. **Investigate parity clusters from the remaining 29 output-diff failures.**
+2. **Investigate parity clusters from the remaining 28 output-diff failures.**
    Remaining diffs cluster into:
      - **Cross-module alias binding expansion** (coercion_module_alias_test):
        OCaml emits `let C3 = Char;` for module aliasing; Rust expands to
@@ -34,10 +34,6 @@ Your next steps, in order:
      - **Dead-code branch elimination** (gpr_4632, stringmatch_test):
        Rust eliminates branches OCaml keeps (compile-time folding over
        pattern match scrutinees).
-     - **Pjscomp / equality folding** (equal_box_test): Rust folds
-       `3 !== undefined` to `true`; OCaml keeps the literal comparison
-       (Lam.prim only folds `Pintcomp ((Ceq|Cneq))` on `Const_pointer`
-       pairs — not on `Const_js_undefined`).
    None of these appear to be a single-spot fix; each needs targeted
    investigation.
 3. Address the issues in existing ports listed at the top of
@@ -46,6 +42,17 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Pobjcomp Ceq/Cneq: raw construction in nullish comparison**:
+  OCaml's `eq_null_undefined_boolean` / `neq_null_undefined_boolean`
+  (js_exp_make.ml:1743-1771) build their fallthrough comparison via
+  raw `{expression_desc = Bin (EqEqEq|NotEqEq, a, b); comment}`, which
+  bypasses `triple_equal`'s fold of `Optional_block === Undefined` to
+  `false_`. Rust's `compile_nullish_strict_comparison` routed through
+  `Expression::bin`, hitting `fold_strict_equality` and collapsing
+  `Some(3) === undefined` (and its `Pnot` wrapper) to `true`. Switched
+  the fallthrough to `raw_bin_expression` so `eqNull(Some(3), …)` et al.
+  emit `3 !== undefined` as OCaml does. JS snapshot parity:
+  **624 / 657 -> 625 / 657 (+1)**; output diffs: **29 -> 28**.
 - **Literal+Alias source-order preservation** (commit cd100e413):
   `move_same_name_export_alias_to_export_tail` was relocating Literal+Alias
   bindings that `Lam_pass_lets_dce` preserved via the Strict-arm +
@@ -75,8 +82,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Literal+Alias preserve + pp_function eta-reduction, +25 parity)
-**Status:** 624 / 657 authoritative JS snapshot baseline; 4 compile errors and 29 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions.
+**Last Updated:** 2026-04-21 (Pobjcomp Ceq/Cneq raw-construction fix, +1 parity)
+**Status:** 625 / 657 authoritative JS snapshot baseline; 4 compile errors and 28 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
