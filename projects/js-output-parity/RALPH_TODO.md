@@ -1,32 +1,97 @@
 # Ralph TODO: JS Output Parity
 
-## ⚠️ STOP — READ THIS BEFORE DOING ANYTHING
+## ⚠️ THE MONOLITH IS GONE — PORT THE STUBBED PASSES NEXT
 
-**The monolithic `simplify_with_env` and `SimplifyEnv` must be DELETED NOW.**
+**The mandatory deletion has happened.** `simplify_with_env`, `SimplifyEnv`, and
+the ~114 helper functions that fed them are gone. `compiler-rust/src/lambda/simplify.rs`
+is now a 99-line file that calls the OCaml-aligned pipeline from
+`lam_compile_main.ml:148-200`. `deep_flatten` was extracted into its own module
+at `compiler-rust/src/lambda/deep_flatten.rs`.
 
-You have been adding parity fixes to the old monolithic code. **Stop doing that.**
-Every commit you add to the monolith is wasted work because it's about to be deleted.
+Three of the pipeline stages are still **identity stubs** in the new
+`simplify.rs`:
+
+- `collect_info` (port of `Lam_pass_collect.collect_info`) — needs to populate a
+  `Lam_stats.t` consumed by the next two stages.
+- `simplify_alias` (port of `Lam_pass_remove_alias.simplify_alias`) — field
+  folding, optional unwrapping, cross-module fn inlining, boolean const folding.
+- `alpha_conversion` (port of `Lam_pass_alpha_conversion.alpha_conversion`) —
+  rename idents duplicated by inlining.
 
 Your next steps, in order:
-1. Delete `simplify_with_env`, `SimplifyEnv`, and ALL ~114 helper functions that
-   only exist to feed the monolith (see PERFORMANCE_PLAN.md for the full list).
-2. Wire up the OCaml pipeline from `lam_compile_main.ml:148-200` using the passes
-   you already ported (pass_exits, pass_lets_dce) plus stubs for the ones not yet
-   ported (collect_info → identity, remove_alias → identity, alpha_conversion → identity).
-3. Port the remaining passes: collect_info, remove_alias, deep_flatten, alpha_conversion.
-4. Fix the issues in existing ports (see PERFORMANCE_PLAN.md top section).
+1. Port `collect_info` (`compiler/core/lam_pass_collect.ml`, ~152 lines). It
+   produces the `ident_tbl` consumed by `simplify_alias` and `alpha_conversion`.
+2. Port `simplify_alias` (`compiler/core/lam_pass_remove_alias.ml`, ~290 lines).
+3. Port `alpha_conversion` (`compiler/core/lam_pass_alpha_conversion.ml`, ~128 lines).
+4. Address the issues in existing ports listed at the top of PERFORMANCE_PLAN.md
+   (IdGenerator stamp collisions in pass_exits, raw `Lsequence` vs `Lambda::seq`
+   in pass_lets_dce, dead `let_variable` helper in lam_util, etc.).
 
-**Do NOT add any more parity fixes to the old code. Do NOT try to preserve the
-617/657 score. Regressions are expected and acceptable.**
+**Every line of Rust must trace to a specific line in OCaml source.** No
+invented logic. Regressions from the monolith deletion are expected; parity
+will return as the stubbed passes are ported.
 
 Read [PERFORMANCE_PLAN.md](./PERFORMANCE_PLAN.md) and [PLAN.md](./PLAN.md) for
-the full constraints — especially: every line of Rust must trace to a specific
-line in OCaml source. No invented logic.
+the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Const_js_null inline exclusion)
-**Status:** 618 / 657 authoritative JS snapshot baseline; 4 compile errors and 35 output diffs. Net +1 vs prior 617 baseline: `test_zero_nullable` passes byte-clean.
+**Last Updated:** 2026-04-21 (monolith deleted, OCaml pipeline wired with stubs)
+**Status:** 270 / 657 authoritative JS snapshot baseline; 4 compile errors and 383 output diffs. Net -348 vs prior 618 baseline — the expected and required regression from removing the 15K-line monolithic simplifier and replacing it with the OCaml pipeline plus identity stubs for the not-yet-ported passes.
+
+## Iteration on 2026-04-21 (monolithic simplify_with_env deleted)
+
+- **The monolith is gone.** `compiler-rust/src/lambda/simplify.rs` shrank from
+  15,455 lines to 99. `simplify_with_env`, `SimplifyEnv`, and the entire
+  surrounding apparatus (~114 helper functions, two save/restore mechanisms,
+  ~8,600 lines of tests that pinned it in place) were removed in one commit.
+- `deep_flatten_for_js_backend` was extracted into a dedicated module at
+  `compiler-rust/src/lambda/deep_flatten.rs` (328 lines). It is a direct port
+  of `compiler/core/lam_pass_deep_flatten.ml`.
+- The new `simplify_for_js_backend` is a direct port of the pipeline at
+  `compiler/core/lam_compile_main.ml:148-200`. It calls, in OCaml's exact
+  order:
+  - `deep_flatten` (real port)
+  - `collect_info` (identity stub)
+  - `simplify_exits` (real port from `pass_exits.rs`)
+  - `simplify_alias` (identity stub)
+  - `alpha_conversion` (identity stub)
+  - `simplify_lets` (real port from `pass_lets_dce.rs`)
+- `jsx_preserve` is still threaded through the public API for parity with
+  OCaml's `Js_config.jsx_preserve`, but it is currently unused because
+  `simplify_alias` is stubbed.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **270 / 657**.
+- Outcome:
+  - JS snapshot parity: **270 / 657** (-348 vs prior 618 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **35 -> 383**.
+- Next iteration candidates (in priority order):
+  1. **Port `collect_info` (`Lam_pass_collect.collect_info`)** —
+     `compiler/core/lam_pass_collect.ml`. Populates the `Lam_stats.t` /
+     `ident_tbl` consumed by `simplify_alias` and `alpha_conversion`. Without
+     it, those two stages cannot do anything useful.
+  2. **Port `simplify_alias` (`Lam_pass_remove_alias.simplify_alias`)** —
+     `compiler/core/lam_pass_remove_alias.ml`. Field folding, optional
+     unwrapping, cross-module fn inlining, boolean const folding. This is
+     where most of the parity comes back.
+  3. **Port `alpha_conversion` (`Lam_pass_alpha_conversion.alpha_conversion`)** —
+     `compiler/core/lam_pass_alpha_conversion.ml`. Rename duplicated idents
+     produced by inlining.
+  4. **Issues in existing ports** (from PERFORMANCE_PLAN.md top section):
+     IdGenerator stamp collisions in `pass_exits`, raw `Lsequence` instead of
+     `Lambda::seq` in `pass_lets_dce`, unreachable catch-all `Llet` arm,
+     `lookup` convenience wrapper in `pass_count` (let `pass_lets_dce` do
+     its own lookup like OCaml), dead `let_variable` helper in `lam_util`.
+
+## Historical iterations (old monolith — kept for reference only)
+
+The iterations below all targeted the now-deleted monolithic `simplify_with_env`.
+They are retained as a record of what the OCaml backend wants the JS pipeline
+to do at each pinch point. Use them as parity expectation references when
+porting the stubbed passes — they describe what OCaml does, not what the
+deleted code did.
 
 ## Iteration on 2026-04-21 (Const_js_null inline exclusion)
 

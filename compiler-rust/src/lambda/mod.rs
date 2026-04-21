@@ -31,6 +31,7 @@ pub mod compile;
 pub mod compile_context;
 pub mod constant;
 pub mod convert;
+pub mod deep_flatten;
 pub mod free_variables;
 pub mod lam_hit;
 pub mod lam_util;
