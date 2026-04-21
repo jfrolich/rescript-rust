@@ -42,6 +42,20 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Fold only `EqEqEq` in `Expression::bin`, match OCaml's `bin` asymmetry**:
+  OCaml's `Js_exp_make.bin` (js_exp_make.ml:623-631) routes `EqEqEq`
+  through `triple_equal` — which folds literal-vs-literal and nullish
+  pairs — but lets `NotEqEq` fall through unfolded. Rust's
+  `fold_strict_comparison` was symmetric on both, so
+  `Pjscomp Cneq (Const_int 0, Const_int 0)` — produced after field
+  folding through a constant block — collapsed to `false` and the
+  enclosing `Lifthenelse` eliminated the non-throw branch that OCaml
+  preserves. Restricting the fold to `EqEqEq` matches OCaml's shape and
+  makes `gpr_4632.res` emit OCaml's output byte-for-byte. Callers that
+  do need a symmetric `Cneq` fold on typed operands already perform it
+  before `Expression::bin` (e.g. `compile_int_comparison`'s Int/Int
+  short-circuit). JS snapshot parity: **629 / 657 -> 630 / 657 (+1)**;
+  output diffs: **24 -> 23**.
 - **Use `lam_util::refine_let` in beta_reduce.rs (lam_beta_reduce.ml:74,115,122)**:
   All three beta-reduction helpers (`no_names_beta_reduce`,
   `propagate_beta_reduce_with_meta`, `propagate_beta_reduce_with_map_and_meta`)
@@ -127,8 +141,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (use lam_util::refine_let in beta_reduce, +2 parity)
-**Status:** 629 / 657 authoritative JS snapshot baseline; 4 compile errors and 24 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
+**Last Updated:** 2026-04-21 (fold only EqEqEq in Expression::bin, +1 parity)
+**Status:** 630 / 657 authoritative JS snapshot baseline; 4 compile errors and 23 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
