@@ -1,7 +1,35 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (morning)
-**Status:** 602 / 657 authoritative JS snapshot baseline; 4 compile errors and 51 output diffs. Nine OCaml-aligned changes since the 589 baseline; latest (9) moves `final_named_inlining` before the `lets_dce_style` + `lets_dce_aliases` cleanup passes to match OCaml's `remove_alias → lets_dce` order in `lam_compile_main.ml:188-193`.
+**Last Updated:** 2026-04-21 (midday)
+**Status:** 604 / 657 authoritative JS snapshot baseline; 4 compile errors and 49 output diffs. Latest iteration routes `compile_deps_program_with_possible_required_modules` through `simplify_for_js_backend_with_jsx_preserve(self.jsx_preserve)` so the JSX-preserve guard at simplify.rs:3118 actually fires during the JS backend; this prevents lambda-level `simplify_field_access` from collapsing `Pfield(0, Lvar Foo)` into `Lvar Async_jsx$Foo` before the IR stage can keep the `Foo.make` static index. Newly passing: `async_jsx`, `jsx_preserve_test`.
+
+## Iteration on 2026-04-21 (midday)
+
+- Active slice: `async_jsx` (smallest output diff, 11 lines) and `jsx_preserve_test` (a broad JSX shape cluster) both showed `<Foo.make />` in the OCaml snapshot but `<Async_jsx$Foo />` / `<Jsx_preserve_test$Icon />` in Rust output. Instrumenting the simplify-guard at `simplify.rs:3109-3133` showed `env.jsx_preserve == false` for EVERY jsx call during `async_jsx.ast` compilation, even though the `@@config({ flags: ["-bs-jsx-preserve"] })` in the source is picked up downstream for `apply_js_flatten_and_mark_dead_pass`.
+- OCaml / backend reference:
+  - `compiler/core/js_pass_flatten_and_mark_dead.ml:248-251` — the JS IR pass blocks the `Caml_block` projection substitution for `{name = "make"}` entries when `!Js_config.jsx_preserve`.
+  - `compiler/bsc/rescript_compiler_main.ml:420-446` — the `@@config flags: [...]` payload is fed back into `Bsc_args.parse_exn` so `-bs-jsx-preserve` from the file flips `Js_config.jsx_preserve` globally.
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs:328-330` — replaced the hard-coded `simplify_for_js_backend(lam)` call in `compile_deps_program_with_possible_required_modules` with `simplify_for_js_backend_with_jsx_preserve(lam, self.jsx_preserve)`. All other wiring (the `jsx_preserve_for_structure` structure scan at `driver.rs:1194-1200`, the `LambdaCompiler` constructor, and the existing JS IR pass at `flatten_and_mark_dead_transformed_jsx_tag_expression`) was already correct — the preserve guard was simply not being asked about the flag at the lambda stage.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for `async_jsx`, `jsx_preserve_test` (newly fixed) and the existing cluster: ExternalShadow, test_static_catch_ident, NondetPatterMatch, gpr_2413_test, DictPatternMatchingOptimization, LetUnwrap, flexible_array_test, inline_string_test, bal_set_mini, stdlib/intl/Stdlib_IntlTests (no regression).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **604 / 657**.
+- Outcome:
+  - JS snapshot parity: **604 / 657** (+2 vs prior 602 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **49** (-2 vs prior 51).
+- Remaining failure clusters (unchanged buckets, smaller):
+  - **gpr_3609_test** — extra `let intValue = state._0` binding; alias-simplification source. Unchanged.
+  - **exception_rebound_err_test** — Rust keeps nested `if-else` chain where OCaml flattens into sequence of top-level `if (cond) return;` statements.
+  - **miss_colon_test** — exit id renumbering in nested staticcatches; the `exit = N` / `exit$1 = M` values and surrounding branch structure are offset by one.
+  - **export-coercion cluster** (ast_abstract_test, async_inline, derive_projector_test, exception_alias, lazy_test, test_simple_ref, webpack_config, ...) — export-coercion path creates extra `let x$1 = ...` aliases and reorders trailing simple-constant exports. Blocked on wiring `pass_lets_dce` into the live pipeline.
+  - **broader simplify-aggressiveness** (test_google_closure, option_optimisation, ticker, tuple_alloc, global_module_alias_test, gpr_4491_test) — Rust-specific folding of small inlineable functions, option-wrap removal, `<expr>, undefined` seq residues.
+  - **test_set / test_zero_nullable / for_loop_test / ast_abstract_test** — alias and var renaming differences (`match` vs `s2`, `v` vs `v$1`, etc.).
+- Next iteration candidates:
+  1. **miss_colon_test exit renumbering** — trace the staticcatch emission order in OCaml vs Rust. OCaml emits `exit = 1` / `exit === 1` for the OUTER catch; Rust emits `exit$1 = 3` / `exit$1 === 3`.
+  2. **for_loop_test var renaming** — Rust renames the `v` ref inside inner loops to `v$1`; OCaml keeps `v`.
+  3. **export-coercion wire-up** — block on the documented `pass_lets_dce` wire-up task.
 
 ## Iteration on 2026-04-21 (morning)
 
