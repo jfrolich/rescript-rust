@@ -264,8 +264,16 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
     }
 
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
+    // OCaml's `propagate_beta_reduce` (lam_beta_reduce.ml:66) builds
+    // `rest_bindings` via `fold_left2` with prepending (`(p, arg) :: rest_bindings`),
+    // so the list ends up in REVERSE param-order, then walks it with
+    // `Ext_list.fold_right` to wrap the body. The Rust loop above appends
+    // (push) instead of prepending, so iterating rest_bindings forward here
+    // is equivalent to OCaml's prepend-then-fold-right shape. Each iteration
+    // wraps the current result in a new outer Llet, so the LAST element
+    // becomes the outermost binding (matching OCaml).
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter().rev() {
+    for (param, arg) in rest_bindings.into_iter() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
@@ -365,9 +373,13 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
     // Apply substitution to body
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
 
-    // Wrap with let bindings (in reverse order for proper scoping)
+    // See `propagate_beta_reduce_with_meta_and_id_gen` above for why we
+    // iterate forward here despite the OCaml source using `fold_right`:
+    // OCaml prepends to `rest_bindings` (reversing param-order), then
+    // `fold_right` rebuilds the wrap from the right, equivalent to walking a
+    // push-built list forward and wrapping outward at each step.
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter().rev() {
+    for (param, arg) in rest_bindings.into_iter() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
