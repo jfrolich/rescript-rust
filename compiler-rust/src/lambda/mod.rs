@@ -40,6 +40,7 @@ pub mod pass_count;
 pub mod pass_eliminate_ref;
 pub mod pass_exits;
 pub mod pass_lets_dce;
+pub mod pass_remove_alias;
 pub mod primitive;
 pub mod print;
 pub mod sexp_lambda;

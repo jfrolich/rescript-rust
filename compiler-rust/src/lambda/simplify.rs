@@ -1,9 +1,9 @@
 //! JS-backend lambda simplification pipeline.
 //!
 //! Direct port of `compiler/core/lam_compile_main.ml:148-200`. Calls the
-//! ported passes in the same order as OCaml. Passes that have not been ported
-//! yet (`simplify_alias`, `alpha_conversion`) are stubbed as identity functions
-//! and will be replaced as their ports land.
+//! ported passes in the same order as OCaml. The remaining stubbed pass
+//! (`alpha_conversion`) is an identity function and will be replaced when
+//! its port lands.
 //!
 //! Every line here must trace to a specific line in
 //! `compiler/core/lam_compile_main.ml`. No Rust-only logic.
@@ -13,16 +13,8 @@ use crate::lambda::compile_context::LamStats;
 use crate::lambda::deep_flatten::deep_flatten;
 use crate::lambda::pass_exits::simplify_exits;
 use crate::lambda::pass_lets_dce::simplify_lets;
+use crate::lambda::pass_remove_alias::simplify_alias_with_jsx;
 use crate::lambda::Lambda;
-
-/// Stub for `Lam_pass_remove_alias.simplify_alias`
-/// (compiler/core/lam_pass_remove_alias.ml). Identity for now: when the real
-/// pass is ported it will fold field reads, unwrap optional blocks, inline
-/// known cross-module functions and fold boolean constants using the
-/// `ident_tbl` populated by `collect_info`.
-fn simplify_alias(_meta: &LamStats, lam: &Lambda) -> Lambda {
-    lam.clone()
-}
 
 /// Stub for `Lam_pass_alpha_conversion.alpha_conversion`
 /// (compiler/core/lam_pass_alpha_conversion.ml). Identity for now: when the
@@ -37,11 +29,10 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
 }
 
-/// `jsx_preserve` is wired through here for parity with OCaml's
-/// `Js_config.jsx_preserve`, but `simplify_alias` is currently stubbed so the
-/// flag has no effect yet. It is kept on the public API so the call sites in
-/// `compile.rs` continue to thread the value down.
-pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, _jsx_preserve: bool) -> Lambda {
+/// `jsx_preserve` reaches `simplify_alias` here so that the JSX guard in
+/// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:54-62)
+/// fires on the same callees OCaml does.
+pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
     // OCaml constructs `meta` once at line 150-153 with `~export_idents` and
     // `~export_ident_sets` from the Lam_compile_main.compile entry point.
     // The Rust JS backend does not currently propagate exports down to this
@@ -65,7 +56,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, _jsx_preserve: bo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias(&meta, &lam);
+    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:169 — deep_flatten.
     let lam = deep_flatten(&lam);
@@ -74,7 +65,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, _jsx_preserve: bo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias(&meta, &lam);
+    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten(&lam);
@@ -92,7 +83,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, _jsx_preserve: bo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias(&meta, &lam);
+    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:190 — alpha_conversion.
     let lam = alpha_conversion(&meta, &lam);

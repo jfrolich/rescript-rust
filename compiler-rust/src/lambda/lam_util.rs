@@ -5,10 +5,14 @@
 //! that justifies it; do not introduce Rust-only logic.
 
 use crate::ident::Ident;
-use crate::lambda::compat::LetKind;
+use crate::lambda::compat::{FieldDbgInfo, LetKind};
+use crate::lambda::compile_context::{Element, IdKind, IdentTable};
+use crate::lambda::constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
-use crate::lambda::primitive::{Mutable, Primitive};
+use crate::lambda::primitive::Primitive;
+use crate::lambda::tag_info::TagInfo;
 use crate::lambda::{analysis, Apply, Lambda, PrimInfo};
+use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
 fn is_block_constructor(primitive: &Primitive) -> bool {
@@ -118,12 +122,80 @@ pub fn let_variable(param: Ident, arg: Lambda, body: Lambda) -> Lambda {
     Lambda::let_(LetKind::Variable, param, arg, body)
 }
 
+/// Direct port of `Lam_util.field_flatten_get` (lam_util.ml:202-232).
+///
+/// Resolves a `Pfield(i, info)` access on a known identifier by consulting
+/// `tbl`. When the binding is a known module / immutable block / constant
+/// block we either rewrite to the shared module field access, lift the
+/// element out of the block, or fall back to the caller's `lam` thunk when
+/// the slot is opaque or allocates.
+pub fn field_flatten_get(
+    lam: impl FnOnce() -> Lambda,
+    v: &Ident,
+    i: i32,
+    info: &FieldDbgInfo,
+    tbl: &IdentTable,
+) -> Lambda {
+    match tbl.get(v) {
+        // lam_util.ml:204-207 — `Module g`: rewrite as Pfield on
+        // `Lam.global_module g`.
+        Some(IdKind::Module(g)) => Lambda::prim(
+            Primitive::Pfield(i, info.clone()),
+            vec![Lambda::global_module(g.clone(), false)],
+            Location::none(),
+        ),
+        // lam_util.ml:208-213 — ImmutableBlock: lift element if `SimpleForm`,
+        // bail otherwise. Out-of-bounds index is treated as bail (OCaml uses
+        // the `exception _` arm).
+        Some(IdKind::ImmutableBlock(arr)) => match arr.get(i as usize) {
+            None => lam(),
+            Some(Element::Na) => lam(),
+            Some(Element::SimpleForm(l)) => l.clone(),
+        },
+        // lam_util.ml:214-224 — Constant Const_block (Blk_record {fields}, ls):
+        // resolve the field by name when `info` is `Fld_record`. If the named
+        // slot holds a non-allocating constant, lift it as `Lam.const`.
+        Some(IdKind::Constant(Constant::Block {
+            tag_info: TagInfo::Record { fields, .. },
+            elements,
+            ..
+        })) => match info {
+            FieldDbgInfo::Record { name, .. } => {
+                let mut found: Option<&Constant> = None;
+                for (idx, (field_name, _)) in fields.iter().enumerate() {
+                    if field_name == name {
+                        found = elements.get(idx);
+                        break;
+                    }
+                }
+                match found {
+                    Some(c) if !c.is_allocating() => Lambda::const_(c.clone()),
+                    _ => lam(),
+                }
+            }
+            _ => lam(),
+        },
+        // lam_util.ml:225-230 — Constant Const_block (other tag, ls):
+        // lift the i-th element if it is non-allocating.
+        Some(IdKind::Constant(Constant::Block { elements, .. })) => {
+            match elements.get(i as usize) {
+                None => lam(),
+                Some(x) if !x.is_allocating() => Lambda::const_(x.clone()),
+                Some(_) => lam(),
+            }
+        }
+        // lam_util.ml:231-232 — anything else (or no entry): bail.
+        Some(_) | None => lam(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
     use crate::lambda::compat::LetKind;
     use crate::lambda::constant::Constant;
+    use crate::lambda::primitive::Mutable;
     use crate::location::Location;
 
     fn ident(name: &str, stamp: i32) -> Ident {

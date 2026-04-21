@@ -4,28 +4,30 @@
 
 **The mandatory deletion has happened.** `simplify_with_env`, `SimplifyEnv`, and
 the ~114 helper functions that fed them are gone. `compiler-rust/src/lambda/simplify.rs`
-is now a 99-line file that calls the OCaml-aligned pipeline from
+is now a 97-line file that calls the OCaml-aligned pipeline from
 `lam_compile_main.ml:148-200`. `deep_flatten` was extracted into its own module
 at `compiler-rust/src/lambda/deep_flatten.rs`.
 
-Three of the pipeline stages are still **identity stubs** in the new
-`simplify.rs`:
+The pipeline now invokes the real ports of `collect_info` and `simplify_alias`.
+The remaining identity stub in `simplify.rs` is:
 
-- `collect_info` (port of `Lam_pass_collect.collect_info`) — needs to populate a
-  `Lam_stats.t` consumed by the next two stages.
-- `simplify_alias` (port of `Lam_pass_remove_alias.simplify_alias`) — field
-  folding, optional unwrapping, cross-module fn inlining, boolean const folding.
 - `alpha_conversion` (port of `Lam_pass_alpha_conversion.alpha_conversion`) —
   rename idents duplicated by inlining.
 
 Your next steps, in order:
-1. Port `collect_info` (`compiler/core/lam_pass_collect.ml`, ~152 lines). It
-   produces the `ident_tbl` consumed by `simplify_alias` and `alpha_conversion`.
-2. Port `simplify_alias` (`compiler/core/lam_pass_remove_alias.ml`, ~290 lines).
-3. Port `alpha_conversion` (`compiler/core/lam_pass_alpha_conversion.ml`, ~128 lines).
-4. Address the issues in existing ports listed at the top of PERFORMANCE_PLAN.md
-   (IdGenerator stamp collisions in pass_exits, raw `Lsequence` vs `Lambda::seq`
-   in pass_lets_dce, dead `let_variable` helper in lam_util, etc.).
+1. Port `alpha_conversion` (`compiler/core/lam_pass_alpha_conversion.ml`,
+   ~128 lines).
+2. Propagate exports from the driver into `LamStats` so the
+   `Set_ident.mem meta.export_idents` arm in `Lam_pass_collect.collect_info`
+   (lam_pass_collect.ml:92-93) annotates non-Lfunction exported bindings.
+3. Wire up `Lam_compile_env.query_external_id_info` so the cross-module
+   inline arms in `Lam_pass_remove_alias.simplify_alias`
+   (lam_pass_remove_alias.ml:131-162) and `Lam_arity_analysis.get_arity`
+   (lam_arity_analysis.ml:43-71) can resolve foreign module functions.
+4. Address the issues in existing ports listed at the top of
+   PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
+   `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
+   in lam_util, etc.).
 
 **Every line of Rust must trace to a specific line in OCaml source.** No
 invented logic. Regressions from the monolith deletion are expected; parity
@@ -36,8 +38,60 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (collect_info ported, threaded through pipeline)
-**Status:** 270 / 657 authoritative JS snapshot baseline; 4 compile errors and 383 output diffs. Unchanged from the post-monolith-delete baseline — `simplify_alias` and `alpha_conversion` are still identity stubs and don't yet consume the meta produced by `collect_info`. Parity will return when those two ports land.
+**Last Updated:** 2026-04-21 (simplify_alias ported, +20 parity)
+**Status:** 290 / 657 authoritative JS snapshot baseline; 4 compile errors and 363 output diffs. `simplify_alias` no longer stubbed; `alpha_conversion` is the only remaining identity-stub stage in the OCaml-aligned pipeline.
+
+## Iteration on 2026-04-21 (simplify_alias ported)
+
+- New module `compiler-rust/src/lambda/pass_remove_alias.rs` (~370 lines):
+  direct port of `compiler/core/lam_pass_remove_alias.ml`. Covers all 12
+  arms of `simpl` — JSX preserve guard, `Pfield` flattening via the new
+  `field_flatten_get` helper, optional-block unwrapping, `Pis_not_none`
+  rewrite into explicit `Pis_null` / `Pis_undefined` / `Pis_null_undefined`
+  probes, boolean-constant folding via `id_is_for_sure_true_in_boolean`,
+  same-arity `Lapply(Lvar)` and `Lapply(Lfunction)` beta-reduction with
+  `lfunction_can_be_inlined` / `ok_to_inline_fun_when_app` / `is_closed_with_map` /
+  `hit_variable` guards, `Lstringswitch` scrutinee const-folding, and the
+  expected recursive cases for `Lswitch`, `Lletrec`, `Llet`, etc.
+- New helper `Lam_util.field_flatten_get` ported into
+  `compiler-rust/src/lambda/lam_util.rs` (lam_util.ml:202-232). Resolves
+  `Pfield(i, info)` against `IdKind::Module / ImmutableBlock /
+  Constant(Const_block(...))`.
+- Cross-module function inlining (`Lam_compile_env.query_external_id_info`,
+  lam_pass_remove_alias.ml:131-162) is intentionally *not* ported — the
+  Rust JS backend has no env counterpart yet, so the `Lapply(Lprim(Pfield,
+  Lglobal_module))` arm falls through to the default Lapply handler. This
+  matches OCaml's behavior whenever the foreign module info is missing.
+- The `jsx_preserve` flag is now threaded all the way to
+  `Simplifier::simpl`, so the 7432-tagged `Pjs_call jsx/jsxs` guard
+  (lam_pass_remove_alias.ml:54-62) fires on the same callees OCaml does.
+  Previously the flag was wired through but unused.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 10 ./compiler-rust/target/release/bsc` byte-clean for
+    `ExternalShadow`.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **290 / 657**.
+- Outcome:
+  - JS snapshot parity: **290 / 657** (+20 vs prior 270 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **383 -> 363**.
+- Next iteration candidates (in priority order):
+  1. **Port `alpha_conversion`** — `compiler/core/lam_pass_alpha_conversion.ml`,
+     ~128 lines. Rename duplicated idents produced by inlining so downstream
+     analyses see fresh names.
+  2. **Propagate exports from the driver** so `LamStats` knows which
+     non-function bindings should be annotated as `FunctionId` (the OCaml
+     `if Set_ident.mem meta.export_idents ident` fallback in
+     `lam_pass_collect.ml:92-93`). This currently downgrades the `is_export_id`
+     branch in `simplify_alias` (lam_pass_remove_alias.ml:211).
+  3. **Cross-module inlining infrastructure** — port
+     `Lam_compile_env.query_external_id_info` so the cross-module arms in
+     `simplify_alias` and `Lam_arity_analysis.get_arity` can fire.
+  4. **Issues in existing ports** (from PERFORMANCE_PLAN.md top section):
+     IdGenerator stamp collisions in `pass_exits`, raw `Lsequence` instead of
+     `Lambda::seq` in `pass_lets_dce`, unreachable catch-all `Llet` arm,
+     `lookup` convenience wrapper in `pass_count`, dead `let_variable` helper
+     in `lam_util`.
 
 ## Iteration on 2026-04-21 (collect_info ported)
 
