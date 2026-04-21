@@ -21,8 +21,10 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::analysis::no_side_effects;
 use crate::lambda::closure::StatsMap;
+use crate::lambda::collect_info::kind_of_lambda_block;
 use crate::lambda::compat::LetKind;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::compile_context::{IdKind, IdentTable};
+use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::subst::Subst;
 use crate::lambda::{Apply, Lambda, PrimInfo};
 use crate::location::Location;
@@ -194,7 +196,31 @@ pub fn no_names_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) ->
 /// This substitutes only constants/variables directly and introduces fresh let-bindings
 /// for other arguments so returned wrapper structure is preserved instead of being
 /// collapsed by `subst`.
+///
+/// Back-compat variant without meta threading — primarily used by unit tests.
+/// Mirrors the OCaml signature change introduced by `Lam_beta_reduce` which takes
+/// `meta : Lam_stats.t`; the production call path uses
+/// [`propagate_beta_reduce_with_meta`] instead.
 pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -> Lambda {
+    let mut scratch = HashMap::new();
+    propagate_beta_reduce_with_meta(&mut scratch, params, body, args)
+}
+
+/// Port of `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:47-74).
+///
+/// When a parameter argument is bound to a fresh variable rather than inlined,
+/// OCaml also registers the new variable in `meta.ident_tbl` via
+/// `kind_of_lambda_block` / `Normal_optional` so subsequent
+/// `Lam_pass_remove_alias` field lookups (`field_flatten_get`) can continue to
+/// see through the wrapper. Without this, `let X = {foo: funarg.foo}` stays
+/// alive as a dead binding after `simplify_alias` rewrites `X.foo` to
+/// `funarg.foo`.
+pub fn propagate_beta_reduce_with_meta(
+    ident_tbl: &mut IdentTable,
+    params: &[Ident],
+    body: &Lambda,
+    args: &[Lambda],
+) -> Lambda {
     if let Some(result) = simple_beta_reduce(params, body, args) {
         return result;
     }
@@ -219,6 +245,7 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
     let new_body = rewrite_bounded_vars(&mut substitution, body, &id_gen);
     let mut result = new_body;
     for (param, arg) in rest_bindings.into_iter().rev() {
+        register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
     result
@@ -233,7 +260,25 @@ pub fn propagate_beta_reduce(params: &[Ident], body: &Lambda, args: &[Lambda]) -
 /// - Constants or variables: always substituted
 /// - Pure and used 0-1 times: substituted
 /// - Otherwise: bound to let variables
+///
+/// Back-compat variant without meta threading — unit tests only.
 pub fn propagate_beta_reduce_with_map(
+    stats: &StatsMap,
+    params: &[Ident],
+    body: &Lambda,
+    args: &[Lambda],
+) -> Lambda {
+    let mut scratch = HashMap::new();
+    propagate_beta_reduce_with_map_and_meta(&mut scratch, stats, params, body, args)
+}
+
+/// Port of `Lam_beta_reduce.propagate_beta_reduce_with_map`
+/// (lam_beta_reduce.ml:76-115). Same ident_tbl tracking as
+/// [`propagate_beta_reduce_with_meta`] — when a non-inlined argument is bound
+/// to a fresh variable, we register its shape in `ident_tbl` so later
+/// `simplify_alias` passes can continue to see through it.
+pub fn propagate_beta_reduce_with_map_and_meta(
+    ident_tbl: &mut IdentTable,
     stats: &StatsMap,
     params: &[Ident],
     body: &Lambda,
@@ -286,9 +331,36 @@ pub fn propagate_beta_reduce_with_map(
     // Wrap with let bindings (in reverse order for proper scoping)
     let mut result = new_body;
     for (param, arg) in rest_bindings.into_iter().rev() {
+        register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
     result
+}
+
+/// Direct port of the `meta.ident_tbl` update in
+/// `Lam_beta_reduce.propagate_beta_reduce` (lam_beta_reduce.ml:66-73) and
+/// `propagate_beta_reduce_with_map` (lam_beta_reduce.ml:107-114). OCaml only
+/// registers `ImmutableBlock` / `Normal_optional` here — everything else is
+/// a no-op so downstream `Lam_pass_remove_alias` keeps treating the binding
+/// as an opaque `Lvar`.
+fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &Lambda) {
+    match arg {
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+            args,
+            ..
+        }) => {
+            ident_tbl.insert(param.clone(), kind_of_lambda_block(args));
+        }
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Psome | Primitive::PsomeNotNest,
+            args,
+            ..
+        }) if args.len() == 1 => {
+            ident_tbl.insert(param.clone(), IdKind::NormalOptional(args[0].clone()));
+        }
+        _ => {}
+    }
 }
 
 /// Create an optimized let binding.

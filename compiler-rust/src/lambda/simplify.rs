@@ -51,7 +51,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:169 — deep_flatten.
     let lam = deep_flatten(&lam);
@@ -60,7 +60,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten(&lam);
@@ -78,7 +78,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:190 — alpha_conversion.
     let lam = alpha_conversion(&meta, &lam);

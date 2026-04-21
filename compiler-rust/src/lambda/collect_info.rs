@@ -24,7 +24,7 @@ use crate::lambda::{Lambda, PrimInfo};
 /// Decides whether a single block field is "simple" enough to substitute on
 /// reads. Anything but a Lvar, Lconst or a `Pfield(_, Fld_module _)` from a
 /// global module / Lvar is reported as `NA`.
-fn element_of_lambda(lam: &Lambda) -> Element {
+pub(crate) fn element_of_lambda(lam: &Lambda) -> Element {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => Element::SimpleForm(lam.clone()),
         Lambda::Lprim(PrimInfo {
@@ -43,7 +43,7 @@ fn element_of_lambda(lam: &Lambda) -> Element {
 }
 
 /// Direct port of `Lam_util.kind_of_lambda_block` (lam_util.ml:198-200).
-fn kind_of_lambda_block(xs: &[Lambda]) -> IdKind {
+pub(crate) fn kind_of_lambda_block(xs: &[Lambda]) -> IdKind {
     IdKind::ImmutableBlock(xs.iter().map(element_of_lambda).collect())
 }
 

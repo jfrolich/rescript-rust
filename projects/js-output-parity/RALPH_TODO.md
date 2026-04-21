@@ -42,6 +42,21 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Beta-reduction ident_tbl tracking (lam_beta_reduce.ml:66-73,107-114)**:
+  OCaml's `propagate_beta_reduce` and `propagate_beta_reduce_with_map`
+  mutate `meta.ident_tbl` when a non-inlined argument gets bound to a
+  fresh variable — registering `Pmakeblock(_, _, Immutable) args` as
+  `ImmutableBlock(kind_of_lambda_block args)` and `Psome/Psome_not_nest
+  [v]` as `Normal_optional v`. This lets subsequent `simplify_alias`
+  field reads see through the wrapper via `field_flatten_get`. Rust's
+  ports didn't thread the meta, so freshly introduced let-bindings
+  stayed opaque. Added `propagate_beta_reduce_with_meta` and
+  `propagate_beta_reduce_with_map_and_meta` variants, refactored
+  `Simplifier` in `pass_remove_alias.rs` to hold
+  `&mut IdentTable` + `&HashSet<Ident>`, and made
+  `simplify_alias` / `simplify_alias_with_jsx` take `&mut LamStats`.
+  JS snapshot parity: **626 / 657 -> 627 / 657 (+1)**; output diffs:
+  **27 -> 26**. `a_recursive_type.res` now matches.
 - **Port `Lam.prim` Blk_module collapse (lam.ml:549-582)**:
   OCaml's `Lam.prim` smart constructor folds
   `Pmakeblock(_, Blk_module [f0; f1; …], _) [v.f0; v.f1; …]` — a
@@ -93,8 +108,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Blk_module collapse + nullish raw construction, +2 parity)
-**Status:** 626 / 657 authoritative JS snapshot baseline; 4 compile errors and 27 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
+**Last Updated:** 2026-04-21 (beta_reduce ident_tbl tracking + Blk_module collapse + nullish raw, +3 parity)
+**Status:** 627 / 657 authoritative JS snapshot baseline; 4 compile errors and 26 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 

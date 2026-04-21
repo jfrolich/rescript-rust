@@ -13,7 +13,6 @@
 //! logic.
 
 use crate::lambda::analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
-use crate::lambda::beta_reduce::{propagate_beta_reduce, propagate_beta_reduce_with_map};
 use crate::lambda::closure::is_closed_with_map;
 use crate::lambda::compat::Comparison;
 use crate::lambda::compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
@@ -89,32 +88,47 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
 
 /// Direct port of `Lam_pass_remove_alias.simplify_alias`
 /// (lam_pass_remove_alias.ml:50-290).
-pub fn simplify_alias(meta: &LamStats, lam: &Lambda) -> Lambda {
-    Simplifier {
-        meta,
+///
+/// The `meta` parameter is mutable so that the beta-reduction helpers called
+/// from inside the pass can register `ImmutableBlock` / `Normal_optional`
+/// entries for their fresh let-bound parameters (lam_beta_reduce.ml:66-73).
+/// Without this, blocks introduced by beta-reduced functor arguments remain
+/// opaque to subsequent `field_flatten_get` lookups.
+pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
+    let export_idents = std::mem::take(&mut meta.export_idents);
+    let result = Simplifier {
+        ident_tbl: &mut meta.ident_tbl,
+        export_idents: &export_idents,
         jsx_preserve: false,
     }
-    .simpl(lam)
+    .simpl(lam);
+    meta.export_idents = export_idents;
+    result
 }
 
 /// Same as [`simplify_alias`] but threads the JSX preservation flag — a port
 /// of OCaml's `Js_config.jsx_preserve` global. The 7432-tagged Pjs_call arm
 /// inside `simpl` only fires when this flag is true (lam_pass_remove_alias.ml:54-62).
-pub fn simplify_alias_with_jsx(meta: &LamStats, lam: &Lambda, jsx_preserve: bool) -> Lambda {
-    Simplifier {
-        meta,
+pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: bool) -> Lambda {
+    let export_idents = std::mem::take(&mut meta.export_idents);
+    let result = Simplifier {
+        ident_tbl: &mut meta.ident_tbl,
+        export_idents: &export_idents,
         jsx_preserve,
     }
-    .simpl(lam)
+    .simpl(lam);
+    meta.export_idents = export_idents;
+    result
 }
 
 struct Simplifier<'a> {
-    meta: &'a LamStats,
+    ident_tbl: &'a mut crate::lambda::compile_context::IdentTable,
+    export_idents: &'a std::collections::HashSet<crate::ident::Ident>,
     jsx_preserve: bool,
 }
 
 impl<'a> Simplifier<'a> {
-    fn simpl(&self, lam: &Lambda) -> Lambda {
+    fn simpl(&mut self, lam: &Lambda) -> Lambda {
         match lam {
             // lam_pass_remove_alias.ml:53
             Lambda::Lvar(_) => lam.clone(),
@@ -172,7 +186,7 @@ impl<'a> Simplifier<'a> {
                             v,
                             *i,
                             info,
-                            &self.meta.ident_tbl,
+                            self.ident_tbl,
                         )
                     }
                     other => Lambda::prim(primitive.clone(), vec![other], loc.clone()),
@@ -191,8 +205,9 @@ impl<'a> Simplifier<'a> {
                 let Lambda::Lvar(v) = &args[0] else {
                     unreachable!()
                 };
-                match self.meta.ident_tbl.get(v) {
-                    Some(IdKind::OptionalBlock(l, _)) => l.clone(),
+                let kind = self.ident_tbl.get(v).cloned();
+                match kind {
+                    Some(IdKind::OptionalBlock(l, _)) => l,
                     _ => {
                         if matches!(p, Primitive::PvalFromOptionNotNest) {
                             args[0].clone()
@@ -237,8 +252,9 @@ impl<'a> Simplifier<'a> {
                 let Lambda::Lvar(id) = &cond_args[0] else {
                     unreachable!()
                 };
-                match self.meta.ident_tbl.get(id) {
-                    Some(IdKind::Constant(c)) if is_const_some(c) => self.simpl(then_),
+                let kind = self.ident_tbl.get(id).cloned();
+                match kind {
+                    Some(IdKind::Constant(c)) if is_const_some(&c) => self.simpl(then_),
                     Some(
                         IdKind::ImmutableBlock(_)
                         | IdKind::MutableBlock(_)
@@ -289,7 +305,8 @@ impl<'a> Simplifier<'a> {
             // conditions are recursively simplified.
             Lambda::LifThenElse(cond, then_, else_) => match cond.as_ref() {
                 Lambda::Lvar(id) => {
-                    match id_is_for_sure_true_in_boolean(&self.meta.ident_tbl, id) {
+                    let outcome = id_is_for_sure_true_in_boolean(self.ident_tbl, id);
+                    match outcome {
                         Outcome::EvalTrue => self.simpl(then_),
                         Outcome::EvalFalse => self.simpl(else_),
                         Outcome::EvalUnknown => Lambda::if_(
@@ -335,80 +352,95 @@ impl<'a> Simplifier<'a> {
                 };
                 let ap_args: Vec<Lambda> =
                     apply.ap_args.iter().map(|a| self.simpl(a)).collect();
-                let normal = || {
+
+                // Clone the FunctionId payload to release the immutable
+                // borrow on `self.ident_tbl`; the beta-reduction helpers below
+                // mutate it to register fresh let-bindings, and the `self.simpl`
+                // recursion that follows needs `&mut self` in turn.
+                let func_info = match self.ident_tbl.get(v) {
+                    Some(IdKind::FunctionId {
+                        lambda: Some((Lambda::Lfunction(func), rec_flag)),
+                        ..
+                    }) if lfunction_can_be_inlined(func)
+                        && ap_args.len() == func.params.len() =>
+                    {
+                        Some((func.clone(), *rec_flag))
+                    }
+                    _ => None,
+                };
+
+                let normal = |simplifier: &mut Self| {
                     Lambda::apply(
-                        self.simpl(apply.ap_func.as_ref()),
+                        simplifier.simpl(apply.ap_func.as_ref()),
                         ap_args.clone(),
                         apply.ap_info.clone(),
                         apply.ap_transformed_jsx,
                     )
                 };
-                match self.meta.ident_tbl.get(v) {
-                    Some(IdKind::FunctionId {
-                        lambda: Some((Lambda::Lfunction(func), rec_flag)),
-                        ..
-                    }) if lfunction_can_be_inlined(func) => {
-                        if ap_args.len() == func.params.len() {
-                            if func.attr.is_a_functor {
-                                // lam_pass_remove_alias.ml:188-197 — functor:
-                                // always beta-reduce (callers are expected to
-                                // be at most one site).
-                                self.simpl(&propagate_beta_reduce(
-                                    &func.params,
-                                    &func.body,
-                                    &ap_args,
-                                ))
-                            } else if ok_to_inline_fun_when_app(func, &ap_args) {
-                                // lam_pass_remove_alias.ml:198-231 —
-                                // size-bounded inlining.
-                                let (param_ok, param_map) = is_closed_with_map(
-                                    &self.meta.export_idents,
-                                    &func.params,
-                                    &func.body,
-                                );
-                                let is_export_id = self.meta.export_idents.contains(v);
-                                let allow = match (is_export_id, param_ok) {
-                                    (false, _) => true,
-                                    (true, true) => true,
-                                    (true, false) => false,
-                                };
-                                if allow {
-                                    match rec_flag {
-                                        RecFlag::Rec => propagate_beta_reduce_with_map(
+
+                match func_info {
+                    Some((func, _rec_flag)) if func.attr.is_a_functor => {
+                        // lam_pass_remove_alias.ml:188-197 — functor:
+                        // always beta-reduce (callers are expected to
+                        // be at most one site).
+                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta(
+                            self.ident_tbl,
+                            &func.params,
+                            &func.body,
+                            &ap_args,
+                        );
+                        self.simpl(&reduced)
+                    }
+                    Some((func, rec_flag)) if ok_to_inline_fun_when_app(&func, &ap_args) => {
+                        // lam_pass_remove_alias.ml:198-231 —
+                        // size-bounded inlining.
+                        let (param_ok, param_map) = is_closed_with_map(
+                            self.export_idents,
+                            &func.params,
+                            &func.body,
+                        );
+                        let is_export_id = self.export_idents.contains(v);
+                        let allow = match (is_export_id, param_ok) {
+                            (false, _) => true,
+                            (true, true) => true,
+                            (true, false) => false,
+                        };
+                        if allow {
+                            match rec_flag {
+                                RecFlag::Rec => {
+                                    crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta(
+                                        self.ident_tbl,
+                                        &param_map,
+                                        &func.params,
+                                        &func.body,
+                                        &ap_args,
+                                    )
+                                }
+                                RecFlag::SelfRec => normal(self),
+                                RecFlag::NonRec => {
+                                    // lam_pass_remove_alias.ml:220-228:
+                                    // avoid non-termination such as
+                                    // `g(g)` by checking whether v
+                                    // appears in the args.
+                                    if ap_args.iter().any(|lam| hit_variable(v, lam)) {
+                                        normal(self)
+                                    } else {
+                                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta(
+                                            self.ident_tbl,
                                             &param_map,
                                             &func.params,
                                             &func.body,
                                             &ap_args,
-                                        ),
-                                        RecFlag::SelfRec => normal(),
-                                        RecFlag::NonRec => {
-                                            // lam_pass_remove_alias.ml:220-228:
-                                            // avoid non-termination such as
-                                            // `g(g)` by checking whether v
-                                            // appears in the args.
-                                            if ap_args.iter().any(|lam| hit_variable(v, lam)) {
-                                                normal()
-                                            } else {
-                                                self.simpl(&propagate_beta_reduce_with_map(
-                                                    &param_map,
-                                                    &func.params,
-                                                    &func.body,
-                                                    &ap_args,
-                                                ))
-                                            }
-                                        }
+                                        );
+                                        self.simpl(&reduced)
                                     }
-                                } else {
-                                    normal()
                                 }
-                            } else {
-                                normal()
                             }
                         } else {
-                            normal()
+                            normal(self)
                         }
                     }
-                    _ => normal(),
+                    _ => normal(self),
                 }
             }
 
@@ -418,13 +450,26 @@ impl<'a> Simplifier<'a> {
             Lambda::Lapply(apply)
                 if matches!(apply.ap_func.as_ref(), Lambda::Lfunction(_)) =>
             {
-                let Lambda::Lfunction(func) = apply.ap_func.as_ref() else {
-                    unreachable!()
+                // Clone the function payload up front: the mutable meta
+                // borrow used by `propagate_beta_reduce_with_meta` is
+                // incompatible with the `apply.ap_func` / `apply.ap_args`
+                // borrows we need to carry across the call.
+                let func_clone = match apply.ap_func.as_ref() {
+                    Lambda::Lfunction(func) => func.clone(),
+                    _ => unreachable!(),
                 };
                 let args: Vec<Lambda> =
                     apply.ap_args.iter().map(|a| self.simpl(a)).collect();
-                if args.len() == func.params.len() && lfunction_can_be_inlined(func) {
-                    self.simpl(&propagate_beta_reduce(&func.params, &func.body, &args))
+                if args.len() == func_clone.params.len()
+                    && lfunction_can_be_inlined(&func_clone)
+                {
+                    let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta(
+                        self.ident_tbl,
+                        &func_clone.params,
+                        &func_clone.body,
+                        &args,
+                    );
+                    self.simpl(&reduced)
                 } else {
                     Lambda::apply(
                         self.simpl(apply.ap_func.as_ref()),
@@ -478,12 +523,16 @@ impl<'a> Simplifier<'a> {
             // lam_pass_remove_alias.ml:268-277 — Lstringswitch with a Lvar
             // scrutinee: try const-folding via the ident_tbl, then recurse.
             Lambda::LstringSwitch(scrut, sw, d) => {
-                let scrut = match scrut.as_ref() {
-                    Lambda::Lvar(s) => match self.meta.ident_tbl.get(s) {
-                        Some(IdKind::Constant(c)) => Lambda::const_(c.clone()),
-                        _ => self.simpl(scrut),
+                let folded = match scrut.as_ref() {
+                    Lambda::Lvar(s) => match self.ident_tbl.get(s).cloned() {
+                        Some(IdKind::Constant(c)) => Some(Lambda::const_(c)),
+                        _ => None,
                     },
-                    _ => self.simpl(scrut),
+                    _ => None,
+                };
+                let scrut = match folded {
+                    Some(c) => c,
+                    None => self.simpl(scrut),
                 };
                 Lambda::string_switch(
                     scrut,
