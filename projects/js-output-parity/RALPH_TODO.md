@@ -42,6 +42,17 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Port `Lam.prim` Blk_module collapse (lam.ml:549-582)**:
+  OCaml's `Lam.prim` smart constructor folds
+  `Pmakeblock(_, Blk_module [f0; f1; …], _) [v.f0; v.f1; …]` — a
+  reconstruction of the full module — back to the single module
+  reference `v`. Added `fold_makeblock_module_alias` in `lambda/mod.rs`
+  that matches the OCaml shape exactly: every arg must be
+  `Pfield(i, Fld_module {name = fi}) [Lglobal_module v | Lvar v]` with
+  the same source ident `v`. `global_module_alias_test` now emits
+  `return Belt_List;` and `return U;` instead of a full object
+  literal rebuild. JS snapshot parity: **625 / 657 -> 626 / 657 (+1)**;
+  output diffs: **28 -> 27**.
 - **Pobjcomp Ceq/Cneq: raw construction in nullish comparison**:
   OCaml's `eq_null_undefined_boolean` / `neq_null_undefined_boolean`
   (js_exp_make.ml:1743-1771) build their fallthrough comparison via
@@ -82,8 +93,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Pobjcomp Ceq/Cneq raw-construction fix, +1 parity)
-**Status:** 625 / 657 authoritative JS snapshot baseline; 4 compile errors and 28 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
+**Last Updated:** 2026-04-21 (Blk_module collapse + nullish raw construction, +2 parity)
+**Status:** 626 / 657 authoritative JS snapshot baseline; 4 compile errors and 27 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 

@@ -516,7 +516,16 @@ impl Lambda {
                 },
                 _ => default(primitive, args, loc),
             },
-            _ => default(primitive, args, loc),
+            // lam.ml:549-582 — `Pmakeblock(_, Blk_module fields, _)` arm of
+            // `Lam.prim`. When every argument `args.[i]` is
+            // `Pfield(i, Fld_module {name = fields.[i]}) [Lglobal_module v | Lvar v]`
+            // referencing the SAME source module `v`, the makeblock collapses
+            // to that module reference — the code reconstruction is exactly
+            // the source alias. This turns `{ x0: y.x0, x1: y.x1 }` back into
+            // `y`, matching OCaml's module-alias output (`return U` vs the
+            // expanded object literal).
+            _ => fold_makeblock_module_alias(&primitive, &args)
+                .unwrap_or_else(|| default(primitive, args, loc)),
         }
     }
 
@@ -1080,6 +1089,78 @@ fn is_assertfalse(lam: &Lambda) -> bool {
             ..
         })
     )
+}
+
+/// Direct port of OCaml's `Lam.prim` Blk_module collapse arm (lam.ml:551-575).
+///
+/// Recognises `Pmakeblock(_, Blk_module fields, _) [arg0; arg1; …]` where
+/// every `argi` has the shape `Pfield(i, Fld_module {name = fields.[i]}) [src]`
+/// and every `src` is the SAME `Lglobal_module v` or `Lvar v`. Returns that
+/// module reference — the makeblock is reconstructing the source module
+/// exactly, so the alias can be expressed as a single variable.
+fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option<Lambda> {
+    let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = primitive else {
+        return None;
+    };
+
+    if fields.len() != args.len() || fields.is_empty() {
+        return None;
+    }
+
+    // Inspect the first argument to discover both the source module (`Lglobal_module`
+    // or `Lvar`) and to verify field 0 of the makeblock indeed maps to position 0
+    // of that module with a matching name — mirrors the `pos = 0 && field1 = f1`
+    // test in OCaml at lam.ml:566-573.
+    let first = args.first()?;
+    let Lambda::Lprim(PrimInfo {
+        primitive: Primitive::Pfield(pos, compat::FieldDbgInfo::Module { name: f1 }),
+        args: first_args,
+        ..
+    }) = first
+    else {
+        return None;
+    };
+    if *pos != 0 || f1 != &fields[0] {
+        return None;
+    }
+    if first_args.len() != 1 {
+        return None;
+    }
+    let source_ident = match &first_args[0] {
+        Lambda::LglobalModule(v, _) => v.clone(),
+        Lambda::Lvar(v) => v.clone(),
+        _ => return None,
+    };
+    let source_lam = first_args[0].clone();
+
+    // Now verify every subsequent arg has the same shape and references the
+    // SAME source module — mirrors the recursive `aux` helper at
+    // lam.ml:552-563.
+    for (i, (arg, expected_name)) in args.iter().zip(fields.iter()).enumerate().skip(1) {
+        let Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pfield(pos, compat::FieldDbgInfo::Module { name }),
+            args: inner_args,
+            ..
+        }) = arg
+        else {
+            return None;
+        };
+        if *pos as usize != i || name != expected_name {
+            return None;
+        }
+        if inner_args.len() != 1 {
+            return None;
+        }
+        let inner_same = match &inner_args[0] {
+            Lambda::LglobalModule(v, _) | Lambda::Lvar(v) => v.same(&source_ident),
+            _ => false,
+        };
+        if !inner_same {
+            return None;
+        }
+    }
+
+    Some(source_lam)
 }
 
 fn lambda_not(loc: Location, lam: Lambda) -> Lambda {
