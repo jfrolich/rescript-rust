@@ -1132,26 +1132,26 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if !bindings.is_empty()
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
-                {
-                    let mut block = vec![Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: None,
-                        property: kind,
-                        ident_info: IdentInfo::default(),
-                    })];
-                    block.extend(
-                        self.compile_staticcatch_assignment_block(
-                            id, *label, bindings, body, handler,
-                        ),
-                    );
-                    block
-                } else {
-                    self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_let_binding(kind, id, body)
-                    })
-                }
+                // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017)
+                // gates pseudo-jmp on `EffectCall (Maybe_tail_is_return
+                // (Tail_with_name {in_staticcatch=false}))`. A `Declare (kind, id)`
+                // continuation — which is what `compile_let_binding` models —
+                // takes the explicit-jump arm at lam_compile.ml:996-1000
+                // unconditionally. Take that path here; the
+                // `with_static_handler` inline shortcut is a Rust-only
+                // optimization with no OCaml analog for `Declare`.
+                let mut block = vec![Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: None,
+                    property: kind,
+                    ident_info: IdentInfo::default(),
+                })];
+                block.extend(
+                    self.compile_staticcatch_assignment_block(
+                        id, *label, bindings, body, handler,
+                    ),
+                );
+                block
             }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_binding_block(kind, id, cond, then_, else_)
