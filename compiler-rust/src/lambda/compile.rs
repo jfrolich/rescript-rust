@@ -858,7 +858,13 @@ impl LambdaCompiler {
             if let [index] = group.as_slice() {
                 if !dependencies[*index].contains(index) {
                     let (id, expr) = &bindings[*index];
-                    block.extend(self.compile_let_binding(LetKind::Strict, id, expr));
+                    // OCaml's `compile_recursive_let` (lam_compile.ml:380-486)
+                    // routes every non-self-referencing binding through
+                    // `Declare(Alias, id)`. Using `Strict` here breaks the
+                    // `js_pass_flatten_and_mark_dead` skip for all-deep-constant
+                    // alias bindings (lam_pass_lets_dce.ml + the implicit
+                    // skip behind the Variable arm).
+                    block.extend(self.compile_let_binding(LetKind::Alias, id, expr));
                     continue;
                 }
             }

@@ -81,20 +81,55 @@ Your next steps, in order:
      - **Module-level Pmakeblock binding inlined** (variantsMatching):
        OCaml keeps `let CustomizeTags_d = {TAG:"qq", _0:42}; ... let
        CustomizeTags = {... d: CustomizeTags_d, ...}`. Rust inlines the
-       block literals directly into the outer record. Investigation
-       (2026-04-21): `pass_lets_dce` correctly converts
-       `Strict + Pmakeblock(pure)` → `StrictOpt + Pmakeblock` (via
-       `lam_util::refine_let` lam_util.ml:131-136), so after
-       `simplify_lets` both bindings are preserved in the lambda. The
-       inlining must happen further down; `flatten_and_mark_dead_block`
-       at `compile.rs:12395-12453` inserts into the `substitution` map
-       but only `try_substitute_caml_block_projection`
-       (compile.rs:13007-13028) consumes it and only on
-       `ArrayIndex` / `StaticIndex` projections, not on bare `Var` refs.
-       Some later pass (or earlier lowering choice) must be rewriting
-       `Pmakeblock(..., Lvar CustomizeTags_d, ...)` with the inlined
-       block at raw-lambda → Lambda lowering time. Bisect by dumping
-       the Lambda between each pipeline stage.
+       block literals directly into the outer record.
+
+       Deeper investigation (2026-04-21, second pass):
+         * Verified the lambda is identical between OCaml and Rust at
+           `dump_lambda_sexp` time. After the simplify pipeline, the
+           Rust lambda has `Lconst (Const_block ...)` for `d`/`e`
+           inlined directly into the export `Pmakeblock`'s arg list.
+           Confirmed via `RUST_DEBUG_SIMPLIFY_FINAL=1` dump.
+         * Root cause is in `pass_lets_dce`: `deep_flatten` already
+           runs `refine_let` which converts `Strict + Lconst` →
+           `Alias` (lam_util.ml:118-124 + deep_flatten.rs:34). When
+           `simplify_lets` then sees `Llet Alias h Lconst body`, the
+           Alias arm with `times == 1, captured == false` substitutes
+           the value directly (lam_pass_lets_dce.ml:50). Verified via
+           `RUST_DEBUG_LETS_HELPER_H=1`: the kind reaching
+           `lets_helper` is already `Alias`.
+         * OCaml has the same logic and should also inline, but its
+           snapshot output keeps the binding. Either OCaml's
+           `count_var` returns a different `times` for h, or its
+           `lets_helper` Alias arm has a guard I missed. **Open
+           question for next session: trace OCaml end-to-end (with
+           `Js_config.diagnose = true` or a debug counter) to find
+           the precise behaviour difference.** It cannot be in the
+           Rust port files alone — both ports look line-for-line
+           equivalent.
+         * Workaround attempts that all introduced regressions:
+           - Removing the recursive-Constructor arm from
+             `is_simple_block_binding_item` (compile.rs:13155): fixes
+             variantsMatching's CustomizeTags binding split, but
+             regresses minimal_test (`let rec fake_y = list{2, 3}`)
+             and record_debug_test/record_type_spread (`let h =
+             list{1, 2, 3, 4}`) because the inner cons cells get
+             materialized.
+           - Combining the above with kind=Alias in the Lletrec
+             non-self-referencing fast path (compile.rs:867): fixes
+             fake_y but record_debug_test/record_type_spread still
+             regress because `let h = list{...}` is a regular Llet,
+             not Lletrec.
+           - Extending the all-deep-constant skip in
+             `should_materialize_block_binding_items` to cover all
+             property kinds (not just Alias) regresses RecordCoercion
+             because OCaml DOES materialize `let TestInlining =
+             {a: {number:42, name:"a"}, name:"a"}` into
+             `let TestInlining_a = ...`.
+         * The Lletrec fast-path `kind=Strict` → `kind=Alias` change
+           (compile.rs:867) is OCaml-aligned (lam_compile.ml:486
+           uses `Declare(Alias, id)` for any non-Lvar/non-Pmakeblock
+           recursive binding) and has zero parity impact on its own —
+           applied as part of this investigation.
      - **Static-catch handler duplication** (test_list, gpr_4280_test,
        bdd, mario_game): Rust's compile path produces multiple call
        sites for what should be a shared `(catch ... with handler)`
