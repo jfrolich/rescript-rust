@@ -127,6 +127,7 @@ pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInf
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn initialize_build(
     default_timing: Option<Duration>,
     filter: &Option<regex::Regex>,
@@ -135,12 +136,13 @@ pub fn initialize_build(
     plain_output: bool,
     warn_error: Option<String>,
     prod: bool,
+    features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
     let compiler = get_compiler_info(&project_context)?;
 
     let timing_clean_start = Instant::now();
-    let packages = packages::make(filter, &project_context, show_progress, prod)?;
+    let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref())?;
 
     let compiler_check = verify_compiler_info(&packages, &compiler);
 
@@ -154,6 +156,7 @@ pub fn initialize_build(
         packages,
         compiler,
         warn_error,
+        features,
     );
     packages::parse_packages(&mut build_state)?;
 
@@ -491,6 +494,7 @@ pub fn build(
     plain_output: bool,
     warn_error: Option<String>,
     prod: bool,
+    features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
     let default_timing: Option<std::time::Duration> = if no_timing {
         Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
@@ -506,6 +510,7 @@ pub fn build(
         plain_output,
         warn_error,
         prod,
+        features,
     )
     .with_context(|| "Could not initialize build")?;
 

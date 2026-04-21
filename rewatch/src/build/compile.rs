@@ -665,20 +665,16 @@ fn get_dependency_paths(
     packages: &Option<&AHashMap<String, packages::Package>>,
     is_file_type_dev: bool,
 ) -> Vec<String> {
-    let normal_deps = config
-        .dependencies
-        .clone()
-        .unwrap_or_default()
+    let normal_deps: Vec<DependentPackage> = config
+        .get_dependency_names()
         .into_iter()
         .map(DependentPackage::Normal)
         .collect();
 
     // We can only access dev dependencies for source_files that are marked as "type":"dev"
-    let dev_deps = if is_file_type_dev {
+    let dev_deps: Vec<DependentPackage> = if is_file_type_dev {
         config
-            .dev_dependencies
-            .clone()
-            .unwrap_or_default()
+            .get_dev_dependency_names()
             .into_iter()
             .map(DependentPackage::Dev)
             .collect()
