@@ -10,34 +10,43 @@ the ~114 helper functions that fed them are gone. The pipeline at
 `lam_compile_main.ml:148-200`.
 
 Your next steps, in order:
-1. **Recover the `Lconst`-substituted export placement.** `simplify_lets`
-   correctly drops `let h = 3` (small-const Alias arm), but
-   `Lam_coercion.handle_exports` then synthesises a `Single (Strict, h, Lconst 3)`
-   group at the end of the file (`lam_coercion.ml:122-157`). OCaml has the
-   same shape on paper yet emits the binding at the original site;
-   investigate whether OCaml's coercion or its earlier pipeline retains the
-   `let` somewhere we drop it. See attr_test.res / similar regression
-   triggered when porting the `Lam.prim` smart constructor (commit 083ec6668).
-2. **Eta-reduce `let f = (x) => g(x)` -> `let f = g`.** Several diffs
-   (a_scope_bug, belt_hashmap_test, ffi_arity_test, async_jsx,
-   stdlib_Stdlib_ObjectTests, topsort_test, uncurried_cast,
-   bs_mutable_set_test, bs_poly_set_test, ...) come from Rust emitting
-   `function f(x) { return g(x); }` while OCaml emits `let f = g;`. The
-   Rust pipeline preserves the Lfunction shape that the source produced;
-   OCaml seems to fold it earlier. Search OCaml's pipeline (likely a
-   special arm of `Lam_pass_lets_dce` or `Lam.apply` smart constructor)
-   for the rewrite.
-3. **Wire up `Lam_compile_env.query_external_id_info`** so the cross-module
+1. **Wire up `Lam_compile_env.query_external_id_info`** so the cross-module
    inline arms in `Lam_pass_remove_alias.simplify_alias`
    (lam_pass_remove_alias.ml:131-162) and `Lam_arity_analysis.get_arity`
-   (lam_arity_analysis.ml:43-71) can resolve foreign module functions.
-4. **Investigate parity clusters from the remaining 54 output-diff failures.**
-   The for-loop direction cluster has been resolved by the smart
-   constructor port; what remains is mostly eta + emit-order issues.
-5. Address the issues in existing ports listed at the top of
+   (lam_arity_analysis.ml:43-71) can resolve foreign module functions. Note:
+   the pp_function eta-reduction port (commit a8c93b98b) works around the
+   missing info by accepting `Qualified(Ml | Runtime, _)` callees
+   unconditionally in the printer; wiring up `query_external_id_info` would
+   also flip cross-module calls from `App_uncurry` to `App_infer_full` in
+   alpha_conversion, matching OCaml more precisely.
+2. **Investigate parity clusters from the remaining 33 output-diff failures.**
+   Top remaining files: a_recursive_type, arity_deopt, bdd,
+   bs_mutable_set_test, bs_poly_mutable_set_test, bs_poly_set_test,
+   bs_set_int_test, coercion_module_alias_test, equal_box_test, and 23
+   more. Most look like specific JS IR / printer edge cases now that the
+   big-hitter clusters (Literal+Alias export placement, eta-reduction) are
+   handled.
+3. Address the issues in existing ports listed at the top of
    PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
    `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
    in lam_util, etc.).
+
+## Completed since last update
+- **Literal+Alias source-order preservation** (commit cd100e413):
+  `move_same_name_export_alias_to_export_tail` was relocating Literal+Alias
+  bindings that `Lam_pass_lets_dce` preserved via the Strict-arm +
+  `refine_let` path. OCaml's `Lam_coercion.handle_exports` hits the
+  `Lvar id` matching-name arm for those and keeps the binding in source
+  order; Rust now blocks the tail-move for Literal+Alias. JS snapshot
+  parity: **599 / 657 -> 605 / 657 (+6)**.
+- **pp_function print-time eta-reduction** (commit a8c93b98b): direct
+  port of OCaml's `js_dump.ml:299-344` rewrite — collapses
+  `function f(x, y) { return g(x, y); }` into `let f = g;` when the
+  call is ML + Full arity. Added `CallKind` / `CallArity` fields to
+  `CallInfo` and threaded them through `call_info_of_apply_status`.
+  Accepts `Qualified(Ml | Runtime, _)` callees unconditionally to
+  compensate for the missing `query_external_id_info` port. JS
+  snapshot parity: **605 / 657 -> 620 / 657 (+15)**.
 
 **Every line of Rust must trace to a specific line in OCaml source.** No
 invented logic.
@@ -47,8 +56,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding, +116 parity)
-**Status:** 599 / 657 authoritative JS snapshot baseline; 4 compile errors and 54 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants the same way OCaml's `Lam.prim` does.
+**Last Updated:** 2026-04-21 (Literal+Alias preserve + pp_function eta-reduction, +21 parity)
+**Status:** 620 / 657 authoritative JS snapshot baseline; 4 compile errors and 33 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
