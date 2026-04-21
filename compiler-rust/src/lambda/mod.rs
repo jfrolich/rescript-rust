@@ -28,6 +28,7 @@ pub mod beta_reduce;
 pub mod closure;
 pub mod compat;
 pub mod compile;
+pub mod collect_info;
 pub mod compile_context;
 pub mod constant;
 pub mod convert;

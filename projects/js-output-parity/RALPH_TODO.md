@@ -36,8 +36,57 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (monolith deleted, OCaml pipeline wired with stubs)
-**Status:** 270 / 657 authoritative JS snapshot baseline; 4 compile errors and 383 output diffs. Net -348 vs prior 618 baseline — the expected and required regression from removing the 15K-line monolithic simplifier and replacing it with the OCaml pipeline plus identity stubs for the not-yet-ported passes.
+**Last Updated:** 2026-04-21 (collect_info ported, threaded through pipeline)
+**Status:** 270 / 657 authoritative JS snapshot baseline; 4 compile errors and 383 output diffs. Unchanged from the post-monolith-delete baseline — `simplify_alias` and `alpha_conversion` are still identity stubs and don't yet consume the meta produced by `collect_info`. Parity will return when those two ports land.
+
+## Iteration on 2026-04-21 (collect_info ported)
+
+- New module `compiler-rust/src/lambda/collect_info.rs` (~340 lines): direct
+  port of `compiler/core/lam_pass_collect.ml` plus the supporting helpers from
+  `compiler/core/lam_arity_analysis.ml` and `compiler/core/lam_util.ml`
+  (`element_of_lambda`, `kind_of_lambda_block`, `alias_ident_or_global`,
+  `arity_of_var`, `get_arity`, `all_lambdas`, `annotate`, `collect_bind`,
+  `collect`).
+- Cross-module arity lookup (`Lam_compile_env.query_external_id_info`) has no
+  Rust counterpart yet, so the two `Pfield (_, Fld_module _)` arms in
+  `get_arity` short-circuit to `Arity::Na`. This matches OCaml's behavior when
+  external info is unavailable. To be revisited when `Lam_compile_env` is
+  ported.
+- The simplify pipeline now constructs a single `LamStats` at the entry and
+  threads it through every pipeline stage. `simplify_alias` and
+  `alpha_conversion` accept `&LamStats` even though they currently ignore it;
+  this matches the OCaml signatures so the port lands incrementally.
+- `LamStats` is constructed with empty exports because the JS-backend driver
+  in `compile.rs` does not yet propagate the export set down to this pass.
+  This degrades the `if Set_ident.mem meta.export_idents ident` arm in
+  `Lam_pass_collect.collect_info` (lam_pass_collect.ml:92-93) — non-Lfunction
+  exported bindings are not annotated with FunctionId. To be fixed when the
+  export set becomes available at this entry.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **270 / 657**.
+- Outcome:
+  - JS snapshot parity: **270 / 657** (unchanged).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **383** (unchanged).
+- Next iteration candidates (in priority order):
+  1. **Port `simplify_alias` (`Lam_pass_remove_alias.simplify_alias`)** —
+     `compiler/core/lam_pass_remove_alias.ml`, ~290 lines. Field folding,
+     optional unwrapping, cross-module fn inlining, boolean const folding.
+     Now that `collect_info` provides the `ident_tbl`, this is where the
+     parity returns.
+  2. **Port `alpha_conversion` (`Lam_pass_alpha_conversion.alpha_conversion`)** —
+     `compiler/core/lam_pass_alpha_conversion.ml`, ~128 lines. Rename
+     duplicated idents produced by inlining.
+  3. **Propagate exports from the driver** so `LamStats` knows which
+     non-function bindings should be annotated as `FunctionId` (the OCaml
+     `if Set_ident.mem meta.export_idents ident` fallback in
+     `lam_pass_collect.ml:92-93`).
+  4. **Issues in existing ports** (from PERFORMANCE_PLAN.md top section):
+     IdGenerator stamp collisions in `pass_exits`, raw `Lsequence` instead of
+     `Lambda::seq` in `pass_lets_dce`, unreachable catch-all `Llet` arm,
+     `lookup` convenience wrapper in `pass_count` (let `pass_lets_dce` do its
+     own lookup like OCaml), dead `let_variable` helper in `lam_util`.
 
 ## Iteration on 2026-04-21 (monolithic simplify_with_env deleted)
 
