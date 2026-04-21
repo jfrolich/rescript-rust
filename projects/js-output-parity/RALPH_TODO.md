@@ -1,45 +1,88 @@
 # Ralph TODO: JS Output Parity
 
-## ⚠️ THE MONOLITH IS GONE — PORT THE STUBBED PASSES NEXT
+## ⚠️ THE MONOLITH IS GONE — ALL OCAML PIPELINE STAGES PORTED
 
-**The mandatory deletion has happened.** `simplify_with_env`, `SimplifyEnv`, and
-the ~114 helper functions that fed them are gone. `compiler-rust/src/lambda/simplify.rs`
-is now a 97-line file that calls the OCaml-aligned pipeline from
-`lam_compile_main.ml:148-200`. `deep_flatten` was extracted into its own module
-at `compiler-rust/src/lambda/deep_flatten.rs`.
-
-The pipeline now invokes the real ports of `collect_info` and `simplify_alias`.
-The remaining identity stub in `simplify.rs` is:
-
-- `alpha_conversion` (port of `Lam_pass_alpha_conversion.alpha_conversion`) —
-  rename idents duplicated by inlining.
+**The mandatory deletion happened.** `simplify_with_env`, `SimplifyEnv`, and
+the ~114 helper functions that fed them are gone. The pipeline at
+`compiler-rust/src/lambda/simplify.rs` now invokes faithful ports of
+`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`,
+`alpha_conversion`, `simplify_lets` — every stage from
+`lam_compile_main.ml:148-200`.
 
 Your next steps, in order:
-1. Port `alpha_conversion` (`compiler/core/lam_pass_alpha_conversion.ml`,
-   ~128 lines).
-2. Propagate exports from the driver into `LamStats` so the
+1. Propagate exports from the driver into `LamStats` so the
    `Set_ident.mem meta.export_idents` arm in `Lam_pass_collect.collect_info`
    (lam_pass_collect.ml:92-93) annotates non-Lfunction exported bindings.
-3. Wire up `Lam_compile_env.query_external_id_info` so the cross-module
+   This currently downgrades the `is_export_id` branch in `simplify_alias`
+   (lam_pass_remove_alias.ml:211).
+2. Wire up `Lam_compile_env.query_external_id_info` so the cross-module
    inline arms in `Lam_pass_remove_alias.simplify_alias`
    (lam_pass_remove_alias.ml:131-162) and `Lam_arity_analysis.get_arity`
    (lam_arity_analysis.ml:43-71) can resolve foreign module functions.
+3. Investigate parity clusters from the remaining 170 output-diff failures.
+   The biggest targets are likely the same as before the port: module
+   strengthening, simple-abbrevs sharing, etc. Pick a small-internal
+   cluster first.
 4. Address the issues in existing ports listed at the top of
    PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
    `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
    in lam_util, etc.).
 
 **Every line of Rust must trace to a specific line in OCaml source.** No
-invented logic. Regressions from the monolith deletion are expected; parity
-will return as the stubbed passes are ported.
+invented logic.
 
 Read [PERFORMANCE_PLAN.md](./PERFORMANCE_PLAN.md) and [PLAN.md](./PLAN.md) for
 the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (simplify_alias ported, +20 parity)
-**Status:** 290 / 657 authoritative JS snapshot baseline; 4 compile errors and 363 output diffs. `simplify_alias` no longer stubbed; `alpha_conversion` is the only remaining identity-stub stage in the OCaml-aligned pipeline.
+**Last Updated:** 2026-04-21 (alpha_conversion ported, +193 parity)
+**Status:** 483 / 657 authoritative JS snapshot baseline; 4 compile errors and 170 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`.
+
+## Iteration on 2026-04-21 (alpha_conversion ported)
+
+- New module `compiler-rust/src/lambda/eta_conversion.rs` (~280 lines):
+  direct port of `compiler/core/lam_eta_conversion.ml`. Provides
+  `transform_under_supply` (under-application: build outer `Lam.function_`
+  with the missing arguments) and `unsafe_adjust_to_arity` (eta-(de)expand
+  with three sub-cases: `to_ = 0`, `to_ > from`, `to_ < from`). Each helper
+  cites the precise OCaml line numbers it implements.
+- New module `compiler-rust/src/lambda/pass_alpha_conversion.rs` (~260
+  lines): direct port of `compiler/core/lam_pass_alpha_conversion.ml`.
+  Walks every `Lapply` and consults `get_arity` (already in
+  `collect_info.rs`) to either tag the application with `App_infer_full`,
+  eta-expand under-supplied calls, or split over-applied calls into nested
+  applications with the inner one carrying `App_infer_full`. Also handles
+  the `Pjs_fn_make len` and `Pjs_fn_make_unit` primitives.
+- `Lam_arity_analysis.get_arity` made public in `collect_info.rs` so the
+  alpha pass can consume it. Same single source of truth used by
+  `simplify_alias`'s arity reads.
+- `simplify_for_js_backend_with_jsx_preserve` no longer carries an identity
+  stub. Every line in the pipeline now resolves to a real port.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **483 / 657**.
+- Outcome:
+  - JS snapshot parity: **483 / 657** (+193 vs prior 290 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **363 -> 170**.
+- Next iteration candidates (in priority order):
+  1. **Propagate exports from the driver** so `LamStats` knows which
+     non-function bindings should be annotated as `FunctionId` (the OCaml
+     `if Set_ident.mem meta.export_idents ident` fallback in
+     `lam_pass_collect.ml:92-93`). This currently downgrades the
+     `is_export_id` branch in `simplify_alias`.
+  2. **Cross-module inlining infrastructure** — port
+     `Lam_compile_env.query_external_id_info` so the cross-module arms in
+     `simplify_alias` and `Lam_arity_analysis.get_arity` can fire.
+  3. **Pick a parity cluster from `temp/rust-parity/diffs/`** — investigate
+     a small internal-test cluster first (e.g. `a.res`, `alias_test.res`)
+     to see whether the gap is a simple OCaml-aligned tweak or a deeper
+     cross-pass interaction.
+  4. **Issues in existing ports** (from PERFORMANCE_PLAN.md top section):
+     IdGenerator stamp collisions in `pass_exits`, raw `Lsequence` instead
+     of `Lambda::seq` in `pass_lets_dce`, `lookup` convenience wrapper in
+     `pass_count`, dead `let_variable` helper in `lam_util`.
 
 ## Iteration on 2026-04-21 (simplify_alias ported)
 

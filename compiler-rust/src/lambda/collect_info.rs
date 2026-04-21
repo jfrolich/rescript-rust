@@ -78,7 +78,7 @@ fn arity_of_var(meta: &LamStats, v: &Ident) -> Arity {
 /// recorded arity. The Rust code has no equivalent yet, so both arms return
 /// [`Arity::na`] here. This matches OCaml's behavior whenever the external
 /// info is unavailable.
-fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
+pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
     match lam {
         // lam_arity_analysis.ml:40
         Lambda::Lvar(v) => arity_of_var(meta, v),

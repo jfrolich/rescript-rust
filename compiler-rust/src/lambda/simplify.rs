@@ -1,9 +1,7 @@
 //! JS-backend lambda simplification pipeline.
 //!
 //! Direct port of `compiler/core/lam_compile_main.ml:148-200`. Calls the
-//! ported passes in the same order as OCaml. The remaining stubbed pass
-//! (`alpha_conversion`) is an identity function and will be replaced when
-//! its port lands.
+//! ported passes in the same order as OCaml.
 //!
 //! Every line here must trace to a specific line in
 //! `compiler/core/lam_compile_main.ml`. No Rust-only logic.
@@ -11,18 +9,11 @@
 use crate::lambda::collect_info::collect_info;
 use crate::lambda::compile_context::LamStats;
 use crate::lambda::deep_flatten::deep_flatten;
+use crate::lambda::pass_alpha_conversion::alpha_conversion;
 use crate::lambda::pass_exits::simplify_exits;
 use crate::lambda::pass_lets_dce::simplify_lets;
 use crate::lambda::pass_remove_alias::simplify_alias_with_jsx;
 use crate::lambda::Lambda;
-
-/// Stub for `Lam_pass_alpha_conversion.alpha_conversion`
-/// (compiler/core/lam_pass_alpha_conversion.ml). Identity for now: when the
-/// real pass is ported it will rename idents that have been duplicated by
-/// inlining so static analyses downstream see fresh names.
-fn alpha_conversion(_meta: &LamStats, lam: &Lambda) -> Lambda {
-    lam.clone()
-}
 
 /// Direct port of `compiler/core/lam_compile_main.ml:148-200` pipeline.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {

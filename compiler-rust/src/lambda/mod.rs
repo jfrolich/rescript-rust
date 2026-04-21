@@ -36,6 +36,8 @@ pub mod deep_flatten;
 pub mod free_variables;
 pub mod lam_hit;
 pub mod lam_util;
+pub mod eta_conversion;
+pub mod pass_alpha_conversion;
 pub mod pass_count;
 pub mod pass_eliminate_ref;
 pub mod pass_exits;
