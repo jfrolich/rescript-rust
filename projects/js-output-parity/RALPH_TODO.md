@@ -1,7 +1,38 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (night)
-**Status:** 594 / 657 authoritative JS snapshot baseline; 4 compile errors and 59 output diffs. Five OCaml-aligned changes landed: `pass_exits::simplify_exits` (`Lam_pass_exits.ml` port), `Primitive::eq_approx` rewritten as a 1:1 port of `Lam_primitive.eq_primitive_approx`, `grouped_return_string_clauses` `should_break` gate corrected so empty fall-through case groups still emit explicit `break;` like OCaml's `lam_compile.ml` pseudo-jmp lowering, `return_staticcatch_requires_explicit_jump` now forces explicit-jump when nested in another staticcatch (matching OCaml's `in_staticcatch=true` gate in `lam_compile.ml:937-939`), and `compile_assign_to_target_block` now handles `LstaticRaise` explicitly so the Assign continuation never appends a spurious `target = undefined` after a static raise. Net +5 vs the original 589 baseline.
+**Last Updated:** 2026-04-21 (late night)
+**Status:** 596 / 657 authoritative JS snapshot baseline; 4 compile errors and 57 output diffs. Seven OCaml-aligned changes landed since the 589 baseline: the five previous ones plus (6) all four `compile_*_block` LstaticCatch arms now force explicit-jump in non-Tail_with_name continuations — matching OCaml's single-gate rule in `lam_compile.ml:937-943` — and (7) the JS printer emits polyvariant NAME from the block's first element (matching `js_dump.ml:901-912`) instead of the tag-name string.
+
+## Iteration on 2026-04-21 (late night)
+
+- Active slice: a cluster of staticcatch-context divergences plus a polyvariant encoding bug. After the 594/657 baseline, four thin OCaml-alignment edits landed in sequence; the first produced a byte-clean `Stdlib_IntlTests` (595/657), the last produced a byte-clean `gpr_5218_test` (596/657), and two were strictly neutral but defensive.
+- OCaml / backend references:
+  - `compiler/core/lam_compile.ml:937-1017` — `compile_staticcatch` has exactly two paths: pseudo-jmp at 937-943 (continuation must be `EffectCall (Maybe_tail_is_return (Tail_with_name {in_staticcatch=false}))` + `[code_table]` + `no_static_raise_in_handler code_table`) and explicit-jump at 963-1017 for every other continuation (NeedValue, Declare, Assign, EffectCall Not_tail, EffectCall Tail_in_try).
+  - `compiler/core/js_dump.ml:901-912` — `Caml_block(el, _, _, Blk_poly_var _)` emits `{NAME: el[0]; VAL: el[1]}`. The `el[0]` slot is `Const_int n` for numeric polyvariant names like `#1` / `#2` (lowering: `lam_convert.ml:181-194` with `Ext_string.is_valid_hash_number`), `Const_string "Foo"` otherwise.
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs` — `compile_effect_block`, `compile_assign_to_target_block`, `compile_let_binding`, and `compile_expr` LstaticCatch arms now all route directly to their respective explicit-jump block constructors. The `with_static_handler` inline shortcut is deleted from every non-return-tail context; it has no OCaml analog.
+  - `compiler-rust/src/js_ir/printer.rs:2046-2071` — polyvariant NAME slot now prints `elements[0]` as an expression (so a `Const_int 1` prints as `1`) instead of the tag-name string (which emitted `NAME: "1"`).
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for ExternalShadow, test_static_catch_ident, NondetPatterMatch, gpr_2413_test, VariantPatternMatchingSpreads, DictPatternMatchingOptimization, gpr_2316_test (previous), stdlib/intl/Stdlib_IntlTests (this iteration), gpr_5218_test (this iteration).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **596 / 657**.
+- Outcome:
+  - JS snapshot parity: **596 / 657** (+2 vs prior 594 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **57** (-2 vs prior 59).
+  - Newly passing: `stdlib/intl/Stdlib_IntlTests`, `gpr_5218_test`.
+- Remaining failure clusters:
+  - **gpr_3609_test** — extra `let intValue = state._0` binding; alias-simplification source. Unchanged.
+  - **LetUnwrap / getXWithResult** — case-ordering heuristic inside `compile_small_string_switch_return` (compile.rs:4067-4099). OCaml inverts the outer Ok/Error test when the then-branch terminates.
+  - **bal_set_mini / js_json_test / gpr_4280_test / gpr_3875_test / record_extension_test / int_poly_var / topsort_test** — `simplify_if_statement` (`js_ir/mod.rs:1505-1513`) flattens `if (cond) {return X;} else {return Y;}` into early-return shape; OCaml preserves `else if ... else` chains.
+  - **exception_rebound_err_test** — OPPOSITE of `simplify_if_statement`: here Rust keeps a nested `if-else` chain where OCaml flattens each arm into a sequence of top-level `if (cond) return;` statements. Likely a case-grouping boundary in exception-switch lowering.
+  - **async_inline / lazy_test / test_simple_ref / ast_abstract_test / webpack_config / derive_projector_test / exception_alias** — export-coercion path creates extra `let x$1 = ...` aliases and reorders trailing simple-constant exports to the end of the block. Blocked on wiring `pass_lets_dce` into the live pipeline; see 2026-04-20 evening iteration for the root cause (ref-elimination interleaving).
+  - **test_google_closure / option_optimisation / ticker / tuple_alloc / global_module_alias_test / gpr_4491_test** — broader simplify aggressiveness mismatches (Rust-specific inlining of small local functions, option-wrap removal, `<expr>, undefined` seq residues).
+  - **gpr_1150 / gpr_4632** — semantic divergences (Rust elides a non-terminating branch). Likely real bugs requiring lambda-trace investigation.
+- Next iteration candidates (in rough tractability order):
+  1. **Track Tail_with_name precisely** — the four LstaticCatch arms now cover all non-Tail_with_name cases. In `compile_return_block`, we could similarly tighten: a LstaticCatch whose continuation is the outer function-return with `in_staticcatch=false` AND body is a single-exit staticcatch AND handler has no static raise is the only case that should take pseudo-jmp. Rust's existing gate at compile.rs:7890 allows pseudo-jmp in more cases than OCaml (e.g., missing explicit `[code_table]` count check when body contains nested staticcatch). Scope: narrow `return_staticcatch_requires_explicit_jump` to match OCaml's `[code_table]` single-handler constraint.
+  2. **Nested LstaticCatch count** — if body contains an inner staticcatch with the same label-family, OCaml's `flatten_nested_caches` produces multiple code_tables → pseudo-jmp gate fails → explicit-jump. Rust does not count; may be taking pseudo-jmp in nested cases where OCaml wouldn't.
+  3. **Switch case-ordering** — trace `compile_named_string_switch_return` / `compile_small_string_switch_return` against OCaml's `compile_string_cases` to see why OCaml inverts the outer Ok/Error test in LetUnwrap.
 
 ## Iteration on 2026-04-21 (night)
 
