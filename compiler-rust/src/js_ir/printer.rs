@@ -1783,6 +1783,20 @@ impl JsPrinter {
                 directive,
                 ..
             } => {
+                // js_dump.ml:342-344 — when an anonymous Fun expression's body
+                // is `[ Return (Call (Var v, args, _)) ]` with each
+                // `args[i] == Var(params[i])` and the callee is ML/runtime,
+                // collapse the expression to the underlying `v`. This mirrors
+                // OCaml's `Is_return | No_name _` arm of pp_function that
+                // emits `optimize len ~p cxt f v` → `vident` for the clean
+                // `arity = Full, call_info = Call_ml | Call_builtin_runtime`
+                // case.
+                if let Some(target) = eta_reduce_function_body(*is_method, params, body) {
+                    self.with_function_ident_scope(params, body, None, |this| {
+                        this.print_vident(target);
+                    });
+                    return;
+                }
                 let use_arrow = !*is_method;
                 self.with_function_ident_scope(params, body, None, |this| {
                     let (this_binding, param_names) =
