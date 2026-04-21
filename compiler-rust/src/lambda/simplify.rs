@@ -6105,8 +6105,17 @@ fn substitution_candidate(
     }
 
     match simplified_value {
+        // OCaml lam_pass_lets_dce.ml:21-23 substitutes `let v = Lvar w`
+        // unconditionally for Strict / Alias / StrictOpt.
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => Some(simplified_value.clone()),
-        Lambda::Lconst(constant) if can_substitute_constant_unconditionally(constant) => {
+        // OCaml lam_pass_lets_dce.ml:50-65 inlines basic-literal constants
+        // only inside the `Llet (Alias, ...)` arm. The `Llet ((Strict |
+        // StrictOpt | Variable), ...)` arms (lines 74-133) refine the let
+        // and never substitute constants — so a `let tci:Strict = 3` keeps
+        // its binding instead of folding into uses.
+        Lambda::Lconst(constant)
+            if kind == LetKind::Alias && can_substitute_constant_unconditionally(constant) =>
+        {
             Some(simplified_value.clone())
         }
         Lambda::Lprim(info)
