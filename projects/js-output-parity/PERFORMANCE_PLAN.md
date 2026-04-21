@@ -28,15 +28,16 @@ the monolith, it added 30+ parity-fix commits to the OLD monolithic `simplify_wi
 
 ### Issues to fix in existing ports:
 
-- `pass_exits.rs`: `IdGenerator` initialized from `max_ident_stamp_in_lambda` —
-  OCaml uses a global mutable stamp counter (`Ident.rename`). This local
-  approximation may cause stamp collisions. Fix to match OCaml's behavior.
-- `pass_lets_dce.rs`: Uses raw `Lambda::Lsequence(Box::new(...), Box::new(...))`
-  instead of `Lambda::seq()` smart constructor. OCaml uses `Lam.seq`. Fix it.
-- `pass_lets_dce.rs`: Remove unreachable catch-all `Llet` arm — not in OCaml.
-- `pass_count.rs`: Remove `lookup` convenience wrapper — not in OCaml. Let
-  `pass_lets_dce` do its own lookup like OCaml's `count_var` in `apply_lets`.
-- `lam_util.rs`: Remove dead `let_variable` helper — not in OCaml.
+All five items have now been addressed (commits 0382c4696 + 87cc26424):
+
+- ✅ `pass_exits.rs`: threaded `meta.id_gen` through `simplify_exits` so
+  every `Ident.rename` share's OCaml's global-counter semantics.
+- ✅ `pass_lets_dce.rs`: swapped raw `Lambda::Lsequence` for the smart
+  constructor `Lambda::seq`, matching `Lam.seq`.
+- ✅ `pass_lets_dce.rs`: dropped the unreachable catch-all `Llet` arm.
+- ✅ `pass_count.rs`: dropped the dead `lookup` free function. The sole
+  caller was already the `count_var` method on `LetsState`.
+- ✅ `lam_util.rs`: dropped the dead `let_variable` helper.
 
 ---
 
