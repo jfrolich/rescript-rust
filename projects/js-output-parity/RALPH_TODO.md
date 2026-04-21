@@ -1,7 +1,73 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (evening)
-**Status:** 610 / 657 authoritative JS snapshot baseline; 4 compile errors and 43 output diffs. Three OCaml-aligned iterations landed on 2026-04-21 evening: (1) gate the exported-function `delay_dead_let_cleanup` guard on `env.allow_named_function_inlining` so the final simplify pass can still DCE truly-dead bindings inside exported function bodies (`gpr_3609_test`); (2) port `lam_pass_lets_dce.ml:21-23` unconditional `let (kind) v = Lvar w` substitution into `simplify_alias_bindings_like_lets_dce`, with a mutation-set guard to mirror OCaml's post-eliminate_ref timing (`test_set`); (3) add a dedicated `resolve_exported_lvar_alias_chains` top-down pass that flattens exported Lvar-to-Lvar chains so each binding's value points directly at the chain endpoint (`exception_alias` value-shape fix, though positional difference remains). Newly passing: `gpr_3609_test`, `test_set`, plus one more.
+**Last Updated:** 2026-04-21 (late evening)
+**Status:** 611 / 657 authoritative JS snapshot baseline; 4 compile errors and 42 output diffs. One OCaml-aligned iteration landed on 2026-04-21 late evening: pre-flatten `then_block` inside `compile_if_unit_return_tail_block` so `Return (Seq (assign, undefined))` from unit-returning primitives splits into `[Exp assign; Return undefined]` before the trailing-Return-undefined guard runs. This mirrors OCaml's pipeline ordering where `js_pass_flatten` (line 88) runs before `function_body` inspects the if-body, so the `if !cond { side_effect }` shape in `topsort_test`'s `sort_node` is kept as `if (!cond) { work; return; }` instead of being flattened by `simplify_if_statement` into `if (cond) return; work;`.
+
+## Iteration on 2026-04-21 (late evening)
+
+- Active slice: `topsort_test` and related "side-effect inside `if !cond`
+  with no else" clusters. Instrumenting `compile_if_unit_return_tail_block`
+  showed `js_block_is_simple_unit_return_tail` returning false because the
+  compiled then_block's last statement was `Return (Seq (visited.contents = ..., undefined))`
+  rather than `Return undefined`. The Seq wrapping came from
+  `compile_expr`'s `Psetfield` arm (compile.rs:6002-6008) which mirrors
+  OCaml's `ensure_value_unit` — but OCaml's pipeline runs `js_pass_flatten`
+  on the block afterwards and splits `Return (Seq _)` into
+  `[Exp _; Return unit]`, so the printer-level `function_body` rule at
+  `js_dump.ml:1612-1618` sees the trailing Return-undefined and preserves
+  the `if (!cond) { body }` shape. Rust's equivalent `apply_js_flatten_pass`
+  runs downstream of lambda compile, so by the time flatten rewrites the
+  Seq, `simplify_if_statement` has already decided to flatten via the
+  `block_last_is_terminal(then_)` rule at `js_ir/mod.rs:1505-1513`.
+- OCaml / backend reference:
+  - `compiler/core/js_pass_flatten.ml:79-97` — `Return (Seq _)` splits into
+    `[Exp rest; Return last]`.
+  - `compiler/core/js_dump.ml:1612-1618` — `function_body` strips the else
+    when the last statement is `If (cond, then_, [Return undefined])`.
+- Rust changes:
+  - `compiler-rust/src/lambda/compile.rs:1674-1683` — call `flatten_block`
+    on the compiled then_block before checking
+    `js_block_is_simple_unit_return_tail`, so
+    `Return (Seq (assign, undefined))` splits first and the guard
+    recognises the unit-return tail.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release`
+    clean.
+  - Single-file byte-clean for `topsort_test` (newly fixed) plus the existing
+    cluster: `ExternalShadow`, `LetUnwrap`, `bal_set_mini`,
+    `DictPatternMatchingOptimization`.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **611 / 657**.
+- Outcome:
+  - JS snapshot parity: **611 / 657** (+1 vs prior 610 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **42** (-1 vs prior 43).
+- Remaining failure clusters (unchanged architecturally):
+  - **export-coercion position** (ast_abstract_test, async_inline,
+    derive_projector_test, exception_alias, lazy_test, test_simple_ref,
+    webpack_config, res_debug, test_zero_nullable, ...) — Rust still
+    keeps exported Const/Lvar-alias bindings at source position; OCaml's
+    `handle_exports` appends them as fresh Single groups at the end of
+    `coerced_input.groups`. Needs `Lam_coercion.handle_exports` port.
+  - **nested if-else** (js_json_test, ticker, exception_rebound_err_test,
+    option_optimisation) — shape mismatches in simplify_if_statement's
+    terminal-then-flatten rule firing in one direction or the other. The
+    pattern here is different from topsort_test's single-branch if.
+  - **bs_poly_map_test / test_google_closure** — eta-reduction of named
+    local functions OCaml performs but Rust doesn't.
+  - **gpr_4632** — dead-code aggressiveness mismatch.
+  - **equal_box_test** — Rust folds `3 !== null` to `true` semantically.
+  - **res_debug / test_non_export** — module-signature-constraint DCE.
+- Next iteration candidates:
+  1. **Export-coercion positional rebuild** — port
+     `Lam_coercion.handle_exports` groups-order so exported Const / Lvar
+     aliases are appended at the end of the top-level block in the order
+     they appear in the export tuple. This is the biggest cluster.
+  2. **Nested if-else shape** — trace why OCaml keeps the nested
+     `if-else` shape for `js_json_test` and why the flatten rule
+     at `simplify_if_statement` fires in Rust but not OCaml for this
+     shape (both languages share the `block_last_is_terminal` rule).
+  3. **Eta-reduce named local functions** — match OCaml's eta reduction
+     `(a, i) => acc(a, i) --> acc`.
 
 ## Iteration on 2026-04-21 (evening)
 
