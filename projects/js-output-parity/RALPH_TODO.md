@@ -10,20 +10,31 @@ the ~114 helper functions that fed them are gone. The pipeline at
 `lam_compile_main.ml:148-200`.
 
 Your next steps, in order:
-1. Propagate exports from the driver into `LamStats` so the
-   `Set_ident.mem meta.export_idents` arm in `Lam_pass_collect.collect_info`
-   (lam_pass_collect.ml:92-93) annotates non-Lfunction exported bindings.
-   This currently downgrades the `is_export_id` branch in `simplify_alias`
-   (lam_pass_remove_alias.ml:211).
-2. Wire up `Lam_compile_env.query_external_id_info` so the cross-module
+1. **Recover the `Lconst`-substituted export placement.** `simplify_lets`
+   correctly drops `let h = 3` (small-const Alias arm), but
+   `Lam_coercion.handle_exports` then synthesises a `Single (Strict, h, Lconst 3)`
+   group at the end of the file (`lam_coercion.ml:122-157`). OCaml has the
+   same shape on paper yet emits the binding at the original site;
+   investigate whether OCaml's coercion or its earlier pipeline retains the
+   `let` somewhere we drop it. See attr_test.res / similar regression
+   triggered when porting the `Lam.prim` smart constructor (commit 083ec6668).
+2. **Eta-reduce `let f = (x) => g(x)` -> `let f = g`.** Several diffs
+   (a_scope_bug, belt_hashmap_test, ffi_arity_test, async_jsx,
+   stdlib_Stdlib_ObjectTests, topsort_test, uncurried_cast,
+   bs_mutable_set_test, bs_poly_set_test, ...) come from Rust emitting
+   `function f(x) { return g(x); }` while OCaml emits `let f = g;`. The
+   Rust pipeline preserves the Lfunction shape that the source produced;
+   OCaml seems to fold it earlier. Search OCaml's pipeline (likely a
+   special arm of `Lam_pass_lets_dce` or `Lam.apply` smart constructor)
+   for the rewrite.
+3. **Wire up `Lam_compile_env.query_external_id_info`** so the cross-module
    inline arms in `Lam_pass_remove_alias.simplify_alias`
    (lam_pass_remove_alias.ml:131-162) and `Lam_arity_analysis.get_arity`
    (lam_arity_analysis.ml:43-71) can resolve foreign module functions.
-3. Investigate parity clusters from the remaining 170 output-diff failures.
-   The biggest targets are likely the same as before the port: module
-   strengthening, simple-abbrevs sharing, etc. Pick a small-internal
-   cluster first.
-4. Address the issues in existing ports listed at the top of
+4. **Investigate parity clusters from the remaining 54 output-diff failures.**
+   The for-loop direction cluster has been resolved by the smart
+   constructor port; what remains is mostly eta + emit-order issues.
+5. Address the issues in existing ports listed at the top of
    PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
    `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
    in lam_util, etc.).
@@ -36,8 +47,82 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (alpha_conversion ported, +193 parity)
-**Status:** 483 / 657 authoritative JS snapshot baseline; 4 compile errors and 170 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`.
+**Last Updated:** 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding, +116 parity)
+**Status:** 599 / 657 authoritative JS snapshot baseline; 4 compile errors and 54 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants the same way OCaml's `Lam.prim` does.
+
+## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
+
+Three OCaml-aligned fixes landed back-to-back, totalling **+116 parity** and
+**-116 output diffs** vs the previous 483/657 baseline:
+
+- **deep_flatten -> refine_let on Single groups** (commit 387e37a8f):
+  `Lam_pass_deep_flatten.lambda_of_groups` calls `Lam_util.refine_let` on
+  every `Single` group when re-emitting the let chain
+  (lam_pass_deep_flatten.ml:108). The Rust port short-circuited that with a
+  raw `Lambda::let_`, so Strict bindings whose RHS is safe to alias
+  (`Pfield (Fld_module _)` on a global module or local var) were never
+  downgraded to Alias. Their later `simplify_lets` Alias arm therefore
+  could not inline single-use bindings such as `let h = Belt_List.length`
+  into their call sites; the emitted JS retained dead local bindings like
+  `let v = U.compare; return { v: v };`.
+  - JS snapshot parity: **483 / 657 -> 592 / 657 (+109)**
+  - Output diffs: **170 -> 61**
+- **Propagate exports into `LamStats`** (commit 0204b6865):
+  `Lam_compile_main.compile` (lam_compile_main.ml:124-153) constructs the
+  shared `Lam_stats.t` with `~export_idents` populated from
+  `Translmod.transl_implementation`. Two passes consume those:
+  `Lam_pass_collect.collect_info` (lam_pass_collect.ml:90-93) annotates
+  non-`Lfunction` exported bindings with `FunctionId`, and
+  `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:211)
+  consults `is_export_id` together with `is_closed_with_map` to refuse
+  inlining when an exported callee captures variables that would leak
+  through the inlined body. The Rust port previously seeded
+  `LamStats::new(Vec::new())`, so the simplifier always took the
+  unconditional beta-reduction branch and exported helpers like
+  `orientationToJs` were inlined into their call sites. Rebuild the export
+  list from the lowered Lambda by walking the tree the same way
+  `LoweringContext::collect_exported_idents` does
+  (raw_lambda/lower.rs:502-577).
+  - JS snapshot parity: **592 / 657 -> 601 / 657 (+9)**
+  - Output diffs: **61 -> 52**
+- **Port `Lam.prim` smart-constructor constant folding** (commit 083ec6668):
+  Direct port of OCaml's `Lam.prim` smart constructor (lam.ml:479-548),
+  which folds constants on the common unary and binary primitives — int
+  arithmetic, comparisons, string ops, and the seq* boolean helpers.
+  Without this, `for i in 0 to n - 1` lowered to `for (let i = 0; i < n; ++i)`
+  because the `Psubint(Const_int n, Const_int 1)` operand never folded to
+  `Const_int (n - 1)`; OCaml folds eagerly so the `Lfor` arm in
+  `lam_compile.ml` sees the literal and emits `for (let i = 0; i <= 9; ++i)`.
+  - JS snapshot parity: **601 / 657 -> 599 / 657 (-2 regression)**
+  - Output diffs: **52 -> 54**
+  - The two new failures (e.g. attr_test.res) are a placement regression:
+    `simplify_lets` substitutes the now-foldable `let h = 3` into the
+    export makeblock, so `Lam_coercion.handle_exports` re-emits it via the
+    `_ -> Single (Strict, ...)` arm at the end of the file. OCaml has the
+    same logical shape but somehow keeps the binding in source order;
+    needs follow-up.
+
+Net iteration delta vs baseline: **483 / 657 -> 599 / 657 (+116 parity)**,
+**170 -> 54 output diffs**, **4 compile errors unchanged**.
+
+### Next iteration candidates (in priority order)
+
+1. **Recover Lconst-substituted export placement.** Investigate why OCaml
+   keeps the `let h = 3` binding in source order even though
+   `simplify_lets` substitutes the value. Likely involves the interaction
+   between `Lam_pass_lets_dce` and `Lam_coercion.handle_exports`.
+2. **Eta-reduce `let f = (x) => g(x)` -> `let f = g`.** Many remaining diffs
+   come from this single pattern. Search the OCaml pipeline for where this
+   rewrite happens (perhaps `Lam_pass_lets_dce` Strict arm with
+   `Lfunction` body whose body is a single Lapply with eta-conversion of
+   params).
+3. **Cross-module inlining infrastructure** — port
+   `Lam_compile_env.query_external_id_info` so the cross-module arms in
+   `simplify_alias` and `Lam_arity_analysis.get_arity` can fire.
+4. **Issues in existing ports** (from PERFORMANCE_PLAN.md top section):
+   IdGenerator stamp collisions in `pass_exits`, raw `Lsequence` instead
+   of `Lambda::seq` in `pass_lets_dce`, `lookup` convenience wrapper in
+   `pass_count`, dead `let_variable` helper in `lam_util`.
 
 ## Iteration on 2026-04-21 (alpha_conversion ported)
 
