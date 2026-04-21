@@ -9839,16 +9839,25 @@ fn resolve_rewriteable_toplevel_alias_initializer(
             return None;
         }
 
-        let value = flatten_toplevel_block(block)
+        let (value, property) = flatten_toplevel_block(block)
             .into_iter()
             .find_map(|stmt| match stmt.desc {
                 StatementDesc::Variable(VariableDeclaration {
                     ident,
                     value: Some(initializer),
+                    property,
                     ..
-                }) if ident.same(&current) => Some(initializer),
+                }) if ident.same(&current) => Some((initializer, property)),
                 _ => None,
             })?;
+
+        // OCaml's lam_pass_lets_dce.ml:21-23 only substitutes Strict / Alias /
+        // StrictOpt. A Variable-kind binding compiles to a `let`-mutable JS
+        // declaration (post-eliminate_ref ref); folding through its initial
+        // value is unsound because later code may mutate the binding.
+        if matches!(property, LetKind::Variable) {
+            return None;
+        }
 
         match value.desc {
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
@@ -15288,11 +15297,20 @@ fn resolve_tail_move_replacement_expression(
         };
 
         let StatementDesc::Variable(VariableDeclaration {
-            value: Some(value), ..
+            value: Some(value),
+            property,
+            ..
         }) = &stmt.desc
         else {
             return Expression::var(current);
         };
+
+        // OCaml's lam_pass_lets_dce.ml:21-23 only substitutes Strict / Alias /
+        // StrictOpt. Stop at a Variable-kind binding (post-eliminate_ref ref);
+        // folding through it is unsound because later code may mutate it.
+        if matches!(property, LetKind::Variable) {
+            return Expression::var(current);
+        }
 
         match &value.desc {
             ExpressionDesc::Fun { .. } => return Expression::var(current),
