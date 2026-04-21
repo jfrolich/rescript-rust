@@ -19,13 +19,27 @@ Your next steps, in order:
    unconditionally in the printer; wiring up `query_external_id_info` would
    also flip cross-module calls from `App_uncurry` to `App_infer_full` in
    alpha_conversion, matching OCaml more precisely.
-2. **Investigate parity clusters from the remaining 33 output-diff failures.**
-   Top remaining files: a_recursive_type, arity_deopt, bdd,
-   bs_mutable_set_test, bs_poly_mutable_set_test, bs_poly_set_test,
-   bs_set_int_test, coercion_module_alias_test, equal_box_test, and 23
-   more. Most look like specific JS IR / printer edge cases now that the
-   big-hitter clusters (Literal+Alias export placement, eta-reduction) are
-   handled.
+2. **Investigate parity clusters from the remaining 29 output-diff failures.**
+   Remaining diffs cluster into:
+     - **Cross-module alias binding expansion** (coercion_module_alias_test):
+       OCaml emits `let C3 = Char;` for module aliasing; Rust expands to
+       `{ escaped: Char.escaped, ... }`. Needs tracking module aliases
+       through the JS IR.
+     - **Constant inlining through partial application / closures**
+       (test_demo, arity_deopt): OCaml's `simplify_lets` substitutes
+       literal bindings more aggressively inside closures created by
+       partial applications; Rust preserves intermediate `let` bindings.
+     - **Adjacent let reordering** (bs_set_int_test): OCaml orders
+       `let i$2 = range(50,100); let s = ...` differently from Rust.
+     - **Dead-code branch elimination** (gpr_4632, stringmatch_test):
+       Rust eliminates branches OCaml keeps (compile-time folding over
+       pattern match scrutinees).
+     - **Pjscomp / equality folding** (equal_box_test): Rust folds
+       `3 !== undefined` to `true`; OCaml keeps the literal comparison
+       (Lam.prim only folds `Pintcomp ((Ceq|Cneq))` on `Const_pointer`
+       pairs — not on `Const_js_undefined`).
+   None of these appear to be a single-spot fix; each needs targeted
+   investigation.
 3. Address the issues in existing ports listed at the top of
    PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
    `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
@@ -47,6 +61,11 @@ Your next steps, in order:
   Accepts `Qualified(Ml | Runtime, _)` callees unconditionally to
   compensate for the missing `query_external_id_info` port. JS
   snapshot parity: **605 / 657 -> 620 / 657 (+15)**.
+- **pp_function eta-reduction for inline Fun expressions**
+  (commit 075b948f4): port of the `Is_return | No_name _` arm of
+  `pp_function` (js_dump.ml:342-344). Collapses inline
+  `node => sort_node(node)` arguments to `sort_node`. JS snapshot
+  parity: **620 / 657 -> 624 / 657 (+4)**.
 
 **Every line of Rust must trace to a specific line in OCaml source.** No
 invented logic.
@@ -56,8 +75,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Literal+Alias preserve + pp_function eta-reduction, +21 parity)
-**Status:** 620 / 657 authoritative JS snapshot baseline; 4 compile errors and 33 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer.
+**Last Updated:** 2026-04-21 (Literal+Alias preserve + pp_function eta-reduction, +25 parity)
+**Status:** 624 / 657 authoritative JS snapshot baseline; 4 compile errors and 29 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
