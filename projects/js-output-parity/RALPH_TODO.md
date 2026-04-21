@@ -1,7 +1,37 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (midday)
-**Status:** 604 / 657 authoritative JS snapshot baseline; 4 compile errors and 49 output diffs. Latest iteration routes `compile_deps_program_with_possible_required_modules` through `simplify_for_js_backend_with_jsx_preserve(self.jsx_preserve)` so the JSX-preserve guard at simplify.rs:3118 actually fires during the JS backend; this prevents lambda-level `simplify_field_access` from collapsing `Pfield(0, Lvar Foo)` into `Lvar Async_jsx$Foo` before the IR stage can keep the `Foo.make` static index. Newly passing: `async_jsx`, `jsx_preserve_test`.
+**Last Updated:** 2026-04-21 (afternoon)
+**Status:** 605 / 657 authoritative JS snapshot baseline; 4 compile errors and 48 output diffs. Two OCaml-aligned iterations landed on 2026-04-21 since the 602 baseline: (1) route the JS backend lambda simplify through `simplify_for_js_backend_with_jsx_preserve(self.jsx_preserve)` so the JSX-preserve guard actually fires, and (2) stop pushing a fresh `NameScope` for `StatementDesc::ForRange` so inner-body `let` bindings inherit the outer `next_suffix` counter and match OCaml's cardinal-based shadow renaming. Newly passing in those two iterations: `async_jsx`, `jsx_preserve_test`, `for_loop_test`.
+
+## Iteration on 2026-04-21 (afternoon)
+
+- Active slice: the 20-line `for_loop_test` diff where OCaml renamed an inner-for-loop `let v = {...}` to `v$1` (stamp-distinct shadow) while Rust printed it as plain `v`.
+- OCaml / backend reference:
+  - `compiler/ext/ext_pp_scope.ml:41-49` — `add_ident` uses `Map_int.cardinal imap` so the N-th stamp-distinct use of a mangled name gets `name$N`.
+  - `compiler/core/js_dump.ml:1415-1497` — `ForRange` threads `cxt` through the body; only `js_dump.ml:369` calls `Ext_pp_scope.sub_scope` on function entry.
+- Rust changes:
+  - `compiler-rust/src/js_ir/printer.rs:567-638` — removed the `with_local_ident_scope` wrapper around `StatementDesc::ForRange`. The body now prints inside the caller's `NameScope`, so the outer `next_suffix["v"] = 1` is still visible when the inner `let v` is assigned and it correctly prints as `v$1`. The reserved-printed-name list is no longer needed because `ident_name` on a new stamp already lands on a fresh suffix through the shared parent state.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for `for_loop_test` (newly fixed), plus existing cluster: ExternalShadow, test_static_catch_ident, bal_set_mini.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **605 / 657**.
+- Outcome:
+  - JS snapshot parity: **605 / 657** (+1 vs prior 604 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **48** (-1 vs prior 49).
+  - `mario_game` diff shrank from 890 lines → 747 and `ticker` from 32 → 22 as collateral.
+- Remaining failure clusters (unchanged buckets, smaller):
+  - **gpr_3609_test** — extra `let intValue = state._0` binding; alias-simplification source.
+  - **exception_rebound_err_test** — nested `if-else` chain where OCaml flattens to top-level `if (cond) return;` sequence.
+  - **miss_colon_test** — exit-id renumbering in nested staticcatches.
+  - **export-coercion cluster** (ast_abstract_test, async_inline, derive_projector_test, exception_alias, lazy_test, test_simple_ref, webpack_config, ...) — extra `let x$1 = ...` aliases and trailing simple-constant export reordering.
+  - **topsort_test / js_json_test / test_google_closure / option_optimisation / ticker** — Rust's `simplify_if_statement` flattens `if (!cond) { work }` into `if (cond) return; work` where OCaml preserves the positive form.
+  - **variantsMatching / test_zero_nullable / gpr_3875_test** — the `js_pass_flatten_and_mark_dead` module-field alias hoisting (`ModuleName_field = value` then `Module = { field: ModuleName_field }`) — Rust doesn't mirror OCaml's blocklen >=2 hoisting.
+  - **test_set / belt_list_test** — alias bindings that OCaml inlines but Rust keeps (`let match = s2`, `let b = length_10_id`).
+- Next iteration candidates:
+  1. **export-coercion wire-up** — biggest remaining cluster (7+ files) blocked on the documented `pass_lets_dce` wire-up.
+  2. **simplify_if_statement flatten narrow** — identify why OCaml keeps `if (!cond) { work }` (topsort_test case) vs Rust's flatten-on-empty-else. Likely the compile phase adds `[Return undef]` to the empty else where OCaml leaves `[]`.
+  3. **js_pass_flatten_and_mark_dead module field hoisting** — port the OCaml `subst_map` rule at `js_pass_flatten_and_mark_dead.ml:172-233` that splits a 2+ element Caml_block module into `ModuleName_field` temporaries.
 
 ## Iteration on 2026-04-21 (midday)
 
