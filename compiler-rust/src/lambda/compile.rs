@@ -1314,6 +1314,10 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
+        // OCaml's `compile_switch` (lam_compile.ml:784-787) unconditionally
+        // emits `S.declare_variable ~kind id` before compiling the switch
+        // body in `Assign id` context. No `declaration` is threaded through,
+        // so the switch never folds back into `let id = cond ? a : b`.
         let mut declared = vec![Statement::variable(VariableDeclaration {
             ident: id.clone(),
             value: None,
@@ -1332,14 +1336,15 @@ impl LambdaCompiler {
         cases: &[(String, Lambda)],
         default: Option<&Lambda>,
     ) -> Block {
-        let mut declared = vec![Statement::variable(VariableDeclaration {
-            ident: id.clone(),
-            value: None,
-            property: kind,
-            ident_info: IdentInfo::default(),
-        })];
-        declared.extend(self.compile_string_switch_assignment_block(id, scrut, cases, default));
-        declared
+        // OCaml's `compile_stringswitch` (lam_compile.ml:872-876) threads the
+        // `Declare (kind, id)` continuation straight to `compile_string_cases`
+        // -> `compile_general_cases` -> `morph_declare_to_assign` -> `S.if_`,
+        // so the two-case Complete arm folds `[id = then; id = else]` into
+        // `let id = cond ? then : else` via the `declaration` parameter. Mirror
+        // that by folding the final `id = expr` in the emitted assignment
+        // block into the pending declaration.
+        let body = self.compile_string_switch_assignment_block(id, scrut, cases, default);
+        Self::prepend_declaration_or_fold_final_assignment(kind, id, body)
     }
 
     fn compile_short_circuit_expr(
@@ -4950,6 +4955,51 @@ impl LambdaCompiler {
             Expression::var(id.clone()),
             expr,
         ))
+    }
+
+    /// Mirrors OCaml's `Js_stmt_make.if_ ~declaration` promotion
+    /// (js_stmt_make.ml:304-312): when the final statement of `body` is
+    /// `id = expr;`, collapse the pending `let id;` and the assignment into a
+    /// single `let id = expr;`. Otherwise prepend the bare declaration.
+    /// Every earlier statement in `body` was produced BEFORE `id` was brought
+    /// into scope (scrut prelude, switch dispatch, etc.), so none of them can
+    /// reference `id`; moving the declaration past them preserves semantics
+    /// while matching OCaml's shape.
+    fn prepend_declaration_or_fold_final_assignment(
+        kind: LetKind,
+        id: &Ident,
+        mut body: Block,
+    ) -> Block {
+        if let Some(last) = body.last() {
+            if let StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                ..
+            }) = &last.desc
+            {
+                if let ExpressionDesc::Var(VIdent::Id(target)) = &lhs.desc {
+                    if target.same(id) {
+                        let rhs_expr = rhs.as_ref().clone();
+                        body.pop();
+                        body.push(Statement::variable(VariableDeclaration {
+                            ident: id.clone(),
+                            value: Some(rhs_expr),
+                            property: kind,
+                            ident_info: IdentInfo::default(),
+                        }));
+                        return body;
+                    }
+                }
+            }
+        }
+        let mut result = Vec::with_capacity(body.len() + 1);
+        result.push(Statement::variable(VariableDeclaration {
+            ident: id.clone(),
+            value: None,
+            property: kind,
+            ident_info: IdentInfo::default(),
+        }));
+        result.extend(body);
+        result
     }
 
     fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
