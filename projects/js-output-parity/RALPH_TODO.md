@@ -1,7 +1,88 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (afternoon)
-**Status:** 605 / 657 authoritative JS snapshot baseline; 4 compile errors and 48 output diffs. Two OCaml-aligned iterations landed on 2026-04-21 since the 602 baseline: (1) route the JS backend lambda simplify through `simplify_for_js_backend_with_jsx_preserve(self.jsx_preserve)` so the JSX-preserve guard actually fires, and (2) stop pushing a fresh `NameScope` for `StatementDesc::ForRange` so inner-body `let` bindings inherit the outer `next_suffix` counter and match OCaml's cardinal-based shadow renaming. Newly passing in those two iterations: `async_jsx`, `jsx_preserve_test`, `for_loop_test`.
+**Last Updated:** 2026-04-21 (evening)
+**Status:** 610 / 657 authoritative JS snapshot baseline; 4 compile errors and 43 output diffs. Three OCaml-aligned iterations landed on 2026-04-21 evening: (1) gate the exported-function `delay_dead_let_cleanup` guard on `env.allow_named_function_inlining` so the final simplify pass can still DCE truly-dead bindings inside exported function bodies (`gpr_3609_test`); (2) port `lam_pass_lets_dce.ml:21-23` unconditional `let (kind) v = Lvar w` substitution into `simplify_alias_bindings_like_lets_dce`, with a mutation-set guard to mirror OCaml's post-eliminate_ref timing (`test_set`); (3) add a dedicated `resolve_exported_lvar_alias_chains` top-down pass that flattens exported Lvar-to-Lvar chains so each binding's value points directly at the chain endpoint (`exception_alias` value-shape fix, though positional difference remains). Newly passing: `gpr_3609_test`, `test_set`, plus one more.
+
+## Iteration on 2026-04-21 (evening)
+
+- Active slice: three OCaml-faithful rules in `simplify.rs` targeting the
+  `let x = y.field` and `let match = x` alias clusters that survived the
+  603→610 range.
+- OCaml / backend references:
+  - `compiler/core/lam_pass_lets_dce.ml:21-23` — unconditional substitution
+    rule for `let (Strict | Alias | StrictOpt) v = Lvar w in body`.
+  - `compiler/core/lam_pass_lets_dce.ml:121-133` — Strict/Variable DCE of
+    unused bindings, unconditional and applicable inside function bodies.
+  - `compiler/core/lam_coercion.ml:82-172` — `handle_exports` creates fresh
+    single-let groups per export and defers them after `reverse_input` in
+    `coerced_input.groups`, which is how OCaml flattens chain values
+    naturally via the `Lvar w` substitution.
+- Rust changes (all in `compiler-rust/src/lambda/simplify.rs`):
+  - Line 1624-1628: gate the `delay_dead_let_cleanup = true` propagation
+    on `env.allow_named_function_inlining`. Fixes `gpr_3609_test`.
+  - Line 1303-1313 + Line 1384-1394: factor
+    `simplify_alias_bindings_like_lets_dce` into a public wrapper that
+    precomputes `collect_mutated_idents` once, and an inner function that
+    threads the mutated set through recursion. The wrapper adds the
+    OCaml-aligned Lvar substitution rule with a mutation-set guard that
+    skips when the target is assigned anywhere in the program (to mirror
+    OCaml's post-eliminate_ref timing for ref-derived Lvar values).
+  - Line 1135-1192 (new): `resolve_exported_lvar_alias_chains` — a
+    dedicated top-down pass that walks exported Lvar-to-Lvar chains and
+    rewrites each binding's value to the chain endpoint while preserving
+    every binding identifier and every makeblock export reference. Placed
+    between `simplify_alias_bindings_like_lets_dce` and the final
+    `simplify_for_js_backend_once` in the pipeline.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml
+    --release` clean.
+  - Single-file byte-clean for `gpr_3609_test`, `test_set`,
+    `bal_set_mini`, `ExternalShadow`, `LetUnwrap`,
+    `DictPatternMatchingOptimization`.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **610 /
+    657**.
+- Outcome:
+  - JS snapshot parity: **610 / 657** (+5 vs prior 605 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **43** (-5 vs prior 48).
+- Remaining failure clusters:
+  - **export-coercion position** (ast_abstract_test, async_inline,
+    derive_projector_test, exception_alias, lazy_test, test_simple_ref,
+    webpack_config, derive_projector_test, ...) — Rust keeps exported
+    Const/Lvar-alias bindings at source position; OCaml's `handle_exports`
+    appends them as fresh Single groups at the end of
+    `coerced_input.groups`. The value-shape chain fix has landed; the
+    positional fix would need `coerce_toplevel_exports` to emit a separate
+    "trailing export rebind" section.
+  - **simplify_if_statement** (topsort_test, js_json_test, ticker,
+    option_optimisation) — Rust's `js_ir/mod.rs:1505-1513` flattens
+    `if (!cond) { work }` into `if (cond) return; work` where OCaml
+    preserves the positive form. Likely the compile phase passes a
+    `[Return undef]` else-block where OCaml leaves `[]`.
+  - **exception_rebound_err_test** — OPPOSITE of the above: Rust keeps
+    nested `if-else` where OCaml flattens into `if (cond) return;`
+    sequence.
+  - **bs_poly_map_test / test_google_closure** — eta-reduction of named
+    local functions that OCaml performs but Rust doesn't (Rust hoists the
+    inner lambda as a separate named binding and uses it by reference).
+  - **gpr_4632** — Rust elides a never-taken branch that OCaml preserves
+    (dead-code aggressiveness mismatch).
+  - **equal_box_test** — Rust folds `3 !== null` to `true` semantically,
+    OCaml preserves the literal comparison.
+  - **res_debug / test_non_export** — module-signature-constraint DCE
+    that OCaml performs for `include ({...}: {})` but Rust preserves.
+- Next iteration candidates:
+  1. **simplify_if_statement narrow** — find why OCaml's `if_` at
+     `js_stmt_make.ml:240-248` doesn't flatten for the
+     `topsort_test` shape (empty else vs `[Return undef]` else).
+  2. **Export-coercion positional rebuild** — port
+     `Lam_coercion.handle_exports` groups-order so exported Const / Lvar
+     aliases are appended at the end of the top-level block in the order
+     they appear in the export tuple, rather than staying in source
+     position.
+  3. **Eta-reduce named local functions** — match OCaml's
+     eta reduction `(a, i) => acc(a, i) --> acc` so named-function
+     shadowing doesn't spawn a `$1` rename.
 
 ## Iteration on 2026-04-21 (afternoon)
 
