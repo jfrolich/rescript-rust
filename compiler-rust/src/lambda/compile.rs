@@ -5063,17 +5063,18 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if !bindings.is_empty()
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
-                {
-                    self.compile_staticcatch_assignment_block(
-                        result, *label, bindings, body, handler,
-                    )
-                } else {
-                    self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_assign_to_target_block(result, body)
-                    })
-                }
+                // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017)
+                // gates pseudo-jmp on `EffectCall (Maybe_tail_is_return
+                // (Tail_with_name {in_staticcatch=false}))`. For an `Assign`
+                // continuation — which is where `compile_assign_to_target_block`
+                // sits — the match falls into the explicit-jump arm at
+                // lam_compile.ml:1005-1010 (`| Assign _ -> ...`). Take the
+                // explicit-jump path unconditionally; the `with_static_handler`
+                // shortcut is a Rust-only optimization with no OCaml analog in
+                // this continuation.
+                self.compile_staticcatch_assignment_block(
+                    result, *label, bindings, body, handler,
+                )
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_assign_to_target_block(result, body);
