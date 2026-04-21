@@ -1677,7 +1677,10 @@ impl LambdaCompiler {
         if then_is_trivial_unit && else_is_trivial_unit {
             let cond_compiled = self.compile_expr(cond);
             let mut block = cond_compiled.prelude;
-            push_effect_expression(&mut block, cond_compiled.expr);
+            // OCaml's `S.if_ cond [] []` reduces to `S.exp cond`
+            // (js_stmt_make.ml:242 + 45-53), which keeps pure comparisons like
+            // `tmp === null` as a bare `Exp` statement.
+            push_s_exp(&mut block, cond_compiled.expr);
             return Some(block);
         }
 
@@ -2613,7 +2616,10 @@ impl LambdaCompiler {
                 remove_pure_subexpression(else_compiled.expr.clone()),
             ) {
                 (None, None) => {
-                    push_effect_expression(&mut block, cond_expr);
+                    // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
+                    // (js_stmt_make.ml:242 + 45-53). Preserve non-Number/
+                    // Undefined pure expressions like `tmp === null;`.
+                    push_s_exp(&mut block, cond_expr);
                     return block;
                 }
                 (Some(then_expr), Some(else_expr)) => {
@@ -5465,7 +5471,10 @@ impl LambdaCompiler {
             let dispatch =
                 self.compile_untagged_variant_switch_effect_statements(scrut_expr.clone(), switch);
             if dispatch.is_empty() {
-                push_effect_expression(&mut block, scrut_expr);
+                // OCaml's switch compilation collapses an empty dispatch to
+                // `S.exp scrut` (via js_output.ml + js_stmt_make.ml:45-53),
+                // preserving bare comparisons like `tmp === null;`.
+                push_s_exp(&mut block, scrut_expr);
             } else {
                 block.extend(dispatch);
             }
@@ -5483,7 +5492,10 @@ impl LambdaCompiler {
             let dispatch =
                 self.compile_named_variant_switch_effect_statements(scrut_expr.clone(), switch);
             if dispatch.is_empty() {
-                push_effect_expression(&mut block, scrut_expr);
+                // OCaml's switch collapses to `S.exp scrut` when the whole
+                // dispatch is unit (js_stmt_make.ml:45-53) — keeps bare
+                // comparisons as `Exp` statements.
+                push_s_exp(&mut block, scrut_expr);
                 return block;
             }
             block.extend(dispatch);
@@ -5524,7 +5536,9 @@ impl LambdaCompiler {
         let has_effectful_case = cases.iter().any(|(_, clause)| !clause.body.is_empty())
             || default_block.as_ref().is_some_and(|body| !body.is_empty());
         if !has_effectful_case {
-            push_effect_expression(&mut block, scrut_compiled.expr);
+            // OCaml collapses an all-empty switch to `S.exp scrut`
+            // (js_stmt_make.ml:45-53), preserving bare pure expressions.
+            push_s_exp(&mut block, scrut_compiled.expr);
             return block;
         }
 
@@ -5556,7 +5570,9 @@ impl LambdaCompiler {
             false,
         ) {
             if small.is_empty() {
-                push_effect_expression(&mut block, scrut_compiled.expr);
+                // OCaml collapses an all-empty switch to `S.exp scrut`
+                // (js_stmt_make.ml:45-53), preserving bare pure expressions.
+                push_s_exp(&mut block, scrut_compiled.expr);
             } else {
                 block.extend(small);
             }
@@ -5591,7 +5607,9 @@ impl LambdaCompiler {
         let has_effectful_case = clauses.iter().any(|clause| !clause.clause.body.is_empty())
             || default_block.as_ref().is_some_and(|body| !body.is_empty());
         if !has_effectful_case {
-            push_effect_expression(&mut block, scrut_compiled.expr);
+            // OCaml collapses an all-empty string switch to `S.exp scrut`
+            // (js_stmt_make.ml:45-53), preserving bare pure expressions.
+            push_s_exp(&mut block, scrut_compiled.expr);
             return block;
         }
 
@@ -10300,6 +10318,33 @@ fn push_effect_expression(block: &mut Block, expr: Expression) {
             push_effect_expression(block, *right);
         }
         _ if js_expr_no_side_effects(&expr) => {}
+        _ => block.push(Statement::exp(expr)),
+    }
+}
+
+/// Mirrors OCaml's `S.exp` (js_stmt_make.ml:45-53): keeps pure expressions as
+/// `Exp` statements except for literal `Number`/`Undefined` payloads, which
+/// are silently dropped (along with the Number/Undefined side of a top-level
+/// `Seq`). Use this wherever OCaml would construct `S.exp e` — e.g. the
+/// empty-branches reduction inside `S.if_` (js_stmt_make.ml:242), and the
+/// all-empty switch collapses. `push_effect_expression` is more aggressive and
+/// strips every side-effect-free expression, which matches OCaml's
+/// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
+fn push_s_exp(block: &mut Block, expr: Expression) {
+    match expr.desc {
+        ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. } => {}
+        ExpressionDesc::Seq(left, right) => match (&left.desc, &right.desc) {
+            (ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }, _) => {
+                push_s_exp(block, *right);
+            }
+            (_, ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. }) => {
+                push_s_exp(block, *left);
+            }
+            _ => block.push(Statement::exp(Expression {
+                desc: ExpressionDesc::Seq(left, right),
+                comment: expr.comment,
+            })),
+        },
         _ => block.push(Statement::exp(expr)),
     }
 }
