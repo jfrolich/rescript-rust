@@ -1,7 +1,72 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (night, post-Lassign-guard scoping)
-**Status:** 615 / 657 authoritative JS snapshot baseline; 4 compile errors and 38 output diffs. 2026-04-21 night iteration: scoped `simplify_alias_bindings_like_lets_dce`'s unconditional Lvar substitution guard from "any Psetfield/Poffsetref/Lassign-mutated target and any exported binding" down to "only Lassign-mutated target" — matching OCaml's effective behaviour because `Lam_pass_eliminate_ref` rewrites `Pfield(0, ref)` reads into `Lvar ref` AFTER simplif processed the surrounding let, and ref mutations become `Lassign`. Psetfield on a block field is safe to substitute through (OCaml does). Exported bindings are safe because `Lam_coercion.handle_exports` re-creates them as trailing `Single (Alias, new_id, Lvar w)` groups and Rust's `coerce_toplevel_exports` mirrors that. Newly passing: `ast_abstract_test`, `exception_alias`, `res_debug`, `webpack_config` (+4). Zero regressions; `bal_set_mini` stays byte-clean because its `let match = v` target is Lassign-mutated (ref after eliminate_ref).
+**Last Updated:** 2026-04-21 (late night #2, Variable-kind substitution guard)
+**Status:** 615 / 657 authoritative JS snapshot baseline; 4 compile errors and 38 output diffs (unchanged). Variable-kind substitution guard landed — `test_simple_ref` diff shrunk from 16 lines to 4 lines (not_real_escape now emits at source position) but still fails because `coerce_toplevel_exports`' trailing rebind path also folds `Lvar a` through `resolve_tail_move_replacement_expression` into the Number literal `0`.
+
+## Iteration on 2026-04-21 (late night #2, Variable-kind alias substitution guard)
+
+- Active slice: `test_simple_ref` — Rust was emitting `let not_real_escape = 0;` at the export tail with the original `let a = 0;` DCE'd, while OCaml emits `let a = 0;` and `let not_real_escape = a;` at source position.
+- Diagnosis (see "Iteration #1" section below for the full substitution-candidate timing trace): Rust's `simplify_with_env` was substituting `let not_real_escape = Lvar a` through `body_env.substitutions.insert(not_real_escape, Lvar a)` because neither `substitution_hits_assigned_free_variable` nor any other guard blocked Variable-kind targets. OCaml's `lam_pass_lets_dce.ml` implicitly skips this case because `Lam_pass_eliminate_ref` runs AFTER `simplif`, so `let v = Lvar w` with `w` being a ref never sees the line-21 rule.
+- OCaml / backend references:
+  - `compiler/core/lam_pass_lets_dce.ml:21-23` — unconditional Lvar alias substitution.
+  - `compiler/core/lam_pass_lets_dce.ml:24-43`, `38-39` — ref elimination sets binding kind to `Variable` AFTER `simplif` has processed the surrounding let.
+- Rust changes (all in `compiler-rust/src/lambda/simplify.rs`):
+  - `SimplifyEnv.variable_kind_idents: HashSet<Ident>` — tracks idents currently bound with `LetKind::Variable`. Populated at each `simplify_for_js_backend_once` entry via `collect_variable_kind_idents`, so it stays in sync after `eliminate_non_escaping_ref_binding` transitions refs from `Strict(Pmakeblock Mutable)` to `Variable(init)`.
+  - `collect_variable_kind_idents(lam)` — new helper, mirrors `collect_lassign_mutated_idents` in structure.
+  - `substitution_hits_variable_kind_free_variable(replacement, variable_kind_idents)` — new helper; returns true when the substitution's free variables contain any Variable-kind ident.
+  - Two `simplify_with_env` substitution gates now also reject Variable-kind targets:
+    - simplify.rs:2071 block where `substitution_candidate` adds `body_env.substitutions`.
+    - simplify.rs:2143 block where the Alias arm fires `substitute_alias_use(body, id, value)`.
+  - `simplify_alias_bindings_like_lets_dce` now also collects `variable_kind_idents` and threads it through `simplify_alias_bindings_like_lets_dce_inner`. The unconditional-Lvar-alias rule there (compile.rs:1664) now blocks substitution when the target is Variable-kind OR Lassign-mutated.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **615 / 657** (unchanged from prior baseline).
+  - `test_simple_ref` diff shrunk from 16 lines to 4 lines: `let not_real_escape` now emits at source position (between `c` and `real_escape`), not at the tail. Remaining mismatch: Rust emits `let not_real_escape = 0;` (Lvar a folded through `resolve_tail_move_replacement_expression`) while OCaml emits `let a = 0;` + `let not_real_escape = a;`.
+- Outcome:
+  - JS snapshot parity: **615 / 657** (unchanged; guard is OCaml-faithful but doesn't tip any file yet).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **38** (unchanged in count; `test_simple_ref` diff reduced but still failing).
+- Remaining blocker for `test_simple_ref`: `coerce_toplevel_exports` at `compile.rs:377-501` follows `Lvar not_real_escape → Lvar a → let a = 0` through `resolve_tail_move_replacement_expression` (compile.rs:15262-15325) and returns the Number literal `0`. The trailing rebound binding is then `let not_real_escape = 0;`, and DCE removes the now-unused `let a = 0;`. Fix direction: block the literal-folding in `resolve_tail_move_replacement_expression` when the chain hits a Variable-kind binding (post-eliminate_ref ref), since OCaml's `handle_exports` with the same chain would stop at `Lvar a` and emit `let not_real_escape = a;`. Requires plumbing variable-kind info into `coerce_toplevel_exports` — currently that pass works on the JS IR which has already lost the Lambda-level `LetKind::Variable` tag. Either re-derive it (e.g. mark JS `let` declarations from Variable-kind lambda bindings) or thread the info forward.
+- Next iteration candidates:
+  1. **Propagate Variable-kind info into coerce_toplevel_exports** — either via a new `ref_eliminated_idents: HashSet<Ident>` threaded through compile, or by checking the JS IR block for `VariableDeclaration { property: Variable, value: Number/Lconst }` patterns and refusing to fold them in `resolve_tail_move_replacement_expression`.
+  2. **Pobjcomp nullish alignment** (equal_box_test): port OCaml's `eq_null_undefined_boolean` unwrapping of `Optional_block` to its inner Number literal, so `Some(3) !== null` lowers to `3 !== null` (literal comparison) instead of folding to `true`.
+  3. **gpr_1150 DCE aggressiveness** — Rust folds `if (children$15.tl !== 0) { throw ... } return [...]` into `throw ...` unconditionally, likely due to an overly-aggressive "tail field is known 0" analysis.
+
+## Iteration on 2026-04-21 (late night #1, substitution_candidate Variable-kind timing diagnosis)
+
+- Active slice: `test_simple_ref` — Rust emits `let not_real_escape = 0;` at the export tail with the original `let a = 0;` DCE'd, while OCaml emits `let a = 0;` and `let not_real_escape = a;` both at source position.
+- OCaml / backend references:
+  - `compiler/core/lam_pass_lets_dce.ml:21-23` — unconditional Lvar alias substitution.
+  - `compiler/core/lam_pass_lets_dce.ml:24-43` — ref elimination runs AFTER `simplif` has already processed the surrounding let. So `let not_real_escape = (let b = a in b.contents)` becomes `let not_real_escape = Pfield(0, Lvar a) in ...` at the moment line 21 sees it — Pfield pattern, no substitution. Only LATER does `eliminate_ref` rewrite the body's `Pfield(0, Lvar a)` to `Lvar a`, turning the surviving binding into `let not_real_escape = Lvar a`, but simplif is done so no re-fire.
+- Rust pipeline analysis:
+  - `compiler-rust/src/lambda/pass_lets_dce.rs` exists (direct OCaml port) but is **never called** — the actual simplify pipeline lives in `compiler-rust/src/lambda/simplify.rs` (`simplify_for_js_backend`).
+  - `simplify_with_env` (in `simplify.rs:2015-2216`) processes lets inner-first. For `let not_real_escape = let b = a in b.contents`:
+    1. Inner `let b = a` adds `b → Lvar a` to `body_env.substitutions` via `substitution_candidate(Strict, Lvar a, Lvar a)` returning `Some(Lvar a)` (simplify.rs:6061-6092, matches `Lvar` arm at 6075).
+    2. Inner body `Pfield(0, Lvar b)` is rewritten to `Pfield(0, Lvar a)` via the substitution.
+    3. The inner `let b = a` is then DCE'd (no remaining use of b).
+    4. Simplified value for `not_real_escape` is `Pfield(0, Lvar a)`.
+    5. `substitution_candidate(Strict, <original let b...>, Pfield(0, Lvar a))` returns `Some(Pfield(0, Lvar a))` because `Pfield, [Lvar _]` matches the `Pfield-from-global-or-Var` arm at simplify.rs:6079-6089.
+    6. `body_env.substitutions.insert(not_real_escape, Pfield(0, Lvar a))` — substitutes all uses of `not_real_escape` in the outer body (including the Pmakeblock's `Lvar not_real_escape`).
+    7. Body is simplified; the Pmakeblock's `not_real_escape` slot now holds `Pfield(0, Lvar a)`.
+    8. Back at the outer `let a = Pmakeblock(...Mutable)`: `mutable_ref_init` + `eliminate_non_escaping_ref_binding(a, body)` succeeds (all uses of `a` in body are `Pfield(0, Lvar a)` reads). Kind becomes `Variable`, value becomes `Lconst 0`. Body has all `Pfield(0, Lvar a)` → `Lvar a`. Pmakeblock's `not_real_escape` slot is now `Lvar a`.
+  - Final lambda: `let a:Variable = 0 in ... Pmakeblock[ME](..., Lvar a, ...)`. The `let not_real_escape` binding is gone entirely.
+- `coerce_toplevel_exports` (compile.rs:377-501) sees export `not_real_escape` with value `Lvar a`:
+  - `target.name() == export.name()` is false (a vs not_real_escape), so the same-name branches don't fire.
+  - Falls through to the default rebind at line 483-495: creates `Single (Alias, newid_not_real_escape, Lvar a)` as a trailing export.
+  - Later, `resolve_tail_move_replacement_expression` (compile.rs:15262-15325) walks the trailing `Lvar a` chain, finds `let a = 0` (Number literal), and returns the literal `0` at line 15311-15320. The rebound binding becomes `let not_real_escape = 0`.
+  - Then `a = 0` has no remaining use (Pmakeblock's slot is now `0`, and the trailing rebound used `0`), and gets DCE'd.
+- Attempted fix (reverted): add `variable_kind_idents` guard to `simplify_alias_bindings_like_lets_dce` (lam_pass_lets_dce.ml:21-23 equivalent). Variable-kind tracks `LetKind::Variable` bindings (post-eliminate_ref refs).
+  - **Result**: 615 / 657 unchanged. The `simplify_alias_bindings_like_lets_dce` pass runs AFTER `simplify_with_env`, which has already substituted `not_real_escape → Pfield(0, Lvar a)` in step (6) above. By the time `simplify_alias_bindings_like_lets_dce` sees the lambda, `let not_real_escape = Lvar a` is gone — so my Variable-kind guard has nothing to protect.
+- True fix direction (not yet implemented): `substitution_candidate` at simplify.rs:6061-6092 needs to either
+  - block the Lvar arm (line 6075) when the target is Variable-kind, OR
+  - block the Pfield-from-Lvar arm (line 6079-6089) when the inner Lvar target is Variable-kind.
+  - Both match OCaml's implicit timing guard from lam_pass_lets_dce.ml:24-43: ref-eliminated variables are not substitution candidates because OCaml's `simplif` processes the surrounding let BEFORE the ref body is rewritten to Lvar form.
+  - Caveat: `substitution_candidate` sees the OUTER let's kind, not the target's kind. To check the target's kind, we'd need a pre-pass collecting `LetKind::Variable` idents (analogous to the existing `collect_mutated_idents` / `collect_lassign_mutated_idents`) and thread it through `simplify_with_env`.
+- No code committed this iteration.
+
+## Previous iteration (2026-04-21 night, Lassign-only alias-substitution guard)
+
+- Landed `simplify_alias_bindings_like_lets_dce` Lassign-only guard. JS snapshot parity: 611 → 615.
 
 ## Iteration on 2026-04-21 (night, Lassign-only alias-substitution guard)
 

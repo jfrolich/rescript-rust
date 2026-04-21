@@ -24,6 +24,19 @@ use crate::location::Location;
 #[derive(Clone, Default)]
 struct SimplifyEnv {
     mutated_idents: HashSet<Ident>,
+    /// Idents currently bound with `LetKind::Variable` in the lambda under
+    /// simplification. Populated at each `simplify_for_js_backend_once` entry
+    /// so it stays in sync after `eliminate_non_escaping_ref_binding`
+    /// transitions refs from `Strict(Pmakeblock Mutable)` to `Variable(init)`.
+    ///
+    /// Matches OCaml's implicit timing guard in
+    /// `compiler/core/lam_pass_lets_dce.ml:24-43`: when a ref is eliminated,
+    /// OCaml's `refine_let ~kind:Variable` runs AFTER `simplif` has already
+    /// processed the surrounding let. So any `let v = Lvar w` that appears
+    /// with `w` being Variable-kind is post-eliminate_ref and never sees the
+    /// unconditional substitution rule at line 21-23. Block the Lvar
+    /// substitution here when the target is Variable-kind to mirror that.
+    variable_kind_idents: HashSet<Ident>,
     blocks: HashMap<Ident, ImmutableBlockInfo>,
     call_substitutions: HashMap<Ident, Lambda>,
     functions: HashMap<Ident, LFunction>,
@@ -323,6 +336,94 @@ fn collect_mutated_idents(lam: &Lambda) -> HashSet<Ident> {
     mutated
 }
 
+/// Collect idents currently bound with `LetKind::Variable`. These are
+/// typically ref cells that `eliminate_non_escaping_ref_binding` has already
+/// reified (the Rust analogue of OCaml's
+/// `refine_let ~kind:Variable` at lam_pass_lets_dce.ml:38-39).
+fn collect_variable_kind_idents(lam: &Lambda) -> HashSet<Ident> {
+    fn collect(lam: &Lambda, variable: &mut HashSet<Ident>) {
+        match lam {
+            Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
+            Lambda::Lapply(apply) => {
+                collect(&apply.ap_func, variable);
+                for arg in &apply.ap_args {
+                    collect(arg, variable);
+                }
+            }
+            Lambda::Lfunction(func) => collect(&func.body, variable),
+            Lambda::Llet(kind, id, value, body) => {
+                if matches!(kind, LetKind::Variable) {
+                    variable.insert(id.clone());
+                }
+                collect(value, variable);
+                collect(body, variable);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                for (_, binding) in bindings {
+                    collect(binding, variable);
+                }
+                collect(body, variable);
+            }
+            Lambda::Lprim(info) => {
+                for arg in &info.args {
+                    collect(arg, variable);
+                }
+            }
+            Lambda::Lswitch(scrutinee, switch) => {
+                collect(scrutinee, variable);
+                for (_, body) in &switch.sw_consts {
+                    collect(body, variable);
+                }
+                for (_, body) in &switch.sw_blocks {
+                    collect(body, variable);
+                }
+                if let Some(failaction) = &switch.sw_failaction {
+                    collect(failaction, variable);
+                }
+            }
+            Lambda::LstringSwitch(scrutinee, cases, default) => {
+                collect(scrutinee, variable);
+                for (_, body) in cases {
+                    collect(body, variable);
+                }
+                if let Some(default) = default {
+                    collect(default, variable);
+                }
+            }
+            Lambda::LstaticRaise(_, args) => {
+                for arg in args {
+                    collect(arg, variable);
+                }
+            }
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                collect(body, variable);
+                collect(handler, variable);
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                collect(cond, variable);
+                collect(then_, variable);
+                collect(else_, variable);
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                collect(first, variable);
+                collect(second, variable);
+            }
+            Lambda::Lfor(_, from, to, _, body) => {
+                collect(from, variable);
+                collect(to, variable);
+                collect(body, variable);
+            }
+            Lambda::Lassign(_, value) => {
+                collect(value, variable);
+            }
+        }
+    }
+
+    let mut variable = HashSet::new();
+    collect(lam, &mut variable);
+    variable
+}
+
 /// Simplify lowered lambda before JS IR lowering.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
@@ -446,6 +547,7 @@ fn simplify_for_js_backend_once(
     let exports = collect_exported_idents(&flattened);
     let env = SimplifyEnv {
         mutated_idents: collect_mutated_idents(&flattened),
+        variable_kind_idents: collect_variable_kind_idents(&flattened),
         functions: collect_inlineable_functions(&flattened),
         known_functions: collect_known_functions(&flattened),
         preserved_export_bindings: preserved_export_bindings.clone(),
@@ -1370,16 +1472,23 @@ fn simplify_alias_bindings_like_lets_dce(
     // OCaml's lam_pass_lets_dce.ml:21-23 substitutes `let (Strict | Alias |
     // StrictOpt) v = Lvar w` unconditionally. OCaml only "misses" the ref
     // case because Lam_pass_eliminate_ref rewrites `Pfield(0, ref)` reads
-    // into `Lvar w` AFTER simplif has already processed the surrounding let.
-    // Ref mutations become `Lassign w` after eliminate_ref, so track the
-    // Lassign-mutated idents to skip substitution for just those targets.
+    // into `Lvar w` and ref writes into `Lassign w` AFTER simplif has already
+    // processed the surrounding let. Mirror that timing guard here by
+    // tracking two sets:
+    //   - Lassign-mutated idents (post-eliminate_ref ref mutations).
+    //   - Variable-kind idents (post-eliminate_ref ref reads that ended up
+    //     as `let v = Lvar w` where `w` has `LetKind::Variable` —
+    //     the `refine_let ~kind:Variable` output of
+    //     lam_pass_lets_dce.ml:38-39).
     // Psetfield / Poffsetref on a block field do NOT block substitution in
     // OCaml (they mutate a record field, not the binding).
     let lassign_mutated_idents = collect_lassign_mutated_idents(lam);
+    let variable_kind_idents = collect_variable_kind_idents(lam);
     simplify_alias_bindings_like_lets_dce_inner(
         lam,
         preserved_local_module_module_alias_bindings,
         &lassign_mutated_idents,
+        &variable_kind_idents,
     )
 }
 
@@ -1469,6 +1578,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
     lam: &Lambda,
     preserved_local_module_module_alias_bindings: &HashSet<Ident>,
     lassign_mutated_idents: &HashSet<Ident>,
+    variable_kind_idents: &HashSet<Ident>,
 ) -> Lambda {
     match lam {
         Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam.clone(),
@@ -1477,6 +1587,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 &apply.ap_func,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
             apply
                 .ap_args
@@ -1486,6 +1597,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                         arg,
                         preserved_local_module_module_alias_bindings,
                     lassign_mutated_idents,
+                    variable_kind_idents,
                     )
                 })
                 .collect(),
@@ -1499,6 +1611,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 &func.body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
             func.attr.clone(),
         ),
@@ -1512,11 +1625,13 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 value,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             );
             let body = simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             );
             let binding_is_exported = lambda_exports_ident(&body, id);
             let preserve_local_module_module_alias =
@@ -1559,7 +1674,9 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                     // itself and are safe to substitute through — OCaml does
                     // substitute in that case via handle_exports' trailing
                     // rebind.
-                    if !lassign_mutated_idents.contains(target) {
+                    if !lassign_mutated_idents.contains(target)
+                        && !variable_kind_idents.contains(target)
+                    {
                         return substitute_alias_use(&body, id, &value);
                     }
                 }
@@ -1593,6 +1710,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                         &substitute_alias_use(&body, id, &value),
                         preserved_local_module_module_alias_bindings,
                     lassign_mutated_idents,
+                    variable_kind_idents,
                     );
                 }
             }
@@ -1608,6 +1726,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                             binding,
                             preserved_local_module_module_alias_bindings,
                         lassign_mutated_idents,
+                        variable_kind_idents,
                         ),
                     )
                 })
@@ -1616,6 +1735,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
         ),
         Lambda::Lprim(info) => Lambda::prim(
@@ -1627,6 +1747,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                         arg,
                         preserved_local_module_module_alias_bindings,
                     lassign_mutated_idents,
+                    variable_kind_idents,
                     )
                 })
                 .collect(),
@@ -1637,6 +1758,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 scrutinee,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             LambdaSwitch {
                 sw_consts_full: switch.sw_consts_full,
@@ -1650,6 +1772,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                                 lam,
                                 preserved_local_module_module_alias_bindings,
                             lassign_mutated_idents,
+                            variable_kind_idents,
                             ),
                         )
                     })
@@ -1665,6 +1788,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                                 lam,
                                 preserved_local_module_module_alias_bindings,
                             lassign_mutated_idents,
+                            variable_kind_idents,
                             ),
                         )
                     })
@@ -1674,6 +1798,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                         lam,
                         preserved_local_module_module_alias_bindings,
                     lassign_mutated_idents,
+                    variable_kind_idents,
                     ))
                 }),
                 sw_names: switch.sw_names.clone(),
@@ -1684,6 +1809,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 scrutinee,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             cases
                 .iter()
@@ -1694,6 +1820,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                             lam,
                             preserved_local_module_module_alias_bindings,
                         lassign_mutated_idents,
+                        variable_kind_idents,
                         ),
                     )
                 })
@@ -1703,6 +1830,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                     lam,
                     preserved_local_module_module_alias_bindings,
                 lassign_mutated_idents,
+                variable_kind_idents,
                 ))
             }),
         ),
@@ -1714,6 +1842,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                         arg,
                         preserved_local_module_module_alias_bindings,
                     lassign_mutated_idents,
+                    variable_kind_idents,
                     )
                 })
                 .collect(),
@@ -1723,12 +1852,14 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             handler.clone(),
             Box::new(simplify_alias_bindings_like_lets_dce_inner(
                 recover,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
         ),
         Lambda::LtryWith(body, exn, handler) => Lambda::LtryWith(
@@ -1736,12 +1867,14 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             exn.clone(),
             Box::new(simplify_alias_bindings_like_lets_dce_inner(
                 handler,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
         ),
         Lambda::LifThenElse(cond, then_, else_) => Lambda::if_(
@@ -1749,16 +1882,19 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 cond,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
             simplify_alias_bindings_like_lets_dce_inner(
                 then_,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
             simplify_alias_bindings_like_lets_dce_inner(
                 else_,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
         ),
         Lambda::Lsequence(first, second) => Lambda::seq(
@@ -1766,11 +1902,13 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 first,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
             simplify_alias_bindings_like_lets_dce_inner(
                 second,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             ),
         ),
         Lambda::Lwhile(cond, body) => Lambda::Lwhile(
@@ -1778,11 +1916,13 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 cond,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             Box::new(simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
         ),
         Lambda::Lfor(id, from, to, direction, body) => Lambda::Lfor(
@@ -1791,17 +1931,20 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 from,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             Box::new(simplify_alias_bindings_like_lets_dce_inner(
                 to,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
             *direction,
             Box::new(simplify_alias_bindings_like_lets_dce_inner(
                 body,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
         ),
         Lambda::Lassign(id, value) => Lambda::Lassign(
@@ -1810,6 +1953,7 @@ fn simplify_alias_bindings_like_lets_dce_inner(
                 value,
                 preserved_local_module_module_alias_bindings,
             lassign_mutated_idents,
+            variable_kind_idents,
             )),
         ),
     }
@@ -1945,6 +2089,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     && !preserve_named_function_apply_argument_alias
                     && !preserve_single_use_switch_scrutinee_alias
                     && !substitution_hits_assigned_free_variable(&substitution, body)
+                    && !substitution_hits_variable_kind_free_variable(
+                        &substitution,
+                        &env.variable_kind_idents,
+                    )
                 {
                     if binding_is_exported {
                         if let Some(export_target) = exported_alias_target(&substitution) {
@@ -2040,6 +2188,10 @@ fn simplify_with_env(lam: &Lambda, env: &SimplifyEnv, exports: &HashSet<Ident>) 
                     && !preserve_single_use_allocating_constant_apply_arg
                     && !preserve_single_use_switch_scrutinee_alias
                     && !substitution_hits_assigned_free_variable(&value, &body)
+                    && !substitution_hits_variable_kind_free_variable(
+                        &value,
+                        &env.variable_kind_idents,
+                    )
                     && (!use_info.captured || matches!(value, Lambda::Lconst(_) | Lambda::Lvar(_)))
                 {
                     return substitute_alias_use(&body, id, &value);
@@ -3869,6 +4021,26 @@ fn substitution_hits_assigned_free_variable(replacement: &Lambda, body: &Lambda)
     free_variables(replacement)
         .iter()
         .any(|ident| lambda_assigns_variable(ident, body))
+}
+
+/// Returns true when the substitution's free variables contain a Variable-kind
+/// ident (ref-eliminated ref). Matches OCaml's implicit timing in
+/// lam_pass_lets_dce.ml: once `eliminate_ref` rewrites `Pfield(0, Lvar w)` to
+/// `Lvar w` and the surrounding let turns into `let v = Lvar w`, OCaml's
+/// `simplif` is already done and line 21's unconditional substitution rule
+/// never re-fires. Rust's `simplify_with_env` runs multiple passes, so we need
+/// to explicitly block the substitution at `substitution_candidate` time when
+/// the Lvar target is currently Variable-kind.
+fn substitution_hits_variable_kind_free_variable(
+    replacement: &Lambda,
+    variable_kind_idents: &HashSet<Ident>,
+) -> bool {
+    if variable_kind_idents.is_empty() {
+        return false;
+    }
+    free_variables(replacement)
+        .iter()
+        .any(|ident| variable_kind_idents.contains(ident))
 }
 
 fn lambda_hits_variable_through_env(target: &Ident, lam: &Lambda, env: &SimplifyEnv) -> bool {
