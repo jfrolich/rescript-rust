@@ -1,8 +1,8 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-21): **635 / 657** (96.7%)
+## Current baseline (2026-04-21): **636 / 657** (96.8%)
 - 4 compile errors (typecheck failures, upstream)
-- 18 output diffs (down from 19)
+- 17 output diffs (down from 18)
 
 ## ⚠️ THE MONOLITH IS GONE — ALL OCAML PIPELINE STAGES PORTED
 
@@ -51,23 +51,24 @@ Your next steps, in order:
      - **Static exit label numbering** (gpr_1698_test, gpr_3875_test): Rust's
        `pass_exits` inlines some exits OCaml preserves, and the label
        counter starts from a different seed.
-     - **Dead pure comparison kept** (option_optimisation): OCaml emits
-       a trailing `tmp === null;` statement that Rust eliminates via some
-       downstream pass. Investigation (2026-04-21): `push_effect_expression`
-       (`compile.rs:10296`) drops every side-effect-free expression, but
-       OCaml's `S.exp` (js_stmt_make.ml:45-53) only drops Number/Undefined.
-       Adding a faithful `push_s_exp` helper and using it in
-       `compile_if_effect_block`'s `(None, None)` arm and
-       `compile_if_unit_return_tail_block` was neutral — the
-       `tmp === null;` for option_optimisation doesn't flow through either
-       path. The expression is generated inside pattern-match compilation
-       via a path that pre-drops the bare comparison before any of the
-       checked code paths see it. Likely origin: the switch / match code
-       path calls `push_effect_expression` on the scrutinee after
-       simplifying the inner ifs. Search for bare comparison emission via
-       `compile.rs:5468, 5486, 5527, 5559, 5594` (other
-       `push_effect_expression(&mut block, scrut_expr)` callers — those
-       may correspond to the specific match paths that drop the check).
+     - ~~**Dead pure comparison kept** (option_optimisation)~~: FIXED.
+       OCaml's two-case Complete arm in `compile_general_cases`
+       (lam_compile.ml:558) emits `S.if_ (test === id1) then else`. When
+       both cases are `Lstaticraise X`, OCaml leaves them as fallthrough
+       (empty), so `S.if_ test [] []` collapses to `S.exp test`
+       (js_stmt_make.ml:242 + 45-53) and the bare `tmp === null;` survives
+       in front of the staticcatch handler body that gets appended after.
+       Rust's `compile_return_block` for `Lstaticraise` resolves through
+       `with_static_handler` -> `resolve_static_raise` and inlines the
+       handler at the raise site; the all-equal short-circuit in
+       `compile_named_string_switch_return_with_strategy` (compile.rs:4322)
+       then dedupes the two identical inlined bodies, but the test was
+       lost. Fix: when the short-circuit fires AND every case is a bare
+       `Lstaticraise`, prepend `S.exp (test === id1)` to the body to
+       recover OCaml's fallthrough shape. Also tightened
+       `compile_effect_if`'s empty/empty arm to `push_s_exp(cond)` instead
+       of `vec![]` (matches `S.if_`'s collapse rule). JS snapshot parity:
+       **635 / 657 -> 636 / 657 (+1)**; output diffs: **18 -> 17**.
      - ~~**Adjacent let reordering** (bs_set_int_test)~~: FIXED in
        commit 34e7fc097 — `propagate_beta_reduce` was iterating
        `rest_bindings.into_iter().rev()` to mirror OCaml's
@@ -128,6 +129,25 @@ Your next steps, in order:
    OCaml's global-counter semantics.
 
 ## Completed since last update
+- **Recover `tmp === null;` bare comparison for option_optimisation**:
+  OCaml's `compile_general_cases` (lam_compile.ml:558) emits `S.if_ (test
+  === id1) then else` for two-case Complete dispatches. When both cases
+  are `Lstaticraise X`, the raises compile to fallthrough (empty), so
+  `S.if_ test [] []` collapses to `S.exp test` (js_stmt_make.ml:242 +
+  45-53), and the bare comparison sits in front of the staticcatch
+  handler that gets emitted after. Rust's `compile_return_block` for
+  `Lstaticraise` resolves through `with_static_handler` ->
+  `resolve_static_raise` and inlines the handler body at the raise site
+  instead. The all-equal short-circuit in
+  `compile_named_string_switch_return_with_strategy` (compile.rs:4322)
+  then deduplicates the two identical inlined bodies but lost the test
+  expression. Fix: when the short-circuit fires AND every case is a bare
+  `Lstaticraise`, prepend `S.exp (test === id1)` to the body to recover
+  OCaml's fallthrough shape. Also tightened `compile_effect_if`'s
+  empty/empty arm to call `push_s_exp(cond)` instead of returning
+  `vec![]`, matching `S.if_`'s collapse rule. JS snapshot parity:
+  **635 / 657 -> 636 / 657 (+1)**; output diffs: **18 -> 17**.
+  `option_optimisation.res` now matches.
 - **Thread shared `IdGenerator` into `simplify_exits`** (commit 87cc26424):
   OCaml's `Ident.rename` (lam_pass_exits.ml:193) reads from a global
   mutable stamp counter. Rust's `simplify_exits` had its own

@@ -4146,7 +4146,13 @@ impl LambdaCompiler {
     fn compile_effect_if(&self, cond: Expression, then_block: Block, else_block: Block) -> Block {
         if then_block.is_empty() {
             if else_block.is_empty() {
-                vec![]
+                // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
+                // (js_stmt_make.ml:242 + 45-53). Preserves bare comparisons
+                // like `tmp === null;` that come from a switch where every
+                // dispatched arm falls through to the same continuation.
+                let mut block = vec![];
+                push_s_exp(&mut block, cond);
+                block
             } else {
                 vec![Statement::if_(Expression::not(cond), else_block, vec![])]
             }
@@ -4321,7 +4327,38 @@ impl LambdaCompiler {
                     .all(|(_, body)| super::lambda_eq_approx(first_body, body))
             })
         {
-            return self.compile_return_block(cases[0].1);
+            let body = self.compile_return_block(cases[0].1);
+            if !body.is_empty() {
+                // OCaml's two-case Complete arm (lam_compile.ml:558) emits
+                // `S.if_ (test === id1) then else`. When every case is
+                // `Lstaticraise X` and Rust's `compile_return_block` resolved
+                // it via `with_static_handler` -> `resolve_static_raise`
+                // inline, the inlined handler body fills both branches.
+                // OCaml instead leaves the raises as fallthrough -> empty
+                // and emits the staticcatch handler body once after the
+                // dispatch, so `S.if_ test [] []` collapses to `S.exp test`
+                // (js_stmt_make.ml:242 + 45-53) and the bare comparison
+                // (`tmp === null;`) survives in front of the handler.
+                // Prepend `S.exp (test === id1)` here to recover that
+                // shape when the dispatched cases are all `Lstaticraise`.
+                if cases.len() >= 2
+                    && cases
+                        .iter()
+                        .all(|(_, body)| matches!(body, Lambda::LstaticRaise(_, _)))
+                {
+                    let test_expr = self.switch_case_test(test, &cases[0].0);
+                    let mut prefix = vec![];
+                    push_s_exp(&mut prefix, test_expr);
+                    prefix.extend(body);
+                    return prefix;
+                }
+                return body;
+            }
+            // Body compiles to empty (e.g. all dispatched cases are
+            // fallthrough static raises). Fall through to the regular
+            // dispatch path so OCaml's `S.if_ cond [] []` -> `S.exp cond`
+            // rule (js_stmt_make.ml:242 + 45-53) preserves bare comparisons
+            // like `tmp === null;`.
         }
 
         if allow_small {
