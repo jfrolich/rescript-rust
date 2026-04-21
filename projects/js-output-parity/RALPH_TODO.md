@@ -1,7 +1,36 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (early morning)
-**Status:** 600 / 657 authoritative JS snapshot baseline; 4 compile errors and 53 output diffs. Eight OCaml-aligned changes landed since the 589 baseline: the seven previous ones plus (8) `simplify_alias_bindings_like_lets_dce` now recurses into every `Llet` value (including named-function bodies called as apply callees) to match OCaml's `lam_pass_lets_dce.ml:150-151`, which recurses into every `Lfunction` body unconditionally.
+**Last Updated:** 2026-04-21 (morning)
+**Status:** 602 / 657 authoritative JS snapshot baseline; 4 compile errors and 51 output diffs. Nine OCaml-aligned changes since the 589 baseline; latest (9) moves `final_named_inlining` before the `lets_dce_style` + `lets_dce_aliases` cleanup passes to match OCaml's `remove_alias → lets_dce` order in `lam_compile_main.ml:188-193`.
+
+## Iteration on 2026-04-21 (morning)
+
+- Active slice: `named-function-inlining cascade` cluster from the previous iteration. Files like `flexible_array_test`, `inline_string_test`, and `LetUnwrap` were over-inlining exported helpers (e.g., `length(s) → s[1]`, `f(3) → "Some"`) that OCaml preserves as function-call sites.
+- OCaml / backend reference:
+  - `compiler/core/lam_compile_main.ml:188-193` — the pipeline order is `remove_alias → alpha_conversion → lets_dce → simplify_exits`. The LAST `remove_alias` (which does Lvar-callee inlining) runs BEFORE `lets_dce` (which does the Alias DCE and direct-Lfunction-only inlining). After `lets_dce` there are no more remove_alias passes, so OCaml never re-examines function bodies with Lvar inlining enabled using the cleaned-up Alias-DCE'd bodies.
+  - `compiler/core/lam_pass_remove_alias.ml:169-232` — the Lvar-callee inlining rule. It checks `ok_to_inline_fun_when_app` against the function body stored in `meta.ident_tbl`, which was collected BEFORE `lets_dce`. So when `length`'s body still contains `Llet Alias _unused (Pfield 0 arg) in Llet Alias n (Pfield 1 arg) in Lvar n` (pre-DCE), size is 7 — blocking inline via the `s < small_inline_size (5)` guard in `ok_to_inline_fun_when_app`. `add` body is just `Lprim Paddint [Lvar x; Lvar y]` with size 3, so it passes.
+- Rust changes:
+  - `compiler-rust/src/lambda/simplify.rs:387-420` — `simplify_for_js_backend_with_jsx_preserve` now calls `final_named_inlining` on the output of `second` directly, then runs `simplify_direct_function_applications_like_lets_dce` and `simplify_alias_bindings_like_lets_dce` on the post-inlining lambda. Rust's `env.functions` at the `final_named_inlining` stage now contains the pre-`lets_dce`-style bodies — matching OCaml's `ident_tbl` snapshot at its 3rd `remove_alias`.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for ExternalShadow, test_static_catch_ident, NondetPatterMatch, gpr_2413_test, gpr_2316_test, gpr_5218_test, bal_set_mini, DictPatternMatchingOptimization, LetUnwrap (newly fixed), flexible_array_test (newly fixed), inline_string_test (newly fixed), a (regression avoided).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **602 / 657**.
+- Outcome:
+  - JS snapshot parity: **602 / 657** (+2 vs prior 600 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **51** (-2 vs prior 53).
+  - Newly passing includes `flexible_array_test`, `inline_string_test`, `LetUnwrap` from the over-inlining cluster; neutralises the `length(s) → s[1]` and `f(3) → "Some"` regressions introduced by the previous iteration without reverting the `simplify_alias_bindings_like_lets_dce` recursion fix.
+- Remaining failure clusters (unchanged buckets, smaller):
+  - **gpr_3609_test** — extra `let intValue = state._0` binding; alias-simplification source. Unchanged.
+  - **exception_rebound_err_test** — Rust keeps a nested `if-else` chain where OCaml flattens each arm into top-level `if (cond) return;`.
+  - **miss_colon_test** — `exit`/`exit$1` numbering diverges from OCaml; the `exit = N` values and surrounding branch structure are offset by one. Likely staticcatch-order mismatch. NEW (this iteration's reorder exposed the diff).
+  - **export-coercion cluster (ast_abstract_test, async_inline, derive_projector_test, exception_alias, lazy_test, test_simple_ref, webpack_config, ...)** — export-coercion path creates extra `let x$1 = ...` aliases and reorders trailing simple-constant exports. Blocked on wiring `pass_lets_dce` into the live pipeline.
+  - **broader simplify-aggressiveness (test_google_closure, option_optimisation, ticker, tuple_alloc, global_module_alias_test, gpr_4491_test)** — Rust-specific folding of small inlineable functions, option-wrap removal, `<expr>, undefined` seq residues.
+  - **gpr_1150, gpr_4632** — semantic divergences (Rust elides a non-terminating branch). Likely real bugs requiring lambda-trace investigation.
+- Next iteration candidates:
+  1. **miss_colon_test exit renumbering** — trace the staticcatch emission order in OCaml vs Rust. OCaml emits `exit = 1` / `exit === 1` for the OUTER catch; Rust emits `exit$1 = 3` / `exit$1 === 3`. Likely the exit-id allocation differs across nested staticcatches.
+  2. **Switch case-ordering for LetUnwrap cluster mates** — LetUnwrap itself is now byte-clean, but other files in the cluster (if any remain) may still need the outer Ok/Error test inversion.
+  3. **export-coercion wire-up** — block on the documented `pass_lets_dce` wire-up task.
 
 ## Iteration on 2026-04-21 (early morning)
 

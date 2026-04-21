@@ -386,13 +386,15 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     );
     preserved_local_module_materialized_alias_bindings_after_first
         .extend(collect_local_module_global_module_alias_bindings(&second));
-    let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&second);
-    let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(
-        &lets_dce_style,
-        &preserved_local_module_module_alias_bindings,
-    );
+    // OCaml's pipeline runs the last Lvar-callee inlining pass BEFORE
+    // lam_pass_lets_dce (compiler/core/lam_compile_main.ml:188-193). Once
+    // lets_dce simplifies function bodies and cleans up Alias Lets, there
+    // are no more remove_alias passes. Match that order here: do final
+    // named-function inlining BEFORE the lets_dce-style cleanup so the
+    // inlining decisions use the same pre-lets_dce body sizes OCaml sees in
+    // its ident_tbl, not the post-lets_dce smaller bodies.
     let final_named_inlining = simplify_for_js_backend_once(
-        &lets_dce_aliases,
+        &second,
         &preserved_export_bindings_after_first,
         &preserved_export_payload_bindings,
         &preserved_local_module_materialized_alias_bindings_after_first,
@@ -404,9 +406,14 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
         true,
         false,
     );
+    let lets_dce_style = simplify_direct_function_applications_like_lets_dce(&final_named_inlining);
+    let lets_dce_aliases = simplify_alias_bindings_like_lets_dce(
+        &lets_dce_style,
+        &preserved_local_module_module_alias_bindings,
+    );
 
     simplify_for_js_backend_once(
-        &final_named_inlining,
+        &lets_dce_aliases,
         &preserved_export_bindings_after_first,
         &preserved_export_payload_bindings,
         &preserved_local_module_materialized_alias_bindings_after_first,
