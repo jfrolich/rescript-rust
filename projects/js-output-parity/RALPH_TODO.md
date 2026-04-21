@@ -83,6 +83,32 @@ Your next steps, in order:
        `Pmakeblock(..., Lvar CustomizeTags_d, ...)` with the inlined
        block at raw-lambda → Lambda lowering time. Bisect by dumping
        the Lambda between each pipeline stage.
+     - **Static-catch handler duplication** (test_list, gpr_4280_test,
+       bdd, mario_game): Rust's compile path produces multiple call
+       sites for what should be a shared `(catch ... with handler)`
+       fall-through. Concrete example in `test_list.stable_sort.sort`:
+       the source has `rev_merge_rev(s1, s2, [])` once at the bottom
+       of the catch-all `(n, l) => ...` case, but Rust emits the call
+       in 6+ places (compile.rs lines 711, 796, 803, 810, 840, 847+).
+       OCaml emits ONE call inlined at the function tail (lines after
+       the if-cascade) plus the rev_merge_rev body inlined as a while
+       loop. Verified via small reproducer (`/tmp/inline_test*.res`):
+       basic `let helper = ...` inlining works correctly, but the
+       multi-site duplication only occurs for OCaml-generated pattern-
+       match catch-all fallbacks. This is because the
+       `tailcall_inline` pass requires `OncePure` status, but `rev_merge_rev`
+       has count > 1 in Rust's output (multiple call sites), so it
+       stays as a separate function. The root issue is upstream in
+       lambda → JS lowering: where OCaml uses `(catch ... with i ->
+       handler)` so the handler appears once in JS, Rust's compile_switch
+       / nested-if emission duplicates the fallthrough. Fixing this
+       would also eliminate the gpr_4280_test "exit flag" diff. Look at
+       `compile.rs::compile_switch_*` and `pass_exits.rs::ok_to_inline`
+       — the latter's policy `(i_occur <= 2 && lam_size < 7) || lam_size < 5`
+       matches OCaml's `lam_pass_exits.ml:173-179` exactly, so the
+       duplication isn't from pass_exits inlining. It's from the
+       JS-emission stage flattening static_catch into duplicated branches
+       instead of hoisting the handler to the function tail.
 4. ~~Address issues in existing ports listed at the top of PERFORMANCE_PLAN.md~~:
    commit 0382c4696 cleaned up `pass_lets_dce` (`Lambda::seq` instead of raw
    `Lsequence`, dropped unreachable catch-all `Llet`, dropped dead
