@@ -5087,6 +5087,30 @@ impl LambdaCompiler {
             }
             Lambda::LstringSwitch(scrut, cases, default) => self
                 .compile_string_switch_assignment_block(result, scrut, cases, default.as_deref()),
+            Lambda::LstaticRaise(id, args) => {
+                // OCaml's `compile_staticraise` (lam_compile.ml:887-904) ignores
+                // the enclosing Assign continuation and emits only the argument
+                // assignments + `exit = N`. Without this arm we would fall
+                // through to the generic case below, which appends a spurious
+                // `result = undefined` after the jump even though control has
+                // already transferred to the post-body exit dispatch.
+                if let Some(block) = self.compile_static_raise_jump_block(*id, args) {
+                    return block;
+                }
+                if let Some(handler) = self.resolve_static_raise(*id, args) {
+                    return self.compile_assign_to_target_block(result, &handler);
+                }
+                let compiled = self.compile_expr(lam);
+                let mut block = compiled.prelude;
+                if !block_terminates(&block) {
+                    block.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        compiled.expr,
+                    )));
+                }
+                block
+            }
             _ => {
                 let compiled = self.compile_expr(lam);
                 let mut block = compiled.prelude;
