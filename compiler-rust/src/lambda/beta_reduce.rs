@@ -24,6 +24,7 @@ use crate::lambda::closure::StatsMap;
 use crate::lambda::collect_info::kind_of_lambda_block;
 use crate::lambda::compat::LetKind;
 use crate::lambda::compile_context::{IdKind, IdentTable};
+use crate::lambda::lam_util::refine_let;
 use crate::lambda::primitive::{Mutable, Primitive};
 use crate::lambda::subst::Subst;
 use crate::lambda::{Apply, Lambda, PrimInfo};
@@ -361,24 +362,6 @@ fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &La
         }
         _ => {}
     }
-}
-
-/// Create an optimized let binding.
-///
-/// This may optimize away the binding in simple cases:
-/// - If the body is just the variable, return the value
-/// - If the value is a simple constant, substitute directly
-fn refine_let(kind: LetKind, id: Ident, value: Lambda, body: Lambda) -> Lambda {
-    // Check if body is just the variable being bound
-    if let Lambda::Lvar(ref body_id) = body {
-        if body_id == &id {
-            return value;
-        }
-    }
-
-    // For now, just create the let binding
-    // More optimizations can be added here
-    Lambda::let_(kind, id, value, body)
 }
 
 fn bound_param_substitution(new_param: Ident, arg: &Lambda) -> Lambda {

@@ -42,6 +42,25 @@ Your next steps, in order:
    in lam_util, etc.).
 
 ## Completed since last update
+- **Use `lam_util::refine_let` in beta_reduce.rs (lam_beta_reduce.ml:74,115,122)**:
+  All three beta-reduction helpers (`no_names_beta_reduce`,
+  `propagate_beta_reduce_with_meta`, `propagate_beta_reduce_with_map_and_meta`)
+  call `Lam_util.refine_let` in OCaml, but the Rust ports referenced a stub
+  `refine_let` defined locally in `beta_reduce.rs` that only handled the
+  `let x = e in x -> e` (Return) optimization and otherwise constructed a
+  `Llet` with the original kind unchanged. The full port in
+  `lam_util.rs` additionally folds (Prim) and (Call) eta forms and crucially
+  applies the `(Strict|StrictOpt) + is_safe_to_alias -> Alias` clause
+  (`Lam_util.refine_let` lam_util.ml:118-124). Without that clause, the
+  `let xx (Strict) = 6 in body` bindings created by `no_names_beta_reduce`
+  for partial-application closures stayed Strict, so the `simplify_lets`
+  Alias arm — which would have substituted them via the small-constant rule
+  (`lam_pass_lets_dce.ml:52-57`) — never fired. Replacing the local stub with
+  `crate::lambda::lam_util::refine_let` makes `function v(extra) { let u = 7;
+  let xx = 6; return (xx + extra | 0) + u | 0; }` collapse to OCaml's
+  `function v(extra) { let u = 7; return (6 + extra | 0) + u | 0; }`. JS
+  snapshot parity: **627 / 657 -> 629 / 657 (+2)**; output diffs:
+  **26 -> 24**. `arity_deopt.res` and `test_demo.res` now match.
 - **Beta-reduction ident_tbl tracking (lam_beta_reduce.ml:66-73,107-114)**:
   OCaml's `propagate_beta_reduce` and `propagate_beta_reduce_with_map`
   mutate `meta.ident_tbl` when a non-inlined argument gets bound to a
@@ -108,8 +127,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (beta_reduce ident_tbl tracking + Blk_module collapse + nullish raw, +3 parity)
-**Status:** 627 / 657 authoritative JS snapshot baseline; 4 compile errors and 26 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
+**Last Updated:** 2026-04-21 (use lam_util::refine_let in beta_reduce, +2 parity)
+**Status:** 629 / 657 authoritative JS snapshot baseline; 4 compile errors and 24 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
