@@ -1,7 +1,77 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (late evening, two iterations)
-**Status:** 611 / 657 authoritative JS snapshot baseline; 4 compile errors and 42 output diffs. Two OCaml-aligned iterations landed on 2026-04-21 late evening: (1) pre-flatten `then_block` inside `compile_if_unit_return_tail_block` so unit-returning-primitive `Return (Seq _)` shapes split before the trailing-Return-undefined guard runs (fixed `topsort_test`'s `if !cond { side_effect }` shape); (2) route `Pintcomp Ceq/Cneq` through `raw_bin_expression` to mirror OCaml's `int_equal` / `int_comp Cneq fallthrough` raw construction, so literal `3 !== null` comparisons stay unfolded instead of collapsing via `fold_strict_comparison`'s nullish-impossible rule — the specific literal folds OCaml's `int_equal` performs (Number Int,Number Int; Float,Float; Str,Str) are preserved so polyvar hash-collision switches still collapse. `topsort_test` newly passing. `equal_box_test` Pintcomp path now matches OCaml but the Pobjcomp path (`Some(3) !== null`) still folds; that cluster needs `compile_object_comparison` alignment.
+**Last Updated:** 2026-04-21 (night, post-Lassign-guard scoping)
+**Status:** 615 / 657 authoritative JS snapshot baseline; 4 compile errors and 38 output diffs. 2026-04-21 night iteration: scoped `simplify_alias_bindings_like_lets_dce`'s unconditional Lvar substitution guard from "any Psetfield/Poffsetref/Lassign-mutated target and any exported binding" down to "only Lassign-mutated target" — matching OCaml's effective behaviour because `Lam_pass_eliminate_ref` rewrites `Pfield(0, ref)` reads into `Lvar ref` AFTER simplif processed the surrounding let, and ref mutations become `Lassign`. Psetfield on a block field is safe to substitute through (OCaml does). Exported bindings are safe because `Lam_coercion.handle_exports` re-creates them as trailing `Single (Alias, new_id, Lvar w)` groups and Rust's `coerce_toplevel_exports` mirrors that. Newly passing: `ast_abstract_test`, `exception_alias`, `res_debug`, `webpack_config` (+4). Zero regressions; `bal_set_mini` stays byte-clean because its `let match = v` target is Lassign-mutated (ref after eliminate_ref).
+
+## Iteration on 2026-04-21 (night, Lassign-only alias-substitution guard)
+
+- Active slice: `res_debug`'s export-coercion-position cluster — Rust emitted `let v2 = newrecord;` at source position (right after `newrecord.x = 3;`), while OCaml emits it late (between `bad1` and `v1`) as a trailing rebind. Traced to `simplify_alias_bindings_like_lets_dce`'s `!binding_is_exported` guard blocking the OCaml-faithful Lvar substitution for exported `v2 = Lvar newrecord`, combined with the mutation guard blocking substitution because `newrecord.x = 3` marks `newrecord` as Psetfield-mutated.
+- OCaml / backend references:
+  - `compiler/core/lam_pass_lets_dce.ml:21-23` — unconditional
+    `subst v (Lvar w)` for Strict / Alias / StrictOpt.
+  - `compiler/core/lam_pass_lets_dce.ml:24-43` — `Lam_pass_eliminate_ref`
+    runs AFTER the outer simplif processed the surrounding let, so
+    Pfield-read-rewritten-to-Lvar never re-fires the unconditional
+    rule. Post-eliminate, ref mutations are `Lassign`, not Psetfield.
+  - `compiler/core/lam_coercion.ml:100-121` — `handle_exports` always
+    re-creates the exported binding as a fresh trailing
+    `Single (Alias, newid, Lvar id)` group when the export value is
+    `Lvar id` with a different name.
+- Rust changes (all in `compiler-rust/src/lambda/simplify.rs`):
+  - New `collect_lassign_mutated_idents` helper: records only
+    `Lassign(id, _)` targets (the post-`eliminate_ref` shape of ref
+    writes). Does NOT record Psetfield / Poffsetref targets.
+  - `simplify_alias_bindings_like_lets_dce` wrapper: compute the
+    Lassign set instead of the broader `collect_mutated_idents` set
+    and pass it through as `lassign_mutated_idents`.
+  - Unconditional-Lvar-alias rule inside
+    `simplify_alias_bindings_like_lets_dce_inner`: dropped the
+    `!binding_is_exported` clause and switched the mutation check to
+    `!lassign_mutated_idents.contains(target)`. Result: exported
+    `let v2 = Lvar newrecord` now substitutes away, leaving the
+    Pmakeblock to reference `Lvar newrecord` directly.
+    `coerce_toplevel_exports` then rebuilds the export as a trailing
+    `let v2 = newrecord;` — matching OCaml's layout.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml
+    --release` clean.
+  - Byte-clean for `res_debug` (newly passing) and `bal_set_mini`
+    (guard reason: its `let match = v` reads a ref, so `v` is
+    Lassign-mutated and the substitution still skips).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured
+    **615 / 657**.
+- Outcome:
+  - JS snapshot parity: **615 / 657** (+4 vs prior 611 baseline).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **38** (-4 vs prior 42).
+  - Newly passing (net +4, zero regressions): `ast_abstract_test`,
+    `exception_alias`, `res_debug`, `webpack_config`.
+- Remaining failure clusters (updated):
+  - **export-coercion position** still dominates: `async_inline`,
+    `derive_projector_test`, `lazy_test`, `test_simple_ref`,
+    `test_non_export`, `test_zero_nullable`, `exception_rebound_err_test`,
+    … — cases where the export value is NOT a simple Lvar (e.g. a
+    record literal, a coercion, a `null`). Those don't flow through
+    the unconditional-Lvar rule, so Rust still keeps the binding at
+    source position.
+  - **Pobjcomp nullish fold aggressiveness** (equal_box_test lines
+    21, 39, 57) — unchanged.
+  - **nested if-else shape** (js_json_test, ticker, …) — unchanged.
+  - **eta reduction** (bs_poly_map_test / test_google_closure) —
+    unchanged.
+- Next iteration candidates:
+  1. **Non-Lvar exported rebind**: for the remaining export-coercion
+     cluster, port the second half of `Lam_coercion.handle_exports`
+     (line 122-157: `_ -> Single (Strict, newid, lam) :: groups`),
+     which creates a trailing `Single (Strict, newid, lam)` group for
+     ANY export value, not just Lvar aliases. This would move `let
+     name1 = optionMap(undefined, x => x)` (or a Const, etc.) to the
+     end of the top-level block.
+  2. **Pobjcomp nullish alignment** — align `compile_object_comparison`
+     to produce raw `Bin EqEqEq` when one side is nullish AND the
+     other is a known non-null literal (mirroring OCaml's
+     `eq_null_undefined_boolean` unwrapping of `Optional_block`).
+  3. **Nested if-else shape** — trace `js_json_test`.
 
 ## Iteration on 2026-04-21 (late evening #2, Pintcomp raw construction)
 
