@@ -1,9 +1,80 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (late evening)
-**Status:** 611 / 657 authoritative JS snapshot baseline; 4 compile errors and 42 output diffs. One OCaml-aligned iteration landed on 2026-04-21 late evening: pre-flatten `then_block` inside `compile_if_unit_return_tail_block` so `Return (Seq (assign, undefined))` from unit-returning primitives splits into `[Exp assign; Return undefined]` before the trailing-Return-undefined guard runs. This mirrors OCaml's pipeline ordering where `js_pass_flatten` (line 88) runs before `function_body` inspects the if-body, so the `if !cond { side_effect }` shape in `topsort_test`'s `sort_node` is kept as `if (!cond) { work; return; }` instead of being flattened by `simplify_if_statement` into `if (cond) return; work;`.
+**Last Updated:** 2026-04-21 (late evening, two iterations)
+**Status:** 611 / 657 authoritative JS snapshot baseline; 4 compile errors and 42 output diffs. Two OCaml-aligned iterations landed on 2026-04-21 late evening: (1) pre-flatten `then_block` inside `compile_if_unit_return_tail_block` so unit-returning-primitive `Return (Seq _)` shapes split before the trailing-Return-undefined guard runs (fixed `topsort_test`'s `if !cond { side_effect }` shape); (2) route `Pintcomp Ceq/Cneq` through `raw_bin_expression` to mirror OCaml's `int_equal` / `int_comp Cneq fallthrough` raw construction, so literal `3 !== null` comparisons stay unfolded instead of collapsing via `fold_strict_comparison`'s nullish-impossible rule — the specific literal folds OCaml's `int_equal` performs (Number Int,Number Int; Float,Float; Str,Str) are preserved so polyvar hash-collision switches still collapse. `topsort_test` newly passing. `equal_box_test` Pintcomp path now matches OCaml but the Pobjcomp path (`Some(3) !== null`) still folds; that cluster needs `compile_object_comparison` alignment.
 
-## Iteration on 2026-04-21 (late evening)
+## Iteration on 2026-04-21 (late evening #2, Pintcomp raw construction)
+
+- Active slice: `equal_box_test` where Rust folds `3 !== null` / `3 !==
+  undefined` to `true` via `Expression::bin`'s `fold_strict_comparison`
+  nullish-impossible rule, while OCaml keeps the literal comparison. Traced
+  through `Pintcomp Ceq`/`Cneq` primitive path: OCaml's
+  `lam_compile_primitive.ml:317-323` dispatches to `int_comp` which at
+  `js_exp_make.ml:1386-1412` routes Ceq to `int_equal` (raw `Bin EqEqEq`
+  default) and Cneq-non-special to `bin NotEqEq` (raw because `bin` has no
+  NotEqEq case). Neither goes through `triple_equal`'s nullish-impossible
+  fold.
+- OCaml / backend references:
+  - `compiler/ml/translcore.ml:182-201` — `%equal_null`/`%equal_undefined`
+    dispatch to `Pintcomp Ceq` for primitive-typed inner args.
+  - `compiler/core/lam_compile_primitive.ml:317-323` — `Pintcomp` → `int_comp`.
+  - `compiler/core/js_exp_make.ml:1215-1251` — `int_equal` (= `float_equal`)
+    raw `Bin EqEqEq` default at line 1251.
+  - `compiler/core/js_exp_make.ml:1402-1412` — `int_comp Cneq` special
+    folds and fallthrough to `bin NotEqEq`.
+  - `compiler/core/js_exp_make.ml:623-625` — `bin EqEqEq` routes through
+    `triple_equal` (folding path); `bin NotEqEq` has no special case.
+- Rust changes (all in `compiler-rust/src/lambda/compile.rs`):
+  - Line 6881-6904: `compile_int_comparison`'s `Comparison::Neq` fallback
+    uses `raw_bin_expression` directly (not `compile_raw_comparison` →
+    `Expression::bin`); literal `Str,Str` Cneq fold inlined via
+    `fold_strict_string_equality_pub` to mirror OCaml's `string_comp`.
+  - Line 10959-10998: `compile_int_equality` builds raw `Bin EqEqEq`,
+    preserving OCaml's specific fold cases: Number Int,Number Int (always
+    fold), Float,Float when equal (fold to true), and Str,Str via
+    `fold_strict_string_equality_pub` (load-bearing for hash-collision
+    polyvar switches that lower to Pintcomp Ceq with string tag args).
+  - `compiler-rust/src/js_ir/mod.rs:2113`: expose `raw_bin_expression` as
+    `pub(crate)` and add a `fold_strict_string_equality_pub` wrapper.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml
+    --release` clean.
+  - Byte-clean for `topsort_test`, `bb` (polyvar switch), `polyvar_test`,
+    `hash_collision_test` (hash-collision string polyvar switch),
+    `test_demo` (no export-alias regression), `ExternalShadow`,
+    `LetUnwrap`.
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **611 /
+    657**.
+- Outcome:
+  - JS snapshot parity: **611 / 657** (neutral, but fold semantics now
+    mirror OCaml; many internal `3 !== null`-like diffs inside
+    `equal_box_test` now match OCaml).
+  - Compile errors: **4** (unchanged).
+  - Output diffs: **42** (unchanged; the cluster of diffs shifted rather
+    than shrinking — the Pintcomp path is now correct, but `equal_box_test`
+    still fails on `Some(3) !== null` via the Pobjcomp path).
+- Remaining failure clusters (updated):
+  - **Pobjcomp nullish fold aggressiveness** (equal_box_test lines 21, 39,
+    57) — Rust's `compile_object_comparison` → `compile_nullish_strict_comparison`
+    still folds `CamlBlock!==Null → true`; OCaml's Pobjcomp path produces
+    `3 !== undefined` literal because `Some(3)` gets unwrapped to the
+    inner `3` and the comparison falls back to `int_equal` raw. Needs
+    alignment across OptionalBlock unwrapping semantics.
+  - **export-coercion position** — unchanged, broadest remaining cluster.
+  - **nested if-else shape** (js_json_test, ticker, …) — unchanged.
+  - **eta reduction** (bs_poly_map_test / test_google_closure) — unchanged.
+- Next iteration candidates:
+  1. **Pobjcomp nullish alignment** — align `compile_object_comparison` to
+     produce raw `Bin EqEqEq` when one side is nullish AND the other is a
+     known non-null literal (mirroring OCaml's `eq_null_undefined_boolean`
+     unwrapping of `Optional_block` to its inner). Currently Rust folds
+     `OptionalBlock!==Null` aggressively where OCaml lowers to
+     `Number!==Null` raw.
+  2. **Export-coercion positional rebuild** — port
+     `Lam_coercion.handle_exports`.
+  3. **Nested if-else shape** — trace `js_json_test`.
+
+## Iteration on 2026-04-21 (late evening #1, unit-return-tail flatten)
 
 - Active slice: `topsort_test` and related "side-effect inside `if !cond`
   with no else" clusters. Instrumenting `compile_if_unit_return_tail_block`
@@ -323,7 +394,7 @@
   2. **`simplify_if_statement` narrow** — identify a positive guard so the flatten-on-terminal-then rule at `js_ir/mod.rs:1505-1513` matches OCaml's `S.if_` precisely. OCaml's `js_stmt_make.ml:233-298` has overlapping rules that don't always flatten; need to understand which ones fire in bal_set_mini where the `else if ... else` chain is preserved.
   3. **Switch case-ordering** — trace `compile_named_string_switch_return` / `compile_small_string_switch_return` (compile.rs:4067-4099) against OCaml's `compile_string_cases` to see why OCaml inverts the outer Ok/Error test in LetUnwrap.
 
-## Iteration on 2026-04-21 (late evening)
+## Iteration on 2026-04-21 (late evening #1, unit-return-tail flatten)
 
 - Active slice: the previous iteration diagnosed DictPatternMatchingOptimization
   as needing the `compile_staticcatch` pseudo_jmp port. After instrumenting the
