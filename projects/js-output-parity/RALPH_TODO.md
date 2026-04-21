@@ -1,7 +1,34 @@
 # Ralph TODO: JS Output Parity
 
-**Last Updated:** 2026-04-21 (late night)
-**Status:** 596 / 657 authoritative JS snapshot baseline; 4 compile errors and 57 output diffs. Seven OCaml-aligned changes landed since the 589 baseline: the five previous ones plus (6) all four `compile_*_block` LstaticCatch arms now force explicit-jump in non-Tail_with_name continuations — matching OCaml's single-gate rule in `lam_compile.ml:937-943` — and (7) the JS printer emits polyvariant NAME from the block's first element (matching `js_dump.ml:901-912`) instead of the tag-name string.
+**Last Updated:** 2026-04-21 (early morning)
+**Status:** 600 / 657 authoritative JS snapshot baseline; 4 compile errors and 53 output diffs. Eight OCaml-aligned changes landed since the 589 baseline: the seven previous ones plus (8) `simplify_alias_bindings_like_lets_dce` now recurses into every `Llet` value (including named-function bodies called as apply callees) to match OCaml's `lam_pass_lets_dce.ml:150-151`, which recurses into every `Lfunction` body unconditionally.
+
+## Iteration on 2026-04-21 (early morning)
+
+- Active slice: `bal_set_mini` and a cluster of related files emit flat `if`-statement chains where OCaml preserves `} else if ... else {` shape. Traced through the JS passes and found the root cause is NOT in the backend `simplify_if_statement` / `js_pass_flatten` logic — it's upstream in the lambda simplifier, which was leaving unused `Llet Alias "match" (Pfield 3 x)` bindings in place inside named-function bodies when the function is called as an apply callee. The leftover unused lets broke the "both branches single Return" condition that the IR's `simplify_if_statement` uses to emit `Return (Cond ...)` → which `apply_js_flatten_pass` later re-expands into nested `if-else` form (matching OCaml's `js_pass_flatten.ml:79-87`).
+- OCaml / backend reference:
+  - `compiler/core/lam_pass_lets_dce.ml:150-151` — the `Lfunction {arity; params; body; attr}` arm calls `simplif` on the body unconditionally. There is no "preserve this function's body because it is called as an apply callee" escape hatch. Alias `Llet` inside the body then goes through the `times = 0 → eliminate` rule at lines 48-49.
+- Rust changes:
+  - `compiler-rust/src/lambda/simplify.rs:1327-1338` — removed the Rust-specific `preserve_named_function_body` guard from `simplify_alias_bindings_like_lets_dce`'s `Llet` arm. The guard was blocking recursion into the value whenever `inlineable_local_function(value).is_some() && alias_occurs_as_apply_callee(id, body)`, which covered every exported helper called via `myCaller → bal(...)`. Now the value is always simplified, so the nested `Llet Alias match (Pfield ...)` bindings inside `bal`'s body with `use_info.times == 0` are eliminated, allowing the IR's later `simplify_if_statement` + `flatten_pass` combination to produce OCaml's canonical `else if / else` chain.
+- Verified guards:
+  - `timeout 600 cargo build --manifest-path compiler-rust/Cargo.toml --release` clean.
+  - Single-file byte-clean for ExternalShadow, test_static_catch_ident, NondetPatterMatch, gpr_2413_test, VariantPatternMatchingSpreads, DictPatternMatchingOptimization, gpr_2316_test, gpr_5218_test, and bal_set_mini (newly fixed).
+  - `timeout 1800 ./scripts/test_js_output_parity.sh` measured **600 / 657**.
+- Outcome:
+  - JS snapshot parity: **600 / 657** (+4 vs prior 596 baseline).
+  - Compile errors: **4** (unchanged upstream typechecker errors).
+  - Output diffs: **53** (-4 vs prior 57).
+  - Newly passing includes `bal_set_mini` and three other files in the "nested let + nested if" cluster. Several other files shifted status (some previously-passing files now fail because the same recursion exposes downstream `final_named_inlining` decisions to cleaner bodies); the net is +4.
+- Remaining failure clusters (broadly same buckets as before):
+  - **gpr_3609_test** — extra `let intValue = state._0` binding; alias-simplification source. Unchanged.
+  - **LetUnwrap / getXWithResult** — case-ordering heuristic inside `compile_small_string_switch_return` (compile.rs:4067-4099). OCaml inverts the outer Ok/Error test when the then-branch terminates.
+  - **exception_rebound_err_test** — Rust keeps a nested `if-else` chain where OCaml flattens each arm into top-level `if (cond) return;`.
+  - **export-coercion cluster (ast_abstract_test, async_inline, derive_projector_test, exception_alias, lazy_test, test_simple_ref, webpack_config, ...)** — export-coercion path creates extra `let x$1 = ...` aliases and reorders trailing simple-constant exports. Blocked on wiring `pass_lets_dce` into the live pipeline.
+  - **named-function-inlining cascade (flexible_array_test, inline_string_test, miss_colon_test, module_parameter_test, ...)** — with `preserve_named_function_body` removed, `final_named_inlining` now sees the cleaner helper bodies and inlines more aggressively than OCaml in some cases (e.g., `length(s) → s[1]` for a single-line helper). This is the flip side of the bal_set_mini fix.
+- Next iteration candidates:
+  1. **Narrow `final_named_inlining` to match OCaml** — the named-function inlining in `simplify_with_env` is more aggressive than OCaml's `lam_pass_lets_dce` direct-Lapply-of-Lfunction rule (line 135-139). OCaml only inlines when the `Lapply.ap_func` IS already an `Lfunction` literal; it does not inline across an `Lvar` callee. Tighten Rust's inlining predicate to match.
+  2. **Track Tail_with_name precisely** — see earlier iterations.
+  3. **Switch case-ordering** for LetUnwrap.
 
 ## Iteration on 2026-04-21 (late night)
 

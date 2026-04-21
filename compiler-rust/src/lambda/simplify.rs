@@ -1327,16 +1327,15 @@ fn simplify_alias_bindings_like_lets_dce(
             func.attr.clone(),
         ),
         Lambda::Llet(kind, id, value, body) => {
-            let preserve_named_function_body =
-                inlineable_local_function(value).is_some() && alias_occurs_as_apply_callee(id, body);
-            let value = if preserve_named_function_body {
-                value.as_ref().clone()
-            } else {
-                simplify_alias_bindings_like_lets_dce(
-                    value,
-                    preserved_local_module_module_alias_bindings,
-                )
-            };
+            // Match OCaml's lam_pass_lets_dce: recurse into every value,
+            // including named-function bodies that are called as applied
+            // callees, so unused Alias bindings inside the body still get
+            // cleaned up (compiler/core/lam_pass_lets_dce.ml:150-151
+            // recurses into every Lfunction body unconditionally).
+            let value = simplify_alias_bindings_like_lets_dce(
+                value,
+                preserved_local_module_module_alias_bindings,
+            );
             let body = simplify_alias_bindings_like_lets_dce(
                 body,
                 preserved_local_module_module_alias_bindings,
