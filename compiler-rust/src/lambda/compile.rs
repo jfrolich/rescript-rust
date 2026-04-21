@@ -5924,7 +5924,15 @@ impl LambdaCompiler {
             ),
             Pnot => Expression::not(compiled_args[0].clone()),
             Pnegint => int32_minus(int_expr(0), compiled_args[0].clone()),
-            Pnegfloat => Expression::bin(BinOp::Minus, int_expr(0), compiled_args[0].clone()),
+            // `Pnegfloat` must emit `0. - x` (not `0 - x`) so the printer
+            // rule at `js_dump.ml` / `printer.rs:1520-1531` produces `- x`
+            // with the OCaml-style space. Mirrors
+            // `lam_compile_primitive.ml:179`: `E.float_minus E.zero_float_lit`.
+            Pnegfloat => Expression::bin(
+                BinOp::Minus,
+                Expression::number(Number::float("0.")),
+                compiled_args[0].clone(),
+            ),
             Pnegbigint => Expression::bin(
                 BinOp::Minus,
                 Expression::number(Number::bigint(true, "0")),
