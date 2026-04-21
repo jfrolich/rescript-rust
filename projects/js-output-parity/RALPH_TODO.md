@@ -19,29 +19,63 @@ Your next steps, in order:
    unconditionally in the printer; wiring up `query_external_id_info` would
    also flip cross-module calls from `App_uncurry` to `App_infer_full` in
    alpha_conversion, matching OCaml more precisely.
-2. **Investigate parity clusters from the remaining 28 output-diff failures.**
+2. **Architectural: `Return(Cond)` vs early-return form.** OCaml's
+   `S.if_` rule 5 (js_stmt_make.ml:244-246) + `js_pass_flatten`
+   (js_pass_flatten.ml:79-87) conspire to keep `if (cond) { x; return; }
+   else { return y; }` shapes when branches are both tail-returning,
+   rather than rewriting to `if (!cond) return y; x; return;`. Rust's
+   `compile_if_return_block` + `simplify_if_statement` applies the early-
+   return form too eagerly in unit-return contexts. See the
+   `take_return_tail_expr` undefined-rejection guard at
+   `compile.rs:5028` — removing it to match OCaml ends up fixing
+   ticker/constrainedAsDict but regressing VariantPatternMatchingSpreads,
+   confirming the issue is architectural. A clean fix requires either
+   (a) always routing `Return(Cond)` through `flatten_program` without
+   the `compile_test_return_block` + `simplify_if_statement` pre-
+   rewrite, and pushing return-unit function_body transforms into
+   printer time, or (b) faithful port of OCaml's `pp_function` special
+   cases at js_dump.ml:1615-1624 inside Rust's `print_function_body`.
+3. **Investigate parity clusters from the remaining output-diff failures.**
    Remaining diffs cluster into:
-     - **Cross-module alias binding expansion** (coercion_module_alias_test):
-       OCaml emits `let C3 = Char;` for module aliasing; Rust expands to
-       `{ escaped: Char.escaped, ... }`. Needs tracking module aliases
-       through the JS IR.
-     - **Constant inlining through partial application / closures**
-       (test_demo, arity_deopt): OCaml's `simplify_lets` substitutes
-       literal bindings more aggressively inside closures created by
-       partial applications; Rust preserves intermediate `let` bindings.
+     - **if/else vs early-return** (ticker, constrainedAsDict, reasonReactRouter,
+       fun_pattern_match). See item 2 above — architectural.
+     - **Nested-if && merge with empty else** (reasonReactRouter.push/replace,
+       stdlib_Stdlib_DictTests.inferDictByPattern). Rust's
+       `simplify_if_statement` has `!nested_else.is_empty()` guards
+       (commit 327e6de13) that block merges OCaml performs via
+       `js_stmt_make.if_` rule 10 (js_stmt_make.ml:290-292).
+     - **Static exit label numbering** (gpr_1698_test, gpr_3875_test): Rust's
+       `pass_exits` inlines some exits OCaml preserves, and the label
+       counter starts from a different seed.
+     - **Dead pure comparison kept** (option_optimisation): OCaml emits
+       a trailing `tmp === null;` statement that Rust eliminates via some
+       downstream pass.
      - **Adjacent let reordering** (bs_set_int_test): OCaml orders
        `let i$2 = range(50,100); let s = ...` differently from Rust.
-     - **Dead-code branch elimination** (gpr_4632, stringmatch_test):
-       Rust eliminates branches OCaml keeps (compile-time folding over
-       pattern match scrutinees).
-   None of these appear to be a single-spot fix; each needs targeted
-   investigation.
-3. Address the issues in existing ports listed at the top of
-   PERFORMANCE_PLAN.md (IdGenerator stamp collisions in pass_exits, raw
-   `Lsequence` vs `Lambda::seq` in pass_lets_dce, dead `let_variable` helper
-   in lam_util, etc.).
+4. ~~Address issues in existing ports listed at the top of PERFORMANCE_PLAN.md~~:
+   commit 0382c4696 cleaned up `pass_lets_dce` (`Lambda::seq` instead of raw
+   `Lsequence`, dropped unreachable catch-all `Llet`, dropped dead
+   `pass_count::lookup` and `lam_util::let_variable`); commit 87cc26424
+   threaded `meta.id_gen` into `simplify_exits` so every rename shares
+   OCaml's global-counter semantics.
 
 ## Completed since last update
+- **Thread shared `IdGenerator` into `simplify_exits`** (commit 87cc26424):
+  OCaml's `Ident.rename` (lam_pass_exits.ml:193) reads from a global
+  mutable stamp counter. Rust's `simplify_exits` had its own
+  `IdGenerator::with_start_stamp(max_ident_stamp_in_lambda(..))` per
+  call, risking collisions with `simplify_alias`'s beta-reduce renames
+  which already shared `LamStats::id_gen`. Now both `simplify_exits`
+  invocations in the pipeline thread `meta.id_gen` through. JS snapshot
+  parity: **634 / 657** (unchanged).
+- **`Lambda::seq` + dead-arm cleanup in `pass_lets_dce`** (commit 0382c4696):
+  Switched the Strict/Variable + Lsequence arms from raw
+  `Lambda::Lsequence(Box::new, Box::new)` to the smart constructor
+  `Lambda::seq`, matching `Lam.seq` in OCaml (lam_pass_lets_dce.ml:125,134).
+  Dropped the unreachable catch-all `Llet` arm (LetKind has four variants,
+  all matched above). Dropped the dead free functions
+  `pass_count::lookup` and `lam_util::let_variable`. JS snapshot parity:
+  **634 / 657** (unchanged).
 - **Emit `Pnegfloat` as `0. - x` (lam_compile_primitive.ml:179)**: OCaml's
   `Pnegfloat` arm uses `E.float_minus E.zero_float_lit args` — a float-literal
   `0.` as the left operand. The printer's unary-minus shortcut emits `- x`
@@ -196,7 +230,7 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-21 (Pnegfloat = `0. - x`, stringswitch declaration fold)
+**Last Updated:** 2026-04-21 (pass cleanups + shared id_gen in simplify_exits)
 **Status:** 634 / 657 authoritative JS snapshot baseline; 4 compile errors and 19 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
