@@ -4556,19 +4556,13 @@ fn eta_reduce_function_value(func: &LFunction, env: &SimplifyEnv) -> Option<Lamb
         return None;
     }
 
+    // OCaml's eta-reduction (Lam_pass_remove_alias and friends) only
+    // reduces `fun x -> f x` (a direct Lapply body), not `fun x -> (f x; ())`
+    // or `fun x -> ignore (f x)`. Reducing the Lsequence form would change
+    // observable semantics: the wrapper's return type was unit, but the inner
+    // function `f` may return a non-unit value that callers shouldn't see.
     let apply = match func.body.as_ref() {
         Lambda::Lapply(apply) => apply,
-        Lambda::Lsequence(first, second)
-            if matches!(
-                second.as_ref(),
-                Lambda::Lconst(Constant::JsUndefined { .. })
-            ) =>
-        {
-            let Lambda::Lapply(apply) = first.as_ref() else {
-                return None;
-            };
-            apply
-        }
         _ => return None,
     };
 
