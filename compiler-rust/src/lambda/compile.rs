@@ -654,15 +654,15 @@ impl LambdaCompiler {
                 }
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                if !bindings.is_empty()
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
-                {
-                    self.compile_staticcatch_expr(*label, bindings, body, handler)
-                } else {
-                    self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_expr(body)
-                    })
-                }
+                // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017)
+                // gates pseudo-jmp on `EffectCall (Maybe_tail_is_return
+                // (Tail_with_name {in_staticcatch=false}))`. `NeedValue _`,
+                // which is what `compile_expr` models, takes the
+                // explicit-jump arm at lam_compile.ml:978-993 unconditionally
+                // (it allocates a tmp, assigns through it, then dispatches).
+                // Take that path here; the `with_static_handler` inline
+                // shortcut has no OCaml analog for NeedValue.
+                self.compile_staticcatch_expr(*label, bindings, body, handler)
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let result = self.fresh_tmp_ident();
