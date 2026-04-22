@@ -1701,13 +1701,17 @@ impl JsPrinter {
             }
 
             ExpressionDesc::ArrayIndex(arr, idx) => {
+                // OCaml's `Array_index` printer (js_dump.ml:991-995) wraps the
+                // inner expression in `P.group f 1` unconditionally — every
+                // multi-line shape inside the target gets +1 indent. The
+                // printer's `print_member_target_expression(_, true)` mirrors
+                // that by raising the indent before delegating to the inner
+                // expression.
                 let needs_paren = level > 15;
                 if needs_paren {
                     self.write_char('(');
                 }
-                let extra_group_indent = member_target_needs_extra_group_indent(arr)
-                    && matches!(self.previous_non_space_char_on_line(), Some('(' | ','));
-                self.print_member_target_expression(arr, extra_group_indent);
+                self.print_member_target_expression(arr, true);
                 self.write_char('[');
                 self.print_expression(idx, 0);
                 self.write_char(']');
