@@ -76,6 +76,17 @@
   lambda_has_exit`. Total diff hunks 2780 -> 2763 (-17); fixes
   fallthrough in gpr_1698_test, miss_colon_test, and similar.
 
+## Failed approaches (2026-04-22, session 5)
+- **Use `compile_effect_block` for both branches in `compile_if_unit_return_tail_block`
+  when both are non-trivial unit**: Attempted to match OCaml's shape
+  where `if cond { Console.log("a") } else { Console.log("b") }` keeps the
+  if/else structure with bare `Exp` statements (no synthetic `return undefined`).
+  Regressed 641 → 634 (-7). The early-return rewrite in
+  `simplify_if_statement` is load-bearing for many other test shapes; without
+  a precise unit-tail detection, switching to effect-block form breaks those.
+  The proper fix needs to detect `both-branches-are-pure-unit-expressions-without-early-exits`
+  at a narrower scope.
+
 ## Failed approaches (2026-04-22, session 4)
 - **Make `block_last_is_terminal` non-recursive**: Tried matching OCaml's
   `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193) which
