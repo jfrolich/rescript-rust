@@ -4447,7 +4447,26 @@ impl LambdaCompiler {
                     prefix.extend(body);
                     return prefix;
                 }
-                return body;
+                // The general "all cases equal → just return body" collapse is
+                // only valid when OCaml's `compile_general_cases` would reduce
+                // to a body-only return via `S.if_` + `E.econd`. That path is
+                // the 1-case Complete arm (lam_compile.ml:543) or the 2-case
+                // Complete arm (lam_compile.ml:558) — both handled by
+                // `compile_small_string_switch_return`. For 3+ cases OCaml
+                // takes the `_, _` arm (lam_compile.ml:567+) which uses
+                // `group_apply` + `S.string_switch` and KEEPS the switch form
+                // even when all bodies are identical. Gate on `allow_small` to
+                // match: when a caller disables the small path (e.g. the
+                // untagged block switch wrapping a typeof tail in an instance
+                // if-chain, compile.rs:3614), the typeof switch stays as a
+                // switch statement so the outer `Statement::if_` rule
+                // "block_last_is_terminal → flip to sequence" (mod.rs:1550)
+                // mirrors OCaml's `S.if_` rule 249-250 and produces the
+                // `if (instance) return X; switch (typeof e) { ... }` shape
+                // OCaml emits (UntaggedVariants.res `awaitUser`, `can_merge`).
+                if allow_small && cases.len() <= 2 {
+                    return body;
+                }
             }
             // Body compiles to empty (e.g. all dispatched cases are
             // fallthrough static raises). Fall through to the regular

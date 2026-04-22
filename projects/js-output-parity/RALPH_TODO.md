@@ -1,9 +1,41 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **643 / 657** (97.9%)
+## Current baseline (2026-04-22): **644 / 657** (98.0%)
 - 4 compile errors (typecheck failures, upstream)
-- 10 output diffs (unchanged)
-- Total diff lines: **1401** (down from 1477)
+- 9 output diffs (was 10)
+- Total diff lines: **1364** (down from 1401)
+
+## Recent fixes (2026-04-22, session 10)
+- **Gate "all cases equal → return body" collapse on `allow_small`
+  (compile.rs:`compile_named_string_switch_return_with_strategy`)**:
+  Rust was collapsing a multi-case typeof switch whose bodies all compile to
+  the same thing (e.g. `awaitUser` with `typeof u` cases `"object"` and
+  `"string"` both returning `"dummy"`, `can_merge` with `"boolean"` and
+  `"object"` both returning `"merge"`) into a bare `[return body]`. That shortcut
+  is only valid at OCaml's 1-case-Complete (lam_compile.ml:543) or 2-case-Complete
+  (lam_compile.ml:558) arms — both handled by Rust's
+  `compile_small_string_switch_return` via `allow_small=true`. For 3+ cases
+  (including the 4-case `can_merge` before runtime_test_cases get split out, or
+  the typeof_cases tail wrapped by an outer instance if-chain) OCaml takes the
+  `_, _` arm (lam_compile.ml:567+) which uses `group_apply` + `S.string_switch`
+  — the switch statement survives even when all clause bodies are identical
+  (group_apply yields `(tag1, {body=[]})…(tagN, {body=[…]})` so OCaml's
+  `S.string_switch` has non-equal clauses and doesn't short-circuit). When Rust
+  then wrapped its collapsed `[return body]` with an instance test via
+  `Statement::if_`, the `single_return_expr(&then) && single_return_expr(&else)`
+  rule (mod.rs:1521) built `return (test ? "dnm" : "merge")`, and
+  `Expression::cond`'s inner-Cond collapse (mod.rs:855) folded a second
+  runtime test in via `cond1 || cond2`. `flatten_block` later expanded the
+  `Return(Cond)` back to `if/else`, producing
+  `if (Array.isArray(x) || x instanceof Date) return "dnm"; else return "merge";`
+  instead of OCaml's `if (Array.isArray(x)) return "dnm"; if (x instanceof Date)
+  return "dnm"; switch (typeof x) { case "boolean": case "object": return "merge"; }`.
+  Gate the general collapse on `allow_small && cases.len() <= 2` so it only
+  fires on the OCaml-aligned 1/2-case paths. The `Lstaticraise`-specific
+  narrow collapse inside the branch stays untouched (it mirrors OCaml's
+  `S.if_ test [] []` → `S.exp test` behavior for fallthrough raises). JS
+  snapshot parity: **643 → 644 / 657 (+1)**; output diffs **10 → 9**;
+  total diff lines **1401 → 1364**. `UntaggedVariants.res` now matches.
 
 ## Recent fixes (2026-04-22, session 9)
 - **Drop `compile_if_unit_return_tail_block` case-2 short-circuit
