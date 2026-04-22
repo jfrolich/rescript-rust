@@ -8,6 +8,7 @@
 
 use crate::ident::Ident;
 use crate::lambda::collect_info::collect_info;
+use crate::lambda::compat::LetKind;
 use crate::lambda::compile_context::LamStats;
 use crate::lambda::deep_flatten::deep_flatten;
 use crate::lambda::pass_alpha_conversion::alpha_conversion;
@@ -96,7 +97,112 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = simplify_lets(&lam);
 
     // lam_compile_main.ml:200 — final simplify_exits.
-    simplify_exits(&lam, &meta.id_gen)
+    let lam = simplify_exits(&lam, &meta.id_gen);
+
+    // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
+    // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list
+    // of `Lam_group.t` and runs `handle_exports` on the trailing
+    // `Pmakeblock(_, ModuleExport _, args)`. Each non-`Lvar` arg gets
+    // hoisted into a fresh `Single (Strict, newid, lam)` group; the
+    // makeblock's arg list becomes `Lvar newid`. In Rust the JS compile
+    // walks one Lambda tree, so we re-emit the equivalent shape: rename
+    // the export id, prepend a `Llet (Strict, newid, value, _)` just
+    // outside the makeblock, and replace the arg with `Lvar newid`. This
+    // makes downstream `compile_expr` see separate top-level bindings
+    // instead of inlining `Lconst (Const_block ...)` (etc.) into the
+    // module-export block — matching `let X = {...}` snapshots like
+    // `variantsMatching.CustomizeTags_d`.
+    handle_exports(&mut meta, lam)
+}
+
+/// Direct port of `compiler/core/lam_coercion.ml:82-172` — `handle_exports`
+/// applied to the trailing module-export `Pmakeblock`.
+fn handle_exports(meta: &mut LamStats, lam: Lambda) -> Lambda {
+    rewrite_export_makeblock(meta, lam)
+}
+
+fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
+    match lam {
+        Lambda::Llet(kind, id, value, body) => {
+            let new_body = rewrite_export_makeblock(meta, *body);
+            Lambda::Llet(kind, id, value, Box::new(new_body))
+        }
+        Lambda::Lletrec(bindings, body) => {
+            let new_body = rewrite_export_makeblock(meta, *body);
+            Lambda::Lletrec(bindings, Box::new(new_body))
+        }
+        Lambda::Lsequence(left, right) => {
+            let new_right = rewrite_export_makeblock(meta, *right);
+            Lambda::Lsequence(left, Box::new(new_right))
+        }
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(export_ids), mutable_),
+            args,
+            loc,
+        }) => {
+            // lam_coercion.ml:88-122 — fold_right2 over (export_ids, args).
+            // OCaml builds `result.groups` by prepending Single(...)
+            // entries, so the resulting groups list ends up in
+            // original-arg order. In Rust we rebuild by wrapping
+            // `Llet`s around the makeblock; the FIRST hoisted binding
+            // must end up OUTERMOST so it compiles first (matching
+            // OCaml's `compile_group` iteration order).
+            let mut new_args: Vec<Lambda> = Vec::with_capacity(args.len());
+            let mut new_export_ids: Vec<Ident> = Vec::with_capacity(export_ids.len());
+            let mut hoisted: Vec<(Ident, Lambda, LetKind)> = Vec::new();
+
+            for (orig_export_id, arg) in export_ids.into_iter().zip(args) {
+                match &arg {
+                    // lam_coercion.ml:100-111 — Lvar with matching name.
+                    Lambda::Lvar(id) if id.name() == orig_export_id.name() => {
+                        new_export_ids.push(id.clone());
+                        new_args.push(arg);
+                    }
+                    // lam_coercion.ml:112-121 — Lvar with mismatched name:
+                    // rename the export id, alias-bind it.
+                    Lambda::Lvar(_) => {
+                        let newid = orig_export_id.rename(&meta.id_gen);
+                        new_export_ids.push(newid.clone());
+                        new_args.push(Lambda::Lvar(newid.clone()));
+                        hoisted.push((newid, arg, LetKind::Alias));
+                    }
+                    // lam_coercion.ml:122-157 — non-Lvar arg: rename the
+                    // export id, strict-bind it.
+                    _ => {
+                        let newid = orig_export_id.rename(&meta.id_gen);
+                        new_export_ids.push(newid.clone());
+                        new_args.push(Lambda::Lvar(newid.clone()));
+                        hoisted.push((newid, arg, LetKind::Strict));
+                    }
+                }
+            }
+
+            // Update meta.exports / export_idents to match the renamed
+            // export list (lam_coercion.ml:200-205).
+            meta.exports = new_export_ids.clone();
+            meta.export_idents = new_export_ids.iter().cloned().collect();
+
+            let mut result = Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pmakeblock(
+                    tag,
+                    TagInfo::ModuleExport(new_export_ids),
+                    mutable_,
+                ),
+                args: new_args,
+                loc,
+            });
+            // Wrap with hoisted Llets so the FIRST hoist (by export
+            // order) is OUTERMOST, matching OCaml's compile_group
+            // iteration order.
+            for (id, value, kind) in hoisted.into_iter().rev() {
+                result = Lambda::Llet(kind, id, Box::new(value), Box::new(result));
+            }
+            result
+        }
+        // The trailing expression is not a module-export Pmakeblock
+        // (e.g. tests with `assert false` etc.). Leave it untouched.
+        other => other,
+    }
 }
 
 /// Walks `lam` and returns the idents carried in the top-level
