@@ -1,11 +1,23 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **640 / 657** (97.4%)
+## Current baseline (2026-04-22): **641 / 657** (97.6%)
 - 4 compile errors (typecheck failures, upstream)
-- 13 output diffs (down from 16)
-- Total diff lines: **1741** (down from ~2745)
+- 12 output diffs (down from 16)
+- Total diff lines: **1695** (down from ~2745)
 
 ## Recent fixes (2026-04-22, session 5)
+- **Skip scrutinee rebinding for named variant switch assignment
+  (compile.rs:5391+)**: `compile_switch_assignment_block` unconditionally
+  wrapped the scrutinee via `bind_switch_scrutinee_once` for
+  `uses_named_variant_switch`, introducing a `let tmp = expr;` even for
+  simple field-access scrutinees that only appear once in the dispatch.
+  Mirror the sibling compile paths (return/effect/tail_loop) which gate on
+  `named_variant_switch_needs_bound_scrutinee`. Also pass `default.is_none()`
+  for the `complete` flag to `compile_small_string_switch_{assignment,return}`
+  call sites — OCaml's `compile_stringswitch` (lam_compile.ml:858-862)
+  treats `default=None` as Complete, enabling the two-case ternary fold in
+  `compile_general_cases`. JS snapshot parity **640 → 641 / 657 (+1)**;
+  total diff lines **1741 → 1695**. `ticker.res` now matches.
 - **Staticcatch fallthrough path for empty bindings (compile.rs:1602+)**:
   OCaml's `compile_staticcatch` pseudo-jmp path (lam_compile.ml:937-962,
   `add_pseudo_jmp` at lam_compile_context.ml:99-104) fires for any single
