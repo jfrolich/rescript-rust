@@ -34,6 +34,7 @@ pub mod constant;
 pub mod convert;
 pub mod deep_flatten;
 pub mod free_variables;
+pub mod js_pass_external_shadow;
 pub mod lam_exit_code;
 pub mod lam_hit;
 pub mod lam_util;
