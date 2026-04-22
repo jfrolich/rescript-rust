@@ -4,6 +4,53 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 18 (2026-04-22) — loop has no actionable work in scope
+
+Verified end-to-end state on the current `typechecker-performance` tip
+(26e5a00ed):
+
+- `./scripts/test_js_output_parity.sh` → **653 / 657**, **4 compile errors**,
+  **0 output diffs**.
+- The 4 failing files all crash BEFORE reaching any JS-backend code with
+  `Type checking failed: CoreError(...)`:
+  - `defunctor_make_test.res` — `ExprTypeClash` in `FunctionCall`
+  - `functor_ffi.res` — `ExprTypeClash` (no ctx)
+  - `inline_map2_test.res` — `UndefinedMethod { method: "Test_utils.eq" }`
+  - `int_map.res` — `ExprTypeClash` in `FunctionCall`
+- `./scripts/test_typedtree_parity.sh --canonical defunctor_make_test`
+  confirms the Rust typechecker literally CRASHES on this file (OCaml
+  passes, Rust fails). So PLAN.md's "typedtree parity: 657/657" claim is
+  no longer true on this branch — at least 4 files regressed upstream.
+
+**Prompt's "MANDATORY FIRST TASK" is obsolete.** `simplify_with_env` and
+`SimplifyEnv` are already gone (checked
+`compiler-rust/src/lambda/simplify.rs` — it's a 306-line pipeline
+orchestrator, not a monolith). All referenced passes are ported:
+`collect_info`, `deep_flatten`, `pass_remove_alias`, `pass_exits`,
+`pass_lets_dce`, `pass_alpha_conversion`, `pass_count`,
+`pass_eliminate_ref`. The pipeline in `simplify_for_js_backend` mirrors
+`lam_compile_main.ml:148-200` line-for-line with OCaml line citations.
+
+**Hard blocker per prompt's exit condition.** The prompt says stop when
+"there is a genuine hard blocker that requires human input." The
+remaining 4 failures are strictly upstream typechecker regressions that
+PLAN.md declares out of scope for this project. With 0 output diffs and
+no in-scope work left, the JS-output-parity loop has nothing to do.
+
+**What the human needs to decide:**
+1. Either fix the 4 upstream typechecker regressions (outside this
+   project's scope — likely requires work on the
+   `typechecker-performance` branch's type-expression handling, not the
+   JS backend), OR
+2. Accept 99.4% as the project's terminal parity on this branch and
+   close it out, OR
+3. Rebase onto a typechecker-green branch and re-run the JS parity
+   suite to confirm 0 output diffs still holds there.
+
+No commits this session — nothing to change in JS backend code. Working
+tree has only generated test-output artifacts from prior parity runs
+(not a coding-session side effect).
+
 ## Fix (2026-04-22, session 17) — drop pre-flatten in `compile_if_return_block` fallback
 
 `compile_if_return_block` was applying `normalize_unit_return_if_branch`
