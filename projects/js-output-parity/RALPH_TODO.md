@@ -5,7 +5,108 @@
 - 6 output diffs (was 7)
 - Total diff lines: **1179** (down from 1261)
 
-## Investigation 2026-04-22 (session 13) — remaining 6 output diffs all trace to one missing port
+## Investigation 2026-04-22 (session 14) — correcting session 13's gpr_3875 analysis
+
+Reran the baseline (confirmed 647/657) and re-audited the 6 failing files
+against current Rust output. **Session 13's Cluster A was wrong about
+gpr_3875_test.** The other 3 of 4 files in Cluster A still match the
+description.
+
+### Actual status per file (verified by `grep -c 'exit\$' <rust-output>`):
+
+| File              | Rust `exit$N` count | Rust `let exit` | Matches Cluster A? |
+|-------------------|---------------------|-----------------|--------------------|
+| gpr_3875_test     | 0                   | 1               | **NO** — already 1 exit |
+| miss_colon_test   | 0                   | 1               | Partial — see below |
+| gpr_1698_test     | 6                   | 1               | YES — 2+ exits    |
+| rbset             | 6                   | 1               | YES — 2+ exits    |
+| mario_game        | 32                  | multiple        | YES — 3+ exits    |
+
+### gpr_3875_test (27 diff lines) — NOT a flatten_nested_caches issue
+
+Rust's output already uses ONE `exit` variable matching OCaml's structure:
+```js
+let exit = 0;
+if (a !== "x") { exit = 2; }
+if (exit === 2) { <inner-switch-on-b> }
+// f-branch fallthrough
+```
+
+The remaining diff is inside the `if (exit === 2)` block. The inner
+switch-on-`b` (option<string>) compiles differently:
+
+OCaml:
+```js
+if (b === undefined) { c-branch; return; }
+if (b !== "x")       { c-branch; return; }
+// fallthrough
+```
+
+Rust:
+```js
+if (b !== undefined) {
+  if (b !== "x") { c-branch; return; }
+} else {
+  c-branch; return;
+}
+```
+
+Both are semantically equivalent. Checked both `simplify_if_statement`
+(mod.rs:1503) and OCaml's `S.if_` (js_stmt_make.ml:247/249): neither
+smart-constructor rule would rewrite Rust's shape to OCaml's. The rules
+require either "else is a single `Return`" (ifnot=[Return]) or "then
+terminates" (ifso ends with Return/Throw/Continue). In Rust's shape
+for gpr_3875, else is a 2-statement block `[if-exp-stmt, Return]` and
+then ends with an inner `if` statement (non-terminating). This is a
+**lambda-level shape difference**, likely from how the option-switch
+gets lowered (matching OCaml's ordering of `None` vs `Some _` cases).
+Not a flatten_nested_caches issue.
+
+### miss_colon_test (165 diff lines) — partial Cluster A
+
+OCaml has TWO exit vars: `exit` and `exit$1`. Rust has ONE: `exit`.
+OCaml emits `exit$1 = 3` (raise-assignment) at the raise sites; Rust
+emits `exit = 3` AND also inlines the outer handler body at a separate
+raise site. This is the flatten_nested_caches issue: OCaml's outer
+catch uses `exit$1` (fresh) with handler shared via `if (exit$1 === 3) {…}`;
+Rust collapses to one exit_id but then inlines the OUTER handler at each
+raise site for the inner label, producing handler duplication.
+
+### Cluster A (confirmed): `gpr_1698_test`, `rbset`, `mario_game`
+
+Rust emits `exit$1` (multiple exit vars from nested Lstaticcatch each
+creating its own fresh exit_id), which shows OCaml's flatten_nested_caches
+is collapsing these nested catches to share one exit_id with sequential
+`order_id`s.
+
+### Cluster B (unchanged): `reasonReactRouter.res` — 25 diff lines
+(see session 13 analysis below)
+
+### Cluster C (unchanged): 4 compile errors (upstream)
+
+### Port plan for flatten_nested_caches (for a future session)
+
+The port requires `has_exit_code` (lam_exit_code.ml:25-33 — not yet in
+Rust) and `flat_catches` (lam_compile.ml:104-114). Once ported, the
+staticcatch entry points in compile.rs (`compile_staticcatch_return_block`,
+`compile_staticcatch_effect_block`, `compile_staticcatch_assignment_block`,
+`compile_staticcatch_tail_loop_return_block`) need to:
+
+1. Call `flatten_nested_caches` on the outer Lstaticcatch → `(handlers, body)`.
+2. Create ONE fresh `exit_id`.
+3. Push ALL handlers to `static_jump_handlers` with sequential exit codes
+   starting at `next_static_jump_exit_code()`.
+4. Emit `let exit = 0;` + all bindings for all handlers (combined).
+5. Compile body with the populated static_jump_handlers.
+6. After body, emit the dispatch (switch or if-chain over exit_id).
+
+**Risk:** Threading flat_catches through all four entry points is a large
+refactor. The existing fallthrough/pseudo-inline paths in compile.rs (for
+single-handler no-raise cases) must be kept, matching OCaml's pseudo-jmp
+path (lam_compile.ml:938-962) which only fires when `code_table` has
+exactly ONE entry and `no_static_raise_in_handler`.
+
+## Investigation 2026-04-22 (session 13) — superseded by session 14 for gpr_3875
 
 Ran baseline and audited every remaining failing file. The 6 output diffs
 (1179 total diff lines) cluster into exactly **two** missing OCaml ports:
