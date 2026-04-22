@@ -15,7 +15,7 @@ use crate::js_ir::{
 use crate::lambda::compat::LetKind;
 use crate::lambda::js_pass_external_shadow::is_lexical_binding_kind;
 
-use super::compile::js_expr_no_side_effects;
+use super::js_exp_make::js_expr_no_side_effects;
 
 pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgram {
     deps.program = tailcall_inline_program(deps.program);
