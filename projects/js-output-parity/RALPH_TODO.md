@@ -1,9 +1,42 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **641 / 657** (97.6%)
+## Current baseline (2026-04-22): **642 / 657** (97.7%)
 - 4 compile errors (typecheck failures, upstream)
-- 12 output diffs (down from 16)
-- Total diff lines: **1682** (down from ~2745)
+- 11 output diffs (down from 16)
+- Total diff lines: **1658** (down from ~2745)
+
+## Recent fixes (2026-04-22, session 7)
+- **Fold effect-only `[Exp; ...; Return tail]` branches into `Return(Seq)`
+  (compile.rs `try_fold_effect_only_return_tail` + `compile_if_return_block`)**:
+  Real correctness bug and missing OCaml-alignment. OCaml's Lifthenelse
+  `EffectCall (Maybe_tail_is_return)` arm at lam_compile.ml:1422-1427
+  emits `Return(Cond(cond, out1, out2))` when both branches compile via
+  `NeedValue` to `{block=[]; value=Some e}`. `E.econd`
+  (js_exp_make.ml:1201-1204) then folds
+  `Cond(Seq(a, undef), Seq(b, undef))` → `Seq(Cond(a, b), undef)`, which
+  `js_pass_flatten`'s `Return(Seq)` + `Exp(Cond)` rules flatten to
+  `[If(cond, [Exp a], [Exp b]); Return undef]` — printed by
+  `function_body` (drops trailing `Return undef`) as
+  `if (cond) { a; } else { b; }`.
+  Rust's `compile_return_block` for `Lsequence(effect, Lconst undef)`
+  pre-flattens to `[Exp effect; Return undef]`, and the
+  undefined-rejection guard in `take_return_tail_expr` refused to
+  reconstruct the `Seq` tail — so `compile_test_return_block_with_fallback`
+  fell back to `Statement::if_`, triggering the early-return rewrite
+  in `simplify_if_statement` rule 7 (`if (cond) { log_a; return; } log_b;`).
+  Added `try_fold_effect_only_return_tail` to reassemble
+  `Seq(e1, Seq(e2, ..., tail))` from `[Exp e1, Exp e2, ..., Return tail]`,
+  and use it in `compile_if_return_block` before the fallback path.
+  When both branches fold, build `Return(Expression::cond(cond, then_seq, else_seq))`
+  — `Expression::cond`'s own `Cond(Seq(_,undef), Seq(_,undef)) → Seq(Cond(_,_), undef)`
+  rule (js_ir/mod.rs:784-805) handles the collapse, matching OCaml's
+  `E.econd` exactly. The fold accepts both single-return shapes
+  (from inner Lifthenelse already folded to `[Return(Seq(Cond, undef))]`)
+  and multi-statement effect-plus-return shapes, so the collapse fires
+  uniformly at every Lifthenelse level in a nested typeof+NAME+VAL chain.
+  JS snapshot parity: **641 / 657 -> 642 / 657 (+1)**;
+  output diffs: **12 -> 11**; total diff lines: **1682 -> 1658**.
+  `stdlib_Stdlib_DictTests.res` now matches.
 
 ## Recent fixes (2026-04-22, session 6)
 - **`ArrayIndex` printer always +1 indent (printer.rs:1703+)**: OCaml's

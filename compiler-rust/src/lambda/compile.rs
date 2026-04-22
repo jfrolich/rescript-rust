@@ -5123,6 +5123,51 @@ impl LambdaCompiler {
         result
     }
 
+    /// Mirrors OCaml's Lifthenelse `EffectCall (Maybe_tail_is_return)` arm
+    /// (lam_compile.ml:1422-1427). When both branches compile to
+    /// `{block=[]; value=Some e}` via `NeedValue`, OCaml emits
+    /// `Return(Cond(cond, out1, out2))` where each `out` is the branch's
+    /// tail expression (e.g. `Seq(log, undef)` for `Lsequence(log, Lconst undef)`).
+    /// `E.econd` then folds `Cond(Seq(a,undef), Seq(b,undef))` to
+    /// `Seq(Cond(a,b), undef)`, which `js_pass_flatten`'s Return(Seq) +
+    /// Exp(Cond) rules later flatten into the clean `[If(cond, [Exp a], [Exp b]);
+    /// Return undef]` shape printed as `if (cond) { a; } else { b; }`.
+    ///
+    /// Rust's `compile_return_block` for `Lsequence(effect, Lconst undef)`
+    /// pre-flattens to `[Exp effect; Return Undefined]` — losing the `Seq`
+    /// shape that `take_return_tail_expr`'s undefined-rejection guard then
+    /// refuses to reconstruct. Fold here explicitly so the caller can match
+    /// OCaml's `Return(Cond(Seq, Seq))` construction.
+    ///
+    /// Returns `Some(Seq(e1, Seq(e2, ..., Return-expr)))` iff the block is
+    /// exactly `[Exp e1, Exp e2, ..., Return last]`. The prefix must be
+    /// non-empty — for a single `[Return]` block the generic
+    /// `take_return_tail_expr` path is sufficient.
+    fn try_fold_effect_only_return_tail(&self, block: &Block) -> Option<Expression> {
+        let (last, prefix) = block.split_last()?;
+        let Statement {
+            desc: StatementDesc::Return(tail_expr),
+            ..
+        } = last
+        else {
+            return None;
+        };
+        // Accept both a single `[Return tail]` (empty prefix — the inner
+        // Lifthenelse case where `compile_if_return_block` has already
+        // folded into `Return(Seq(Cond, undef))`) and the multi-statement
+        // `[Exp e1, ..., Exp eN, Return tail]` case. Reject any prefix
+        // statement that isn't a plain `Exp` — control-flow stmts like
+        // Return/Throw/If would break the `Seq` fold.
+        let mut result = tail_expr.clone();
+        for stmt in prefix.iter().rev() {
+            let StatementDesc::Exp(effect) = &stmt.desc else {
+                return None;
+            };
+            result = js_seq(effect.clone(), result);
+        }
+        Some(result)
+    }
+
     fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
         if std::env::var_os("RUST_DEBUG_TAKE_RETURN_TAIL").is_some() {
             let rendered = crate::js_ir::print_block(&block);
@@ -5182,6 +5227,32 @@ impl LambdaCompiler {
         let cond_compiled = self.compile_expr(cond);
         let then_block_raw = self.compile_return_block(then_);
         let else_block_raw = self.compile_return_block(else_);
+
+        // Mirror OCaml's Lifthenelse `EffectCall (Maybe_tail_is_return)` arm
+        // (lam_compile.ml:1422-1427). When both branches are pure
+        // effect-plus-Return-tail shapes like `[Exp e1, ..., Return tail]`
+        // (produced by `Lsequence(effect, Lconst undef)` tails), fold each
+        // into a `Seq` expression and build
+        // `Return(Expression::cond(cond, then_seq, else_seq))`.
+        // `Expression::cond` folds `Cond(Seq(a, undef), Seq(b, undef))` to
+        // `Seq(Cond(a, b), undef)` (js_ir/mod.rs:784-805, matching OCaml's
+        // `E.econd` at js_exp_make.ml:1201-1204). The subsequent
+        // `flatten_block` pass rewrites `Return(Seq(_, _))` and `Exp(Cond)`
+        // into the clean `[If(cond, [Exp a], [Exp b]); Return undef]` shape
+        // that `print_function_body` drops to `if (cond) { a; } else { b; }`.
+        if let (Some(then_seq), Some(else_seq)) = (
+            self.try_fold_effect_only_return_tail(&then_block_raw),
+            self.try_fold_effect_only_return_tail(&else_block_raw),
+        ) {
+            let mut block = cond_compiled.prelude;
+            block.push(Statement::return_(Expression::cond(
+                cond_compiled.expr,
+                then_seq,
+                else_seq,
+            )));
+            return block;
+        }
+
         // Keep the raw `[Return(Seq(...))]` shape available so
         // `compile_test_return_block` can detect both-single-return branches
         // and collapse via OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246).
