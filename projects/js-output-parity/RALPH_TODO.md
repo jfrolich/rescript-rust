@@ -5,6 +5,71 @@
 - 1 output diff (was 4)
 - Total diff lines: **27** (down from 111, -84)
 
+## Remaining gpr_3875_test diff (27 lines) — option<string> chain vs nested
+
+OCaml's snapshot for `gpr_3875_test.res`'s `compilerBug` inner `b`-test
+emits a CHAIN of separate `if` statements:
+```
+if (b === undefined) { c-branch; return; }
+if (b !== "x")       { c-branch; return; }
+```
+
+Rust emits the equivalent NESTED form:
+```
+if (b !== undefined) {
+  if (b !== "x") { c-branch; return; }
+} else {
+  c-branch; return;
+}
+```
+
+Both compile from the same lambda
+`Lifthenelse(Pis_not_none(b), Llet match' = Pval_from_option_not_nest(b)
+in Lstringswitch(...), raise 3)` (verified — both compilers' `matching.ml`
+/ `convert.rs` use the same orientation).
+
+**OCaml's path to chain form**: `compile_staticcatch` inlines handler 3
+(c-branch) at every `raise(3)` site via the pseudo-jmp arm. The inlined
+c-branch in tail-return context folds via `E.econd`'s
+`Cond(Seq, Seq) → Seq(Cond, undef)` rule into a single `Return Seq`. The
+outer `b`-test then has `else = [Return Seq]` (single Return). At
+`S.if_`, the inner `Llet match' = Pval_from_option_not_nest(b)` keeps the
+THEN multi-statement, so rule-244 (both-single-Return → `return cond`)
+doesn't fire. Rule 247-248 (`else = [Return _]` → flip) fires → chain.
+
+**Rust's path to nested form**: same inlining, same E.cond folding. But
+Rust's `simplify_lets` eliminates the `Llet match'` binding (since
+`Pval_from_option_not_nest` is identity and `match'` is a single-use
+alias). After elimination, the THEN of the b-test reduces to a single
+Return too (via the inner Lstringswitch's own E.cond fold). With BOTH
+branches single Return, `compile_test_return_block_with_fallback` rule 4
+fires → folds into `Return Cond(b !== undef, then_seq, c_seq)`, then
+`Expression::cond`'s `Cond(_, Cond(_, _, X), X) → cond(test && inner_test,
+inner_then, X)` collapses to `Return Cond(b !== undef && b === "x",
+fb_seq, c_seq)`. After flatten, this expands to the nested form.
+
+**Why OCaml doesn't fall into the same trap**: OCaml's `simplify_lets`
+might NOT eliminate the `Llet match' = Pval_from_option_not_nest(b)`
+binding for some reason — keeping THEN multi-statement and forcing the
+S.if_ rule 247-248 path. Or the snapshot was generated before some
+simplification. Either way, the divergence is in the lambda
+post-simplification, not in the JS emit.
+
+**Fix candidates** (ordered by risk):
+1. Make Rust's `simplify_lets` not eliminate aliases of
+   `Pval_from_option_not_nest` (or any optional unwrap). Match OCaml's
+   exact substitution criteria for these prims.
+2. In `compile_test_return_block_with_fallback`, if the cond is a
+   nullish-strict-refinement and the else is `[Return Seq(Cond, undef)]`,
+   prefer the Statement::if_ flip path over rule-4 fold.
+3. Add a JS-IR pass that recognizes `Return Cond(c1 && c2, X, Y)` where
+   `Y` matches the inner else of an inferred Cond, and unrolls back into
+   chain form.
+
+Option 1 is the most architecturally faithful but risks regressing other
+tests that depend on the alias elimination. Option 2 is targeted but
+adds Rust-only logic. Option 3 is also Rust-only.
+
 ## Fix (2026-04-22, session 16 continued) — add `Lletrec` arm to `compile_return_block_inner` and `compile_effect_block_inner`
 
 The two functions had explicit `Llet` arms but no `Lletrec` arm — `Lletrec`
