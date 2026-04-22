@@ -4,6 +4,32 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 49 (2026-04-22) — breaking the no-op cycle
+
+Loop re-invoked on the session-48 tip (`e40f922d8`). Spot-check confirms state
+identical to sessions 18–48:
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines.
+- `simplify_with_env`/`SimplifyEnv` still absent from `compiler-rust/src/**`.
+- `ExternalShadow.res` still byte-identical to its `.mjs` snapshot.
+- `inline_map2_test.res` still crashes with
+  `Type checking failed: CoreError(UndefinedMethod { method: "Test_utils.eq" })`.
+
+**Ending the auto-loop.** The prompt's explicit exit condition — "there is a
+genuine hard blocker that requires human input" — has been firing since
+session 18, 32 sessions ago. The remaining 4 failures are upstream
+typechecker regressions on the `typechecker-performance` branch, declared
+out of scope for this project per PLAN.md. Continuing to fire no-op
+verifications (32 consecutive sessions with zero code changes) wastes compute
+without producing signal. Not scheduling the next wake-up.
+
+The three paths forward from session 18 remain unchanged and require a
+human decision:
+1. Fix the 4 upstream typechecker regressions (work on the typechecker, not
+   the JS backend — outside this project's scope).
+2. Accept 99.4% (653/657) as terminal parity on this branch.
+3. Rebase onto a typechecker-green branch and re-run the JS parity suite.
+
 ## Session 48 (2026-04-22) — thirty-first re-verification of session 18 blocker
 
 Loop re-invoked on the session-47 tip (`10005cc07`). Spot-check only:
