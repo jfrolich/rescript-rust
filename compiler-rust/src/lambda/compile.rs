@@ -6627,9 +6627,19 @@ impl LambdaCompiler {
                 elements,
             } => {
                 let elems = elements.iter().map(Self::compile_constant).collect();
+                // OCaml's `Lam_compile_const.translate` (lam_compile_const.ml:67-69)
+                // calls `Js_of_lam_block.make_block NA tag_info ...` — `NA`, not
+                // `Immutable`. Downstream JS-pass rules that match
+                // `Caml_block(_, Immutable, _, _)` (notably the binding-hoist rule
+                // in `js_pass_flatten_and_mark_dead.ml:172-183`) deliberately skip
+                // `NA`, so e.g. `let h = list{1,2,3,4}` (a `Lconst Const_block`)
+                // stays inline as `{hd: 1, tl: {hd: 2, ...}}` while
+                // `let CustomizeTags = Pmakeblock(...)` (which IS `Immutable`) gets
+                // its inner `Caml_block(NA)` constants hoisted to
+                // `let CustomizeTags_d = ...`. Mirror the OCaml convention here.
                 Expression::new(ExpressionDesc::CamlBlock(
                     elems,
-                    MutableFlag::Immutable,
+                    MutableFlag::NA,
                     Box::new(Expression::number(Number::int(*tag))),
                     tag_info.clone(),
                 ))
@@ -13449,6 +13459,13 @@ fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
 }
 
 fn is_simple_block_binding_item(property: LetKind, expr: &Expression) -> bool {
+    // Mirror OCaml's `js_pass_flatten_and_mark_dead.ml:188-193` "simple"
+    // case: only `Var`, `Number`, `Str`, `Bool`, `Undefined` items stay
+    // inline; everything else (including any `Caml_block`) is hoisted into
+    // a fresh local binding. `Lconst Const_block` materializes as
+    // `Caml_block(NA, ...)` (see `Self::compile_constant`) so it intentionally
+    // does NOT match `Caml_block(Immutable, ...)` patterns elsewhere — and
+    // therefore does NOT count as simple here either.
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
@@ -13458,14 +13475,6 @@ fn is_simple_block_binding_item(property: LetKind, expr: &Expression) -> bool {
         ExpressionDesc::OptionalBlock(inner, true) if property != LetKind::StrictOpt => {
             is_simple_block_binding_item(property, inner)
         }
-        ExpressionDesc::CamlBlock(
-            items,
-            MutableFlag::Immutable,
-            _,
-            TagInfo::Constructor { .. },
-        ) => items
-            .iter()
-            .all(|item| is_simple_block_binding_item(property, item)),
         _ => false,
     }
 }
