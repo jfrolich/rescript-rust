@@ -1,9 +1,23 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **646 / 657** (98.3%)
+## Current baseline (2026-04-22): **647 / 657** (98.5%)
 - 4 compile errors (typecheck failures, upstream)
-- 7 output diffs (was 8)
-- Total diff lines: **1261** (down from 1323)
+- 6 output diffs (was 7)
+- Total diff lines: **1179** (down from 1261)
+
+## Recent fixes (2026-04-22, session 12 — continued)
+- **`Constant::Some::is_allocating` recurses into inner
+  (constant.rs:`is_allocating`)**: Direct port of
+  `compiler/frontend/lam_constant.ml:104-111`. The OCaml definition
+  recurses into `Const_some inner`, so `Const_some (Const_string "v1")`
+  is non-allocating. Rust returned `true` unconditionally. Effect:
+  `field_flatten_get`'s "non-allocating" check (lam_util.ml:225-230)
+  now lifts optional record fields like `{x1: ?Some("v1")}` out of
+  parent constant blocks, letting `let pm1 = switch ir1 { V0({x0, x1,
+  x3}) => ... }` fold to the flat OCaml ternary
+  `pm1 = ir1.TAG === "V0" ? ["v0", "v1", 3] : [...]`. JS snapshot
+  parity: **646 → 647 / 657 (+1)**; output diffs **7 → 6**; total diff
+  lines **1261 → 1179 (-82)**. `record_regression.res` now matches.
 
 ## Recent fixes (2026-04-22, session 12)
 - **`Const_block` emits `MutableFlag::NA` + tighten `is_simple_block_binding_item`
