@@ -1,16 +1,8 @@
-/* ********************************************************************* */
-/*  */
-/* OCaml */
-/*  */
-/* Xavier Leroy, projet Cristal, INRIA Rocquencourt */
-/*  */
-/* Copyright 1996 Institut National de Recherche en Informatique et */
-/* en Automatique.  All rights reserved.  This file is distributed */
-/* under the terms of the GNU Library General Public License, with */
-/* the special exception on linking described in file ../LICENSE. */
-/*  */
-/* ********************************************************************* */
-/* Adapted significantly by Authors of ReScript */
+/* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
+ *
+ * SPDX-License-Identifier: MIT
+ */
 
 /***
 Utilities for `Array` functions.
@@ -66,15 +58,6 @@ let getOrThrow: (t<'a>, int) => 'a
 no bounds checking; this would cause type error if `i` does not stay within range
 */
 external getUnsafe: (t<'a>, int) => 'a = "%array_unsafe_get"
-
-/**
-`getUndefined(arr, i)`
-
-It does the samething in the runtime as [`getUnsafe`]();
-it is _type safe_ since the return type still track whether it is
-in range or not
-*/
-external getUndefined: (t<'a>, int) => Js.undefined<'a> = "%array_unsafe_get"
 
 /**
 `set(arr, n, x)` modifies `arr` in place; it replaces the nth element of `arr`

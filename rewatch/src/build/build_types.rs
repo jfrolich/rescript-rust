@@ -30,6 +30,10 @@ pub struct Interface {
     pub compile_state: CompileState,
     pub last_modified: SystemTime,
     pub parse_dirty: bool,
+    /// Compiler warning output (from bsc stderr) stored for re-emission
+    /// during incremental builds when this module is not recompiled.
+    /// Written to `.compiler.log` on each build cycle.
+    pub compile_warnings: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +43,10 @@ pub struct Implementation {
     pub compile_state: CompileState,
     pub last_modified: SystemTime,
     pub parse_dirty: bool,
+    /// Compiler warning output (from bsc stderr) stored for re-emission
+    /// during incremental builds when this module is not recompiled.
+    /// Written to `.compiler.log` on each build cycle.
+    pub compile_warnings: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +139,7 @@ pub struct BuildState {
 /// - This prevents the "code smell" of optional fields that are None for some commands
 #[derive(Debug)]
 pub struct BuildCommandState {
+    pub root_folder: PathBuf,
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     pub warn_error_override: Option<String>,
@@ -142,6 +151,9 @@ pub struct BuildCommandState {
     pub dump_typed_sexp: bool,
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
+    // Command-line --features override. `None` means all features are active; `Some(list)`
+    // restricts the root package to those features (and whatever they transitively imply).
+    pub features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +200,7 @@ impl BuildState {
 
 impl BuildCommandState {
     pub fn new(
+        root_folder: PathBuf,
         project_context: ProjectContext,
         packages: AHashMap<String, Package>,
         compiler: CompilerInfo,
@@ -195,14 +208,17 @@ impl BuildCommandState {
         use_rust_parser: bool,
         subprocess: bool,
         dump_typed_sexp: bool,
+        features: Option<Vec<String>>,
     ) -> Self {
         Self {
+            root_folder,
             build_state: BuildState::new(project_context, packages, compiler),
             warn_error_override,
             use_rust_parser,
             subprocess,
             dump_typed_sexp,
             stored_asts: Mutex::new(AHashMap::new()),
+            features,
         }
     }
 
@@ -220,6 +236,10 @@ impl BuildCommandState {
 
     pub fn dump_typed_sexp(&self) -> bool {
         self.dump_typed_sexp
+    }
+
+    pub fn get_features(&self) -> Option<Vec<String>> {
+        self.features.clone()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

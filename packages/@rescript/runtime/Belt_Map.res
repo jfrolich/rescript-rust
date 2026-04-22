@@ -1,16 +1,8 @@
-/* ********************************************************************* */
-/*  */
-/* OCaml */
-/*  */
-/* Xavier Leroy, projet Cristal, INRIA Rocquencourt */
-/*  */
-/* Copyright 1996 Institut National de Recherche en Informatique et */
-/* en Automatique.  All rights reserved.  This file is distributed */
-/* under the terms of the GNU Library General Public License, with */
-/* the special exception on linking described in file ../LICENSE. */
-/*  */
-/* Adapted by authors of ReScript without using functors */
-/* ********************************************************************* */
+/* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
+ *
+ * SPDX-License-Identifier: MIT
+ */
 
 /** specalized when key type is `int`, more efficient
     than the generic type
@@ -109,17 +101,11 @@ let toArray = m => Dict.toArray(m.data)
 let keysToArray = m => Dict.keysToArray(m.data)
 let valuesToArray = m => Dict.valuesToArray(m.data)
 let minKey = m => Dict.minKey(m.data)
-let minKeyUndefined = m => Dict.minKeyUndefined(m.data)
 let maxKey = m => Dict.maxKey(m.data)
-let maxKeyUndefined = m => Dict.maxKeyUndefined(m.data)
 let minimum = m => Dict.minimum(m.data)
-let minUndefined = m => Dict.minUndefined(m.data)
 let maximum = m => Dict.maximum(m.data)
-let maxUndefined = m => Dict.maxUndefined(m.data)
 
 let get = (map, x) => Dict.get(~cmp=map.cmp, map.data, x)
-
-let getUndefined = (map, x) => Dict.getUndefined(~cmp=map.cmp, map.data, x)
 
 let getWithDefault = (map, x, def) => Dict.getWithDefault(~cmp=map.cmp, map.data, x, def)
 

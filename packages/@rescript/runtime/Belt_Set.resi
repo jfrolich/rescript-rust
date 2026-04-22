@@ -1,26 +1,8 @@
-/* Copyright (C) 2017 Authors of ReScript
+/* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * In addition to the permissions granted to you by the LGPL, you may combine
- * or link a "work that uses the Library" with a publicly distributed version
- * of this file to produce a combined library or application, then distribute
- * that combined work under the terms of your choosing, with no requirement
- * to comply with the obligations normally placed on you by section 4 of the
- * LGPL version 3 (or the corresponding section of a later version of the LGPL
- * should you choose to use a later version).
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
+ * SPDX-License-Identifier: MIT
+ */
 
 /***
 An _immutable_ sorted set module which allows customized _compare_ behavior.
@@ -587,26 +569,6 @@ s1->Belt.Set.minimum == Some(1)
 let minimum: t<'value, 'id> => option<'value>
 
 /**
-Returns minimum value of the collection. `undefined` if collection is empty.
-
-## Examples
-
-```rescript
-module IntCmp = Belt.Id.MakeComparable({
-  type t = int
-  let cmp = Pervasives.compare
-})
-
-let s0 = Belt.Set.make(~id=module(IntCmp))
-let s1 = Belt.Set.fromArray([3, 2, 1, 5], ~id=module(IntCmp))
-
-s0->Belt.Set.minUndefined->Js.Undefined.toOption == None
-s1->Belt.Set.minUndefined->Js.Undefined.toOption == Some(1)
-```
-*/
-let minUndefined: t<'value, 'id> => Js.undefined<'value>
-
-/**
 Returns maximum value of the collection. `None` if collection is empty.
 
 ## Examples
@@ -627,31 +589,6 @@ s1->Belt.Set.maximum == Some(5)
 let maximum: t<'value, 'id> => option<'value>
 
 /**
-Returns maximum value of the collection. `undefined` if collection is empty.
-
-## Examples
-
-```rescript
-module IntCmp = Belt.Id.MakeComparable({
-  type t = int
-  let cmp = Pervasives.compare
-})
-
-let s0 = Belt.Set.make(~id=module(IntCmp))
-let s1 = Belt.Set.fromArray([3, 2, 1, 5], ~id=module(IntCmp))
-
-s0
-->Belt.Set.maxUndefined
-->Js.Undefined.toOption == None
-
-s1
-->Belt.Set.maxUndefined
-->Js.Undefined.toOption == Some(5)
-```
-*/
-let maxUndefined: t<'value, 'id> => Js.undefined<'value>
-
-/**
 Returns the reference of the value which is equivalent to value using the comparator specifiecd by this collection. Returns `None` if element does not exist.
 
 ## Examples
@@ -669,11 +606,6 @@ s0->Belt.Set.get(20) == None
 ```
 */
 let get: (t<'value, 'id>, 'value) => option<'value>
-
-/**
-Same as [get](#get) but returns `undefined` when element does not exist.
-*/
-let getUndefined: (t<'value, 'id>, 'value) => Js.undefined<'value>
 
 /**
 Same as [get](#get) but throw when element does not exist.

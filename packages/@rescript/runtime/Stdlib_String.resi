@@ -1,26 +1,8 @@
 /* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * In addition to the permissions granted to you by the LGPL, you may combine
- * or link a "work that uses the Library" with a publicly distributed version
- * of this file to produce a combined library or application, then distribute
- * that combined work under the terms of your choosing, with no requirement
- * to comply with the obligations normally placed on you by section 4 of the
- * LGPL version 3 (or the corresponding section of a later version of the LGPL
- * should you choose to use a later version).
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
+ * SPDX-License-Identifier: MIT
+ */
 
 /***
 Functions for interacting with JavaScript strings.
@@ -1192,11 +1174,14 @@ String.padEnd("abc", 1, "") == "abc"
 external padEnd: (string, int, string) => string = "padEnd"
 
 /**
-`localeCompare(referenceStr, compareStr)` returns a float than indicatings
+`localeCompare(referenceStr, compareStr, ~locales=?, ~options=?)` returns a float indicating
 whether a reference string comes before or after, or is the same as the given
-string in sort order. If `referenceStr` occurs before `compareStr` positive if
-the `referenceStr` occurs after `compareStr`, `0` if they are equivalent.
-Do not rely on exact return values of `-1` or `1`
+string in sort order. Returns a negative value if `referenceStr` occurs before `compareStr`,
+positive if `referenceStr` occurs after `compareStr`, `0` if they are equivalent.
+Do not rely on exact return values of `-1` or `1`.
+
+Optionally takes `~locales` to specify locale(s) and `~options` to customize comparison behavior
+(e.g., sensitivity, case ordering, numeric sorting). These correspond to the `Intl.Collator` options.
 See [`String.localeCompare`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/localeCompare) on MDN.
 
 ## Examples
@@ -1204,10 +1189,17 @@ See [`String.localeCompare`](https://developer.mozilla.org/en-US/docs/Web/JavaSc
 ```rescript
 String.localeCompare("a", "c") < 0.0 == true
 String.localeCompare("a", "a") == 0.0
+String.localeCompare("a", "b", ~locales=["en-US"]) < 0.0 == true
+String.localeCompare("a", "A", ~locales=["en-US"], ~options={sensitivity: #base}) == 0.0
 ```
 */
 @send
-external localeCompare: (string, string) => float = "localeCompare"
+external localeCompare: (
+  string,
+  string,
+  ~locales: array<string>=?,
+  ~options: Stdlib_Intl_Collator.options=?,
+) => float = "localeCompare"
 
 /**
   `ignore(string)` ignores the provided string and returns unit.
@@ -1218,12 +1210,18 @@ external localeCompare: (string, string) => float = "localeCompare"
 external ignore: string => unit = "%ignore"
 
 /**
+`asIterable(str)` views `str` as an `Iterable.t<string>` where each yielded
+value is one string element.
+*/
+external asIterable: string => Stdlib_Iterable.t<string> = "%identity"
+
+/**
 `getSymbolUnsafe(str, symbol)` returns the value of the symbol property of a string.
 
 ## Examples
 
 ```rescript
-let it: Iterator.t<string> = ("foo"->String.getSymbolUnsafe(Symbol.iterator))()
+let it: IteratorObject.t<string, unit, unknown> = ("foo"->String.getSymbolUnsafe(Symbol.iterator))()
 Nullable.make(it)->Nullable.isNullable == false
 ```
 

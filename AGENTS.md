@@ -399,6 +399,7 @@ tests/
    - **JS layer** (`compiler/core/js_*`): JavaScript generation
 
 2. **Always run appropriate tests:**
+
    ```bash
    # For compiler or stdlib changes
    make test
@@ -421,6 +422,7 @@ tests/
 ### Debugging Techniques
 
 #### View Intermediate Representations
+
 ```bash
 # Source code (for debugging preprocessing)
 ./cli/bsc.js -dsource myfile.res
@@ -438,6 +440,7 @@ tests/
 ```
 
 #### Common Debug Scenarios
+
 - **JavaScript formatting issues**: Check `compiler/ml/pprintast.ml`
 - **Type checking issues**: Look in `compiler/ml/` type checker modules
 - **Optimization bugs**: Check `compiler/core/lam_*.ml` analysis passes
@@ -446,12 +449,14 @@ tests/
 ### Testing Requirements
 
 #### When to Add Tests
+
 - **Always** for new language features
 - **Always** for bug fixes
 - **When modifying** analysis passes
 - **When changing** JavaScript generation
 
 #### Test Types to Include
+
 1. **Syntax tests** (`tests/syntax_tests/`) - Parser validation
 2. **Integration tests** (`tests/tests/`) - End-to-end behavior
 3. **Unit tests** (`tests/ounit_tests/`) - Compiler functions
@@ -461,6 +466,7 @@ tests/
 ## Build Commands & Development
 
 ### Essential Commands
+
 ```bash
 # Build compiler
 make
@@ -482,6 +488,7 @@ make clean
 ```
 
 ### Testing Commands
+
 ```bash
 # Specific test types
 make test-syntax           # Syntax parser tests
@@ -496,6 +503,7 @@ make test-rewatch         # Rewatch tests
 ```
 
 ### Code Quality
+
 ```bash
 # Format code
 make format
@@ -510,7 +518,6 @@ npm run check:all
 # TypeScript type checking
 npm run typecheck
 ```
-
 
 ## Performance Considerations
 
@@ -573,16 +580,19 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 ## Coding Conventions
 
 ### Naming
+
 - **OCaml code**: snake_case (e.g., `to_string`)
 - **ReScript code**: camelCase (e.g., `toString`)
 
 ### Commit Standards
+
 - Use DCO sign-off: `Signed-Off-By: Your Name <email>`
 - Include appropriate tests with all changes
 - Build must pass before committing
 - **Commit atomically** - Each commit should address exactly one concern (one bug fix, one feature, one refactor). When making multiple related changes, split them into separate atomic commits. For example, if fixing a parity issue requires adding a new field to a struct and then using that field in parsing logic, make two commits: one for the struct change, one for the parsing logic. This makes it easier to review changes, bisect issues, revert specific changes if needed, and understand the evolution of the codebase. Each commit message should clearly describe what was changed and why.
 
 ### Code Quality
+
 - Follow existing patterns in the codebase
 - Prefer existing utility functions over reinventing
 - Comment complex algorithms and non-obvious logic
@@ -598,6 +608,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 ## Common Tasks
 
 ### Adding New Language Features
+
 1. Update parser in `compiler/syntax/`
 2. Update AST definitions in `compiler/ml/`
 3. Implement type checking in `compiler/ml/`
@@ -606,6 +617,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 6. Add comprehensive tests
 
 ### Debugging Compilation Issues
+
 1. Identify which compilation phase has the issue
 2. Use appropriate debugging flags (`-dparsetree`, `-dtypedtree`)
 3. Check intermediate representations
@@ -613,6 +625,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 5. Verify with minimal test cases
 
 ### Working with Lambda IR
+
 - Remember Lambda IR is the core optimization layer
 - All `lam_*.ml` files process this representation
 - Use `lam_print.ml` for debugging lambda expressions
@@ -718,12 +731,51 @@ make test-rewatch     # Run integration tests
 
 **Integration Tests**: The `make test-rewatch` command runs bash-based integration tests located in `rewatch/tests/suite.sh`. These tests use the `rewatch/testrepo/` directory as a test workspace with various package configurations to verify rewatch's behavior across different scenarios.
 
+**Running Individual Integration Tests**: You can run individual test scripts directly by setting up the environment manually:
+
+```bash
+cd rewatch/tests
+export REWATCH_EXECUTABLE="$(realpath ../target/debug/rescript)"
+eval $(node ./get_bin_paths.js)
+export RESCRIPT_BSC_EXE
+export RESCRIPT_RUNTIME
+source ./utils.sh
+bash ./watch/06-watch-missing-source-folder.sh
+```
+
+This is useful for iterating on a specific test without running the full suite.
+
 #### Debugging
 
 - **Build State**: Use `log::debug!` to inspect `BuildState` contents
 - **Compiler Args**: Check generated `bsc` arguments in `compile.rs`
 - **Dependencies**: Inspect module dependency graph in `deps.rs`
 - **File Watching**: Monitor file change events in `watcher.rs`
+
+#### Running Rewatch Directly
+
+When running the rewatch binary directly (via `cargo run` or the compiled binary) during development, you need to set environment variables to point to the local compiler and runtime. Otherwise, rewatch will try to use the installed versions:
+
+```bash
+# Set the compiler executable path
+export RESCRIPT_BSC_EXE=$(realpath _build/default/compiler/bsc/rescript_compiler_main.exe)
+
+# Set the runtime path
+export RESCRIPT_RUNTIME=$(realpath packages/@rescript/runtime)
+
+# Now you can run rewatch directly
+cargo run --manifest-path rewatch/Cargo.toml -- build
+```
+
+Note that the dev binary is `./rewatch/target/debug/rescript`, not `rewatch`. The binary name is `rescript` because that's the package name in `Cargo.toml`.
+
+This is useful when testing rewatch changes against local compiler modifications without running a full `make` build cycle.
+
+Use `-v` for info-level logging or `-vv` for debug-level logging (e.g., to see which folders are being watched in watch mode):
+
+```bash
+cargo run --manifest-path rewatch/Cargo.toml -- -vv watch <folder>
+```
 
 #### Performance Considerations
 
@@ -742,7 +794,7 @@ When clippy suggests refactoring that could impact performance, consider the tra
   - Small and one-time (e.g., `Vec<String>` with few elements)
   - Necessary for correct ownership semantics
   - Not in a hot path
-  
+
   Then accept the clone rather than over-engineering the solution.
 
 - **When to Optimize**: Profile before optimizing. Most "performance concerns" in build systems are negligible compared to actual compilation time.
@@ -779,6 +831,12 @@ When clippy suggests refactoring that could impact performance, consider the tra
 2. Update `AsyncWatchArgs` for new parameters
 3. Handle different file types (`.res`, `.resi`, etc.)
 4. Consider performance impact of watching many files
+
+## CI Gotchas
+
+- **`sleep` is fragile** — Prefer polling (e.g., `wait_for_file`) over fixed sleeps. CI runners are slower than local machines.
+- **`exit_watcher` is async** — It only signals the watcher to stop (removes the lock file), it doesn't wait for the process to exit. Avoid triggering config-change events before exiting, as the watcher may start a concurrent rebuild.
+- **`sed -i` differs across platforms** — macOS requires `sed -i '' ...`, Linux does not. Use the `replace` / `normalize_paths` helpers from `rewatch/tests/utils.sh` instead of raw `sed`.
 
 ---
 

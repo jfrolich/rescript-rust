@@ -1,4 +1,5 @@
 use super::build_types::*;
+use super::compile::retain_critical_external_warnings;
 use super::logs;
 use super::namespaces;
 use crate::build::packages::Package;
@@ -31,7 +32,6 @@ pub fn generate_asts(
         .modules
         .par_iter()
         .map(|(module_name, module)| {
-            debug!("Generating AST for module: {module_name}");
             let package = build_state
                 .get_package(&module.package_name)
                 .expect("Package not found");
@@ -54,6 +54,7 @@ pub fn generate_asts(
                             .map(|i| i.parse_dirty)
                             .unwrap_or(false)
                     {
+                        debug!("Generating AST for module: {module_name}");
                         inc();
                         let ast_result = generate_ast(
                             package.to_owned(),
@@ -155,7 +156,21 @@ pub fn generate_asts(
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
                             }
                         }
-                        Ok((_path, Some(_), stored_ast)) | Ok((_path, None, stored_ast)) => {
+                        Ok((_path, Some(stderr_warnings), stored_ast)) => {
+                            source_file.implementation.parse_state = ParseState::Success;
+                            source_file.implementation.parse_dirty = false;
+                            // External dep: surface only the critical warnings
+                            // (e.g. legacy `(. ...)` uncurried syntax) so
+                            // downstream users can report breakage upstream.
+                            if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
+                                logs::append(package, &kept);
+                                stderr.push_str(&kept);
+                            }
+                            if let Some(ast) = stored_ast {
+                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
+                            }
+                        }
+                        Ok((_path, None, stored_ast)) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
                             if let Some(ast) = stored_ast {
@@ -189,7 +204,20 @@ pub fn generate_asts(
                                 build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
                             }
                         }
-                        Ok(Some((_, None, stored_ast))) | Ok(Some((_, Some(_), stored_ast))) => {
+                        Ok(Some((_, Some(stderr_warnings), stored_ast))) => {
+                            if let Some(interface) = source_file.interface.as_mut() {
+                                interface.parse_state = ParseState::Success;
+                                interface.parse_dirty = false;
+                            }
+                            if let Some(kept) = retain_critical_external_warnings(&stderr_warnings) {
+                                logs::append(package, &kept);
+                                stderr.push_str(&kept);
+                            }
+                            if let Some(ast) = stored_ast {
+                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
+                            }
+                        }
+                        Ok(Some((_, None, stored_ast))) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
                                 interface.parse_dirty = false;

@@ -1,19 +1,9 @@
-/* ************************************************************************ */
-/*  */
-/* OCaml */
-/*  */
-/* Francois Pottier, projet Cristal, INRIA Rocquencourt */
-/* Jeremie Dimino, Jane Street Europe */
-/*  */
-/* Copyright 2002 Institut National de Recherche en Informatique et */
-/* en Automatique. */
-/*  */
-/* All rights reserved.  This file is distributed under the terms of */
-/* the GNU Lesser General Public License version 2.1, with the */
-/* special exception on linking described in the file LICENSE. */
-/*  */
-/* ************************************************************************ */
-/* Adapted significantly by ReScript Authors */
+/* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 module A = Belt_Array
 
 type rec node<'a> = {
@@ -64,12 +54,6 @@ let peek = q =>
   | Some(v) => Some(v.content)
   }
 
-let peekUndefined = q =>
-  switch q.first {
-  | None => Js.undefined
-  | Some(v) => Js.Undefined.return(v.content)
-  }
-
 let peekOrThrow = q =>
   switch q.first {
   | None => throw(Not_found)
@@ -95,13 +79,11 @@ let pop = q =>
   }
 
 let popOrThrow = q =>
-  /* TO fix */
   switch q.first {
   | None => throw(Not_found)
   | Some(x) =>
     let next = x.next
     if next == None {
-      /* only one element */
       clear(q)
       x.content
     } else {
@@ -112,22 +94,6 @@ let popOrThrow = q =>
   }
 
 let popExn = popOrThrow
-
-let popUndefined = q =>
-  switch q.first {
-  | None => Js.undefined
-  | Some(x) =>
-    let next = x.next
-    if next == None {
-      /* only one element */
-      clear(q)
-      Js.Undefined.return(x.content)
-    } else {
-      q.length = q.length - 1
-      q.first = next
-      Js.Undefined.return(x.content)
-    }
-  }
 
 let rec copyAux = (qRes, prev, cell) =>
   switch cell {

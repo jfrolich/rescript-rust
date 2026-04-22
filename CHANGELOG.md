@@ -10,29 +10,126 @@
 > - :nail_care: [Polish]
 > - :house: [Internal]
 
-# 13.0.0-alpha.1 (Unreleased)
+# 13.0.0-alpha.4 (Unreleased)
 
 #### :boom: Breaking Change
 
-- Remove the legacy build system. Going forward, only the modern build system is supported, and the `rescript-legacy` command is not available anymore. https://github.com/rescript-lang/rescript/pull/8186
-- `Int.fromString` and `Float.fromString` use stricter number parsing and no longer uses an explicit radix argument, but instead supports parsing hexadecimal, binary and exponential notation.
-- Remove `external-stdlib` configuration option from `rescript.json`. This option was rarely used and is no longer supported.
+- Support for `break` and `continue` in loops. `break` and `continue` are new keywords. https://github.com/rescript-lang/rescript/pull/8348
+- Fix iterator / iterable typedefs, add generator typedefs. https://github.com/rescript-lang/rescript/pull/8355
+- Remove deprecated %external extension. https://github.com/rescript-lang/rescript/pull/8376
 
 #### :eyeglasses: Spec Compliance
 
 #### :rocket: New Feature
 
+- Rewatch: add `--prod` flag to `build`, `watch`, and `clean` to skip dev-dependencies and dev sources (`"type": "dev"`), enabling builds in environments where dev packages aren't installed (e.g. after `pnpm install --prod`). https://github.com/rescript-lang/rescript/pull/8347
+- Rewatch: feature-gated source directories. Tag a source entry with `"feature": "<name>"` and select with `--features a,b` (or per-dep in `dependencies` / `dev-dependencies`) to include optional slices of a package's source tree at build time. Top-level `features` map supports transitive implications. https://github.com/rescript-lang/rescript/pull/8379
+- Add `Dict.assignMany`, `Dict.concat`, `Dict.concatMany`, `Dict.concatAll`, `Array.concatAll` to the stdlib. https://github.com/rescript-lang/rescript/pull/8364
+- Implement `for...of` and `for await...of` loops. https://github.com/rescript-lang/rescript/pull/7887
+- Add support for dict spreads: `dict{...foo, "bar": 2, ...qux}`. https://github.com/rescript-lang/rescript/pull/8369
+
 #### :bug: Bug fix
 
-- Reanalyze: fix reactive/server stale results when cross-file references change without changing dead declarations (non-transitive mode). https://github.com/rescript-lang/rescript/pull/8173
-- Add duplicate package detection to rewatch. https://github.com/rescript-lang/rescript/pull/8180
-- Rewatch: do not warn about "reanalyze" config field. https://github.com/rescript-lang/rescript/pull/8181
+- Fix partial application generalization for `...`. https://github.com/rescript-lang/rescript/pull/8343
+- Rewatch: preserve warnings after atomic-save full rebuilds. https://github.com/rescript-lang/rescript/pull/8358
+
+- Preserve JSX prop locations across the AST0 translation layer, fixing `0:0` editor diagnostics in PPX-related flows. https://github.com/rescript-lang/rescript/pull/8350
+- Fix type lowering for `dict{}` and `async`, so you don't need to annotate one extra time when the type is known. https://github.com/rescript-lang/rescript/pull/8359
 
 #### :memo: Documentation
 
 #### :nail_care: Polish
 
+- Allow builds while watchers are running. https://github.com/rescript-lang/rescript/pull/8349
+- Restore parsing of the legacy `(. ...)` uncurried syntax for backwards compatibility with libraries still on older ReScript versions; emit a deprecation warning when it is used. Rewatch also surfaces this specific deprecation when it originates from an external dependency so users can report breakage upstream. https://github.com/rescript-lang/rescript/pull/8383
+- Rewatch: replace wave-based compile scheduler with a work-stealing DAG dispatcher ordered by critical-path priority, avoiding the per-wave stall on the slowest file. https://github.com/rescript-lang/rescript/pull/8374
+
 #### :house: Internal
+
+- Move `rescript.json` reading out of `bsc` into rewatch; remove the custom OCaml JSON parser. https://github.com/rescript-lang/rescript/pull/8365
+
+# 13.0.0-alpha.3
+
+#### :boom: Breaking Change
+
+- Change `Intl.Collator.compare` return type from `int` to `Ordering.t` (`float`). https://github.com/rescript-lang/rescript/pull/8289
+
+#### :rocket: New Feature
+
+- Reanalyze: add glob pattern support for suppress/unsuppress configurations (e.g., `"src/generated/**"`). https://github.com/rescript-lang/rescript/pull/8277
+- Add optional `~locales` and `~options` parameters to `String.localeCompare`. https://github.com/rescript-lang/rescript/pull/8287
+- Support inline records in external definitions. https://github.com/rescript-lang/rescript/pull/8304
+
+#### :bug: Bug fix
+
+- Reanalyze server: invalidate cache and recompute results when config changes in `rescript.json`. https://github.com/rescript-lang/rescript/pull/8262
+- Fix `null` and array values incorrectly matching the `Object` branch when pattern matching on `JSON.t` (or other untagged variants with an `Object` case) in statement position. https://github.com/rescript-lang/rescript/pull/8279
+- Fix rewatch panic when `package.json` has no `name` field. https://github.com/rescript-lang/rescript/pull/8291
+- Fix unpacking first-class module in default argument of React component. https://github.com/rescript-lang/rescript/pull/8296
+- Fix exception record field regression. https://github.com/rescript-lang/rescript/pull/8319
+- Rewatch: ignore stale lock for unrelated process name. https://github.com/rescript-lang/rescript/pull/8316
+- Fix handling of exotic identifiers for let bindings in GenType. https://github.com/rescript-lang/rescript/pull/8315
+
+#### :nail_care: Polish
+
+- Improve error message for dependency without `rescript.json`. https://github.com/rescript-lang/rescript/pull/8292
+
+#### :house: Internal
+
+- Reanalyze server: redesign incremental fixpoint with delete-then-rederive strategy and predecessor tracking, improving speed on deletions. https://github.com/rescript-lang/rescript/pull/8276
+- Fix build tests failing silently. https://github.com/rescript-lang/rescript/pull/8295
+
+# 13.0.0-alpha.2
+
+#### :bug: Bug fix
+
+- Fix compiler crash (`Fatal error: Parmatch.all_record_args`) when matching empty dict/record patterns. https://github.com/rescript-lang/rescript/pull/8246
+- Fix `null` falling into the object branch instead of the wildcard when pattern matching on untagged variants with both `Object` and `null` cases. https://github.com/rescript-lang/rescript/pull/8253
+
+#### :nail_care: Polish
+
+- Build system: Watch only source folders from build state instead of the entire project directory, and report missing configured source folders. https://github.com/rescript-lang/rescript/pull/8219
+
+#### :house: Internal
+
+- Speed up dev container test by installing OCaml in docker image instead of in `postCreate.sh`. https://github.com/rescript-lang/rescript/pull/8230
+
+# 13.0.0-alpha.1
+
+#### :boom: Breaking Change
+
+- Remove the legacy build system. Going forward, only the modern build system is supported, and the `rescript-legacy` command is not available anymore. https://github.com/rescript-lang/rescript/pull/8186 https://github.com/rescript-lang/rescript/pull/8212
+- Remove support for `bsconfig.json`. https://github.com/rescript-lang/rescript/pull/8187
+- `Int.fromString` and `Float.fromString` use stricter number parsing and no longer use an explicit radix argument, but instead support parsing hexadecimal, binary and exponential notation. https://github.com/rescript-lang/rescript/pull/8129
+- Remove the deprecated module system names `es6` and `es6-global` (superseded by `esmodule`). https://github.com/rescript-lang/rescript/pull/8205
+- Default to module system `esmodule`. https://github.com/rescript-lang/rescript/pull/8213
+- Remove `external-stdlib` configuration option from `rescript.json`. This option was rarely used and is no longer supported. https://github.com/rescript-lang/rescript/pull/8175
+- Remove the deprecated uncurried `(. args) => ...` function syntax. https://github.com/rescript-lang/rescript/pull/8211
+- `js-post-build` now passes the correct output file path based on `in-source` configuration: when `in-source: true`, the path next to the source file is passed; when `in-source: false`, the path in the `lib/<module>/` directory is passed. Additionally, stdout and stderr from the post-build command are now logged. https://github.com/rescript-lang/rescript/pull/8190
+- `js-post-build` command now runs in the directory containing the `rescript.json` where it is defined, instead of the unpredictable build invocation directory. This provides consistent behavior in monorepos. https://github.com/rescript-lang/rescript/pull/8195
+- Remove support for deprecated `bs-dependencies`, `bs-dev-dependencies`, and `bsc-flags` configuration options. Use `dependencies`, `dev-dependencies`, and `compiler-flags` instead. https://github.com/rescript-lang/rescript/pull/8196
+- `bsc`: remove legacy `-uncurried` flag. https://github.com/rescript-lang/rescript/pull/8201
+- Remove deprecated cli flags `--dev`, `--create-sourcedirs` and `build -w`. https://github.com/rescript-lang/rescript/pull/8202
+- Do not allow two different package specs with the same suffix to avoid conflicts. https://github.com/rescript-lang/rescript/pull/8214
+
+#### :rocket: New Feature
+
+- Reanalyze: add scoped `@@live`/`@@dead` annotations for marking module/file sections as live or dead. https://github.com/rescript-lang/rescript/pull/8197
+- Stdlib: Added Array.zip, Array.unzip, Array.zipBy, and Array.partition. https://github.com/rescript-lang/rescript/pull/8244
+
+#### :bug: Bug fix
+
+- Reanalyze: fix reactive/server stale results when cross-file references change without changing dead declarations (non-transitive mode). https://github.com/rescript-lang/rescript/pull/8173
+- Reanalyze: link record/variant label liveness across type re-exports (`type y = x = {...}`). https://github.com/rescript-lang/rescript/pull/8217
+- Add duplicate package detection to rewatch. https://github.com/rescript-lang/rescript/pull/8180
+- Rewatch: do not warn about "reanalyze" config field. https://github.com/rescript-lang/rescript/pull/8181
+- Fix error when importing CommonJS runtime modules with `require()`. https://github.com/rescript-lang/rescript/pull/8194
+- Rewatch: fix warnings from non-recompiled modules being lost during incremental builds in watch mode. https://github.com/rescript-lang/rescript/pull/8216
+
+#### :nail_care: Polish
+
+- Formatter no longer writes files when contents are already correctly formatted. https://github.com/rescript-lang/rescript/pull/8209
+- Build system: Only log verbose "Generating AST for module" when actually parsing. https://github.com/rescript-lang/rescript/pull/8210
 
 # 12.1.0
 

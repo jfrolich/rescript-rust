@@ -10,12 +10,12 @@
     "serve-bundle": "node serve-bundle.mjs"
   },
   "dependencies": {
-    "@rescript/react": "^0.13.1",
+    "@rescript/react": "^0.14.0",
     "rescript": "workspace:^"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.0",
-    "h3": "2.0.1-rc.8",
+    "h3": "2.0.1-rc.20",
     "rollup": "^4.32.0"
   }
 }

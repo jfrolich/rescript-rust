@@ -28,6 +28,15 @@ fi
 
 source ./utils.sh
 
+bold "Check for stale rescript processes"
+STALE_PIDS=$(ps aux | grep "$REWATCH_EXECUTABLE" | grep -v grep | awk '{print $2}')
+if [ -n "$STALE_PIDS" ]; then
+  error "Found stale rescript processes using this executable:"
+  ps aux | grep "$REWATCH_EXECUTABLE" | grep -v grep
+  exit 1
+fi
+success "No stale rescript processes found"
+
 bold "Yarn install"
 (cd ../testrepo && yarn)
 
@@ -53,4 +62,72 @@ else
   exit 1
 fi
 
-./compile.sh && ./watch.sh && ./lock.sh && ./suffix.sh && ./format.sh && ./clean.sh && ./experimental.sh && ./experimental-invalid.sh && ./compiler-args.sh
+# Individual test files
+# Comment out any test to skip it
+
+# Compile tests
+./compile/01-basic-compile.sh &&
+./compile/02-standalone-package.sh &&
+./compile/03-rename-file.sh &&
+./compile/04-rename-file-internal-dep.sh &&
+./compile/05-rename-file-namespace.sh &&
+./compile/06-rename-interface-file.sh &&
+./compile/07-rename-file-with-interface.sh &&
+./compile/08-remove-file.sh &&
+./compile/09-dependency-cycle.sh &&
+./compile/10-duplicate-module-name.sh &&
+./compile/11-dev-dependency-non-dev-source.sh &&
+./compile/12-compile-dev-dependencies.sh &&
+./compile/13-no-infinite-loop-with-cycle.sh &&
+./compile/17-prod-flag.sh &&
+./compile/18-external-dep-uncurried-dot.sh &&
+./compile/14-no-testrepo-changes.sh &&
+./compile/15-no-new-files.sh &&
+./compile/16-snapshots-unchanged.sh &&
+
+# Watch tests
+./watch/01-watch-recompile.sh &&
+./watch/02-watch-warnings-persist.sh &&
+./watch/02-watch-warnings-persist-atomic-save.sh &&
+./watch/03-watch-new-file.sh &&
+./watch/04-watch-config-change.sh &&
+./watch/05-watch-ignores-non-source.sh &&
+./watch/06-watch-missing-source-folder.sh &&
+
+# Lock tests
+./lock/01-lock-when-watching.sh &&
+
+# Suffix tests
+./suffix/01-custom-suffix.sh &&
+
+# Format tests
+./format/01-format-all-files.sh &&
+./format/02-format-single-file.sh &&
+./format/03-format-stdin.sh &&
+./format/04-format-current-project.sh &&
+
+# Clean tests
+./clean/01-clean-single-project.sh &&
+./clean/02-clean-dev-dependencies.sh &&
+./clean/03-clean-node-modules.sh &&
+./clean/04-clean-rebuild-no-compiler-update.sh &&
+
+# Experimental tests
+./experimental/01-experimental-features-emit.sh &&
+./experimental/02-experimental-features-parse-error.sh &&
+./experimental/03-watch-invalid-experimental.sh &&
+
+# Experimental-invalid tests
+./experimental-invalid/01-invalid-experimental-key.sh &&
+
+# Features tests
+./features/01-features-default-all-active.sh &&
+./features/02-features-cli-restricts-to-one.sh &&
+./features/03-features-transitive-expansion.sh &&
+./features/04-features-toggle-cleans-artifacts.sh &&
+./features/05-features-cycle-errors.sh &&
+./features/06-features-empty-flag-rejected.sh &&
+
+# Compiler-args tests
+./compiler-args/01-compiler-args-cwd-invariant.sh &&
+./compiler-args/02-warnings-in-parser-and-compiler.sh

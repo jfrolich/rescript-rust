@@ -106,6 +106,18 @@ if (mochaTest) {
     cwd: projectDir,
     stdio: "inherit",
   });
+
+  // CommonJS tests
+  const commonjsTestDir = path.join(projectDir, "tests/commonjs_tests");
+  await execBuild([], {
+    cwd: commonjsTestDir,
+    stdio: "inherit",
+  });
+
+  await node("tests/commonjs_tests/src/belt_import.js", [], {
+    cwd: projectDir,
+    stdio: "inherit",
+  });
 }
 
 if (buildTest) {
@@ -153,6 +165,10 @@ if (runtimeDocstrings) {
       docstringTestDir,
       "generated_mocha_test.res",
     );
+
+    // This generated source file is checked during the initial build below, so
+    // a stale copy from an earlier run can fail before we regenerate it.
+    await fs.promises.rm(generated_mocha_test_res, { force: true });
 
     await execClean([], {
       cwd: docstringTestDir,

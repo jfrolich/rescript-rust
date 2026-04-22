@@ -900,9 +900,15 @@ and transl_exp0 (e : Typedtree.expression) : Lambda.lambda =
     Lifthenelse (transl_exp cond, transl_exp ifso, lambda_unit)
   | Texp_sequence (expr1, expr2) ->
     Lsequence (transl_exp expr1, transl_exp expr2)
+  | Texp_break -> Lbreak
+  | Texp_continue -> Lcontinue
   | Texp_while (cond, body) -> Lwhile (transl_exp cond, transl_exp body)
   | Texp_for (param, _, low, high, dir, body) ->
     Lfor (param, transl_exp low, transl_exp high, dir, transl_exp body)
+  | Texp_for_of (param, _, iterable, body) ->
+    Lfor_of (param, transl_exp iterable, transl_exp body)
+  | Texp_for_await_of (param, _, iterable, body) ->
+    Lfor_await_of (param, transl_exp iterable, transl_exp body)
   | Texp_send (expr, Tmeth_name nm, _) ->
     let obj = transl_exp expr in
     Lsend (nm, obj, e.exp_loc)

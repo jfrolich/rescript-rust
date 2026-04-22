@@ -1,26 +1,8 @@
-/* Copyright (C) 2017 Hongbo Zhang, Authors of ReScript
+/* Copyright (C) 2015-2016 Bloomberg Finance L.P.
+ * Copyright (C) 2017- Hongbo Zhang, Authors of ReScript
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * In addition to the permissions granted to you by the LGPL, you may combine
- * or link a "work that uses the Library" with a publicly distributed version
- * of this file to produce a combined library or application, then distribute
- * that combined work under the terms of your choosing, with no requirement
- * to comply with the obligations normally placed on you by section 4 of the
- * LGPL version 3 (or the corresponding section of a later version of the LGPL
- * should you choose to use a later version).
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
+ * SPDX-License-Identifier: MIT
+ */
 
 module Int = Belt_MutableSetInt
 module String = Belt_MutableSetString
@@ -202,9 +184,7 @@ let make = (type value identity, ~id: id<value, identity>) => {
 let isEmpty = d => N.isEmpty(d.data)
 
 let minimum = d => N.minimum(d.data)
-let minUndefined = d => N.minUndefined(d.data)
 let maximum = d => N.maximum(d.data)
-let maxUndefined = d => N.maxUndefined(d.data)
 
 let forEach = (d, f) => N.forEach(d.data, f)
 let reduce = (d, acc, cb) => N.reduce(d.data, acc, cb)
@@ -232,8 +212,6 @@ let cmp = (d0, d1) => N.cmp(~cmp=d0.cmp, d0.data, d1.data)
 let eq = (d0, d1) => N.eq(~cmp=d0.cmp, d0.data, d1.data)
 
 let get = (d, x) => N.get(~cmp=d.cmp, d.data, x)
-
-let getUndefined = (d, x) => N.getUndefined(~cmp=d.cmp, d.data, x)
 
 let getOrThrow = (d, x) => N.getOrThrow(~cmp=d.cmp, d.data, x)
 

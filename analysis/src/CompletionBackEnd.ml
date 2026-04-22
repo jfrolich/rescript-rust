@@ -1875,17 +1875,14 @@ let rec completeTypedValue ?(typeArgContext : typeArgContext option) ~rawOpens
     ->
     if Debug.verbose () then
       print_endline "[complete_typed_value]--> Tfunction #1";
-    let shouldPrintAsUncurried = false in
     let mkFnArgs ~asSnippet =
       match args with
-      | [(Nolabel, argTyp)] when TypeUtils.typeIsUnit argTyp ->
-        if shouldPrintAsUncurried then "(. )" else "()"
+      | [(Nolabel, argTyp)] when TypeUtils.typeIsUnit argTyp -> "()"
       | [(Nolabel, argTyp)] ->
         let varName =
           CompletionExpressions.prettyPrintFnTemplateArgName ~env ~full argTyp
         in
-        let argsText = if asSnippet then "${1:" ^ varName ^ "}" else varName in
-        if shouldPrintAsUncurried then "(. " ^ argsText ^ ")" else argsText
+        if asSnippet then "${1:" ^ varName ^ "}" else varName
       | _ ->
         let currentUnlabelledIndex = ref 0 in
         let argsText =
@@ -1908,7 +1905,7 @@ let rec completeTypedValue ?(typeArgContext : typeArgContext option) ~rawOpens
                      else varName))
           |> String.concat ", "
         in
-        "(" ^ if shouldPrintAsUncurried then ". " else "" ^ argsText ^ ")"
+        "(" ^ argsText ^ ")"
     in
     let isAsync =
       match TypeUtils.extractType ~env ~package:full.package returnType with
@@ -2157,7 +2154,7 @@ let rec processCompletable ~debug ~full ~scope ~env ~pos ~forHover completable =
           Sys.readdir (Filename.dirname (env.file.uri |> Uri.toPath))
           |> Array.to_list
         in
-        (* Try to filter out compiled in source files *)
+        (* Filter out generated build artifacts from in-source builds. *)
         let resFiles =
           StringSet.of_list
             (files
@@ -2165,6 +2162,10 @@ let rec processCompletable ~debug ~full ~scope ~env ~pos ~forHover completable =
                    if Filename.extension f = ".res" then
                      Some (try Filename.chop_extension f with _ -> f)
                    else None))
+        in
+        let is_internal_artifact_extension = function
+          | ".ast" | ".cmi" | ".cmj" | ".cmt" | ".cmti" | ".iast" -> true
+          | _ -> false
         in
         files
         |> List.filter_map (fun fileName ->
@@ -2178,6 +2179,7 @@ let rec processCompletable ~debug ~full ~scope ~env ~pos ~forHover completable =
                else
                  match Filename.extension fileName with
                  | ".res" | ".resi" | "" -> None
+                 | ext when is_internal_artifact_extension ext -> None
                  | _ -> Some ("./" ^ fileName))
         |> List.sort String.compare
       with _ ->

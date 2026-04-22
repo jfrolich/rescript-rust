@@ -50,3 +50,31 @@ replace() {
     sed -i $1 $2;
   fi
 }
+
+exit_watcher() {
+  rm -f lib/watch.lock
+}
+
+clear_locks() {
+  rm -f lib/watch.lock lib/build.lock
+}
+
+wait_for_file() {
+  local file="$1"; local timeout="${2:-30}"
+  while [ "$timeout" -gt 0 ]; do
+    [ -f "$file" ] && return 0
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+  return 1
+}
+
+wait_for_file_gone() {
+  local file="$1"; local timeout="${2:-30}"
+  while [ "$timeout" -gt 0 ]; do
+    [ ! -f "$file" ] && return 0
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+  return 1
+}

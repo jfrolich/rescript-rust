@@ -8,7 +8,10 @@ external setUnsafe: (array<'a>, int, 'a) => unit = "%array_unsafe_set"
 
 external unsafe_get: (array<'a>, int) => 'a = "%array_unsafe_get"
 
-@val external fromIterator: Stdlib_Iterator.t<'a> => array<'a> = "Array.from"
+external asIterable: array<'a> => Stdlib_Iterable.t<'a> = "%identity"
+
+@val
+external fromIterable: Stdlib_Iterable.t<'a> => array<'a> = "Array.from"
 @val external fromArrayLike: arrayLike<'a> => array<'a> = "Array.from"
 @val
 external fromArrayLikeWithMap: (arrayLike<'a>, 'a => 'b) => array<'b> = "Array.from"
@@ -142,6 +145,7 @@ external removeInPlace: (array<'a>, int, @as(1) _) => unit = "splice"
 
 @send external concat: (array<'a>, array<'a>) => array<'a> = "concat"
 @variadic @send external concatMany: (array<'a>, array<array<'a>>) => array<'a> = "concat"
+let concatAll = arrays => concatMany([], arrays)
 
 @send external flat: array<array<'a>> => array<'a> = "flat"
 
@@ -346,6 +350,59 @@ let findMap = (arr, f) => {
   loop(0)
 }
 
+let zip = (xs, ys) => {
+  let (lenx, leny) = (length(xs), length(ys))
+  let len = min(lenx, leny)
+  let s = makeUninitializedUnsafe(len)
+  for i in 0 to len - 1 {
+    setUnsafe(s, i, (getUnsafe(xs, i), getUnsafe(ys, i)))
+  }
+  s
+}
+
+let zipBy = (xs, ys, f) => {
+  let (lenx, leny) = (length(xs), length(ys))
+  let len = min(lenx, leny)
+  let s = makeUninitializedUnsafe(len)
+  for i in 0 to len - 1 {
+    setUnsafe(s, i, f(getUnsafe(xs, i), getUnsafe(ys, i)))
+  }
+  s
+}
+
+let partition = (a, f) => {
+  let l = length(a)
+  let i = ref(0)
+  let j = ref(0)
+  let a1 = makeUninitializedUnsafe(l)
+  let a2 = makeUninitializedUnsafe(l)
+  for ii in 0 to l - 1 {
+    let v = getUnsafe(a, ii)
+    if f(v) {
+      setUnsafe(a1, i.contents, v)
+      i.contents = i.contents + 1
+    } else {
+      setUnsafe(a2, j.contents, v)
+      j.contents = j.contents + 1
+    }
+  }
+  truncateToLengthUnsafe(a1, i.contents)
+  truncateToLengthUnsafe(a2, j.contents)
+  (a1, a2)
+}
+
+let unzip = a => {
+  let l = length(a)
+  let a1 = makeUninitializedUnsafe(l)
+  let a2 = makeUninitializedUnsafe(l)
+  for i in 0 to l - 1 {
+    let (v1, v2) = getUnsafe(a, i)
+    setUnsafe(a1, i, v1)
+    setUnsafe(a2, i, v2)
+  }
+  (a1, a2)
+}
+
 @send external at: (array<'a>, int) => option<'a> = "at"
 
 let last = a => a->get(a->length - 1)
@@ -353,7 +410,7 @@ let last = a => a->get(a->length - 1)
 external ignore: array<'a> => unit = "%ignore"
 
 @send
-external entries: array<'a> => Stdlib_Iterator.t<(int, 'a)> = "entries"
+external entries: array<'a> => Stdlib_IteratorObject.t<(int, 'a), unit, unknown> = "entries"
 
 @send
-external values: array<'a> => Stdlib_Iterator.t<'a> = "values"
+external values: array<'a> => Stdlib_IteratorObject.t<'a, unit, unknown> = "values"

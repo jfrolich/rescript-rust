@@ -661,6 +661,8 @@ module SexpAst = struct
       | Pexp_sequence (expr1, expr2) ->
         Sexp.list
           [Sexp.atom "Pexp_sequence"; expression expr1; expression expr2]
+      | Pexp_break -> Sexp.atom "Pexp_break"
+      | Pexp_continue -> Sexp.atom "Pexp_continue"
       | Pexp_while (expr1, expr2) ->
         Sexp.list [Sexp.atom "Pexp_while"; expression expr1; expression expr2]
       | Pexp_for (pat, e1, e2, flag, e3) ->
@@ -672,6 +674,17 @@ module SexpAst = struct
             expression e2;
             direction_flag flag;
             expression e3;
+          ]
+      | Pexp_for_of (pat, e1, e2) ->
+        Sexp.list
+          [Sexp.atom "Pexp_for_of"; pattern pat; expression e1; expression e2]
+      | Pexp_for_await_of (pat, e1, e2) ->
+        Sexp.list
+          [
+            Sexp.atom "Pexp_for_await_of";
+            pattern pat;
+            expression e1;
+            expression e2;
           ]
       | Pexp_constraint (expr, typexpr) ->
         Sexp.list

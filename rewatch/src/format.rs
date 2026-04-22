@@ -36,7 +36,8 @@ fn get_files_in_scope() -> Result<Vec<String>> {
     let current_dir = std::env::current_dir()?;
     let project_context = project_context::ProjectContext::new(&current_dir)?;
 
-    let packages = packages::make(&None, &project_context, false)?;
+    // Format walks all source files regardless of feature selection.
+    let packages = packages::make(&None, &project_context, false, false, None)?;
     let mut files: Vec<String> = Vec::new();
     let packages_to_format = project_context.get_scoped_local_packages();
 
@@ -89,21 +90,21 @@ fn format_files(bsc_exe: &Path, files: Vec<String>, check: bool) -> Result<()> {
     files.par_chunks(batch_size).try_for_each(|batch| {
         batch.iter().try_for_each(|file| {
             let mut cmd = Command::new(bsc_exe);
-            if check {
-                cmd.arg("-format").arg(file);
-            } else {
-                cmd.arg("-o").arg(file).arg("-format").arg(file);
-            }
+            // Always get formatted output to stdout for comparison
+            cmd.arg("-format").arg(file);
 
             let output = cmd.output()?;
 
             if output.status.success() {
-                if check {
-                    let original_content = fs::read_to_string(file)?;
-                    let formatted_content = String::from_utf8_lossy(&output.stdout);
-                    if original_content != formatted_content {
+                let original_content = fs::read_to_string(file)?;
+                let formatted_content = String::from_utf8_lossy(&output.stdout);
+                if original_content != formatted_content {
+                    if check {
                         eprintln!("[format check] {file}");
                         incorrectly_formatted_files.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        // Only write if content actually changed
+                        fs::write(file, &*formatted_content)?;
                     }
                 }
             } else {

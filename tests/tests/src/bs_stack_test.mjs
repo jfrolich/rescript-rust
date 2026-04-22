@@ -2,10 +2,10 @@
 
 import * as Mocha from "mocha";
 import * as Test_utils from "./test_utils.mjs";
-import * as Js_undefined from "@rescript/runtime/lib/es6/Js_undefined.js";
-import * as Primitive_option from "@rescript/runtime/lib/es6/Primitive_option.js";
-import * as Belt_MutableQueue from "@rescript/runtime/lib/es6/Belt_MutableQueue.js";
-import * as Belt_MutableStack from "@rescript/runtime/lib/es6/Belt_MutableStack.js";
+import * as Js_undefined from "@rescript/runtime/lib/es6/Js_undefined.mjs";
+import * as Primitive_option from "@rescript/runtime/lib/es6/Primitive_option.mjs";
+import * as Belt_MutableQueue from "@rescript/runtime/lib/es6/Belt_MutableQueue.mjs";
+import * as Belt_MutableStack from "@rescript/runtime/lib/es6/Belt_MutableStack.mjs";
 
 function inOrder(v) {
   let current = v;
@@ -17,7 +17,7 @@ function inOrder(v) {
     current = v$1.left;
   };
   while (!Belt_MutableStack.isEmpty(s)) {
-    current = Belt_MutableStack.popUndefined(s);
+    current = Belt_MutableStack.popOrThrow(s);
     let v$2 = current;
     Belt_MutableQueue.add(q, v$2.value);
     current = v$2.right;
@@ -64,7 +64,7 @@ function inOrder2(v) {
     } else if (Belt_MutableStack.isEmpty(s)) {
       todo = false;
     } else {
-      cursor = Belt_MutableStack.popUndefined(s);
+      cursor = Belt_MutableStack.popOrThrow(s);
       let current = cursor;
       Belt_MutableQueue.add(q, current.value);
       cursor = current.right;
