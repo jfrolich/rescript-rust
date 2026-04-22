@@ -1,9 +1,40 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **644 / 657** (98.0%)
+## Current baseline (2026-04-22): **645 / 657** (98.2%)
 - 4 compile errors (typecheck failures, upstream)
-- 9 output diffs (was 10)
-- Total diff lines: **1364** (down from 1401)
+- 8 output diffs (was 9)
+- Total diff lines: **1323** (down from 1364)
+
+## Recent fixes (2026-04-22, session 11)
+- **Tighten `compile_test_return_block_with_fallback` fold to strict single-Return
+  (compile.rs:`strict_single_return_expr` + call site)**: The fold at this path
+  claimed to mirror OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246) but was
+  going through `take_return_tail_expr`, which also accepts multi-statement
+  `[Exp e1, ..., Exp eN, Return X]` blocks by rebuilding them as
+  `Seq(e1, Seq(..., X))`. OCaml's rule 4 only pattern-matches
+  `([{statement_desc = Return _}], [{statement_desc = Return _}])` — a
+  strictly-single-statement Return on both sides. When one branch is
+  `[Exp effect, Return X]` (pre-flattened from `Lsequence(effect, X)` in
+  `compile_return_block`), OCaml falls through to rule 249-250
+  (`block_last_is_return_throw_or_continue ifso` → flip to sequence), and the
+  flipped sequence gets wrapped by `S.block` (js_stmt_make.ml:37-42) into a
+  single `Block` statement. That Block wrapper HIDES the trailing `Return`
+  from the OUTER `S.if_`'s rule-249 check, which is why OCaml preserves the
+  outer `if/else` shape in js_json_test's JSONNull switch callback:
+  `if (typeof ty !== "object") { ... } else { console.log(ty); return ok(false); }`
+  — both outer branches stay as blocks, neither collapsed into a flat
+  fallthrough. Rust's looser fold produced `[Return(Cond(ok(true), Seq(log, ok(false))))]`
+  — a top-level `Return` that the outer `Statement::if_`'s rule-1550 happily
+  flipped, collapsing the outer else into a flat tail. After `flatten_block`
+  expanded the nested `Return(Cond)` back, the outer had no else, and the
+  trailing `Return ok(false)` got printer-dropped for `return_unit=true`,
+  leaving a bare `Test_utils.ok(...)` expression statement — not matching
+  OCaml. Added `strict_single_return_expr` (= OCaml rule-4 match condition)
+  and use it at this call site. `take_return_tail_expr` (which DOES match
+  OCaml's Lifthenelse path at `compile_if_return_block`) stays untouched.
+  JS snapshot parity: **644 → 645 / 657 (+1)**; output diffs **9 → 8**;
+  total diff lines **1364 → 1323**. `js_json_test.res` now matches;
+  `mario_game.res` diff **571 → 552 (-19)** as a side benefit.
 
 ## Recent fixes (2026-04-22, session 10)
 - **Gate "all cases equal → return body" collapse on `allow_small`

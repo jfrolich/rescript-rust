@@ -5370,16 +5370,35 @@ impl LambdaCompiler {
             }
         }
 
-        match (
-            self.take_return_tail_expr(then_for_fold),
-            self.take_return_tail_expr(else_for_fold),
+        // OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246) folds to
+        // `return_stmt (E.econd e ret_ifso ret_ifnot)` ONLY when both
+        // branches are `[Return _]` — a strictly-single-Return statement each.
+        // Multi-statement effect-plus-Return shapes like
+        // `[Exp e1, ..., Exp eN, Return X]` do NOT match rule 4; they take
+        // rule 249-250 (`block_last_is_return_throw_or_continue ifso` → flip
+        // to sequence) via the `Statement::if_` fallback, which wraps the
+        // flipped sequence in `S.block` (js_stmt_make.ml:37-42) → a single
+        // `Block` statement that hides the trailing Return from the OUTER
+        // `S.if_`'s rule-249 check. Without this gate, `take_return_tail_expr`
+        // would fold any effect-prefix via `Seq` → `Return(Cond(Seq,Seq))` →
+        // after `js_pass_flatten`, a top-level `Return` that the outer
+        // `Statement::if_` happily flips, collapsing OCaml's outer if/else.
+        // (js_json_test's JSONNull switch callback: OCaml preserves the outer
+        // `if (typeof ty !== "object") { ... } else { ... }` because the inner
+        // flip produces a Block-wrapped 3-statement sequence; Rust's aggressive
+        // fold lost that shape.)
+        let folded = match (
+            strict_single_return_expr(&then_for_fold),
+            strict_single_return_expr(&else_for_fold),
         ) {
-            (Ok(then_expr), Ok(else_expr)) => {
-                vec![Statement::return_(Expression::cond(
-                    cond, then_expr, else_expr,
-                ))]
+            (Some(then_expr), Some(else_expr)) => Some((then_expr.clone(), else_expr.clone())),
+            _ => None,
+        };
+        match folded {
+            Some((then_expr, else_expr)) => {
+                vec![Statement::return_(Expression::cond(cond, then_expr, else_expr))]
             }
-            (_, _) => {
+            None => {
                 // Use the normalized fallback blocks when we can't collapse
                 // to `Return(Cond)`, matching the previous behavior for
                 // non-both-single-return cases.
@@ -10689,6 +10708,21 @@ fn compiled_from_effect_block(mut block: Block) -> Compiled {
 
 fn block_terminates(block: &Block) -> bool {
     block.last().is_some_and(statement_terminates)
+}
+
+/// Port of OCaml's `S.if_` rule 4 match condition (js_stmt_make.ml:244-246):
+/// both branches must be `[{statement_desc = Return _}]` — strictly a
+/// single-element list whose sole statement is a `Return`. No effect prefix
+/// allowed. Used by `compile_test_return_block_with_fallback` to mirror
+/// OCaml's rule-4 fold exactly.
+fn strict_single_return_expr(block: &Block) -> Option<&Expression> {
+    let [stmt] = block.as_slice() else {
+        return None;
+    };
+    match &stmt.desc {
+        StatementDesc::Return(expr) => Some(expr),
+        _ => None,
+    }
 }
 
 fn block_finishes_output(block: &Block) -> bool {
