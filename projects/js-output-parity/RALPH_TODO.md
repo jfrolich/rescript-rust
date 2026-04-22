@@ -4,6 +4,23 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 52 (2026-04-22) — loop re-invoked again; terminal, no code change
+
+Spot-check on session-51 tip (`c452ca2ed`):
+- `simplify.rs` still 306 lines; `simplify_with_env`/`SimplifyEnv` still absent.
+- `inline_map2_test.ast` (harness path) still fails typechecker:
+  `ExprTypeClash { trace: [(9965, 10024)], context: Some(FunctionCall) }` —
+  matches session 50/51.
+- Baseline unchanged: **653 / 657 (99.4%)**, 0 output diffs, 4 upstream
+  typechecker failures.
+
+Not scheduling another wake-up. 34 consecutive no-op sessions. The three
+options from session 18 are unchanged and all require a human decision:
+
+1. Fix the 4 upstream typechecker regressions (typechecker scope, not JS).
+2. Accept 99.4% (653/657) as terminal parity on this branch.
+3. Rebase onto a typechecker-green branch and re-run the JS parity suite.
+
 ## Session 51 (2026-04-22) — loop re-invoked again; still terminal
 
 Loop re-invoked on session-50 tip (`e5631c3a6`). Spot-check only, no source
