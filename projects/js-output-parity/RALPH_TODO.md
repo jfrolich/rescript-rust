@@ -1,11 +1,47 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **652 / 657** (99.2%)
-- 4 compile errors (typecheck failures, upstream)
-- 1 output diff (was 4)
-- Total diff lines: **27** (down from 111, -84)
+## Current baseline (2026-04-22): **653 / 657** (99.4%)
+- 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
+- 0 output diffs
 
-## Remaining gpr_3875_test diff (27 lines) — option<string> chain vs nested
+## Fix (2026-04-22, session 17) — drop pre-flatten in `compile_if_return_block` fallback
+
+`compile_if_return_block` was applying `normalize_unit_return_if_branch`
+(= flatten_block + peel) to the THEN/ELSE blocks BEFORE handing them to
+`Statement::if_`. That violated OCaml's pass ordering, where
+`js_pass_flatten` runs strictly AFTER `S.if_` has committed its rewrites
+(see `lam_compile_main.ml`). Pre-flattening converts inner shapes like
+`[Return Seq(Cond(c, set "T", set "F"), undef)]` (a single Return) into
+`[If(c, [Exp set "T"], [Exp set "F"]), Return undef]` (two statements),
+which then prevents the outer `S.if_` rule 247-248 (else=[Return _] →
+flip and chain) from firing. The result was nested form
+`if (cond) { ... } else { ... }` instead of OCaml's chain form
+`if (!cond) { ... return; } ... rest`.
+
+Fix: pass the raw (un-flattened) blocks to
+`compile_test_return_block_with_fallback` for both the rule-4 fold check
+AND the `Statement::if_` fallback. The downstream `apply_js_flatten_pass`
+runs after compile_lambda completes, so the un-flattened
+`Return Seq(_, _)` shapes are still expanded later — exactly mirroring
+OCaml's pipeline ordering. Also removes the now-unused
+`normalize_unit_return_if_branch` helper.
+
+For gpr_3875_test, the inner `Lifthenelse c (set "T") (set "F")` in
+tail-return context now reaches the outer `S.if_` as a single Return
+whose value is `Seq(Cond, undef)`. The strict-nullish guard on
+`b !== undefined` doesn't match `is_loose_nullish_refinement_guard`, so
+no Rust-only guard blocks the flip → OCaml's chain form is emitted.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| gpr_3875_test     | 27 → 0                      | **PASSES** |
+
+JS snapshot parity: **652 → 653 / 657 (+1)**; output diffs **1 → 0**;
+total diff lines **27 → 0 (-27)**. No regressions.
+
+## Historical analysis — gpr_3875_test divergence (now resolved)
+
+OCaml's snapshot for `gpr_3875_test.res`'s `compilerBug` inner `b`-test
 
 OCaml's snapshot for `gpr_3875_test.res`'s `compilerBug` inner `b`-test
 emits a CHAIN of separate `if` statements:

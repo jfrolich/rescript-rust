@@ -5566,28 +5566,21 @@ impl LambdaCompiler {
             return block;
         }
 
-        // Keep the raw `[Return(Seq(...))]` shape available so
-        // `compile_test_return_block` can detect both-single-return branches
-        // and collapse via OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246).
-        // Pre-flattening via `normalize_unit_return_if_branch` would destroy
-        // that shape — that pass corresponds to OCaml's `js_pass_flatten`,
-        // which in OCaml runs AFTER `S.if_` has already committed.
-        let then_for_fold = then_block_raw.clone();
-        let else_for_fold = else_block_raw.clone();
-        // Fallback blocks use the normalized shape so the `Statement::if_`
-        // branch retains the existing simplification behavior when rule 4
-        // doesn't fire (e.g. VariantPatternMatchingSpreads' empty-else shape
-        // that relies on the pre-flattened form).
-        let then_block_norm = self.normalize_unit_return_if_branch(then_block_raw);
-        let else_block_norm = self.normalize_unit_return_if_branch(else_block_raw);
-
+        // Keep the raw `[Return(Seq(...))]` shape so OCaml's `S.if_` rules
+        // (js_stmt_make.ml:244-250) see the same input they would in OCaml.
+        // OCaml runs `js_pass_flatten` AFTER `S.if_` has committed; matching
+        // that ordering is what lets the rule-247-248 flip
+        // (single-Return else → flip and chain) and rule-249-250 (terminal
+        // then → drop else) fire on `Return Seq(Cond, undef)`-style ELSEs
+        // produced by `compile_if_return_block` for inner `Lifthenelse`
+        // branches whose tails fold via `E.econd`'s Seq+Undefined rule.
         let mut block = cond_compiled.prelude;
         block.extend(self.compile_test_return_block_with_fallback(
             cond_compiled.expr,
-            then_for_fold,
-            else_for_fold,
-            then_block_norm,
-            else_block_norm,
+            then_block_raw.clone(),
+            else_block_raw.clone(),
+            then_block_raw,
+            else_block_raw,
         ));
         block
     }
@@ -5667,14 +5660,6 @@ impl LambdaCompiler {
                 vec![Statement::if_(cond, then_fallback, else_fallback)]
             }
         }
-    }
-
-    fn normalize_unit_return_if_branch(&self, block: Block) -> Block {
-        if self.return_unit_stack.last().copied() != Some(true) {
-            return Self::peel_single_block_statement(block);
-        }
-
-        Self::peel_single_block_statement(flatten_block(block))
     }
 
     fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
