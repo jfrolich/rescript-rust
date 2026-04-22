@@ -5131,13 +5131,31 @@ impl LambdaCompiler {
 
     fn compile_if_return_block(&mut self, cond: &Lambda, then_: &Lambda, else_: &Lambda) -> Block {
         let cond_compiled = self.compile_expr(cond);
-        let then_block = self.compile_return_block(then_);
-        let else_block = self.compile_return_block(else_);
-        let then_block = self.normalize_unit_return_if_branch(then_block);
-        let else_block = self.normalize_unit_return_if_branch(else_block);
+        let then_block_raw = self.compile_return_block(then_);
+        let else_block_raw = self.compile_return_block(else_);
+        // Keep the raw `[Return(Seq(...))]` shape available so
+        // `compile_test_return_block` can detect both-single-return branches
+        // and collapse via OCaml's `S.if_` rule 4 (js_stmt_make.ml:244-246).
+        // Pre-flattening via `normalize_unit_return_if_branch` would destroy
+        // that shape — that pass corresponds to OCaml's `js_pass_flatten`,
+        // which in OCaml runs AFTER `S.if_` has already committed.
+        let then_for_fold = then_block_raw.clone();
+        let else_for_fold = else_block_raw.clone();
+        // Fallback blocks use the normalized shape so the `Statement::if_`
+        // branch retains the existing simplification behavior when rule 4
+        // doesn't fire (e.g. VariantPatternMatchingSpreads' empty-else shape
+        // that relies on the pre-flattened form).
+        let then_block_norm = self.normalize_unit_return_if_branch(then_block_raw);
+        let else_block_norm = self.normalize_unit_return_if_branch(else_block_raw);
 
         let mut block = cond_compiled.prelude;
-        block.extend(self.compile_test_return_block(cond_compiled.expr, then_block, else_block));
+        block.extend(self.compile_test_return_block_with_fallback(
+            cond_compiled.expr,
+            then_for_fold,
+            else_for_fold,
+            then_block_norm,
+            else_block_norm,
+        ));
         block
     }
 
@@ -5147,36 +5165,54 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
+        self.compile_test_return_block_with_fallback(
+            cond,
+            then_block.clone(),
+            else_block.clone(),
+            then_block,
+            else_block,
+        )
+    }
+
+    /// Separate the raw blocks used for rule-4 folding
+    /// (js_stmt_make.ml:244-246 — both branches single-return) from the
+    /// pre-normalized blocks used as the `Statement::if_` fallback when
+    /// rule 4 can't fire. OCaml runs `js_pass_flatten` AFTER `S.if_`, so
+    /// the raw `[Return(Seq(...))]` shape survives until rule 4's chance
+    /// to collapse has passed.
+    fn compile_test_return_block_with_fallback(
+        &self,
+        cond: Expression,
+        then_for_fold: Block,
+        else_for_fold: Block,
+        then_fallback: Block,
+        else_fallback: Block,
+    ) -> Block {
         if std::env::var_os("RUST_DEBUG_COMPILE_TEST_RETURN").is_some() {
             let cond_text = crate::js_ir::print_expression(&cond);
             if cond_text.contains("RE_EXN_ID") || cond_text.contains("_1 === \"x\"") {
                 eprintln!(
                     "[compile-test-return]\ncond: {cond_text}\nthen:\n{}\nelse:\n{}\n",
-                    crate::js_ir::print_block(&then_block),
-                    crate::js_ir::print_block(&else_block),
+                    crate::js_ir::print_block(&then_fallback),
+                    crate::js_ir::print_block(&else_fallback),
                 );
             }
         }
 
         match (
-            self.take_return_tail_expr(then_block),
-            self.take_return_tail_expr(else_block),
+            self.take_return_tail_expr(then_for_fold),
+            self.take_return_tail_expr(else_for_fold),
         ) {
             (Ok(then_expr), Ok(else_expr)) => {
                 vec![Statement::return_(Expression::cond(
                     cond, then_expr, else_expr,
                 ))]
             }
-            (then_result, else_result) => {
-                let then_block = match then_result {
-                    Ok(expr) => vec![Statement::return_(expr)],
-                    Err(block) => block,
-                };
-                let else_block = match else_result {
-                    Ok(expr) => vec![Statement::return_(expr)],
-                    Err(block) => block,
-                };
-                vec![Statement::if_(cond, then_block, else_block)]
+            (_, _) => {
+                // Use the normalized fallback blocks when we can't collapse
+                // to `Return(Cond)`, matching the previous behavior for
+                // non-both-single-return cases.
+                vec![Statement::if_(cond, then_fallback, else_fallback)]
             }
         }
     }
