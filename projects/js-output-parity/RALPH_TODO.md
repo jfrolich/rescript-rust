@@ -39,6 +39,58 @@ Your next steps, in order:
    rewrite, and pushing return-unit function_body transforms into
    printer time, or (b) faithful port of OCaml's `pp_function` special
    cases at js_dump.ml:1615-1624 inside Rust's `print_function_body`.
+
+   Deep trace 2026-04-22 (session 3) — full OCaml pipeline for the
+   ticker inner `if (ticker.ticker_name === new_ticker) { assign; return; } else { return failwith }`:
+     1. `Psetfield` compiles via `ensure_value_unit` (lam_compile_primitive.ml:30-36)
+        to `E.seq e E.unit` — an `ExpressionDesc::Seq(assign, undefined)`.
+     2. In `EffectCall (Maybe_tail_is_return)` continuation, `output_of_expression`
+        (js_output.ml:42-52) wraps to `[S.return_stmt (Seq(assign, unit))]` —
+        a SINGLE Return statement.
+     3. `S.if_` then sees `ifso = [Return(Seq)]` + `ifnot = [Return(call failwith)]` —
+        BOTH single return. Rule 4 fires (js_stmt_make.ml:244-246) →
+        `Return(Cond(cond, Seq(assign, unit), call failwith))`.
+     4. `js_pass_flatten` (js_pass_flatten.ml:79-87) re-expands `Return(Cond)` →
+        `If(cond, [return Seq], [return call])`.
+     5. `js_pass_flatten` (js_pass_flatten.ml:88-97) re-expands `return Seq` →
+        `{Block [exp assign, return undef]}`.
+     6. Block-level flatten (js_pass_flatten.ml:100-110) peels the wrapping
+        Block statement on each branch, producing the final
+        `if (cond) { assign; return; } else { return failwith; }` shape.
+
+   Rust's divergence: when `compile_return_block` compiles `Pset` in
+   unit-return context, `Psetfield` (compile.rs:6156-6163) produces
+   `Seq(assign, undefined)` — matching OCaml. Then `normalize_unit_return_if_branch`
+   (compile.rs:5184-5190) pre-flattens via `flatten_block`, which converts
+   `[Return(Seq(assign, undef))]` → `[exp assign, return undef]` BEFORE the
+   `compile_test_return_block` call. That pre-flattening is the same logic
+   OCaml's `js_pass_flatten` applies, but OCaml applies it AFTER `S.if_` has
+   already collapsed via rule 4. By flattening first, Rust loses the
+   `[Return(Seq)]` single-return shape, so rule 4 can't fire and rule 5
+   (`_, [{Return _}]`) applies instead, producing the early-return form.
+
+   The `take_return_tail_expr` undefined-rejection guard at compile.rs:5100
+   was added as a workaround: when pre-flattened then_block is
+   `[exp assign, return undef]`, the function refuses to re-pack it back to
+   `Seq(assign, undef)` — this is what enables VariantPatternMatchingSpreads
+   to emit the correct `if (...) { log; return; } log;` shape (where the
+   else branch is EMPTY, not a single return). Removing the guard routes
+   that case through `Return(Cond)` too, but then the flattened output loses
+   the bare-fallthrough tail that OCaml preserves for unit-return functions.
+
+   Proper fix: move the unit-return flattening AFTER `compile_test_return_block`,
+   so the `[Return(Seq(…))]` single-return shape survives until rule 4 has
+   a chance to fire. Then the subsequent `flatten_program` pass will apply
+   the js_pass_flatten unwrap chain exactly like OCaml. This also means
+   `compile_if_return_block` (compile.rs:5132-5142) should not call
+   `normalize_unit_return_if_branch` on the branches before
+   `compile_test_return_block` — only AFTER, and only on the final block
+   once `Statement::if_` has committed to its shape. Verified via
+   `git diff` experiment on 2026-04-22: removing ONLY the Undefined guard
+   regresses 637 → 633 (-4 net, +0 fixes visible because other parts of
+   the path also produce undefined-returns that the guard was protecting).
+   The combined fix (move flattening after test_return_block + remove
+   guard) has not yet been attempted.
 3. **Investigate parity clusters from the remaining output-diff failures.**
    Remaining diffs cluster into:
      - **if/else vs early-return** (ticker, constrainedAsDict, reasonReactRouter,
@@ -441,8 +493,8 @@ the full constraints.
 
 ---
 
-**Last Updated:** 2026-04-22 (in_staticcatch propagation + inline-with-fallthrough path)
-**Status:** 637 / 657 authoritative JS snapshot baseline; 4 compile errors and 16 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
+**Last Updated:** 2026-04-22 (Return(Cond) deep trace + ensure_value_unit finding)
+**Status:** 637 / 657 authoritative JS snapshot baseline; 4 compile errors and 16 output diffs. All five OCaml pipeline stages (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias`, `alpha_conversion`, `simplify_lets`) now have real ports — no identity stubs remain in `simplify.rs`. Investigation added to item 2 above documents the full OCaml `Psetfield → Seq(assign, unit) → Return(Seq) → S.if_ rule 4 → Return(Cond) → js_pass_flatten → if/else with flat then-branch` chain, and pinpoints Rust's divergence: `normalize_unit_return_if_branch` pre-flattens before `compile_test_return_block`, losing the `[Return(Seq)]` single-return shape that OCaml's rule 4 relies on. Lambda::prim is now a smart constructor that folds compile-time constants and collapses full `Blk_module` reconstructions back to the source module reference. `Js_dump.pp_function`'s print-time eta-reduction is now ported to the Rust printer for both function declarations and inline Fun expressions. `compile_nullish_strict_comparison` now emits raw `Bin(EqEqEq|NotEqEq, …)` to match OCaml's raw construction in `eq_null_undefined_boolean` / `neq_null_undefined_boolean`. `Expression::bin` now folds only `EqEqEq` (mirroring `Js_exp_make.bin`'s asymmetric routing through `triple_equal`), preserving OCaml's raw `0 !== 0` shape that downstream if-branch analysis relies on. `take_return_tail_expr` now returns `Err(block)` (original block) when its recursive if-then conversion fails, instead of propagating the inner-block via `?` — this prevented `compile_test_return_block` from corrupting else-branches shaped `if cond { throw } return X`, which were getting replaced with just the inner `throw`.
 
 ## Iteration on 2026-04-21 (deep_flatten refine_let + exports + Lam.prim folding)
 
