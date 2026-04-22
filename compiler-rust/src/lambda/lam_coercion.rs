@@ -11,7 +11,7 @@ use crate::js_ir::{
     BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
     VariableDeclaration, ocaml_eq_expression,
 };
-use crate::lambda::compat::LetKind;
+use crate::lambda::lam_compat::LetKind;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
     flatten_toplevel_block, statement_mentions_ident_anywhere, tail_move_materialized_root_ident,

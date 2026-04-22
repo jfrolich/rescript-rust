@@ -22,49 +22,49 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
-pub mod analysis;
-pub mod arity;
-pub mod beta_reduce;
-pub mod closure;
-pub mod compat;
-pub mod compile;
-pub mod collect_info;
-pub mod compile_context;
-pub mod constant;
-pub mod convert;
-pub mod deep_flatten;
-pub mod free_variables;
+pub mod lam_analysis;
+pub mod lam_arity;
+pub mod lam_beta_reduce;
+pub mod lam_closure;
+pub mod lam_compat;
+pub mod lam_compile;
+pub mod lam_pass_collect;
+pub mod lam_compile_context;
+pub mod lam_constant;
+pub mod lam_convert;
+pub mod lam_pass_deep_flatten;
+pub mod lam_free_variables;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
 pub mod js_stmt_make;
 pub mod js_pass_flatten_and_mark_dead;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
-pub mod lam_compile_coercion;
+pub mod lam_coercion;
 pub mod lam_exit_code;
 pub mod lam_hit;
 pub mod lam_util;
-pub mod eta_conversion;
-pub mod pass_alpha_conversion;
-pub mod pass_count;
-pub mod pass_eliminate_ref;
-pub mod pass_exits;
-pub mod pass_lets_dce;
-pub mod pass_remove_alias;
-pub mod primitive;
-pub mod print;
+pub mod lam_eta_conversion;
+pub mod lam_pass_alpha_conversion;
+pub mod lam_pass_count;
+pub mod lam_pass_eliminate_ref;
+pub mod lam_pass_exits;
+pub mod lam_pass_lets_dce;
+pub mod lam_pass_remove_alias;
+pub mod lam_primitive;
+pub mod lam_print;
 pub mod sexp_lambda;
-pub mod simplify;
-pub mod subst;
-pub mod tag_info;
+pub mod lam_compile_main;
+pub mod lam_subst;
+pub mod lam_tag_info;
 
 use crate::ident::Ident;
 use crate::location::Location;
-pub use compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-pub use constant::Constant;
-use constant::StringDelim;
-pub use primitive::Primitive;
-pub use tag_info::TagInfo;
+pub use lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
+pub use lam_constant::Constant;
+use lam_constant::StringDelim;
+pub use lam_primitive::Primitive;
+pub use lam_tag_info::TagInfo;
 
 /// Application status for function calls
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1093,7 +1093,7 @@ fn is_assertfalse(lam: &Lambda) -> bool {
     matches!(
         lam,
         Lambda::Lconst(Constant::Int {
-            comment: Some(constant::PointerInfo::AssertFalse),
+            comment: Some(lam_constant::PointerInfo::AssertFalse),
             ..
         })
     )
@@ -1121,7 +1121,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
     // test in OCaml at lam.ml:566-573.
     let first = args.first()?;
     let Lambda::Lprim(PrimInfo {
-        primitive: Primitive::Pfield(pos, compat::FieldDbgInfo::Module { name: f1 }),
+        primitive: Primitive::Pfield(pos, lam_compat::FieldDbgInfo::Module { name: f1 }),
         args: first_args,
         ..
     }) = first
@@ -1146,7 +1146,7 @@ fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option
     // lam.ml:552-563.
     for (i, (arg, expected_name)) in args.iter().zip(fields.iter()).enumerate().skip(1) {
         let Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(pos, compat::FieldDbgInfo::Module { name }),
+            primitive: Primitive::Pfield(pos, lam_compat::FieldDbgInfo::Module { name }),
             args: inner_args,
             ..
         }) = arg
@@ -1388,7 +1388,7 @@ mod tests {
         let then_ = Lambda::const_(Constant::int(1));
         let assertfalse = Lambda::const_(Constant::Int {
             i: 0,
-            comment: Some(constant::PointerInfo::AssertFalse),
+            comment: Some(lam_constant::PointerInfo::AssertFalse),
         });
 
         let if_expr = Lambda::if_(cond.clone(), then_.clone(), assertfalse);

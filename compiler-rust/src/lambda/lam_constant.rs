@@ -4,7 +4,7 @@
 //! These include primitive values like integers and strings, as well
 //! as compound structures like blocks (for variants and records).
 
-use super::tag_info::TagInfo;
+use super::lam_tag_info::TagInfo;
 
 /// String delimiter information for template literals
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3,13 +3,13 @@
 //! Visits applications and `Pjs_fn_make` primitives, consulting
 //! [`get_arity`] (`Lam_arity_analysis.get_arity`) to either tag the
 //! application with `App_infer_full` or eta-expand/eta-reduce via
-//! [`crate::lambda::eta_conversion`].
+//! [`crate::lambda::lam_eta_conversion`].
 //!
 //! Every line traces to a specific line in OCaml. No invented logic.
 
-use crate::lambda::compile_context::LamStats;
-use crate::lambda::eta_conversion::{transform_under_supply, unsafe_adjust_to_arity};
-use crate::lambda::primitive::Primitive;
+use crate::lambda::lam_compile_context::LamStats;
+use crate::lambda::lam_eta_conversion::{transform_under_supply, unsafe_adjust_to_arity};
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, Lambda, LambdaSwitch, PrimInfo,
 };
@@ -288,11 +288,11 @@ impl<'a> Alpha<'a> {
     }
 }
 
-// Re-exposes `collect_info::get_arity` via the public collect_info module.
+// Re-exposes `lam_pass_collect::get_arity` via the public collect_info module.
 // For now the function is private inside `collect_info.rs`; expose a thin
 // wrapper here that calls back into the module via the existing
 // `collect_info` re-export. We only need the read-side, so the implementation
 // lives there to avoid duplicating ~150 lines.
-fn get_arity(meta: &LamStats, lam: &Lambda) -> crate::lambda::arity::Arity {
-    crate::lambda::collect_info::get_arity(meta, lam)
+fn get_arity(meta: &LamStats, lam: &Lambda) -> crate::lambda::lam_arity::Arity {
+    crate::lambda::lam_pass_collect::get_arity(meta, lam)
 }

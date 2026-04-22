@@ -13,10 +13,10 @@
 //! as an unknown arity.
 
 use crate::ident::Ident;
-use crate::lambda::arity::Arity;
-use crate::lambda::compat::FieldDbgInfo;
-use crate::lambda::compile_context::{BoxedNullable, Element, IdKind, LamStats, RecFlag};
-use crate::lambda::primitive::{Mutable, Primitive};
+use crate::lambda::lam_arity::Arity;
+use crate::lambda::lam_compat::FieldDbgInfo;
+use crate::lambda::lam_compile_context::{BoxedNullable, Element, IdKind, LamStats, RecFlag};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Lambda, PrimInfo};
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).

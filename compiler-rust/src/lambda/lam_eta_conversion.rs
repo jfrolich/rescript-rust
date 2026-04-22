@@ -11,9 +11,9 @@
 //! Every line traces to a specific line in OCaml. No invented logic.
 
 use crate::ident::Ident;
-use crate::lambda::compat::{FieldDbgInfo, LetKind};
-use crate::lambda::constant::Constant;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
+use crate::lambda::lam_constant::Constant;
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, PrimInfo,
 };

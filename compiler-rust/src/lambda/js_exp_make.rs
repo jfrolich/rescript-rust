@@ -9,8 +9,8 @@ use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Expression, ExpressionDesc, ModuleId, Statement,
     StatementDesc, StringClause, VIdent, expression_has_no_side_effects,
 };
-use crate::lambda::compat::Comparison;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::lam_compat::Comparison;
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{Lambda, SwitchCaseTag};
 
 pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {

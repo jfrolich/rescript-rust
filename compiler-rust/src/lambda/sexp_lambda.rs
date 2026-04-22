@@ -5,10 +5,10 @@
 
 use std::io::Write;
 
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::constant::{Constant, PointerInfo, StringDelim};
-use crate::lambda::primitive::{Mutable, Primitive};
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
+use crate::lambda::lam_constant::{Constant, PointerInfo, StringDelim};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, DirectionFlag, FunctionAttribute, InlineAttribute, LFunction,
     Lambda, LambdaSwitch, PrimInfo,
@@ -737,7 +737,7 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
 mod tests {
     use super::{constant, escape_ocaml_string, switch_names_sexp};
     use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
-    use crate::lambda::constant::{Constant, StringDelim};
+    use crate::lambda::lam_constant::{Constant, StringDelim};
 
     #[test]
     fn prints_switch_names_consts_and_blocks() {

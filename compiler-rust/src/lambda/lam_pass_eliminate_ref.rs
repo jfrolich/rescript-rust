@@ -13,7 +13,7 @@
 
 use crate::ident::Ident;
 use crate::lambda::lam_hit::hit_variable;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 
 /// Equivalent of OCaml's `Real_reference` exception
@@ -257,8 +257,8 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::compat::{FieldDbgInfo, LetKind};
-    use crate::lambda::constant::Constant;
+    use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
+    use crate::lambda::lam_constant::Constant;
     use crate::location::Location;
 
     fn ident(name: &str, stamp: i32) -> Ident {

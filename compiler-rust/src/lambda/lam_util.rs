@@ -5,13 +5,13 @@
 //! that justifies it; do not introduce Rust-only logic.
 
 use crate::ident::Ident;
-use crate::lambda::compat::{FieldDbgInfo, LetKind};
-use crate::lambda::compile_context::{Element, IdKind, IdentTable};
-use crate::lambda::constant::Constant;
+use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
+use crate::lambda::lam_compile_context::{Element, IdKind, IdentTable};
+use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
-use crate::lambda::primitive::Primitive;
-use crate::lambda::tag_info::TagInfo;
-use crate::lambda::{analysis, Apply, Lambda, PrimInfo};
+use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::lam_tag_info::TagInfo;
+use crate::lambda::{lam_analysis, Apply, Lambda, PrimInfo};
 use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
@@ -31,7 +31,7 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
             primitive: Primitive::Pfield(_, dbg_info),
             args,
             ..
-        }) if matches!(dbg_info, crate::lambda::compat::FieldDbgInfo::Module { .. })
+        }) if matches!(dbg_info, crate::lambda::lam_compat::FieldDbgInfo::Module { .. })
             && args.len() == 1
             && matches!(
                 args[0],
@@ -107,7 +107,7 @@ pub fn refine_let(kind: LetKind, param: Ident, arg: Lambda, body: Lambda) -> Lam
 
         // (Strict Pure) `let[Strict] x = e in body` with no_side_effects e ->
         // `let[StrictOpt] x = e in body` (lam_util.ml:131-136).
-        (LetKind::Strict, _, _) if analysis::no_side_effects(&arg) => {
+        (LetKind::Strict, _, _) if lam_analysis::no_side_effects(&arg) => {
             Lambda::let_(LetKind::StrictOpt, param, arg, body)
         }
 
@@ -187,9 +187,9 @@ pub fn field_flatten_get(
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::Constant;
-    use crate::lambda::primitive::Mutable;
+    use crate::lambda::lam_compat::LetKind;
+    use crate::lambda::lam_constant::Constant;
+    use crate::lambda::lam_primitive::Mutable;
     use crate::location::Location;
 
     fn ident(name: &str, stamp: i32) -> Ident {

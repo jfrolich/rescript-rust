@@ -4,8 +4,8 @@
 //! to JavaScript operations. These include arithmetic, comparisons,
 //! array/string operations, and FFI calls.
 
-use super::compat::{Comparison, FieldDbgInfo, SetFieldDbgInfo};
-use super::tag_info::TagInfo;
+use super::lam_compat::{Comparison, FieldDbgInfo, SetFieldDbgInfo};
+use super::lam_tag_info::TagInfo;
 
 /// Record representation for optimization purposes
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +186,7 @@ pub struct ExternalFfiSpec {
     /// How the fully applied call result should be wrapped.
     pub return_wrapper: ExternalReturnWrapper,
     /// Optional inline constant preserved from marshaled external ffi metadata.
-    pub inline_constant: Option<super::constant::Constant>,
+    pub inline_constant: Option<super::lam_constant::Constant>,
 }
 
 /// Raw FFI kind preserved across the raw-lambda boundary.

@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LetKind;
-use crate::lambda::constant::PointerInfo;
-use crate::lambda::primitive::Mutable;
+use crate::lambda::lam_constant::PointerInfo;
+use crate::lambda::lam_primitive::Mutable;
 use crate::lambda::{
     Comparison, FieldDbgInfo, Primitive, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchNames,
     SwitchTag, TagInfo,
@@ -6882,7 +6882,7 @@ fn convert_polyvar_list(xs: &[(i32, (String, RawLambda))]) -> Vec<(Vec<(i32, Str
 /// Create a disjunction of equality tests for polyvar hash values.
 /// Equivalent to OCaml's `Polyvar_pattern_match.or_list`.
 fn raw_polyvariant_hash_const(hash: i32, name: &str) -> RawLambda {
-    RawLambda::Lconst(crate::lambda::constant::Constant::Int {
+    RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int {
         i: hash,
         comment: Some(PointerInfo::PolyVariant(name.to_string())),
     })
@@ -9249,11 +9249,11 @@ mod tests {
         };
 
         assert!(
-            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            matches!(first_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
             if *i == btype::hash_variant("A") && name == "A")
         );
         assert!(
-            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
+            matches!(second_eq.args.as_slice(), [RawLambda::Lvar(_), RawLambda::Lconst(crate::lambda::lam_constant::Constant::Int { i, comment: Some(PointerInfo::PolyVariant(name)) })]
             if *i == btype::hash_variant("B") && name == "B")
         );
     }

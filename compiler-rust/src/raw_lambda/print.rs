@@ -4,10 +4,10 @@ use std::fmt;
 use std::io::Write;
 
 use crate::ident::Ident;
-use crate::lambda::compat::LetKind;
-use crate::lambda::constant::{Constant, PointerInfo};
-use crate::lambda::primitive::Mutable;
-use crate::lambda::print::raw_primitive_to_string;
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_constant::{Constant, PointerInfo};
+use crate::lambda::lam_primitive::Mutable;
+use crate::lambda::lam_print::raw_primitive_to_string;
 use crate::lambda::{FieldDbgInfo, FunctionAttribute, InlineAttribute, Primitive, TagInfo};
 use crate::parser::formatter::{BoxKind, Formatter};
 use crate::raw_lambda::{RawApply, RawLFunction, RawLambda, RawLambdaSwitch, RawPrimInfo};

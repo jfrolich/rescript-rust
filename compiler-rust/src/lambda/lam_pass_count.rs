@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ident::Ident;
-use crate::lambda::analysis::lfunction_can_be_inlined;
-use crate::lambda::beta_reduce::no_names_beta_reduce;
-use crate::lambda::compat::LetKind;
+use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
+use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{Lambda, LambdaSwitch, LFunction};
 
 /// Equivalent of OCaml's `Lam_pass_count.used_info` (lam_pass_count.ml:15-23).
@@ -307,8 +307,8 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::Constant;
+    use crate::lambda::lam_compat::LetKind;
+    use crate::lambda::lam_constant::Constant;
     use crate::lambda::Lambda;
 
     fn ident(name: &str, stamp: i32) -> Ident {

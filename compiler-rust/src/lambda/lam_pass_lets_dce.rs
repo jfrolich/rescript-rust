@@ -2,7 +2,7 @@
 //!
 //! Combines dead-code elimination of let bindings with alias inlining: every
 //! decision is driven by the precomputed [`OccTbl`] from
-//! [`super::pass_count::collect_occurs`], so this pass is O(n).
+//! [`super::lam_pass_count::collect_occurs`], so this pass is O(n).
 //!
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
 //! justifies it. Do not introduce Rust-only logic.
@@ -10,14 +10,14 @@
 use std::collections::HashMap;
 
 use crate::ident::Ident;
-use crate::lambda::analysis::{lfunction_can_be_inlined, no_side_effects};
-use crate::lambda::beta_reduce::no_names_beta_reduce;
-use crate::lambda::compat::LetKind;
-use crate::lambda::constant::Constant;
+use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};
+use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::pass_count::{collect_occurs, dummy_info, OccTbl, UsedInfo};
-use crate::lambda::pass_eliminate_ref::{eliminate_ref, RealReference};
-use crate::lambda::primitive::{Mutable, Primitive};
+use crate::lambda::lam_pass_count::{collect_occurs, dummy_info, OccTbl, UsedInfo};
+use crate::lambda::lam_pass_eliminate_ref::{eliminate_ref, RealReference};
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{Apply, Lambda, LambdaSwitch, LFunction, PrimInfo};
 
 /// State held during the recursive pass: substitution table and an inline
@@ -465,8 +465,8 @@ pub fn simplify_lets(lam: &Lambda) -> Lambda {
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::Constant;
+    use crate::lambda::lam_compat::LetKind;
+    use crate::lambda::lam_constant::Constant;
 
     fn ident(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)

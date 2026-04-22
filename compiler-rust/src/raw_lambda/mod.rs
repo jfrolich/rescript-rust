@@ -416,12 +416,12 @@ impl RawLambda {
             RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(crate::lambda::PrimInfo {
                 primitive: Primitive::PjsCall {
                     prim_name: format!("send{name}"),
-                    arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
-                    ffi: crate::lambda::primitive::ExternalFfiSpec {
-                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                    arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
+                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
-                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },
                     dynamic_import: false,

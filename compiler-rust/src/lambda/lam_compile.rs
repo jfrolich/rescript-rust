@@ -20,12 +20,12 @@ use crate::js_ir::{
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
     VIdent, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression, unnest_block,
 };
-use crate::lambda::analysis;
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
-use crate::lambda::free_variables::free_variables;
+use crate::lambda::lam_analysis;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
+use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
+use crate::lambda::lam_free_variables::free_variables;
 use crate::lambda::lam_exit_code::has_exit_code;
-use crate::lambda::primitive::{
+use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
     Mutable, Primitive,
@@ -42,7 +42,7 @@ use crate::lambda::js_shake::{
     statement_mentions_ident_anywhere, tail_move_materialized_root_ident,
     TailMoveInitializerKind,
 };
-use crate::lambda::subst;
+use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
     LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, TagInfo,
@@ -66,7 +66,7 @@ use super::js_exp_make::{
     runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int,
     string_switch_iife, to_int32,
 };
-use super::lam_compile_coercion::{
+use super::lam_coercion::{
     block_declares_ident, block_declares_initialized_ident,
     can_reuse_existing_undefined_export_binding,
     collect_declared_idents, collect_export_aliases, count_materialized_same_name_binding_roots,
@@ -465,7 +465,7 @@ impl LambdaCompiler {
         self.external_module_ids.clear();
         let mut possible_required_modules = collect_possible_required_modules(lam);
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified = crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(
+        let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(
             lam,
             self.jsx_preserve,
         );
@@ -1959,15 +1959,15 @@ impl LambdaCompiler {
         match lam {
             Lambda::Lconst(Constant::JsUndefined { is_unit: true }) => true,
             Lambda::Lsequence(first, second) => {
-                analysis::no_side_effects(first) && self.lambda_is_trivial_unit_undefined(second)
+                lam_analysis::no_side_effects(first) && self.lambda_is_trivial_unit_undefined(second)
             }
             Lambda::Llet(_, _, value, body) => {
-                analysis::no_side_effects(value) && self.lambda_is_trivial_unit_undefined(body)
+                lam_analysis::no_side_effects(value) && self.lambda_is_trivial_unit_undefined(body)
             }
             Lambda::Lletrec(bindings, body) => {
                 bindings
                     .iter()
-                    .all(|(_, value)| analysis::no_side_effects(value))
+                    .all(|(_, value)| lam_analysis::no_side_effects(value))
                     && self.lambda_is_trivial_unit_undefined(body)
             }
             Lambda::LstaticCatch(body, (_, bindings), handler) if bindings.is_empty() => {
@@ -7065,7 +7065,7 @@ impl LambdaCompiler {
     fn compile_set_field(
         &self,
         _idx: i32,
-        info: &crate::lambda::compat::SetFieldDbgInfo,
+        info: &crate::lambda::lam_compat::SetFieldDbgInfo,
         target: &Expression,
         value: &Expression,
     ) -> Expression {
@@ -7079,9 +7079,9 @@ impl LambdaCompiler {
         }
 
         let field = match info {
-            crate::lambda::compat::SetFieldDbgInfo::RecordSet(name)
-            | crate::lambda::compat::SetFieldDbgInfo::RecordInlineSet(name)
-            | crate::lambda::compat::SetFieldDbgInfo::RecordExtensionSet(name) => Expression::new(
+            crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(name)
+            | crate::lambda::lam_compat::SetFieldDbgInfo::RecordInlineSet(name)
+            | crate::lambda::lam_compat::SetFieldDbgInfo::RecordExtensionSet(name) => Expression::new(
                 ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
             ),
         };
@@ -8207,7 +8207,7 @@ impl LambdaCompiler {
         &mut self,
         prim_name: &str,
         arg_types: &[ExternalArgSpec],
-        ffi: &crate::lambda::primitive::ExternalFfiSpec,
+        ffi: &crate::lambda::lam_primitive::ExternalFfiSpec,
         dynamic_import: bool,
         transformed_jsx: bool,
         args: Vec<Expression>,
@@ -8620,8 +8620,8 @@ impl LambdaCompiler {
             return Some(handler.handler.clone());
         }
 
-        let subst = subst::make_subst(&handler.bindings, args);
-        Some(subst::subst(&subst, &handler.handler))
+        let subst = lam_subst::make_subst(&handler.bindings, args);
+        Some(lam_subst::subst(&subst, &handler.handler))
     }
 
     fn staticcatch_requires_explicit_jump(&self, bindings: &[Ident], handler: &Lambda) -> bool {
@@ -8673,17 +8673,17 @@ impl LambdaCompiler {
         match lam {
             Lambda::LstaticRaise(label, args) => {
                 self.active_static_raise_target_exists(*label, args.len())
-                    && args.iter().all(analysis::no_side_effects)
+                    && args.iter().all(lam_analysis::no_side_effects)
             }
             Lambda::Llet(kind, _, value, body)
                 if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
-                    && analysis::no_side_effects(value)
+                    && lam_analysis::no_side_effects(value)
                     && !self.lambda_requires_explicit_staticcatch_jump(value) =>
             {
                 self.handler_is_pure_outward_static_raise_forwarder(body)
             }
             Lambda::Lsequence(first, second)
-                if analysis::no_side_effects(first)
+                if lam_analysis::no_side_effects(first)
                     && !self.lambda_requires_explicit_staticcatch_jump(first) =>
             {
                 self.handler_is_pure_outward_static_raise_forwarder(second)
@@ -8814,7 +8814,7 @@ impl LambdaCompiler {
     fn pure_return_static_raise_dispatch_has_terminal_value(&self, lam: &Lambda) -> Option<bool> {
         match lam {
             Lambda::LstaticRaise(label, args) => {
-                let args_are_pure = args.iter().all(analysis::no_side_effects);
+                let args_are_pure = args.iter().all(lam_analysis::no_side_effects);
                 if self.active_static_raise_target_exists(*label, args.len()) && args_are_pure {
                     Some(false)
                 } else {
@@ -8823,21 +8823,21 @@ impl LambdaCompiler {
             }
             Lambda::Llet(kind, _, value, body)
                 if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
-                    && analysis::no_side_effects(value) =>
+                    && lam_analysis::no_side_effects(value) =>
             {
                 self.pure_return_static_raise_dispatch_has_terminal_value(body)
             }
-            Lambda::Lsequence(first, second) if analysis::no_side_effects(first) => {
+            Lambda::Lsequence(first, second) if lam_analysis::no_side_effects(first) => {
                 self.pure_return_static_raise_dispatch_has_terminal_value(second)
             }
-            Lambda::LifThenElse(cond, then_, else_) if analysis::no_side_effects(cond) => {
+            Lambda::LifThenElse(cond, then_, else_) if lam_analysis::no_side_effects(cond) => {
                 let then_has_value =
                     self.pure_return_static_raise_dispatch_has_terminal_value(then_)?;
                 let else_has_value =
                     self.pure_return_static_raise_dispatch_has_terminal_value(else_)?;
                 Some(then_has_value || else_has_value)
             }
-            Lambda::Lswitch(scrut, switch) if analysis::no_side_effects(scrut) => {
+            Lambda::Lswitch(scrut, switch) if lam_analysis::no_side_effects(scrut) => {
                 let mut has_terminal_value = false;
                 for (_, body) in &switch.sw_consts {
                     has_terminal_value |=
@@ -8853,7 +8853,7 @@ impl LambdaCompiler {
                 }
                 Some(has_terminal_value)
             }
-            Lambda::LstringSwitch(scrut, cases, default) if analysis::no_side_effects(scrut) => {
+            Lambda::LstringSwitch(scrut, cases, default) if lam_analysis::no_side_effects(scrut) => {
                 let mut has_terminal_value = false;
                 for (_, body) in cases {
                     has_terminal_value |=
@@ -8865,7 +8865,7 @@ impl LambdaCompiler {
                 }
                 Some(has_terminal_value)
             }
-            _ if analysis::no_side_effects(lam) => Some(true),
+            _ if lam_analysis::no_side_effects(lam) => Some(true),
             _ => None,
         }
     }
@@ -10314,17 +10314,17 @@ fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
         .find_map(|group| match group {
             TopLevelEffectGroup::Single(kind, id, body) => {
                 (matches!(kind, LetKind::Strict | LetKind::Variable)
-                    && !analysis::no_side_effects(&body))
+                    && !lam_analysis::no_side_effects(&body))
                 .then(|| id.name().to_string())
             }
             TopLevelEffectGroup::Recursive(bindings) => {
                 bindings.into_iter().find_map(|(id, body)| {
-                    (!analysis::no_side_effects(&body)).then(|| id.name().to_string())
+                    (!lam_analysis::no_side_effects(&body)).then(|| id.name().to_string())
                 })
             }
-            TopLevelEffectGroup::Nop(body) => (!analysis::no_side_effects(&body)).then(String::new),
+            TopLevelEffectGroup::Nop(body) => (!lam_analysis::no_side_effects(&body)).then(String::new),
         })
-        .or_else(|| (!analysis::no_side_effects(&result)).then(String::new))
+        .or_else(|| (!lam_analysis::no_side_effects(&result)).then(String::new))
 }
 
 fn required_module_side_effect_reason(
@@ -11187,6 +11187,6 @@ fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
 }
 
 #[cfg(test)]
-#[path = "compile_tests.rs"]
+#[path = "lam_compile_tests.rs"]
 mod tests;
 

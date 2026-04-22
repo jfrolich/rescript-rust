@@ -6,10 +6,10 @@
 use std::fmt;
 
 use crate::ident::Ident;
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
-use crate::lambda::constant::Constant;
-use crate::lambda::primitive::{Mutable, Primitive};
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
+use crate::lambda::lam_constant::Constant;
+use crate::lambda::lam_primitive::{Mutable, Primitive};
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{DirectionFlag, Lambda};
 use crate::location::Location;
 

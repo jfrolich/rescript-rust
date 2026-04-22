@@ -12,17 +12,17 @@ use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
 use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::Constant;
-use crate::lambda::compat::LetKind;
-use crate::lambda::constant::{
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
 };
-use crate::lambda::convert::LambdaConverter;
-use crate::lambda::primitive::{
+use crate::lambda::lam_convert::LambdaConverter;
+use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
     ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable,
 };
-use crate::lambda::tag_info::{
+use crate::lambda::lam_tag_info::{
     Attribute as TagAttribute, AttributePayload as TagAttributePayload, TagInfo,
 };
 use crate::lambda::{
@@ -2475,7 +2475,7 @@ impl<'a> RawLambdaConverter<'a> {
             )),
             "%refset" => Some(Primitive::Psetfield(
                 0,
-                crate::lambda::compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
+                crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
             )),
             "%refget" => Some(Primitive::Pfield(
                 0,
@@ -2603,7 +2603,7 @@ impl<'a> RawLambdaConverter<'a> {
                     if let Ok(n) = n_str.parse::<i32>() {
                         return Some(Primitive::Psetfield(
                             n,
-                            crate::lambda::compat::SetFieldDbgInfo::RecordSet(String::new()),
+                            crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(String::new()),
                         ));
                     }
                 }
@@ -5305,7 +5305,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let val_lam = self.convert_expr(value);
                 let primitive = Primitive::Psetfield(
                     lbl.lbl_pos,
-                    crate::lambda::compat::SetFieldDbgInfo::RecordSet(label_runtime_name(lbl)),
+                    crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(label_runtime_name(lbl)),
                 );
                 Lambda::prim(primitive, vec![rec_lam, val_lam], self.loc(expr.exp_loc))
             }
@@ -10999,7 +10999,7 @@ mod tests {
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert!(matches!(
             spec.spec,
-            Some(crate::lambda::primitive::ExternalSpec::JsVar {
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsVar {
                 ref name,
                 external_module_name: None,
                 ref scopes,
@@ -11039,8 +11039,8 @@ mod tests {
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert!(matches!(
             spec.spec,
-            Some(crate::lambda::primitive::ExternalSpec::JsModuleAsVar(
-                crate::lambda::primitive::ExternalModuleName {
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsModuleAsVar(
+                crate::lambda::lam_primitive::ExternalModuleName {
                     ref bundle,
                     import_attributes: Some(ref attrs),
                     ..
@@ -11092,8 +11092,8 @@ external myJson: Js.Json.t = "default"
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         let module_name = match spec.spec {
-            Some(crate::lambda::primitive::ExternalSpec::JsModuleAsVar(module_name)) => module_name,
-            Some(crate::lambda::primitive::ExternalSpec::JsVar {
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsModuleAsVar(module_name)) => module_name,
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsVar {
                 external_module_name: Some(module_name),
                 ..
             }) => module_name,
@@ -11136,7 +11136,7 @@ external myJson: Js.Json.t = "default"
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         assert!(matches!(
             spec.spec,
-            Some(crate::lambda::primitive::ExternalSpec::JsNew {
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsNew {
                 ref name,
                 external_module_name: None,
                 splice: false,

@@ -9,10 +9,10 @@ use std::collections::HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::lambda::analysis::{size, EXIT_INLINE_SIZE};
-use crate::lambda::beta_reduce::max_ident_stamp_in_lambda;
-use crate::lambda::compat::LetKind;
-use crate::lambda::subst::subst as lam_subst;
+use crate::lambda::lam_analysis::{size, EXIT_INLINE_SIZE};
+use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_subst::subst as lam_subst;
 use crate::lambda::{LFunction, Lambda, LambdaSwitch};
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
@@ -441,7 +441,7 @@ pub fn simplify_exits_standalone(lam: &Lambda) -> Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::compat::LetKind;
+    use crate::lambda::lam_compat::LetKind;
 
     #[test]
     fn unused_catch_dropped() {

@@ -11,7 +11,7 @@ use crate::js_ir::printer::is_js_keyword_or_global;
 use crate::js_ir::{
     Block, DepsProgram, Expression, ExpressionDesc, Statement, StatementDesc, VariableDeclaration,
 };
-use crate::lambda::compat::LetKind;
+use crate::lambda::lam_compat::LetKind;
 
 pub(crate) fn apply_external_shadow_pass(mut deps: DepsProgram) -> DepsProgram {
     let shadowed_globals = deps

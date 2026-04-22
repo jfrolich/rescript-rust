@@ -12,10 +12,10 @@ use crate::js_ir::{
     Block, DepsProgram, Expression, ExpressionDesc, Program, Statement, StatementDesc, VIdent,
     VariableDeclaration,
 };
-use crate::lambda::compat::LetKind;
+use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::js_expr_no_side_effects;
-use super::lam_compile_coercion::same_reusable_export_value;
+use super::lam_coercion::same_reusable_export_value;
 
 pub(crate) fn apply_js_shake_pass(mut deps: DepsProgram) -> DepsProgram {
     deps.program = shake_program(deps.program);

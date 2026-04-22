@@ -12,15 +12,15 @@
 //! Every line below must trace to a specific line in OCaml. No invented
 //! logic.
 
-use crate::lambda::analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
-use crate::lambda::closure::is_closed_with_map;
-use crate::lambda::compat::Comparison;
-use crate::lambda::compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
-use crate::lambda::constant::Constant;
+use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
+use crate::lambda::lam_closure::is_closed_with_map;
+use crate::lambda::lam_compat::Comparison;
+use crate::lambda::lam_compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
+use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_util::field_flatten_get;
-use crate::lambda::primitive::Primitive;
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 
@@ -126,7 +126,7 @@ pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: 
 }
 
 struct Simplifier<'a> {
-    ident_tbl: &'a mut crate::lambda::compile_context::IdentTable,
+    ident_tbl: &'a mut crate::lambda::lam_compile_context::IdentTable,
     export_idents: &'a std::collections::HashSet<crate::ident::Ident>,
     /// Shared stamp counter used for `Ident.rename` during beta reduction.
     /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
@@ -391,7 +391,7 @@ impl<'a> Simplifier<'a> {
                         // lam_pass_remove_alias.ml:188-197 — functor:
                         // always beta-reduce (callers are expected to
                         // be at most one site).
-                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                        let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
                             self.ident_tbl,
                             self.id_gen,
                             &func.params,
@@ -417,7 +417,7 @@ impl<'a> Simplifier<'a> {
                         if allow {
                             match rec_flag {
                                 RecFlag::Rec => {
-                                    crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                                    crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                                         self.ident_tbl,
                                         self.id_gen,
                                         &param_map,
@@ -435,7 +435,7 @@ impl<'a> Simplifier<'a> {
                                     if ap_args.iter().any(|lam| hit_variable(v, lam)) {
                                         normal(self)
                                     } else {
-                                        let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                                        let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                                             self.ident_tbl,
                                             self.id_gen,
                                             &param_map,
@@ -474,7 +474,7 @@ impl<'a> Simplifier<'a> {
                 if args.len() == func_clone.params.len()
                     && lfunction_can_be_inlined(&func_clone)
                 {
-                    let reduced = crate::lambda::beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                    let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
                         self.ident_tbl,
                         self.id_gen,
                         &func_clone.params,

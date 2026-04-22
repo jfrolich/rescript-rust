@@ -8,11 +8,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind};
-use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo};
-use crate::lambda::free_variables::free_variables;
-use crate::lambda::primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primitive};
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
+use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
+use crate::lambda::lam_free_variables::free_variables;
+use crate::lambda::lam_primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primitive};
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 use crate::parser::ast::MutableFlag;
@@ -961,7 +961,7 @@ fn pointer_constant_value(constant: &Constant) -> Option<&str> {
 
 fn is_object_create_call(
     prim_name: &str,
-    _arg_types: &[crate::lambda::primitive::ExternalArgSpec],
+    _arg_types: &[crate::lambda::lam_primitive::ExternalArgSpec],
     ffi: &ExternalFfiSpec,
 ) -> bool {
     prim_name.is_empty() && ffi.obj_params.is_some()
@@ -1658,9 +1658,9 @@ mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
     use crate::lambda::InlineAttribute;
-    use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
-    use crate::lambda::primitive::{ExternalFfiKind, JsRawInfo, Mutable};
+    use crate::lambda::lam_compat::LetKind;
+    use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
+    use crate::lambda::lam_primitive::{ExternalFfiKind, JsRawInfo, Mutable};
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {
@@ -1850,13 +1850,13 @@ mod tests {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: String::new(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::ObjCreate,
                     spec: None,
-                    obj_params: Some(vec![crate::lambda::primitive::ExternalObjSpec {
-                        obj_arg_type: crate::lambda::primitive::ExternalArgAttr::Nothing,
-                        obj_arg_label: crate::lambda::primitive::ExternalObjLabel::Label {
+                    obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
+                        obj_arg_type: crate::lambda::lam_primitive::ExternalArgAttr::Nothing,
+                        obj_arg_label: crate::lambda::lam_primitive::ExternalObjLabel::Label {
                             name: "name".to_string(),
                         },
                     }]),
@@ -1882,13 +1882,13 @@ mod tests {
         let raw = RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: String::new(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
-                    obj_params: Some(vec![crate::lambda::primitive::ExternalObjSpec {
-                        obj_arg_type: crate::lambda::primitive::ExternalArgAttr::Nothing,
-                        obj_arg_label: crate::lambda::primitive::ExternalObjLabel::Label {
+                    obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
+                        obj_arg_type: crate::lambda::lam_primitive::ExternalArgAttr::Nothing,
+                        obj_arg_label: crate::lambda::lam_primitive::ExternalObjLabel::Label {
                             name: "name".to_string(),
                         },
                     }]),
@@ -1956,10 +1956,10 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![
-                    crate::lambda::primitive::ExternalArgSpec::dummy(),
-                    crate::lambda::primitive::ExternalArgSpec::dummy(),
+                    crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
+                    crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
                 ],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
@@ -1989,14 +1989,14 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: Vec::new(),
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: Some(Constant::String {
                         s: "hello".to_string(),
-                        delim: Some(crate::lambda::constant::StringDelim::StarJ),
+                        delim: Some(crate::lambda::lam_constant::StringDelim::StarJ),
                     }),
                 },
                 dynamic_import: false,
@@ -2008,7 +2008,7 @@ mod tests {
 
         assert!(matches!(
             lowered,
-            Lambda::Lconst(Constant::String { ref s, delim: Some(crate::lambda::constant::StringDelim::StarJ) }) if s == "hello"
+            Lambda::Lconst(Constant::String { ref s, delim: Some(crate::lambda::lam_constant::StringDelim::StarJ) }) if s == "hello"
         ));
     }
 
@@ -2017,8 +2017,8 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
@@ -2050,8 +2050,8 @@ mod tests {
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
-                arg_types: vec![crate::lambda::primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::primitive::ExternalFfiSpec {
+                arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
@@ -2652,7 +2652,7 @@ mod tests {
                         Primitive::Pmakeblock(
                             0,
                             TagInfo::Tuple,
-                            crate::lambda::primitive::Mutable::Immutable,
+                            crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
                         vec![RawLambda::var(fake_y.clone())],
                         Location::none(),
@@ -2664,7 +2664,7 @@ mod tests {
                         Primitive::Pmakeblock(
                             0,
                             TagInfo::Tuple,
-                            crate::lambda::primitive::Mutable::Immutable,
+                            crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
                         vec![RawLambda::var(fake_y.clone())],
                         Location::none(),
@@ -2740,7 +2740,7 @@ mod tests {
             vec![RawLambda::prim(
                 Primitive::Pfield(
                     36,
-                    crate::lambda::compat::FieldDbgInfo::Module {
+                    crate::lambda::lam_compat::FieldDbgInfo::Module {
                         name: "forEach".to_string(),
                     },
                 ),

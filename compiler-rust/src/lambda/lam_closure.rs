@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;
-use crate::lambda::analysis::no_side_effects;
+use crate::lambda::lam_analysis::no_side_effects;
 
 /// High penalty for loop usage (variables used in loops can't be safely inlined).
 const LOOP_USE: i32 = 100;

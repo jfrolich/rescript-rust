@@ -3,10 +3,10 @@ pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives, print_expression,
 };
-pub(super) use crate::lambda::constant::{
+pub(super) use crate::lambda::lam_constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
 };
-pub(super) use crate::lambda::primitive::{
+pub(super) use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
     ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo,
@@ -1885,7 +1885,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                 Lambda::prim(
                     Primitive::Pfield(
                         0,
-                        crate::lambda::compat::FieldDbgInfo::Record {
+                        crate::lambda::lam_compat::FieldDbgInfo::Record {
                             name: "x".to_string(),
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                         },
@@ -3402,7 +3402,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     );
 
     let simplified =
-        crate::lambda::simplify::simplify_for_js_backend_with_jsx_preserve(&lam, false);
+        crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
     let mut direct_compiler = LambdaCompiler::new();
     let direct_body =
         direct_compiler.compile_return_block(extract_first_function_body(&simplified));
@@ -5710,7 +5710,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
         ),
     );
 
-    let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
     let compiled = compiler.compile_expr(&simplified);
     let rendered = format!(
         "{}\n{}",
@@ -5816,7 +5816,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
         ),
     );
 
-    let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
     let compiled = compiler.compile_expr(&simplified);
     let rendered = print_expression(&compiled.expr);
     assert!(
@@ -7956,7 +7956,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                 ),
                 Lambda::Lsequence(
                     Box::new(Lambda::prim(
-                        Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+                        Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                             code: "console.log(\"hi\")".to_string(),
                             is_stmt: true,
                         }),
@@ -10028,7 +10028,7 @@ fn recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies() {
         Lambda::var(loop_.clone()),
     );
 
-    let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
     let compiled = compiler.compile_expr(&simplified);
     let rendered = if compiled.prelude.is_empty() {
         print_expression(&compiled.expr)
@@ -10161,7 +10161,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
         Lambda::var(odd.clone()),
     );
 
-    let simplified = crate::lambda::simplify::simplify_for_js_backend(&lam);
+    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend(&lam);
     let Lambda::Lletrec(bindings, _) = &simplified else {
         panic!("expected simplified alias test to stay a letrec, got {simplified:?}");
     };
@@ -10174,7 +10174,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
         odd_targets.iter().any(|target| target.same(&odd))
             && odd_targets.iter().any(|target| target.same(&even)),
         "expected odd tail targets to include the same-group alias, got {odd_targets:?}\nsimplified:\n{}",
-        crate::lambda::print::lambda_to_string(&simplified)
+        crate::lambda::lam_print::lambda_to_string(&simplified)
     );
     let compiled = compiler.compile_expr(&simplified);
     let rendered = if compiled.prelude.is_empty() {
@@ -10197,8 +10197,8 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
     );
 }
 
-mod compile_coercion_tests;
-mod compile_switch_tests;
-mod compile_staticcatch_tests;
-mod compile_external_tests;
-mod compile_integration_tests;
+mod lam_coercion_tests;
+mod lam_compile_switch_tests;
+mod lam_compile_staticcatch_tests;
+mod lam_compile_external_tests;
+mod lam_compile_integration_tests;

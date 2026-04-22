@@ -246,7 +246,7 @@ mod tests {
                     vec![Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("a"),
                         value: Some(Expression::var(Ident::create_local("Belt_Array"))),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],
                     vec![],
@@ -283,7 +283,7 @@ mod tests {
                     vec![Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("dict"),
                         value: Some(Expression::new(ExpressionDesc::Object(None, vec![]))),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],
                     vec![],
@@ -348,7 +348,7 @@ mod tests {
                                 runtime.clone(),
                                 Some("map".to_string()),
                             )),
-                            property: crate::lambda::compat::LetKind::Strict,
+                            property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
                         }),
                         Statement::variable(VariableDeclaration {
@@ -357,7 +357,7 @@ mod tests {
                                 react_v.clone(),
                                 Some("ff".to_string()),
                             )),
-                            property: crate::lambda::compat::LetKind::Strict,
+                            property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
                         }),
                         Statement::variable(VariableDeclaration {
@@ -366,7 +366,7 @@ mod tests {
                                 react_x.clone(),
                                 Some("ff2".to_string()),
                             )),
-                            property: crate::lambda::compat::LetKind::Strict,
+                            property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
                         }),
                     ],
@@ -426,7 +426,7 @@ mod tests {
                     vec![Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("x"),
                         value: Some(Expression::number(Number::int(1))),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],
                     vec![],
@@ -466,7 +466,7 @@ mod tests {
                         Statement::variable(VariableDeclaration {
                             ident: Ident::create_local("x"),
                             value: Some(Expression::number(Number::int(1))),
-                            property: crate::lambda::compat::LetKind::Strict,
+                            property: crate::lambda::lam_compat::LetKind::Strict,
                             ident_info: Default::default(),
                         }),
                     ],
@@ -495,7 +495,7 @@ mod tests {
                     vec![Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("VS"),
                         value: Some(Expression::undefined(false)),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],
                     vec![],
@@ -532,7 +532,7 @@ mod tests {
                     vec![Statement::variable(VariableDeclaration {
                         ident: default_ident.clone(),
                         value: Some(Expression::string("xx")),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     })],
                     vec![default_ident],

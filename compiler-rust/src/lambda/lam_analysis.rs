@@ -9,9 +9,9 @@ use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
 };
 use crate::ident::Ident;
-use crate::lambda::compat::FieldDbgInfo;
-use crate::lambda::constant::Constant;
-use crate::lambda::primitive::Primitive;
+use crate::lambda::lam_compat::FieldDbgInfo;
+use crate::lambda::lam_constant::Constant;
+use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{LFunction, Lambda};
 
 /// Check if a constant is definitely not zero.
@@ -272,7 +272,7 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
     }
 }
 
-fn raw_js_is_pure(info: &crate::lambda::primitive::JsRawInfo) -> bool {
+fn raw_js_is_pure(info: &crate::lambda::lam_primitive::JsRawInfo) -> bool {
     if info.is_stmt {
         matches!(
             classify_js_stmt(&info.code),
@@ -497,7 +497,7 @@ pub fn safe_to_inline(lam: &Lambda) -> bool {
             c,
             Constant::Pointer(_)
                 | Constant::Int {
-                    comment: Some(crate::lambda::constant::PointerInfo::Constructor(_)),
+                    comment: Some(crate::lambda::lam_constant::PointerInfo::Constructor(_)),
                     ..
                 }
                 | Constant::JsTrue
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn test_no_side_effects_raw_js_matches_ocaml_classification() {
         let raw_literal = Lambda::prim(
-            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+            Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                 code: "null".to_string(),
                 is_stmt: false,
             }),
@@ -619,7 +619,7 @@ mod tests {
         assert!(no_side_effects(&raw_literal));
 
         let raw_unknown = Lambda::prim(
-            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+            Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                 code: "Number.EPSILON ? Number.EPSILON : 2.220446049250313e-16".to_string(),
                 is_stmt: false,
             }),
@@ -629,7 +629,7 @@ mod tests {
         assert!(!no_side_effects(&raw_unknown));
 
         let raw_comment_stmt = Lambda::prim(
-            Primitive::PrawJsCode(crate::lambda::primitive::JsRawInfo {
+            Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                 code: "/* comment */".to_string(),
                 is_stmt: true,
             }),
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(
             size_constant(&Constant::Block {
                 tag: 0,
-                tag_info: crate::lambda::tag_info::TagInfo::Tuple,
+                tag_info: crate::lambda::lam_tag_info::TagInfo::Tuple,
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
             3

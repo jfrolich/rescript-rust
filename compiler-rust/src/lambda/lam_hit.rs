@@ -69,8 +69,8 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
-    use crate::lambda::compat::LetKind;
-    use crate::lambda::constant::Constant;
+    use crate::lambda::lam_compat::LetKind;
+    use crate::lambda::lam_constant::Constant;
 
     fn ident(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)

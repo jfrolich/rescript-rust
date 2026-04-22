@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;
-use crate::lambda::arity::Arity;
-use crate::lambda::compat::LetKind;
-use crate::lambda::constant::Constant;
+use crate::lambda::lam_arity::Arity;
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_constant::Constant;
 
 /// Label for jump tables (exception handler labels).
 pub type JblLabel = i32;

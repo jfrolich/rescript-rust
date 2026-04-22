@@ -9,14 +9,14 @@ use std::path::Path as StdPath;
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
 use crate::ident::{Ident, IdentFlags};
-use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
-use crate::lambda::constant::{Constant, StringDelim};
-use crate::lambda::primitive::{
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
+use crate::lambda::lam_constant::{Constant, StringDelim};
+use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
     ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable, Primitive,
 };
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, DirectionFlag as LamDirection, FunctionAttribute, InlineAttribute,
     Lambda,
@@ -1206,11 +1206,11 @@ impl<'a> LambdaConverter<'a> {
             "%curry_apply8" => PjsRuntimeApply,
             "%makemutablelist" => Pmakelist,
             "%unsafe_to_method" => PjsFnMethod,
-            "#raw_expr" => PrawJsCode(crate::lambda::primitive::JsRawInfo {
+            "#raw_expr" => PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                 code: String::new(),
                 is_stmt: false,
             }),
-            "#raw_stmt" => PrawJsCode(crate::lambda::primitive::JsRawInfo {
+            "#raw_stmt" => PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
                 code: String::new(),
                 is_stmt: true,
             }),

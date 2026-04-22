@@ -4,7 +4,7 @@
 //! in the JS IR, including binary operators, property access, and
 //! number representations.
 
-use crate::lambda::compat::LetKind;
+use crate::lambda::lam_compat::LetKind;
 
 /// Binary operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

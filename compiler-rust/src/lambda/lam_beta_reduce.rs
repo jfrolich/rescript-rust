@@ -19,14 +19,14 @@ use std::collections::HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::lambda::analysis::no_side_effects;
-use crate::lambda::closure::StatsMap;
-use crate::lambda::collect_info::kind_of_lambda_block;
-use crate::lambda::compat::LetKind;
-use crate::lambda::compile_context::{IdKind, IdentTable};
+use crate::lambda::lam_analysis::no_side_effects;
+use crate::lambda::lam_closure::StatsMap;
+use crate::lambda::lam_pass_collect::kind_of_lambda_block;
+use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_compile_context::{IdKind, IdentTable};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::primitive::{Mutable, Primitive};
-use crate::lambda::subst::Subst;
+use crate::lambda::lam_primitive::{Mutable, Primitive};
+use crate::lambda::lam_subst::Subst;
 use crate::lambda::{Apply, Lambda, PrimInfo};
 use crate::location::Location;
 
@@ -234,7 +234,7 @@ pub fn propagate_beta_reduce_with_meta(
 /// `let l = x => console.log(x)`) rename their parameters to the same new
 /// stamp, which the JS printer then emitted as two `let prim = …` declarations
 /// at module top level — invalid JS. Threading the pipeline-wide generator
-/// from [`crate::lambda::compile_context::LamStats::id_gen`] preserves the
+/// from [`crate::lambda::lam_compile_context::LamStats::id_gen`] preserves the
 /// OCaml invariant.
 pub fn propagate_beta_reduce_with_meta_and_id_gen(
     ident_tbl: &mut IdentTable,
@@ -693,7 +693,7 @@ pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::closure::VarStats;
+    use crate::lambda::lam_closure::VarStats;
     use crate::lambda::{Constant, FunctionAttribute, LambdaSwitch, Primitive};
     use crate::location::Location;
 
@@ -865,11 +865,11 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "exec".to_string(),
                     arg_types: vec![],
-                    ffi: crate::lambda::primitive::ExternalFfiSpec {
-                        kind: crate::lambda::primitive::ExternalFfiKind::Default,
+                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
-                        return_wrapper: crate::lambda::primitive::ExternalReturnWrapper::Identity,
+                        return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },
                     dynamic_import: false,

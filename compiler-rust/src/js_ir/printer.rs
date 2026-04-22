@@ -3850,47 +3850,47 @@ fn call_argument_needs_extra_group_indent(
     }
 }
 
-fn tag_info_has_untagged(attrs: &[crate::lambda::tag_info::Attribute]) -> bool {
+fn tag_info_has_untagged(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.name == "unboxed")
 }
 
-fn tag_info_tag_name(attrs: &[crate::lambda::tag_info::Attribute]) -> Option<&str> {
+fn tag_info_tag_name(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> Option<&str> {
     attrs.iter().find_map(|attr| {
         if attr.name != "tag" {
             return None;
         }
         match &attr.payload {
-            crate::lambda::tag_info::AttributePayload::Str(value) => Some(value.as_str()),
+            crate::lambda::lam_tag_info::AttributePayload::Str(value) => Some(value.as_str()),
             _ => None,
         }
     })
 }
 
-fn tag_info_runtime_tag(attrs: &[crate::lambda::tag_info::Attribute]) -> Option<SwitchCaseTag> {
+fn tag_info_runtime_tag(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> Option<SwitchCaseTag> {
     attrs.iter().find_map(|attr| {
         if attr.name != "as" {
             return None;
         }
         match &attr.payload {
-            crate::lambda::tag_info::AttributePayload::Str(value) => {
+            crate::lambda::lam_tag_info::AttributePayload::Str(value) => {
                 Some(SwitchCaseTag::String(value.clone()))
             }
-            crate::lambda::tag_info::AttributePayload::Int(value) => {
+            crate::lambda::lam_tag_info::AttributePayload::Int(value) => {
                 Some(SwitchCaseTag::Int(*value))
             }
-            crate::lambda::tag_info::AttributePayload::Float(value) => {
+            crate::lambda::lam_tag_info::AttributePayload::Float(value) => {
                 Some(SwitchCaseTag::Float(value.clone()))
             }
-            crate::lambda::tag_info::AttributePayload::BigInt(value) => {
+            crate::lambda::lam_tag_info::AttributePayload::BigInt(value) => {
                 Some(SwitchCaseTag::BigInt(value.clone()))
             }
-            crate::lambda::tag_info::AttributePayload::Bool(value) => {
+            crate::lambda::lam_tag_info::AttributePayload::Bool(value) => {
                 Some(SwitchCaseTag::Bool(*value))
             }
-            crate::lambda::tag_info::AttributePayload::Ident(value) if value == "null" => {
+            crate::lambda::lam_tag_info::AttributePayload::Ident(value) if value == "null" => {
                 Some(SwitchCaseTag::Null)
             }
-            crate::lambda::tag_info::AttributePayload::Ident(value) if value == "undefined" => {
+            crate::lambda::lam_tag_info::AttributePayload::Ident(value) if value == "undefined" => {
                 Some(SwitchCaseTag::Undefined)
             }
             _ => None,
@@ -5625,7 +5625,7 @@ mod tests {
                     Statement::variable(VariableDeclaration {
                         ident: Ident::create_local("b"),
                         value: Some(Expression::number(Number::int(9))),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     }),
                     Statement::return_(Expression::bool(true)),
@@ -5726,7 +5726,7 @@ mod tests {
         let stmt_before = Statement::variable(VariableDeclaration {
             ident: before,
             value: Some(Expression::number(Number::int(1))),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         });
         let stmt_fun = Statement::variable(VariableDeclaration {
@@ -5740,13 +5740,13 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         });
         let stmt_after = Statement::variable(VariableDeclaration {
             ident: after,
             value: Some(Expression::number(Number::int(2))),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         });
 
@@ -5767,7 +5767,7 @@ mod tests {
             Statement::variable(VariableDeclaration {
                 ident: outer,
                 value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
             Statement::variable(VariableDeclaration {
@@ -5781,7 +5781,7 @@ mod tests {
                     async_: false,
                     directive: None,
                 })),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
         ]);
@@ -5801,7 +5801,7 @@ mod tests {
             Statement::variable(VariableDeclaration {
                 ident: outer.clone(),
                 value: Some(Expression::number(Number::int(1))),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
             Statement::variable(VariableDeclaration {
@@ -5819,7 +5819,7 @@ mod tests {
                     async_: false,
                     directive: None,
                 })),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
         ]);
@@ -5857,7 +5857,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -5924,7 +5924,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6023,7 +6023,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6075,7 +6075,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6130,7 +6130,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6186,7 +6186,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6261,7 +6261,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6342,7 +6342,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6418,7 +6418,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6466,7 +6466,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6528,7 +6528,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6582,7 +6582,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6607,7 +6607,7 @@ mod tests {
                     Statement::variable(VariableDeclaration {
                         ident: match_.clone(),
                         value: None,
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     }),
                     Statement::new(StatementDesc::If(
@@ -6630,7 +6630,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6658,7 +6658,7 @@ mod tests {
                     Statement::variable(VariableDeclaration {
                         ident: match_.clone(),
                         value: None,
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     }),
                     Statement::new(StatementDesc::If(
@@ -6681,7 +6681,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6724,7 +6724,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6768,7 +6768,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6811,7 +6811,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6850,7 +6850,7 @@ mod tests {
                             "length".to_string(),
                             None,
                         ))),
-                        property: crate::lambda::compat::LetKind::Strict,
+                        property: crate::lambda::lam_compat::LetKind::Strict,
                         ident_info: Default::default(),
                     }),
                     Statement::exp(Expression::call(
@@ -6864,7 +6864,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6919,7 +6919,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -6972,7 +6972,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7037,7 +7037,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7111,7 +7111,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7182,7 +7182,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7249,7 +7249,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7320,7 +7320,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7406,7 +7406,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7518,7 +7518,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7540,7 +7540,7 @@ mod tests {
         let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
             ident: Ident::create_local("VS"),
             value: Some(Expression::undefined(false)),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -7559,13 +7559,13 @@ mod tests {
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
                 )),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: dead_info,
             }),
             Statement::variable(VariableDeclaration {
                 ident: Ident::create_local("alive"),
                 value: Some(Expression::number(Number::int(2))),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
         ]);
@@ -7586,7 +7586,7 @@ mod tests {
                 vec![],
                 CallInfo::default(),
             )),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: dead_info,
         })]);
 
@@ -7610,13 +7610,13 @@ mod tests {
                     async_: false,
                     directive: None,
                 })),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: dead_info,
             }),
             Statement::variable(VariableDeclaration {
                 ident: Ident::create_local("alive"),
                 value: Some(Expression::number(Number::int(2))),
-                property: crate::lambda::compat::LetKind::Strict,
+                property: crate::lambda::lam_compat::LetKind::Strict,
                 ident_info: Default::default(),
             }),
         ]);
@@ -8042,7 +8042,7 @@ mod tests {
                 async_: false,
                 directive: Some("'use memo'".to_string()),
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
@@ -8106,7 +8106,7 @@ mod tests {
                 async_: false,
                 directive: None,
             })),
-            property: crate::lambda::compat::LetKind::Strict,
+            property: crate::lambda::lam_compat::LetKind::Strict,
             ident_info: Default::default(),
         })]);
 
