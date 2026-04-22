@@ -36,6 +36,7 @@ pub mod deep_flatten;
 pub mod free_variables;
 pub mod js_pass_external_shadow;
 pub mod js_pass_tailcall_inline;
+pub mod js_shake;
 pub mod lam_exit_code;
 pub mod lam_hit;
 pub mod lam_util;
