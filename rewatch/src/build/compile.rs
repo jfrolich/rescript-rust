@@ -7,6 +7,7 @@ use super::logs;
 use super::packages;
 use crate::config;
 use crate::config::Config;
+use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use crate::helpers;
 use crate::helpers::StrippedVerbatimPath;
 use crate::project_context::ProjectContext;
@@ -171,6 +172,8 @@ fn compile_one(
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
+    subprocess: bool,
+    dump_typed_sexp: bool,
 ) -> CompletionMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
@@ -213,18 +216,24 @@ fn compile_one(
                     package,
                     &helpers::get_ast_path(&iface.path),
                     module,
+                    module_name,
                     true,
                     build_state,
                     warn_error_override.clone(),
+                    subprocess,
+                    dump_typed_sexp,
                 )
             });
             let result = compile_file(
                 package,
                 &helpers::get_ast_path(&source_file.implementation.path),
                 module,
+                module_name,
                 false,
                 build_state,
                 warn_error_override,
+                subprocess,
+                dump_typed_sexp,
             );
             let cmi_digest_after = helpers::compute_file_hash(Path::new(&cmi_path));
 
@@ -388,6 +397,8 @@ pub fn compile(
     let mut dirty_set: AHashSet<String> = dirty_modules;
 
     let warn_error_override = build_state.get_warn_error_override();
+    let subprocess = build_state.subprocess();
+    let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
 
     let (tx, rx) = mpsc::channel::<CompletionMsg>();
@@ -412,7 +423,14 @@ pub fn compile(
                 let inc_ref = &inc;
                 in_flight += 1;
                 scope.spawn(move |_| {
-                    let msg = compile_one(build_state_ref, &module_name, is_dirty, warn_override);
+                    let msg = compile_one(
+                        build_state_ref,
+                        &module_name,
+                        is_dirty,
+                        warn_override,
+                        subprocess,
+                        dump_typed_sexp,
+                    );
                     if show_progress {
                         inc_ref();
                     }
@@ -982,7 +1000,7 @@ fn build_compiler_options(
         .config
         .dependencies
         .as_ref()
-        .map(|d| d.iter().map(|s| s.as_str()).collect())
+        .map(|d| d.iter().map(|s| s.name()).collect())
         .unwrap_or_default();
     for dep_name in dep_names {
         if let Some(dep_pkg) = build_state.packages.get(dep_name) {
@@ -1605,7 +1623,7 @@ fn compile_module_in_process(
                     .join(js_relative)
             };
             if js_file.exists() {
-                execute_post_build_command(&js_post_build.cmd, &js_file)?;
+                execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
             }
         }
     }

@@ -3257,6 +3257,86 @@ pub fn typecheck_interface_in_process(
     })
 }
 
+/// Typecheck a `.res` implementation file in-process.
+/// Mirrors `typecheck_interface_in_process` but parses a structure (not a
+/// signature) and uses `type_structure`. No lambda or JS conversion is
+/// performed; the result is the module's published signature plus a
+/// portable `PersStruct` for the shared registry.
+pub fn typecheck_implementation_in_process(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+) -> Result<InProcessInterfaceResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    if parser.has_errors() {
+        return Err(anyhow!(
+            "Parse failed with {} error(s)",
+            parser.diagnostics().len()
+        ));
+    }
+
+    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
+    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let _ = id_gen.next_stamp();
+    let type_ctx = TypeContext::new(&id_gen);
+    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut env = initial_env(&type_ctx);
+
+    let mut pers_env = PersistentEnv::from_registry(registry);
+    let load_path = build_load_path(options);
+    type_ctx.set_load_paths(load_path.clone());
+    pers_env.set_load_path(load_path);
+    pers_env.set_open_modules(options.open_modules.clone());
+    pers_env.set_jsx_version(options.jsx_version);
+    pers_env.set_nopervasives(options.nopervasives);
+    pers_env.set_compiling_module(options.module_name.clone());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
+
+    tctx.set_persistent_env(pers_env);
+
+    let (typed_structure, _final_env) =
+        type_structure(&mut tctx, &env, parser.arena(), &structure)
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let _ = has_interface; // post-typecheck constraint pass not ported here
+
+    let published_signature =
+        crate::types::includemod::simplify_signature(&typed_structure.str_type);
+
+    let mut internal_env = tctx
+        .persistent_env
+        .take()
+        .unwrap_or_else(PersistentEnv::new);
+
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
+
+    let (pers_struct, new_alias_rewrites) =
+        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
+
+    Ok(InProcessInterfaceResult {
+        signature: published_signature,
+        pers_struct,
+        new_alias_rewrites,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_file_directives_from_structure;

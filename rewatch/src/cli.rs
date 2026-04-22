@@ -217,6 +217,29 @@ pub struct SubprocessArg {
 }
 
 #[derive(Args, Debug, Clone, Copy)]
+pub struct InProcessArg {
+    /// Run the Rust compiler fully in-process with no disk-based compiler artifacts.
+    /// Mutually exclusive with --rust.
+    #[arg(long)]
+    pub in_process: bool,
+}
+
+/// Derive the build mode from CLI flags.
+/// Errors if --rust and --in-process are both set.
+pub fn resolve_build_mode(
+    rust: bool,
+    in_process: bool,
+) -> Result<crate::build::build_types::BuildMode, String> {
+    use crate::build::build_types::BuildMode;
+    match (rust, in_process) {
+        (true, true) => Err("--rust and --in-process are mutually exclusive".to_string()),
+        (_, true) => Ok(BuildMode::InProcess),
+        (true, false) => Ok(BuildMode::Rust),
+        (false, false) => Ok(BuildMode::Default),
+    }
+}
+
+#[derive(Args, Debug, Clone, Copy)]
 pub struct DumpTypedSexpArg {
     /// Dump typed tree as sexp to .sexp files in lib/ocaml/ during compilation.
     #[arg(long)]
@@ -273,6 +296,9 @@ pub struct BuildArgs {
 
     #[command(flatten)]
     pub rust: RustParserArg,
+
+    #[command(flatten)]
+    pub in_process: InProcessArg,
 
     #[command(flatten)]
     pub subprocess: SubprocessArg,
@@ -602,6 +628,9 @@ pub struct WatchArgs {
     pub rust: RustParserArg,
 
     #[command(flatten)]
+    pub in_process: InProcessArg,
+
+    #[command(flatten)]
     pub subprocess: SubprocessArg,
 
     #[command(flatten)]
@@ -627,6 +656,7 @@ impl From<BuildArgs> for WatchArgs {
             after_build: build_args.after_build,
             warn_error: build_args.warn_error,
             rust: build_args.rust,
+            in_process: build_args.in_process,
             subprocess: build_args.subprocess,
             dump_typed_sexp_arg: build_args.dump_typed_sexp_arg,
             features: build_args.features,

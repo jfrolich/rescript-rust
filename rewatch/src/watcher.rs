@@ -1,5 +1,5 @@
 use crate::build;
-use crate::build::build_types::{BuildCommandState, SourceType};
+use crate::build::build_types::{BuildCommandState, BuildMode, SourceType};
 use crate::build::clean;
 use crate::cmd;
 use crate::config;
@@ -214,7 +214,7 @@ struct AsyncWatchArgs<'a> {
     after_build: Option<String>,
     create_sourcedirs: bool,
     plain_output: bool,
-    use_rust_parser: bool,
+    build_mode: BuildMode,
     subprocess: bool,
     dump_typed_sexp: bool,
     clear_screen: bool,
@@ -234,7 +234,7 @@ async fn async_watch(
         after_build,
         create_sourcedirs,
         plain_output,
-        use_rust_parser,
+        build_mode,
         subprocess,
         dump_typed_sexp,
         clear_screen,
@@ -475,7 +475,7 @@ async fn async_watch(
                     path,
                     plain_output,
                     build_state.get_warn_error_override(),
-                    build_state.use_rust_parser(),
+                    build_state.build_mode(),
                     build_state.subprocess(),
                     build_state.dump_typed_sexp,
                     prod,
@@ -554,7 +554,7 @@ pub fn start(
     create_sourcedirs: bool,
     plain_output: bool,
     warn_error: Option<String>,
-    use_rust_parser: bool,
+    build_mode: BuildMode,
     subprocess: bool,
     dump_typed_sexp: bool,
     clear_screen: bool,
@@ -579,7 +579,7 @@ pub fn start(
             path,
             plain_output,
             warn_error.clone(),
-            use_rust_parser,
+            build_mode,
             subprocess,
             dump_typed_sexp,
             prod,
@@ -602,7 +602,7 @@ pub fn start(
             after_build,
             create_sourcedirs,
             plain_output,
-            use_rust_parser,
+            build_mode,
             subprocess,
             dump_typed_sexp,
             clear_screen,

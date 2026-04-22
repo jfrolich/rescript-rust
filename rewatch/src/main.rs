@@ -47,6 +47,16 @@ fn main() -> Result<()> {
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
+            let build_mode = match cli::resolve_build_mode(
+                *build_args.rust,
+                build_args.in_process.in_process,
+            ) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+            };
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -55,7 +65,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*build_args.warn_error).clone(),
-                *build_args.rust,
+                build_mode,
                 build_args.subprocess.subprocess,
                 build_args.dump_typed_sexp_arg.dump_typed_sexp,
                 build_args.prod,
@@ -77,6 +87,16 @@ fn main() -> Result<()> {
             let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
 
             let features = watch_args.features.parsed();
+            let build_mode = match cli::resolve_build_mode(
+                *watch_args.rust,
+                watch_args.in_process.in_process,
+            ) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+            };
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -85,7 +105,7 @@ fn main() -> Result<()> {
                 true, // create_sourcedirs is now always enabled
                 plain_output,
                 (*watch_args.warn_error).clone(),
-                *watch_args.rust,
+                build_mode,
                 watch_args.subprocess.subprocess,
                 watch_args.dump_typed_sexp_arg.dump_typed_sexp,
                 watch_args.clear_screen,
