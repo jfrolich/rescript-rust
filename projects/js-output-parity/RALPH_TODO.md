@@ -1,9 +1,67 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **647 / 657** (98.5%)
+## Current baseline (2026-04-22): **648 / 657** (98.6%)
 - 4 compile errors (typecheck failures, upstream)
-- 6 output diffs (was 7)
-- Total diff lines: **1179** (down from 1261)
+- 5 output diffs (was 6)
+- Total diff lines: **410** (down from 1179, -769)
+
+## Fixes (2026-04-22, session 15) — `flatten_nested_caches` port
+
+**Ported `Lam_exit_code.has_exit_code` + `Lam_compile.flatten_nested_caches`**
+(lam_exit_code.ml:25-33, lam_compile.ml:104-118). New file
+`compiler-rust/src/lambda/lam_exit_code.rs` ports `has_exit_code` verbatim
+with the `Lfunction _ -> false` boundary. A new `flatten_nested_caches` helper
+in `compile.rs` walks outward-to-inward, absorbing nested `Lstaticcatch`
+handlers whose body doesn't raise to any already-absorbed label (the
+lam_compile.ml:108-111 #1698 safety check).
+
+**Added 4 multi-handler emitters** (`compile_multi_staticcatch_*_block` for
+return / tail_loop_return / effect / assignment contexts). Each one pre-
+allocates ONE `exit_id` shared across all handlers, assigns sequential
+`order_id`s starting at `next_static_jump_exit_code()` (OCaml's
+`HandlerMap.cardinal + 1` at lam_compile_context.ml:93), emits combined
+bindings declarations, compiles body with every handler active on
+`static_jump_handlers`, and dispatches via
+`compile_exit_dispatch` → `if (exit === N)` for 1 handler or
+`int_switch(exit)` for ≥2 handlers — matching OCaml's
+`compile_cases ... handlers` with NonComplete default
+(lam_compile.ml:987/996/1010/1017, `compile_general_cases`:551-630).
+
+**Wired into 7 LstaticCatch match arms** in `compile.rs`:
+`compile_expr` (line 749), `compile_let_binding` (1288),
+`compile_effect_block_inner` (1408), `compile_return_block` (new guard arm at
+1680), `compile_tail_loop_return_block` (2464), `compile_effect_output`
+(2762), `compile_assign_to_target_block` (5587). Each runs
+`flatten_nested_caches` first; >1 handlers goes to the multi-handler path,
+≤1 falls through to existing single-handler dispatch (preserving all
+pseudo-jmp / fallthrough / with_static_handler optimizations for the
+single-handler case).
+
+### Per-file impact (session 15)
+
+| File              | Diff lines (before → after) | Change       |
+|-------------------|-----------------------------|--------------|
+| rbset             | 195 → 0                     | **PASSES**   |
+| mario_game        | 552 → 41                    | -511         |
+| gpr_1698_test     | 215 → 152                   | -63          |
+| miss_colon_test   | 165 → 165                   | unchanged    |
+| gpr_3875_test     | 27 → 27                     | unchanged (not a flatten issue — session 14) |
+| reasonReactRouter | 25 → 25                     | unchanged (let rec → while loop, cluster B)  |
+
+Remaining failing files:
+- `gpr_1698_test`, `mario_game`, `miss_colon_test` — the *outer* catch now
+  flattens correctly; the residual diff is from Rust's `with_static_handler`
+  path inlining the outer handler at raise sites INSIDE nested (non-flattened)
+  catches, where OCaml uses explicit-jump dispatch once. Fixing this requires
+  forcing nested catches to take explicit-jump when any outer handler is
+  already pushed — the `static_jump_handlers.len() > 0` check in
+  `return_staticcatch_requires_explicit_jump` should already do this but the
+  LstaticCatch arm that calls `with_static_handler` at compile.rs:1748 sits
+  AFTER the explicit-jump guard, so the fallthrough/pseudo-fallthrough guards
+  don't examine the ambient static_jump stack.
+- `reasonReactRouter` — unchanged (Cluster B, let rec → while loop inlining).
+- `gpr_3875_test` — unchanged (option-switch case ordering).
+- 4 compile errors upstream (typecheck failures).
 
 ## Investigation 2026-04-22 (session 14) — correcting session 13's gpr_3875 analysis
 

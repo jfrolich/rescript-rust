@@ -24,6 +24,7 @@ use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
 use crate::lambda::free_variables::free_variables;
+use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
@@ -48,6 +49,72 @@ struct StaticHandler {
     label: i32,
     bindings: Vec<Ident>,
     handler: Lambda,
+}
+
+/// Direct port of the `handler` record in `Lam_compile_context`
+/// (lam_compile_context.ml:78). Used by `flatten_nested_caches` to collect
+/// multiple adjacent `Lstaticcatch` handlers into a single dispatch group.
+#[derive(Debug, Clone)]
+struct FlatHandler {
+    label: i32,
+    bindings: Vec<Ident>,
+    handler: Lambda,
+}
+
+/// Direct port of `Lam_compile.flat_catches` + `flatten_nested_caches`
+/// (lam_compile.ml:104-118).
+///
+/// Starting from the outermost `Lstaticcatch (outer_body, (outer_label,
+/// outer_bindings), outer_handler)`, walks inward, collecting each adjacent
+/// nested `Lstaticcatch` whose handler does NOT raise to any label already in
+/// the accumulator (the #1698 safety check, lam_compile.ml:108-111). Returns
+/// the collected handlers in **innermost-first** order, matching OCaml's
+/// `acc` which prepends (lam_compile.ml:113), together with the residual body
+/// that is no longer a flattenable `Lstaticcatch`.
+fn flatten_nested_caches<'a>(
+    outer_label: i32,
+    outer_bindings: &[Ident],
+    outer_body: &'a Lambda,
+    outer_handler: &Lambda,
+) -> (Vec<FlatHandler>, &'a Lambda) {
+    // `acc` matches OCaml's `acc` parameter to `flat_catches`. OCaml starts
+    // with `[]` and always absorbs the first (outermost) catch via the
+    // `acc = []` branch of the when-clause. In Rust we skip that trivial
+    // first step by seeding with the outermost handler.
+    let mut acc: Vec<FlatHandler> = vec![FlatHandler {
+        label: outer_label,
+        bindings: outer_bindings.to_vec(),
+        handler: outer_handler.clone(),
+    }];
+    let mut current: &Lambda = outer_body;
+    loop {
+        match current {
+            Lambda::LstaticCatch(inner_body, (inner_label, inner_bindings), inner_handler) => {
+                // lam_compile.ml:108-111 — "not (has_exit_code handler (fun exit ->
+                // List.exists acc (fun x -> x.label = exit)))". OCaml also has
+                // the `acc = []` short-circuit (lam_compile.ml:108) but after
+                // our seeding step acc is never empty, so the safety check runs
+                // unconditionally.
+                if has_exit_code(inner_handler, |exit| acc.iter().any(|h| h.label == exit)) {
+                    break;
+                }
+                acc.push(FlatHandler {
+                    label: *inner_label,
+                    bindings: inner_bindings.clone(),
+                    handler: (**inner_handler).clone(),
+                });
+                current = inner_body;
+            }
+            _ => break,
+        }
+    }
+    // OCaml's `acc` ends up with `[innermost; ...; outermost]` because each
+    // recursion prepends (lam_compile.ml:113). Rust pushed with outermost-first,
+    // so reverse to match OCaml's order — the `add_jmps` consumer iterates
+    // this list with `fold_left_with_offset (cardinal + 1)`, assigning
+    // sequential `order_id`s starting at innermost (lam_compile_context.ml:89-98).
+    acc.reverse();
+    (acc, current)
 }
 
 #[derive(Debug, Clone)]
@@ -688,7 +755,30 @@ impl LambdaCompiler {
                 // (it allocates a tmp, assigns through it, then dispatches).
                 // Take that path here; the `with_static_handler` inline
                 // shortcut has no OCaml analog for NeedValue.
-                self.compile_staticcatch_expr(*label, bindings, body, handler)
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    // lam_compile.ml:935 calls `flatten_nested_caches` at the
+                    // top of `compile_staticcatch`; a `code_table` with >1
+                    // entries goes through the multi-handler explicit-jump
+                    // arm for `NeedValue` at lam_compile.ml:978-988.
+                    let result = self.fresh_ident("catch");
+                    let mut prelude = vec![Statement::variable(VariableDeclaration {
+                        ident: result.clone(),
+                        value: None,
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    })];
+                    prelude.extend(self.compile_multi_staticcatch_assignment_block(
+                        &result, &handlers, flat_body,
+                    ));
+                    Compiled {
+                        prelude,
+                        expr: Expression::var(result),
+                    }
+                } else {
+                    self.compile_staticcatch_expr(*label, bindings, body, handler)
+                }
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let result = self.fresh_tmp_ident();
@@ -1210,11 +1300,21 @@ impl LambdaCompiler {
                     property: kind,
                     ident_info: IdentInfo::default(),
                 })];
-                block.extend(
-                    self.compile_staticcatch_assignment_block(
-                        id, *label, bindings, body, handler,
-                    ),
-                );
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    // lam_compile.ml:935 + 989-996 — `Declare (kind, id)`
+                    // with flattened multi-handler code_table.
+                    block.extend(self.compile_multi_staticcatch_assignment_block(
+                        id, &handlers, flat_body,
+                    ));
+                } else {
+                    block.extend(
+                        self.compile_staticcatch_assignment_block(
+                            id, *label, bindings, body, handler,
+                        ),
+                    );
+                }
                 block
             }
             Lambda::LifThenElse(cond, then_, else_) => {
@@ -1315,7 +1415,15 @@ impl LambdaCompiler {
                 // lam_compile.ml:963-1017. Mirror that by always taking the
                 // Rust explicit-jump path here; the inline `with_static_handler`
                 // shortcut is a Rust-only optimization with no OCaml analog.
-                self.compile_staticcatch_effect_block(*label, bindings, body, handler)
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    // lam_compile.ml:935 + 1000-1010 — `EffectCall Not_tail`
+                    // with flattened multi-handler code_table.
+                    self.compile_multi_staticcatch_effect_block(&handlers, flat_body)
+                } else {
+                    self.compile_staticcatch_effect_block(*label, bindings, body, handler)
+                }
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_effect_block(body);
@@ -1568,6 +1676,26 @@ impl LambdaCompiler {
                     block.push(Statement::return_(compiled.expr));
                 }
                 block
+            }
+            Lambda::LstaticCatch(body, (label, bindings), handler)
+                if flatten_nested_caches(*label, bindings, body, handler).0.len() > 1 =>
+            {
+                // lam_compile.ml:935 — `flatten_nested_caches` is the FIRST
+                // thing `compile_staticcatch` does. A code_table with >1
+                // entries goes through the multi-handler explicit-jump arm
+                // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                    eprintln!(
+                        "[staticcatch-return] label={label} path=flatten-multi count={} bindings={} body_kind={} handler_kind={}",
+                        handlers.len(),
+                        bindings.len(),
+                        staticcatch_debug_kind(body),
+                        staticcatch_debug_kind(handler),
+                    );
+                }
+                self.compile_multi_staticcatch_return_block(&handlers, flat_body)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
@@ -2334,6 +2462,17 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                // lam_compile.ml:935 — `flatten_nested_caches` is the first
+                // step of `compile_staticcatch`. A >1 entry code_table goes
+                // through the multi-handler explicit-jump arm
+                // (lam_compile.ml:1000-1010).
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    return self.compile_multi_staticcatch_tail_loop_return_block(
+                        &handlers, flat_body, tail_loop,
+                    );
+                }
                 let uses_fallthrough =
                     self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler);
                 let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
@@ -2621,6 +2760,17 @@ impl LambdaCompiler {
                 compiled_from_effect_block(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    // lam_compile.ml:935 + 1000-1010 — multi-handler
+                    // explicit-jump arm for an effect-value continuation.
+                    return Compiled {
+                        prelude: self
+                            .compile_multi_staticcatch_effect_block(&handlers, flat_body),
+                        expr: Expression::undefined(false),
+                    };
+                }
                 if !bindings.is_empty()
                     || self.staticcatch_requires_explicit_jump(bindings, handler)
                 {
@@ -5455,9 +5605,15 @@ impl LambdaCompiler {
                 // explicit-jump path unconditionally; the `with_static_handler`
                 // shortcut is a Rust-only optimization with no OCaml analog in
                 // this continuation.
-                self.compile_staticcatch_assignment_block(
-                    result, *label, bindings, body, handler,
-                )
+                let (handlers, flat_body) =
+                    flatten_nested_caches(*label, bindings, body, handler);
+                if handlers.len() > 1 {
+                    self.compile_multi_staticcatch_assignment_block(result, &handlers, flat_body)
+                } else {
+                    self.compile_staticcatch_assignment_block(
+                        result, *label, bindings, body, handler,
+                    )
+                }
             }
             Lambda::LtryWith(body, exn, handler) => {
                 let body_block = self.compile_assign_to_target_block(result, body);
@@ -8871,6 +9027,231 @@ impl LambdaCompiler {
             prelude,
             expr: Expression::var(result),
         }
+    }
+
+    /// Direct port of the multi-handler arm of OCaml's
+    /// `compile_staticcatch` (lam_compile.ml:963-1017), specialized to the
+    /// four continuation flavors below.
+    ///
+    /// Pre-allocates ONE `exit_id` shared across all handlers, assigns
+    /// sequential `order_id`s (== Rust `exit_code`s) starting at
+    /// `next_static_jump_exit_code()` (the OCaml `HandlerMap.cardinal + 1`,
+    /// lam_compile_context.ml:93), and emits all handlers' bindings together
+    /// at the top (lam_compile.ml:973-975). The body compiles with every
+    /// handler active, so any `LstaticRaise` to any of the flattened labels
+    /// assigns the corresponding exit code. After the body, a dispatch is
+    /// emitted via `compile_exit_dispatch` — the OCaml `compile_cases` call
+    /// with NonComplete default at lam_compile.ml:987/996/1010/1017.
+    fn emit_multi_staticcatch_prelude(
+        &mut self,
+        handlers: &[FlatHandler],
+    ) -> (Ident, i32, Block) {
+        let exit_id = self.fresh_ident("exit");
+        let first_code = self.next_static_jump_exit_code();
+        let mut block = vec![Statement::variable(VariableDeclaration {
+            ident: exit_id.clone(),
+            value: Some(Expression::number(Number::int(0))),
+            property: LetKind::Variable,
+            ident_info: IdentInfo::default(),
+        })];
+        // lam_compile.ml:973-975: `Ext_list.flat_map code_table (fun
+        // {bindings} -> map bindings (fun x -> S.declare_variable))`.
+        // Iterate handlers in flat-catches order (innermost first) so the
+        // declarations come out in the same order OCaml emits them.
+        for handler in handlers {
+            for binding in &handler.bindings {
+                block.push(Statement::variable(VariableDeclaration {
+                    ident: binding.clone(),
+                    value: None,
+                    property: LetKind::Variable,
+                    ident_info: IdentInfo::default(),
+                }));
+            }
+        }
+        for (i, handler) in handlers.iter().enumerate() {
+            let exit_code = first_code + i32::try_from(i).expect("exit handler index fits in i32");
+            self.static_jump_handlers.push(StaticJumpHandler {
+                label: handler.label,
+                exit_id: exit_id.clone(),
+                exit_code,
+                bindings: handler.bindings.clone(),
+            });
+        }
+        (exit_id, first_code, block)
+    }
+
+    fn pop_multi_staticcatch_handlers(&mut self, count: usize) {
+        for _ in 0..count {
+            self.static_jump_handlers.pop();
+        }
+    }
+
+    /// Emit the `compile_cases ~cxt ~switch_exp:exit_expr handlers` call at
+    /// lam_compile.ml:987/996/1010/1017. For a single handler + NonComplete
+    /// default this reduces to `if (exit === code) { handler_block }`
+    /// (compile_general_cases lam_compile.ml:551-557). For multiple handlers
+    /// it becomes an `int_switch` (lam_compile.ml:567-630).
+    fn compile_exit_dispatch(
+        &self,
+        exit_id: &Ident,
+        first_code: i32,
+        handler_blocks: Vec<Block>,
+    ) -> Option<Statement> {
+        if handler_blocks.is_empty() {
+            return None;
+        }
+        if handler_blocks.len() == 1 {
+            let handler_block = handler_blocks.into_iter().next().unwrap();
+            if handler_block.is_empty() {
+                return None;
+            }
+            return Some(Statement::if_(
+                self.staticcatch_exit_test(exit_id, first_code),
+                handler_block,
+                vec![],
+            ));
+        }
+        // Multi-handler: emit an Int_switch. Each non-last clause needs a
+        // `break` unless its body already terminates (Return/Throw). The
+        // last clause follows OCaml's "common break-through" convention
+        // (lam_compile.ml:626-627): should_break is false when the body
+        // already has exit semantics or when the continuation is
+        // non-returning.
+        let last_idx = handler_blocks.len() - 1;
+        let clauses: Vec<(i32, CaseClause)> = handler_blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| {
+                let is_last = i == last_idx;
+                let should_break = if is_last {
+                    false
+                } else {
+                    !block_terminates(&body)
+                };
+                (
+                    first_code + i32::try_from(i).expect("exit handler index fits in i32"),
+                    CaseClause {
+                        body,
+                        should_break,
+                        comment: None,
+                    },
+                )
+            })
+            .collect();
+        Some(Statement::new(StatementDesc::IntSwitch(
+            Expression::var(exit_id.clone()),
+            clauses,
+            None,
+        )))
+    }
+
+    fn compile_multi_staticcatch_return_block(
+        &mut self,
+        handlers: &[FlatHandler],
+        body: &Lambda,
+    ) -> Block {
+        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_block = self.compile_return_block(body);
+        // If the body already terminates (e.g. every path returned), OCaml
+        // would still emit the dispatch but it'd be dead. Match
+        // `compile_staticcatch_return_block`'s current behavior: skip it.
+        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+            Vec::new()
+        } else {
+            handlers
+                .iter()
+                .map(|h| self.compile_return_block(&h.handler))
+                .collect()
+        };
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
+            {
+                block.push(dispatch);
+            }
+        }
+        block
+    }
+
+    fn compile_multi_staticcatch_effect_block(
+        &mut self,
+        handlers: &[FlatHandler],
+        body: &Lambda,
+    ) -> Block {
+        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_block = self.compile_effect_block(body);
+        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+            Vec::new()
+        } else {
+            handlers
+                .iter()
+                .map(|h| self.compile_effect_block(&h.handler))
+                .collect()
+        };
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
+            {
+                block.push(dispatch);
+            }
+        }
+        block
+    }
+
+    fn compile_multi_staticcatch_assignment_block(
+        &mut self,
+        result: &Ident,
+        handlers: &[FlatHandler],
+        body: &Lambda,
+    ) -> Block {
+        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_block = self.compile_assign_to_target_block(result, body);
+        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+            Vec::new()
+        } else {
+            handlers
+                .iter()
+                .map(|h| self.compile_assign_to_target_block(result, &h.handler))
+                .collect()
+        };
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
+            {
+                block.push(dispatch);
+            }
+        }
+        block
+    }
+
+    fn compile_multi_staticcatch_tail_loop_return_block(
+        &mut self,
+        handlers: &[FlatHandler],
+        body: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
+        let body_block = self.compile_tail_loop_return_block(body, tail_loop);
+        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+            Vec::new()
+        } else {
+            handlers
+                .iter()
+                .map(|h| self.compile_tail_loop_return_block(&h.handler, tail_loop))
+                .collect()
+        };
+        self.pop_multi_staticcatch_handlers(handlers.len());
+        block.extend(body_block);
+        if !block_terminates(&block) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
+            {
+                block.push(dispatch);
+            }
+        }
+        block
     }
 
     fn collect_required_module_set(&self, block: &Block) -> OcamlModuleSet {
