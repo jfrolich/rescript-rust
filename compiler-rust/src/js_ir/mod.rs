@@ -1578,11 +1578,12 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
         let preserve_refinement_guard = preserves_typeof_refinement_guard(&cond, nested_cond);
         let preserve_literal_membership_guard =
             preserves_literal_membership_guard(&cond, nested_cond);
-        // Keep empty shared fallthrough blocks intact here. They need function-tail
-        // context to merge safely, otherwise later statements can change the meaning.
+        // OCaml's `S.if_` rule 10 (js_stmt_make.ml:290-292) merges
+        // `if c1 { if c2 then2 [] } []` into `if (c1 && c2) then2 []` — it
+        // does not require the inner/outer else to be non-empty. Allow the
+        // merge when both else blocks match (including both empty).
         if !preserve_refinement_guard
             && !preserve_literal_membership_guard
-            && !nested_else.is_empty()
             && ocaml_eq_block(nested_else, &else_)
         {
             return simplify_if_statement(

@@ -1,9 +1,44 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **637 / 657** (97.0%)
+## Current baseline (2026-04-22): **640 / 657** (97.4%)
 - 4 compile errors (typecheck failures, upstream)
-- 16 output diffs (down from 17)
-- Total diff hunks: **2745** (down from 2780 baseline at session start)
+- 13 output diffs (down from 16)
+- Total diff lines: **1741** (down from ~2745)
+
+## Recent fixes (2026-04-22, session 5)
+- **Staticcatch fallthrough path for empty bindings (compile.rs:1602+)**:
+  OCaml's `compile_staticcatch` pseudo-jmp path (lam_compile.ml:937-962,
+  `add_pseudo_jmp` at lam_compile_context.ml:99-104) fires for any single
+  code_table with `no_static_raise_in_handler`, regardless of bindings
+  arity — `add_pseudo_jmp` stores `order_id = -1` which `compile_staticraise`
+  treats as a fallthrough marker (lam_compile.ml:896). Rust's catch-all
+  arm at `compile_return_block` gated the fallthrough path on
+  `!bindings.is_empty()`, so staticcatch handlers with zero bindings
+  (the common shape for match-catch-all after all binders get inlined)
+  fell through to `with_static_handler`, which inlines the handler at
+  EVERY `LstaticRaise` site via `resolve_static_raise`. For
+  `fun_pattern_match.handle_tuple` and
+  `exception_rebound_err_test.test_js_error4` this duplicated the entire
+  handler body (3+ copies of `console.log(x); return x+y`). Remove the
+  bindings guard so the fallthrough path fires whenever the handler
+  itself has no static raise and no nested staticcatch, matching OCaml's
+  `no_static_raise_in_handler` check exactly.
+- **Nested-if `&&` merge with empty else (js_ir/mod.rs:1577+)**:
+  OCaml's `S.if_` rule 10 (js_stmt_make.ml:290-292) merges
+  `if c1 { if c2 then2 [] } []` into `if (c1 && c2) then2 []`
+  unconditionally when both outer and nested else blocks are empty.
+  Rust's `simplify_if_statement` had a `!nested_else.is_empty()` guard
+  (commit 327e6de13) that blocked this merge; the guard was compensating
+  for a regression when `with_static_handler` produced `nested_else =
+  [return ...]` shapes. After the staticcatch fallthrough fix above, the
+  empty-else form is produced at many more sites, so the merge needs to
+  fire there. Remove the guard and rely on `ocaml_eq_block(nested_else,
+  &else_)` for matching — which is true when both are empty.
+- Net impact: JS snapshot parity **637 → 640 / 657** (+3), total diff
+  lines **2745 → 1741** (-1000). `test_list.res`, `fun_pattern_match.res`,
+  and `exception_rebound_err_test.res` now match byte-for-byte; ticker,
+  gpr_3875_test, reasonReactRouter, stdlib_Stdlib_DictTests, rbset,
+  mario_game all shrink.
 
 ## Recent fixes (2026-04-22, session 4)
 - **Recursive `Lfunction` binding emit (commit 3e5a1cf3d)**: Real correctness bug.

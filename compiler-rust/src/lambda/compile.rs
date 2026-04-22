@@ -1620,26 +1620,28 @@ impl LambdaCompiler {
                 }
                 if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
-                } else if !bindings.is_empty()
-                    && !lambda_contains_static_raise(handler)
+                } else if !lambda_contains_static_raise(handler)
                     && !lambda_contains_staticcatch(handler)
                     && lambda_contains_static_raise_to_label(body, *label, bindings.len())
                 {
-                    // OCaml's `compile_staticcatch` inline path
-                    // (lam_compile.ml:937-962) declares the bindings, compiles
-                    // the body with `EffectCall (in_staticcatch tail_type)`
-                    // (so each `LstaticRaise` to this label assigns the
-                    // bindings and falls through), then appends the handler
-                    // ONCE after the body. Rust's `with_static_handler` path
-                    // duplicates the handler at every `LstaticRaise` site via
-                    // `resolve_static_raise`, which produces redundant copies
-                    // of the handler when the body has multiple raise sites.
-                    // Use the fallthrough mechanism (matches OCaml's body
-                    // compilation under the in_staticcatch=true continuation)
-                    // when bindings are present and the handler is itself
-                    // raise-free, mirroring `no_static_raise_in_handler`
-                    // (lam_compile_context.ml:80) plus the additional Rust
-                    // safety check that the handler has no nested staticcatch.
+                    // OCaml's `compile_staticcatch` pseudo-jmp path
+                    // (lam_compile.ml:937-962, add_pseudo_jmp at
+                    // lam_compile_context.ml:99-104) fires for any single
+                    // code_table with no static raise in the handler — it
+                    // does NOT gate on bindings arity. Declare the bindings
+                    // (possibly empty), compile the body with the
+                    // fallthrough handler active (so each `LstaticRaise` to
+                    // this label assigns the bindings — a no-op when
+                    // bindings are empty — and falls through), then append
+                    // the handler ONCE after the body.  Rust's
+                    // `with_static_handler` path duplicates the handler at
+                    // every `LstaticRaise` site via `resolve_static_raise`,
+                    // which bloats the output when the body has multiple
+                    // raise sites. `no_static_raise_in_handler`
+                    // (lam_compile_context.ml:80) is mirrored via
+                    // `lambda_contains_static_raise(handler)` plus the
+                    // additional safety check that the handler has no
+                    // nested staticcatch.
                     self.compile_fallthrough_staticcatch_return_block(
                         *label, bindings, body, handler,
                     )
