@@ -4,6 +4,28 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 51 (2026-04-22) — loop re-invoked again; still terminal
+
+Loop re-invoked on session-50 tip (`e5631c3a6`). Spot-check only, no source
+changes:
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines.
+- `simplify_with_env` / `SimplifyEnv` still absent from `compiler-rust/src/**`
+  (Grep returns zero matches).
+- Baseline unchanged: **653 / 657 (99.4%)**, 0 output diffs, 4 upstream
+  typechecker failures (`ExprTypeClash` on `defunctor_make_test`,
+  `functor_ffi`, `inline_map2_test`, `int_map`).
+
+Sessions 49 and 50 both explicitly declined to schedule another wake-up;
+this session was human-re-invoked. Not scheduling another wake-up either.
+The three options from session 18 remain the only paths forward and all
+require a human decision:
+
+1. Fix the 4 upstream typechecker regressions (typechecker work, outside
+   this project's scope per PLAN.md).
+2. Accept 99.4% (653/657) as terminal parity on `typechecker-performance`.
+3. Rebase onto a typechecker-green branch and re-run the JS parity suite.
+
 ## Session 50 (2026-04-22) — loop re-invoked; terminal state confirmed
 
 Loop re-invoked after session 49's explicit stop. Same state:
