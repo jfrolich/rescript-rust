@@ -204,10 +204,21 @@ impl Constant {
         Constant::JsUndefined { is_unit: false }
     }
 
-    /// Check if this constant requires allocation at runtime
+    /// Check if this constant requires allocation at runtime.
+    ///
+    /// Direct port of OCaml's `Lam_constant.is_allocating`
+    /// (compiler/frontend/lam_constant.ml:104-111). Note `Const_some inner`
+    /// recurses into `inner`: `Const_some (Const_string "v1")` is
+    /// non-allocating because `Const_some` only inserts a JS object wrapper
+    /// when the inner already requires one (the JS lowering folds nested
+    /// non-allocating `Some` values into the literal). The original Rust
+    /// code returned `true` for every `Constant::Some`, which blocked
+    /// `field_flatten_get` from lifting non-allocating optional record
+    /// fields like `{x1: ?Some("v1")}` out of the parent constant block.
     pub fn is_allocating(&self) -> bool {
         match self {
-            Constant::Block { .. } | Constant::Some(_) => true,
+            Constant::Block { .. } => true,
+            Constant::Some(inner) => inner.is_allocating(),
             Constant::JsNull
             | Constant::JsUndefined { .. }
             | Constant::JsTrue
@@ -354,7 +365,18 @@ mod tests {
     fn test_is_allocating() {
         assert!(!Constant::int(42).is_allocating());
         assert!(!Constant::string("hello").is_allocating());
-        assert!(Constant::Some(Box::new(Constant::int(42))).is_allocating());
+        // OCaml's `is_allocating` (lam_constant.ml:104-111) recurses into
+        // `Const_some inner`, so a non-allocating inner makes the whole
+        // `Some` non-allocating.
+        assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
+        assert!(
+            Constant::Some(Box::new(Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Tuple,
+                elements: vec![Constant::int(1)],
+            }))
+            .is_allocating()
+        );
         assert!(
             Constant::Block {
                 tag: 0,
