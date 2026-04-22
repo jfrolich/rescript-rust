@@ -4,6 +4,24 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 20 (2026-04-22) — third re-verification, state still unchanged
+
+Loop re-invoked on the session-19 tip (`5161eccae`). Spot-checked instead of
+re-running the 30-min parity sweep:
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines; no `simplify_with_env`
+  / `SimplifyEnv` anywhere in `compiler-rust/src/**`.
+- `ExternalShadow.res` compiles byte-identical to its checked-in `.mjs` snapshot
+  (pipeline works end-to-end for a known-good file).
+- `inline_map2_test.res` still crashes with the exact same
+  `Type checking failed: CoreError(UndefinedMethod { method: "Test_utils.eq" })`
+  recorded in session 18 — before any JS-backend code runs.
+
+**This is the third session in a row with no actionable work.** The prompt's
+exit condition ("genuine hard blocker that requires human input") continues
+to fire. Re-running the loop without human action on the three options in
+session 18 will keep producing this same entry. No source changes.
+
 ## Session 19 (2026-04-22) — re-verified blocker, state unchanged
 
 Loop re-invoked on the same HEAD as session 18 (696cba702). Re-verified
