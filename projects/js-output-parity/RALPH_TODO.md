@@ -4,6 +4,48 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 50 (2026-04-22) — loop re-invoked; terminal state confirmed
+
+Loop re-invoked after session 49's explicit stop. Same state:
+
+- `compiler-rust/src/lambda/simplify.rs`: 306 lines, clean 1:1 port of
+  `lam_compile_main.ml:148-200` — confirmed by reading the file end-to-end.
+- `simplify_with_env` / `SimplifyEnv`: grep across `compiler-rust/src/**`
+  returns zero matches. All four passes listed in the prompt as needing
+  stubs (`collect_info`, `remove_alias`, `alpha_conversion`, `deep_flatten`)
+  are ported and live in `lambda/` as real implementations.
+- All 4 failing files reproduced through the exact harness path
+  (`cd tests/tests/lib/bs && bsc <harness args> src/FILE.ast`):
+
+  | File | Error |
+  |------|-------|
+  | `defunctor_make_test.res` | `ExprTypeClash` trace `[(3207, 3199)]` ctx `FunctionCall` |
+  | `functor_ffi.res`         | `ExprTypeClash` trace `[(1447, 1395)]` ctx `None`         |
+  | `inline_map2_test.res`    | `ExprTypeClash` trace `[(9965, 10024)]` ctx `FunctionCall`|
+  | `int_map.res`             | `ExprTypeClash` trace `[(5505, 5500)]` ctx `FunctionCall` |
+
+  All four fail in the typechecker before any JS-backend code runs. All
+  four involve functor-instance typing (Belt.Id.MakeComparable, a ffi
+  functor, a `Belt.Map.Dict` wrapper, etc.) — the module-strengthening
+  / `Subst.modtype` class noted in the stamp-parity memory.
+
+**Correction to sessions 19–49.** Those entries transcribed the
+`inline_map2_test.res` error as
+`UndefinedMethod { method: "Test_utils.eq" }`. That message only
+appears when `bsc` is run on the raw `.res` source without the harness's
+`-I ../ocaml` etc.; the actual harness-path failure is `ExprTypeClash`
+like the other three, which session 18 reported correctly. The root
+cause classification (upstream typechecker regression, functor module
+strengthening) is unchanged.
+
+**Terminal state, not scheduling another wake-up.** Sessions 18 and 49
+already made the right call. The three options for the human remain:
+
+1. Fix the 4 upstream typechecker regressions (work on the typechecker,
+   out of scope per PLAN.md).
+2. Accept 99.4% (653/657) as terminal parity on this branch.
+3. Rebase onto a typechecker-green branch and re-run the JS parity suite.
+
 ## Session 49 (2026-04-22) — breaking the no-op cycle
 
 Loop re-invoked on the session-48 tip (`e40f922d8`). Spot-check confirms state
