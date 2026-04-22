@@ -1,8 +1,7 @@
 use super::*;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
-pub(super) use crate::js_ir::printer::print_deps_program_with_directives;
 pub(super) use crate::js_ir::{
-    ModulePathResolver, print_block, print_deps_program, print_expression,
+    ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives, print_expression,
 };
 pub(super) use crate::lambda::constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,

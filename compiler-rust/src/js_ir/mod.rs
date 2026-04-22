@@ -15,6 +15,7 @@
 
 pub mod op;
 pub mod printer;
+pub mod program_printer;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -24,9 +25,10 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
 use crate::lambda::SwitchCaseTag;
-use crate::lambda::tag_info::TagInfo;
+use crate::lambda::lam_tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
-pub use printer::{JsPrinter, print_block, print_deps_program, print_expression, print_program};
+pub use printer::{JsPrinter, print_block, print_expression};
+pub use program_printer::{print_deps_program, print_deps_program_with_directives, print_program};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -13,7 +13,7 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
-use crate::js_ir::{Kind, ModulePathResolver, printer::print_deps_program_with_directives};
+use crate::js_ir::{Kind, ModulePathResolver, print_deps_program_with_directives};
 use crate::lambda::compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
