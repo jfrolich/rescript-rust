@@ -4,6 +4,23 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 25 (2026-04-22) — eighth re-verification, state still unchanged
+
+Loop re-invoked on the session-24 tip (`243b5a5e9`). Spot-check only:
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines; no `simplify_with_env`
+  / `SimplifyEnv` anywhere in `compiler-rust/src/**`.
+- `inline_map2_test.res` still crashes with
+  `Type checking failed: CoreError(UndefinedMethod { method: "Test_utils.eq" })`
+  — identical to sessions 18–24.
+- `ExternalShadow.res` still compiles byte-identical to its `.mjs` snapshot.
+- `cargo build --release` — no work to do (already built).
+
+Eighth consecutive no-op. The only path to further progress is human input
+on the three options from session 18 (fix the 4 upstream typechecker
+regressions on `typechecker-performance`, accept 99.4% as terminal parity,
+or rebase onto a typechecker-green branch). No source changes.
+
 ## Session 24 (2026-04-22) — seventh re-verification, state still unchanged
 
 Loop re-invoked on the session-23 tip (`f1243171a`). Spot-check only:
