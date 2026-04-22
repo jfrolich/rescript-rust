@@ -1,9 +1,46 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **650 / 657** (98.9%)
+## Current baseline (2026-04-22): **651 / 657** (99.1%)
 - 4 compile errors (typecheck failures, upstream)
-- 3 output diffs (was 4)
-- Total diff lines: **62** (down from 111, -49)
+- 2 output diffs (was 4)
+- Total diff lines: **52** (down from 111, -59)
+
+## Fix (2026-04-22, session 16 continued) — port OCaml's `compile_general_cases` per-clause `should_break` to `compile_exit_dispatch`
+
+`compile_exit_dispatch` was hard-coding `should_break = false` for the
+trailing case clause and using `!block_terminates(&body)` for everything
+else, with a misleading comment about a "common break-through convention".
+OCaml has no such position-based special case. `compile_general_cases`
+(lam_compile.ml:607-624) computes `should_break` PER per-group last
+clause via `Js_output.to_break_block` (~ `!block_terminates`), and when
+the surrounding continuation `continuation_is_return`
+(lam_compile_context.ml:68-72) it ANDs with `Lam_exit_code.has_exit lam`.
+
+In Rust's `compile_exit_dispatch` every handler is its own group, so the
+per-clause logic applies uniformly:
+- terminates → `should_break = false`
+- otherwise, return-context → `has_exit_code(handler, |_| true)`
+- otherwise, non-return → `true`
+
+Threaded `handler_lambdas` and `is_return_context` through the four
+multi-handler callers:
+- `compile_multi_staticcatch_return_block` → `is_return_context = true`
+- `compile_multi_staticcatch_tail_loop_return_block` → `true`
+- `compile_multi_staticcatch_effect_block` → `false` (`EffectCall Not_tail`)
+- `compile_multi_staticcatch_assignment_block` → `false` (`Assign`)
+
+mario_game's `process_collision` case-3 handler now emits the trailing
+`break;` OCaml has, since the handler body doesn't terminate AND contains
+the inner `Lstaticraise(4)`.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| mario_game        | 10 → 0                      | **PASSES** |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+| reasonReactRouter | 25 → 25 (unchanged)         |
+
+JS snapshot parity: **650 → 651 / 657 (+1)**; output diffs **3 → 2**;
+total diff lines **62 → 52 (-10)**.
 
 ## Fix (2026-04-22, session 16 continued) — port OCaml's `compile_ifthenelse` Declare arm
 

@@ -9178,6 +9178,8 @@ impl LambdaCompiler {
         exit_id: &Ident,
         first_code: i32,
         handler_blocks: Vec<Block>,
+        handler_lambdas: &[&Lambda],
+        is_return_context: bool,
     ) -> Option<Statement> {
         if handler_blocks.is_empty() {
             return None;
@@ -9193,22 +9195,26 @@ impl LambdaCompiler {
                 vec![],
             ));
         }
-        // Multi-handler: emit an Int_switch. Each non-last clause needs a
-        // `break` unless its body already terminates (Return/Throw). The
-        // last clause follows OCaml's "common break-through" convention
-        // (lam_compile.ml:626-627): should_break is false when the body
-        // already has exit semantics or when the continuation is
-        // non-returning.
-        let last_idx = handler_blocks.len() - 1;
+        // Multi-handler: emit an Int_switch. Per OCaml's `compile_general_cases`
+        // (lam_compile.ml:607-624), every per-group last clause computes
+        // `should_break` from `Js_output.to_break_block` (~ `!block_terminates`)
+        // and, when the surrounding continuation `continuation_is_return`
+        // (lam_compile_context.ml:68-72), additionally ANDs with
+        // `Lam_exit_code.has_exit lam`. In `compile_exit_dispatch` each handler
+        // is its own group, so the same per-clause logic applies uniformly —
+        // including the trailing case (mario_game's `process_collision` case 3).
+        debug_assert_eq!(handler_blocks.len(), handler_lambdas.len());
         let clauses: Vec<(i32, CaseClause)> = handler_blocks
             .into_iter()
+            .zip(handler_lambdas.iter())
             .enumerate()
-            .map(|(i, body)| {
-                let is_last = i == last_idx;
-                let should_break = if is_last {
+            .map(|(i, (body, handler_lam))| {
+                let should_break = if block_terminates(&body) {
                     false
+                } else if is_return_context {
+                    has_exit_code(handler_lam, |_| true)
                 } else {
-                    !block_terminates(&body)
+                    true
                 };
                 (
                     first_code + i32::try_from(i).expect("exit handler index fits in i32"),
@@ -9248,8 +9254,14 @@ impl LambdaCompiler {
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
-            {
+            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
+            if let Some(dispatch) = self.compile_exit_dispatch(
+                &exit_id,
+                first_code,
+                handler_blocks,
+                &handler_lambdas,
+                true,
+            ) {
                 block.push(dispatch);
             }
         }
@@ -9274,8 +9286,14 @@ impl LambdaCompiler {
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
-            {
+            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
+            if let Some(dispatch) = self.compile_exit_dispatch(
+                &exit_id,
+                first_code,
+                handler_blocks,
+                &handler_lambdas,
+                false,
+            ) {
                 block.push(dispatch);
             }
         }
@@ -9301,8 +9319,14 @@ impl LambdaCompiler {
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
-            {
+            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
+            if let Some(dispatch) = self.compile_exit_dispatch(
+                &exit_id,
+                first_code,
+                handler_blocks,
+                &handler_lambdas,
+                false,
+            ) {
                 block.push(dispatch);
             }
         }
@@ -9328,8 +9352,14 @@ impl LambdaCompiler {
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, first_code, handler_blocks)
-            {
+            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
+            if let Some(dispatch) = self.compile_exit_dispatch(
+                &exit_id,
+                first_code,
+                handler_blocks,
+                &handler_lambdas,
+                true,
+            ) {
                 block.push(dispatch);
             }
         }
