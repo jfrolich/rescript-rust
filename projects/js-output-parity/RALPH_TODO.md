@@ -3,6 +3,45 @@
 ## Current baseline (2026-04-22): **637 / 657** (97.0%)
 - 4 compile errors (typecheck failures, upstream)
 - 16 output diffs (down from 17)
+- Total diff hunks: **2745** (down from 2780 baseline at session start)
+
+## Recent fixes (2026-04-22, session 4)
+- **Recursive `Lfunction` binding emit (commit 3e5a1cf3d)**: Real correctness bug.
+  `compile_recursive_binding`'s catch-all (compile.rs:1005) split every
+  non-Lfunction recursive binding into `let r;` placeholder + `r = expr`
+  assignment, regardless of expr shape. When the inner letrec collapses
+  to a function expression — e.g. `let rec r = (let x = makeblock(A, r);
+  fun () => x)` lowers to `let x = {VAL: r}; r = () => x` — the literal
+  output captured `undefined` into `x.VAL` because `let r;` doesn't get
+  hoisted. OCaml's `compile_recursive_let` catch-all wraps via
+  `Declare(Alias, id)` and the printer emits a function declaration
+  (`function r() {...}`), which JS hoists. Mirror that: when
+  `compiled.expr` is Fun, emit `Variable { value: Some(Fun) }` after
+  prelude. Rust's printer at top level converts to `function r() {...}`.
+  Total diff hunks 2763 -> 2745 (-18); fun_pattern_match diff 52 -> 34.
+- **Static-raise switch case break (commit 3b77eca9a)**:
+  `compile_named_string_switch_return_with_strategy` (compile.rs:4407)
+  and `grouped_tail_loop_return_string_clauses` (compile.rs:4519)
+  hardcoded `should_break: false`. When the case body was a static raise
+  compiling to an exit assignment (`exit$1 = 5;`), the missing break
+  caused JS fallthrough to the next case. Mirror
+  `grouped_return_string_clauses`'s `should_break = !block_terminates &&
+  lambda_has_exit`. Total diff hunks 2780 -> 2763 (-17); fixes
+  fallthrough in gpr_1698_test, miss_colon_test, and similar.
+
+## Failed approaches (2026-04-22, session 4)
+- **Make `block_last_is_terminal` non-recursive**: Tried matching OCaml's
+  `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193) which
+  inspects only the literal last statement. Regressed 637 -> 630 (-7);
+  many Rust compile paths produce `[..., Block[..., return]]` shapes
+  that OCaml never sees because OCaml's `output_as_block` calls
+  `unnest_block` first. Reverted. The full fix requires also calling
+  `unnest_block` at every `Block` materialization site in Rust's
+  compile path, but `unnest_block` only peels single-element wrappers
+  (matching OCaml js_output.ml:77-80) — multi-statement blocks ending
+  in `Block[...]` are not peeled by either, so the architectural
+  divergence is in WHERE Rust produces these shapes vs OCaml's
+  pre-unnested `Js_output.t` plumbing.
 
 ## ⚠️ THE MONOLITH IS GONE — ALL OCAML PIPELINE STAGES PORTED
 
