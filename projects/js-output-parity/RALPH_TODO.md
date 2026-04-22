@@ -5,6 +5,82 @@
 - 6 output diffs (was 7)
 - Total diff lines: **1179** (down from 1261)
 
+## Investigation 2026-04-22 (session 13) — remaining 6 output diffs all trace to one missing port
+
+Ran baseline and audited every remaining failing file. The 6 output diffs
+(1179 total diff lines) cluster into exactly **two** missing OCaml ports:
+
+### Cluster A: Missing `flatten_nested_caches` (affects 4 of 6 files, ~1127 diff lines)
+
+**Port needed:** `compiler/core/lam_compile.ml:104-118` — `flat_catches` /
+`flatten_nested_caches`. Then modify the four `compile_staticcatch_*_block`
+entry points (return / effect / assignment / tail_loop_return) to call
+flatten first and emit ONE `exit_id` for the whole flattened chain with
+sequential `order_id`s (1, 2, 3, …).
+
+**OCaml behavior** (lam_compile.ml:934-1017):
+1. `flatten_nested_caches lam` walks the body chain, collecting nested
+   `Lstaticcatch` handlers into one list. Stops when the current handler
+   raises to a label already in the accumulator (the #1698 safety check at
+   lines 107-111).
+2. ONE `exit_id` created via `Ext_ident.create_tmp ~name:"exit"`.
+3. `add_jmps jmp_table exit_id code_table` (lam_compile_context.ml:89-98):
+   seeds order at `HandlerMap.cardinal + 1`, assigns sequential order_ids
+   to each handler, adds all to the jmp_table.
+4. Emits `let exit = 0;` + all handlers' bindings declared + body + 
+   `switch(exit) { case 1: h1; case 2: h2; … }` after body.
+
+**Rust today** (compile.rs:8786-8817 and siblings):
+- `compile_staticcatch_return_block` creates a fresh `exit_id` per
+  `Lstaticcatch` via `fresh_ident("exit")`. Nested staticcatches get
+  separate `exit`, `exit$1`, `exit$2` variables.
+- For multi-raise non-empty-bindings handlers, the outer-most path goes
+  through `with_static_handler` → `resolve_static_raise` which INLINES
+  the handler body at every `LstaticRaise` site via `subst::subst`.
+  This is what produces 4× handler duplication in `miss_colon_test`,
+  `gpr_1698_test`, `rbset`, `mario_game`.
+
+**Files affected + OCaml raw lambda shape (verified via `-drawlambda`):**
+
+- `gpr_3875_test.res` (27 diff lines): 3-level nested catch
+  `(catch 1 (catch 2 (catch 3 <body> <h3>) <h2>) <h1>)`. `flat_catches`
+  stops at depth 2 (h3 = b-check raises to 1+2, both in acc). Outer
+  collapses to `{code_table = [{2}, {1}], body = (catch 3 …)}`. Inner
+  catch 3 compiles separately with a NEW exit_id. Rust today gives each
+  catch its own exit_id and inlines h3 at every raise site.
+- `miss_colon_test.res` (165 diff lines): 2-level nested catch on the
+  inner `$star$colon` tail-loop. Inner handler inlined at every `exit = 2`
+  site (seen in 4 nested branches).
+- `gpr_1698_test.res` (215 diff lines): 4-level nested catch with 5
+  exit labels. Rust collapses all handler bodies inline at each raise.
+- `rbset.res` (195 diff lines): 2-level nested catch in `balance_left`.
+  OCaml: single `switch(exit) { case 1: …; case 2: …; }`. Rust:
+  `if (exit === 2) {…} else {…}` with handler inlining.
+- `mario_game.res` (552 diff lines): large nested catch chain in
+  `process_collision`. Exit variable naming diverges (3 exits in Rust vs
+  1 in OCaml), bindings reorderings cascade from the different ordering.
+
+### Cluster B: Missing `let rec` → tail-loop inlining pass (affects 1 file, 25 diff lines)
+
+- `reasonReactRouter.res:134-148` — `urlNotEqual` contains
+  `let rec listNotEqual = ...` used exactly ONCE in the outer
+  `a.hash !== b.hash || (a.search !== b.search || listNotEqual(a.path, b.path))`.
+- OCaml emits the recursion as a `while (true)` loop INLINED at the call site:
+  `let _aList = a.path; let _bList = b.path; while (true) { ... }`, and
+  the outer `||` gets flipped to `if (cond) return true; else { <loop> }`.
+- Rust keeps `listNotEqual` as an inner closure and emits
+  `return cond1 || cond2 || listNotEqual(a.path, b.path);`.
+- The OCaml transform is: recognize a single-use `let rec f = fun args => body`
+  where `body` tail-calls `f`, convert to `let args = init; while(true) { body_with_continue }`,
+  then inline at the call site. This is done in
+  `compiler/core/lam_compile.ml` tail-call handling + simplify_lets inlining
+  for single-use recursive bindings. Needs verifying against the OCaml
+  pass that performs this specific rewrite.
+
+### Cluster C: Compile errors (4 files — upstream, not in scope here)
+- `defunctor_make_test.res`, `functor_ffi.res`, `inline_map2_test.res`,
+  `int_map.res` — all typecheck failures, not backend issues.
+
 ## Recent fixes (2026-04-22, session 12 — continued)
 - **`Constant::Some::is_allocating` recurses into inner
   (constant.rs:`is_allocating`)**: Direct port of
