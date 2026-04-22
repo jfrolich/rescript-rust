@@ -3,7 +3,38 @@
 ## Current baseline (2026-04-22): **650 / 657** (98.9%)
 - 4 compile errors (typecheck failures, upstream)
 - 3 output diffs (was 4)
-- Total diff lines: **93** (down from 111, -18)
+- Total diff lines: **62** (down from 111, -49)
+
+## Fix (2026-04-22, session 16 continued) — port OCaml's `compile_ifthenelse` Declare arm
+
+`compile_if_binding_block` was unconditionally compiling both branches in
+`Assign id` context, producing `[Exp(eff1), Exp(eff2), Exp(id = val)]`-style
+blocks for any `Lsequence`-shaped branch. The downstream
+`compile_declared_if_block` only folds to `let id = cond ? a : b;` when both
+branches collapse to a SINGLE `id = expr;` statement, so any sequenced effect
+(common in mario_game's `let r2$1 = if ... else (eff1, eff2, undef)` shape)
+fell back to `let id; if (cond) { id = a; } else { eff1; eff2; id = undef; }`.
+
+OCaml's `compile_ifthenelse` Declare arm (lam_compile.ml:1326-1349) first
+tries both branches in `NeedValue Not_tail`. When BOTH yield
+`{block = []; value = Some _}` — including the `E.seq`-folded sequence shape
+that `Js_output.append_output` produces (js_output.ml:125-131) — it emits
+`let id = cond ? out1 : out2;` via `E.econd`. Only when one branch has
+non-empty block does it fall back to `S.if_ ~declaration` over Assign id.
+
+Mirror that in Rust: try `compile_expr` on both branches first; if both have
+empty prelude, build the ternary directly. Otherwise fall through to the
+existing Assign path.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| mario_game        | 41 → 10                     | -31 |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+| reasonReactRouter | 25 → 25 (unchanged)         |
+
+Total diff lines: **93 → 62**. JS snapshot parity unchanged at 650/657
+(the residual mario_game diff is a single missing `break;` at the end of
+an outer switch case — separate cluster).
 
 ## Fix (2026-04-22, session 16) — drop pre-filter before `compile_small_string_switch_*` arms
 

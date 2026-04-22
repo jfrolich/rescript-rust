@@ -1450,6 +1450,29 @@ impl LambdaCompiler {
         else_: &Lambda,
     ) -> Block {
         let cond_compiled = self.compile_expr(cond);
+        // Mirror OCaml's `compile_ifthenelse` Declare arm
+        // (lam_compile.ml:1326-1349): first try both branches in
+        // `NeedValue Not_tail`. When BOTH yield `{block = []; value = Some _}`
+        // (i.e. fold to a side-effect-free expression including `E.seq`-folded
+        // sequences), emit `let id = cond ? out1 : out2;` via `E.econd`.
+        // Otherwise compile in Assign id and emit `let id; if (cond) ...`.
+        let then_compiled = self.compile_expr(then_);
+        let else_compiled = self.compile_expr(else_);
+        if then_compiled.prelude.is_empty() && else_compiled.prelude.is_empty() {
+            let mut block = cond_compiled.prelude;
+            block.push(Statement::variable(VariableDeclaration {
+                ident: id.clone(),
+                value: Some(Expression::cond(
+                    cond_compiled.expr,
+                    then_compiled.expr,
+                    else_compiled.expr,
+                )),
+                property: kind,
+                ident_info: IdentInfo::default(),
+            }));
+            return block;
+        }
+
         let then_block = self.compile_assign_to_target_block(id, then_);
         let else_block = self.compile_assign_to_target_block(id, else_);
 
