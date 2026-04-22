@@ -2063,13 +2063,34 @@ fn expression_stmt_is_trivial(expr: &Expression) -> bool {
     )
 }
 
+/// Mirrors OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+/// which inspects the LITERAL last statement of a block — it does NOT recurse
+/// into a trailing `Block` statement. OCaml call sites that pass blocks into
+/// `S.if_` first run `Js_output.output_as_block` (js_output.ml:82-86), which
+/// peels single-element `[Block ...]` wrappers via `unnest_block`
+/// (js_output.ml:77-80) before this check runs, so the literal-last test is
+/// always against a flat block.
 fn last_statement(block: &Block) -> Option<&Statement> {
-    match block.last() {
-        Some(Statement {
-            desc: StatementDesc::Block(inner),
+    block.last()
+}
+
+/// Direct port of OCaml's `Js_output.unnest_block` (js_output.ml:77-80):
+/// strips a single-element `[Block ...]` wrapper recursively. Multi-statement
+/// blocks ending in a `Block` are NOT peeled — that matches OCaml exactly.
+pub fn unnest_block(block: Block) -> Block {
+    match block.as_slice() {
+        [Statement {
+            desc: StatementDesc::Block(_),
             ..
-        }) => last_statement(inner),
-        other => other,
+        }] => {
+            let mut block = block;
+            let stmt = block.pop().expect("non-empty single-element block");
+            match stmt.desc {
+                StatementDesc::Block(inner) => unnest_block(inner),
+                _ => unreachable!(),
+            }
+        }
+        _ => block,
     }
 }
 

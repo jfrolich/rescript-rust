@@ -1,9 +1,38 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **642 / 657** (97.7%)
+## Current baseline (2026-04-22): **643 / 657** (97.9%)
 - 4 compile errors (typecheck failures, upstream)
-- 11 output diffs (down from 16)
-- Total diff lines: **1658** (down from ~2745)
+- 10 output diffs (down from 11)
+- Total diff lines: **1477** (down from 1658)
+
+## Recent fixes (2026-04-22, session 8)
+- **Non-recursive `last_statement` + `unnest_block` at `compile_*_block`
+  returns (js_ir/mod.rs:`last_statement` + `unnest_block`,
+  compile.rs:`compile_effect_block` / `compile_return_block` /
+  `compile_tail_loop_return_block`)**: Direct port of OCaml's
+  `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+  which inspects the LITERAL last statement (NOT recursive into a trailing
+  `Block`), plus OCaml's `Js_output.unnest_block` (js_output.ml:77-80) which
+  peels single-element `[Block ...]` wrappers. OCaml's `Js_output.output_as_block`
+  (js_output.ml:82-86) and `append_output` (js_output.ml:117-138) call
+  `unnest_block` on every consumer of `compile_lambda` — so by the time a
+  block reaches `S.if_`, single-element `[Block[..., terminal]]` shapes
+  produced by an inner rule-7 fold have already been peeled to `[..., terminal]`,
+  letting the outer rule-7 check (the non-recursive `last_statement`) see the
+  literal terminal. Rust previously compensated for missing `unnest_block`
+  in two ways: (a) `last_statement` recursed through trailing `Block`,
+  finding terminals OCaml's check would not see; (b) the absence of unnest
+  meant THEN/ELSE blocks at outer `Statement::if_` sites kept their `[Block[...]]`
+  wrappers, hiding terminals from rule 7. The combination roughly canceled —
+  but for cases where Rust produced flat blocks where OCaml had `[Block]`
+  (or vice versa), the asymmetry caused divergent outputs. This fix flips
+  `last_statement` to non-recursive (OCaml-aligned) and applies `unnest_block`
+  at the return of every public `compile_effect_block` / `compile_return_block`
+  / `compile_tail_loop_return_block` call so consumers always see flat blocks
+  matching OCaml's `output_as_block`-flattened shape. JS snapshot parity:
+  **642 / 657 -> 643 / 657 (+1)**; output diffs: **11 -> 10**;
+  total diff lines: **1658 -> 1477**. `bdd.res` now matches; no other tests
+  flipped either direction.
 
 ## Recent fixes (2026-04-22, session 7)
 - **Fold effect-only `[Exp; ...; Return tail]` branches into `Return(Seq)`

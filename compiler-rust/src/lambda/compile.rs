@@ -18,7 +18,7 @@ use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VIdent, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression,
+    VIdent, VariableDeclaration, expression_has_no_side_effects, ocaml_eq_expression, unnest_block,
 };
 use crate::lambda::analysis;
 use crate::lambda::compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
@@ -1274,6 +1274,17 @@ impl LambdaCompiler {
     }
 
     fn compile_effect_block(&mut self, lam: &Lambda) -> Block {
+        // Mirror OCaml's invariant that consumers of `compile_lambda` go
+        // through `Js_output.output_as_block` (js_output.ml:82-86) which
+        // calls `unnest_block` (js_output.ml:77-80). The unnest peels
+        // single-element `[Block ...]` wrappers so an inner `S.if_` rule 7
+        // result doesn't hide its literal-last terminal from the outer
+        // `block_last_is_return_throw_or_continue` check
+        // (js_stmt_make.ml:186-193).
+        unnest_block(self.compile_effect_block_inner(lam))
+    }
+
+    fn compile_effect_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
@@ -1497,6 +1508,13 @@ impl LambdaCompiler {
     }
 
     fn compile_return_block(&mut self, lam: &Lambda) -> Block {
+        // Mirror OCaml's invariant that consumers go through
+        // `Js_output.output_as_block` (js_output.ml:82-86) which calls
+        // `unnest_block` on `compile_lambda` results.
+        unnest_block(self.compile_return_block_inner(lam))
+    }
+
+    fn compile_return_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
@@ -2265,6 +2283,16 @@ impl LambdaCompiler {
         lam: &Lambda,
         tail_loop: &mut TailLoopState,
     ) -> Block {
+        // Mirror OCaml's invariant that consumers of `compile_lambda` go
+        // through `Js_output.output_as_block` which calls `unnest_block`.
+        unnest_block(self.compile_tail_loop_return_block_inner(lam, tail_loop))
+    }
+
+    fn compile_tail_loop_return_block_inner(
+        &mut self,
+        lam: &Lambda,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
@@ -2390,7 +2418,17 @@ impl LambdaCompiler {
             return block;
         }
 
-        block.push(Statement::if_(cond_compiled.expr, then_block, else_block));
+        // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
+        // calls `Js_output.output_as_block` on each compiled branch — that
+        // calls `unnest_block` (js_output.ml:77-80) before passing to `S.if_`.
+        // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+        // is non-recursive, so an unnested branch ending in `continue`/`return`/`throw`
+        // lets rule 7 fire while a Block-wrapped branch keeps the if-else.
+        block.push(Statement::if_(
+            cond_compiled.expr,
+            unnest_block(then_block),
+            unnest_block(else_block),
+        ));
         block
     }
 
@@ -2711,10 +2749,16 @@ impl LambdaCompiler {
             }
         }
 
+        // Mirror OCaml's Lifthenelse compile path (lam_compile.ml:1428-1436),
+        // which calls `Js_output.output_as_block` on each branch — that calls
+        // `unnest_block` (js_output.ml:77-80) before passing to `S.if_`.
+        // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
+        // is non-recursive, so an unnested branch ending in a terminal allows
+        // rule 7 to fire while a Block-wrapped branch keeps the if-else.
         if then_prelude_empty && then_expr_pure {
             block.push(Statement::if_(
                 Expression::not(cond_expr),
-                self.compile_effect_block(else_),
+                unnest_block(self.compile_effect_block(else_)),
                 vec![],
             ));
             return block;
@@ -2723,7 +2767,7 @@ impl LambdaCompiler {
         if else_prelude_empty && else_expr_pure {
             block.push(Statement::if_(
                 cond_expr,
-                self.compile_effect_block(then_),
+                unnest_block(self.compile_effect_block(then_)),
                 vec![],
             ));
             return block;
@@ -2731,8 +2775,8 @@ impl LambdaCompiler {
 
         block.push(Statement::if_(
             cond_expr,
-            self.compile_effect_block(then_),
-            self.compile_effect_block(else_),
+            unnest_block(self.compile_effect_block(then_)),
+            unnest_block(self.compile_effect_block(else_)),
         ));
         block
     }
