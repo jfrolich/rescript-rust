@@ -36,6 +36,7 @@ pub mod deep_flatten;
 pub mod free_variables;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
+pub mod js_stmt_make;
 pub mod js_pass_flatten_and_mark_dead;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;

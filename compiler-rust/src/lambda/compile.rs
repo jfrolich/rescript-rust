@@ -82,6 +82,10 @@ use super::lam_compile_coercion::{
     same_reusable_export_value, statement_allows_undefined_export_reuse, variable_initializer,
     ExtractedExports,
 };
+use super::js_stmt_make::{
+    block_finishes_output, block_terminates, statement_finishes_output, statement_terminates,
+    strict_single_return_expr,
+};
 
 /// Compilation result for an expression: prelude statements plus a value expression.
 #[derive(Debug, Clone)]
@@ -10456,88 +10460,6 @@ fn compiled_from_effect_block(mut block: Block) -> Compiled {
     Compiled {
         prelude: block,
         expr: Expression::undefined(false),
-    }
-}
-
-fn block_terminates(block: &Block) -> bool {
-    block.last().is_some_and(statement_terminates)
-}
-
-/// Port of OCaml's `S.if_` rule 4 match condition (js_stmt_make.ml:244-246):
-/// both branches must be `[{statement_desc = Return _}]` — strictly a
-/// single-element list whose sole statement is a `Return`. No effect prefix
-/// allowed. Used by `compile_test_return_block_with_fallback` to mirror
-/// OCaml's rule-4 fold exactly.
-fn strict_single_return_expr(block: &Block) -> Option<&Expression> {
-    let [stmt] = block.as_slice() else {
-        return None;
-    };
-    match &stmt.desc {
-        StatementDesc::Return(expr) => Some(expr),
-        _ => None,
-    }
-}
-
-fn block_finishes_output(block: &Block) -> bool {
-    block.last().is_some_and(statement_finishes_output)
-}
-
-fn statement_terminates(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(block) => block_terminates(block),
-        StatementDesc::Return(_)
-        | StatementDesc::Throw(_)
-        | StatementDesc::Break
-        | StatementDesc::Continue => true,
-        StatementDesc::If(_, then_block, else_block) => {
-            !then_block.is_empty()
-                && !else_block.is_empty()
-                && block_terminates(then_block)
-                && block_terminates(else_block)
-        }
-        StatementDesc::IntSwitch(_, cases, default) => {
-            default.as_ref().is_some_and(block_terminates)
-                && !cases.is_empty()
-                && cases
-                    .iter()
-                    .all(|(_, clause)| block_terminates(&clause.body))
-        }
-        StatementDesc::StringSwitch(_, cases, default) => {
-            default.as_ref().is_some_and(block_terminates)
-                && !cases.is_empty()
-                && cases
-                    .iter()
-                    .all(|clause| block_terminates(&clause.clause.body))
-        }
-        _ => false,
-    }
-}
-
-fn statement_finishes_output(stmt: &Statement) -> bool {
-    match &stmt.desc {
-        StatementDesc::Block(block) => block_finishes_output(block),
-        StatementDesc::Return(_) | StatementDesc::Throw(_) => true,
-        StatementDesc::If(_, then_block, else_block) => {
-            !then_block.is_empty()
-                && !else_block.is_empty()
-                && block_finishes_output(then_block)
-                && block_finishes_output(else_block)
-        }
-        StatementDesc::IntSwitch(_, cases, default) => {
-            default.as_ref().is_some_and(block_finishes_output)
-                && !cases.is_empty()
-                && cases
-                    .iter()
-                    .all(|(_, clause)| block_finishes_output(&clause.body))
-        }
-        StatementDesc::StringSwitch(_, cases, default) => {
-            default.as_ref().is_some_and(block_finishes_output)
-                && !cases.is_empty()
-                && cases
-                    .iter()
-                    .all(|clause| block_finishes_output(&clause.clause.body))
-        }
-        _ => false,
     }
 }
 
