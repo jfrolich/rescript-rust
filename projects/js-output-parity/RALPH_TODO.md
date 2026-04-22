@@ -1,9 +1,41 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **649 / 657** (98.8%)
+## Current baseline (2026-04-22): **650 / 657** (98.9%)
 - 4 compile errors (typecheck failures, upstream)
-- 4 output diffs (was 6)
-- Total diff lines: **111** (down from 1179, -1068, -91%)
+- 3 output diffs (was 4)
+- Total diff lines: **93** (down from 111, -18)
+
+## Fix (2026-04-22, session 16) — drop pre-filter before `compile_small_string_switch_*` arms
+
+The three `compile_named_string_switch_*_with_strategy` helpers
+(assignment, tail_loop_return, effect) used to compute
+`filtered_switch_case_refs(cases, default)` BEFORE invoking the small-arm
+matcher. That let inputs like `[("Pow", 1), ("Sum", -1)]` with
+`Default(-1)` collapse to `[("Pow", 1)] + Default(-1)`, hitting the
+1-case-Default arm and emitting `if (test === "Pow") return 1; else
+return -1;`.
+
+OCaml's `compile_general_cases` (lam_compile.ml:540-566) pattern-matches
+the **unfiltered** cases against `[(id, lam)], Default x`. Filtering
+only happens inside the `_, _` switch arm (lam_compile.ml:587-592),
+AFTER the small-arm selection. So OCaml's actual emission for the same
+input keeps the cases as `_, _`, filters Sum out inside the switch arm,
+and produces `switch (b.TAG) { case "Pow": return 1; default: return -1; }`.
+
+`compile_named_string_switch_return_with_strategy` already passed
+unfiltered `cases` to its small-arm helper; this commit aligns the other
+three callers. Fix in compile.rs at the three call sites:
+4547-4558, 4852-4861, 4888-4898.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| gpr_1698_test     | 18 → 0                      | **PASSES** |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+| mario_game        | 41 → 41 (unchanged)         |
+| reasonReactRouter | 25 → 25 (unchanged)         |
+
+JS snapshot parity: **649 → 650 / 657 (+1)**; output diffs **4 → 3**;
+total diff lines **111 → 93 (-18)**.
 
 ## Fix (2026-04-22, session 15 continued) — replace `lambda_contains_static_raise` with OCaml-faithful `has_exit_code` in the pseudo-jmp fallthrough guard
 

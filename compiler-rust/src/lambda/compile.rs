@@ -4544,12 +4544,19 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
-        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
+            // OCaml's `compile_general_cases` (lam_compile.ml:540-566) pattern-
+            // matches the UNFILTERED cases list against `[(id, lam)], Default x`
+            // etc. Cases that equal the default are only filtered out in the
+            // `_, _` switch arm (lam_compile.ml:587-592), AFTER the small-arm
+            // selection. Pre-filtering would let `[("Pow", 1), ("Sum", -1)]`
+            // with `Default(-1)` collapse to `[(Pow, 1)] + Default(-1)` and
+            // hit the 1-case-Default S.if_ arm, where OCaml stays in the
+            // switch arm and emits `switch { case "Pow": 1; default: -1 }`.
             if let Some(block) = self.compile_small_string_switch_assignment(
                 result,
                 test.clone(),
-                filtered_cases.as_slice(),
+                cases,
                 default,
                 complete,
             ) {
@@ -4557,6 +4564,7 @@ impl LambdaCompiler {
             }
         }
 
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         let clauses = stable_group_switch_cases(filtered_cases, |_, _| true)
             .into_iter()
             .map(|(tag, body, is_last)| StringClause {
@@ -4849,10 +4857,15 @@ impl LambdaCompiler {
         complete: bool,
         tail_loop: &mut TailLoopState,
     ) -> Block {
-        let filtered_cases = self.filtered_switch_case_refs(cases, default);
+        // OCaml's `compile_general_cases` (lam_compile.ml:540-566) selects the
+        // small `S.if_` arms against the UNFILTERED cases list. Filtering
+        // happens only inside the `_, _` switch arm (lam_compile.ml:587-592).
+        // Pass the original cases here so a 2-cases-with-Default that filters
+        // down to 1 still emits a `switch` (matching OCaml), instead of
+        // collapsing to `if/else`.
         if let Some(block) = self.compile_small_string_switch_tail_loop_return(
             test.clone(),
-            filtered_cases.as_slice(),
+            cases,
             default,
             complete,
             tail_loop,
@@ -4860,6 +4873,7 @@ impl LambdaCompiler {
             return block;
         }
 
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         let clauses = self.grouped_tail_loop_return_string_clauses(
             stable_group_switch_cases(filtered_cases, |_, _| true),
             |tag| tag,
@@ -4885,11 +4899,16 @@ impl LambdaCompiler {
         complete: bool,
         allow_small: bool,
     ) -> Block {
-        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         if allow_small {
+            // OCaml's `compile_general_cases` (lam_compile.ml:540-566) selects
+            // the small `S.if_` arms against the UNFILTERED cases list.
+            // Filtering happens only inside the `_, _` switch arm
+            // (lam_compile.ml:587-592). Pass `cases` here, not the filtered
+            // list, so `[(case, body)] + Default(eq body)` shapes derived from
+            // a >1-case input keep emitting a switch.
             if let Some(block) = self.compile_small_string_switch_effect(
                 test.clone(),
-                filtered_cases.as_slice(),
+                cases,
                 default,
                 complete,
             ) {
@@ -4897,6 +4916,7 @@ impl LambdaCompiler {
             }
         }
 
+        let filtered_cases = self.filtered_switch_case_refs(cases, default);
         let clauses: Vec<_> = stable_group_switch_cases(filtered_cases, |_, _| true)
             .into_iter()
             .map(|(tag, body, is_last)| {
