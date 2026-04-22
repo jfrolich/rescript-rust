@@ -39,6 +39,7 @@ pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
+pub mod lam_compile_coercion;
 pub mod lam_exit_code;
 pub mod lam_hit;
 pub mod lam_util;

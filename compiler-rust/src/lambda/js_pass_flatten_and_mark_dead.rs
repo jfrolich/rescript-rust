@@ -16,10 +16,10 @@ use crate::js_ir::{
 use crate::lambda::compat::LetKind;
 use crate::lambda::TagInfo;
 
-use super::compile::max_ident_stamp_in_block;
 use super::js_exp_make::{
     direct_projection_from_pure_literal, int_literal, js_expr_no_side_effects,
 };
+use super::lam_compile_coercion::max_ident_stamp_in_block;
 
 pub(crate) fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     deps.program = flatten_program(deps.program);

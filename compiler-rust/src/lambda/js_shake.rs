@@ -14,8 +14,8 @@ use crate::js_ir::{
 };
 use crate::lambda::compat::LetKind;
 
-use super::compile::same_reusable_export_value;
 use super::js_exp_make::js_expr_no_side_effects;
+use super::lam_compile_coercion::same_reusable_export_value;
 
 pub(crate) fn apply_js_shake_pass(mut deps: DepsProgram) -> DepsProgram {
     deps.program = shake_program(deps.program);
