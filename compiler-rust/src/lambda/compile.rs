@@ -2860,7 +2860,7 @@ impl LambdaCompiler {
             scrut_compiled.expr.clone(),
             &borrowed_cases,
             default,
-            false,
+            default.is_none(),
         ) {
             prelude.extend(small);
             return Compiled {
@@ -5390,8 +5390,12 @@ impl LambdaCompiler {
 
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
-            let (mut block, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
+            {
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+            } else {
+                (scrut_compiled.prelude, scrut_compiled.expr)
+            };
             block.extend(
                 self.compile_named_variant_switch_assignment_statements(result, scrut_expr, switch),
             );
@@ -5456,7 +5460,7 @@ impl LambdaCompiler {
             scrut_compiled.expr.clone(),
             &borrowed_cases,
             default,
-            false,
+            default.is_none(),
         ) {
             block.extend(small);
             return block;
@@ -5591,7 +5595,7 @@ impl LambdaCompiler {
             scrut_compiled.expr.clone(),
             &borrowed_cases,
             default,
-            false,
+            default.is_none(),
         ) {
             block.extend(small);
             return block;
