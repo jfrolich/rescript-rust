@@ -1765,30 +1765,18 @@ impl LambdaCompiler {
             return Some(block);
         }
 
-        if !else_is_trivial_unit {
-            return None;
-        }
-
-        let then_block = self.compile_return_block(then_);
-        // Pre-flatten the body so `Return (Seq(expr, undefined))` shapes produced
-        // by unit-returning primitives (Psetfield, Parraysets, etc.) split into
-        // `[Exp expr; Return undefined]`. This mirrors OCaml's `js_pass_flatten`
-        // line 88 (`Return (Seq _)`) running before the printer examines the
-        // if-body, so the trailing-Return-undefined guard catches the common
-        // `if !cond { side_effect }` shape.
-        let then_block = flatten_block(then_block);
-        if !self.js_block_is_simple_unit_return_tail(&then_block) {
-            return None;
-        }
-
-        let cond_compiled = self.compile_expr(cond);
-        let mut block = cond_compiled.prelude;
-        block.push(Statement::new(StatementDesc::If(
-            cond_compiled.expr,
-            then_block,
-            vec![],
-        )));
-        Some(block)
+        // Case 2 (else is trivial unit, then is not): intentionally not
+        // short-circuited here. Falling through to `compile_if_return_block`
+        // lets `try_fold_effect_only_return_tail` produce the OCaml-aligned
+        // `Return(Cond(cond, Seq(effect, undef), undef))` shape via OCaml's
+        // `compile_ifthenelse` `EffectCall (Maybe_tail_is_return)` arm
+        // (lam_compile.ml:1422-1427). `flatten_block` later expands that to
+        // `[If(cond, [Exp effect, Return undef], [Return undef])]`, preserving
+        // the explicit `else { return; }` for nested-if shapes. The printer's
+        // `print_function_tail_statement` (printer.rs:2714-2722) drops the
+        // `else { return undefined; }` for top-level single-If bodies,
+        // matching OCaml's `function_body` rule (js_dump.ml:1612-1618).
+        None
     }
 
     fn js_block_is_simple_unit_return_tail(&self, block: &Block) -> bool {

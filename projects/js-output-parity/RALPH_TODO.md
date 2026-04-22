@@ -2,8 +2,32 @@
 
 ## Current baseline (2026-04-22): **643 / 657** (97.9%)
 - 4 compile errors (typecheck failures, upstream)
-- 10 output diffs (down from 11)
-- Total diff lines: **1477** (down from 1658)
+- 10 output diffs (unchanged)
+- Total diff lines: **1401** (down from 1477)
+
+## Recent fixes (2026-04-22, session 9)
+- **Drop `compile_if_unit_return_tail_block` case-2 short-circuit
+  (compile.rs:1768+)**: Case 2 was emitting `If(cond, [Exp effect, Return undef], [])`
+  (empty else) for `if cond { effect; unit } else { unit }` shapes. That matched
+  OCaml's output for TOP-LEVEL single-If function bodies (via OCaml's
+  `function_body` rule at js_dump.ml:1612-1618 which prints
+  `If(cond, then_, [Return Undefined])` as `If(cond, then_, [])`), but DIVERGED
+  for nested-If shapes like `mario_game.update_animation`'s
+  `if loop { frame=...; return; } else { return; }` — OCaml keeps the explicit
+  `else { return; }` there because `function_body`'s drop rule only fires at the
+  function-body tail, never in nested contexts. Removing case 2 lets
+  `compile_if_return_block` → `try_fold_effect_only_return_tail` produce the
+  OCaml-aligned `Return(Cond(cond, Seq(effect, undef), undef))` shape (matching
+  OCaml's `compile_ifthenelse` `EffectCall (Maybe_tail_is_return)` arm at
+  lam_compile.ml:1422-1427). `flatten_block` later expands
+  `Return(Cond)` → `[If(cond, [Exp effect, Return undef], [Return undef])]`
+  directly (no `S.if_` application), preserving the explicit else for nested
+  cases. The printer's `print_function_tail_statement` (printer.rs:2714-2722)
+  handles the top-level drop when the If is the function's last statement,
+  matching OCaml byte-for-byte. JS snapshot parity: **643 / 657** (unchanged,
+  no test flipped either direction); total diff lines **1477 → 1401 (-76)**;
+  `mario_game.res` diff **623 → 571 lines**; `reasonReactRouter.res` diff
+  **49 → 25 lines** (push/replace clusters match OCaml).
 
 ## Recent fixes (2026-04-22, session 8)
 - **Non-recursive `last_statement` + `unnest_block` at `compile_*_block`
