@@ -4434,9 +4434,17 @@ impl LambdaCompiler {
                             comment: None,
                         }
                     } else {
+                        // Mirror `grouped_return_string_clauses`'s break
+                        // calculation: a body that doesn't terminate but
+                        // contains a static raise compiles to an exit
+                        // assignment (`exit$N = N`) that needs an explicit
+                        // `break;` to leave the switch. Without it the
+                        // next clause falls through.
+                        let should_break =
+                            !block_terminates(&compiled_body) && lambda_has_exit(body);
                         CaseClause {
                             body: compiled_body,
-                            should_break: false,
+                            should_break,
                             comment: None,
                         }
                     },
@@ -4525,6 +4533,13 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
             let group_falls_through = compiled_body.is_empty();
+            // Mirror `grouped_return_string_clauses`'s break calculation:
+            // a body that doesn't terminate but contains a static raise
+            // compiles to an exit assignment (`exit$N = N`) that needs an
+            // explicit `break;` to leave the switch — otherwise the next
+            // case clause falls through and overwrites the exit value.
+            let should_break =
+                !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -4537,7 +4552,7 @@ impl LambdaCompiler {
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
                     body: compiled_body,
-                    should_break: false,
+                    should_break,
                     comment: None,
                 },
                 group_falls_through,
