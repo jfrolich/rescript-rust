@@ -1791,6 +1791,18 @@ impl LambdaCompiler {
                     self.compile_fallthrough_staticcatch_return_block(
                         *label, bindings, body, handler,
                     )
+                } else if lambda_contains_static_raise_to_label(body, *label, bindings.len()) {
+                    // OCaml has no `with_static_handler` analog — when the
+                    // handler contains static_raise or nested staticcatch
+                    // and body raises to this label, OCaml's pseudo-jmp
+                    // path fails its `no_static_raise_in_handler` guard
+                    // (lam_compile.ml:943) and falls through to the
+                    // explicit-jump arm at lam_compile.ml:963-1017. Take
+                    // explicit-jump here; the `with_static_handler` path
+                    // inlines the handler at every raise site via
+                    // `resolve_static_raise`, while OCaml emits it ONCE
+                    // gated by `if (exit === N)` after the body.
+                    self.compile_staticcatch_return_block(*label, bindings, body, handler)
                 } else {
                     self.with_static_handler(*label, bindings, handler, |this| {
                         this.compile_return_block(body)
@@ -2484,6 +2496,18 @@ impl LambdaCompiler {
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else if requires_explicit_jump {
+                    self.compile_staticcatch_tail_loop_return_block(
+                        *label, bindings, body, handler, tail_loop,
+                    )
+                } else if lambda_contains_static_raise_to_label(body, *label, bindings.len()) {
+                    // OCaml has no `with_static_handler` analog — when
+                    // body raises to this label, OCaml emits the handler
+                    // ONCE via explicit-jump (lam_compile.ml:1005-1010 for
+                    // Assign / lam_compile.ml:1000-1010 for EffectCall).
+                    // Rust's `with_static_handler` path inlines the handler
+                    // at every raise site via `resolve_static_raise`.
+                    // Prefer explicit-jump to match OCaml's single-emission
+                    // shape on miss_colon_test / gpr_1698_test.
                     self.compile_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
                     )

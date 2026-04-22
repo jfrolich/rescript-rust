@@ -3,7 +3,26 @@
 ## Current baseline (2026-04-22): **648 / 657** (98.6%)
 - 4 compile errors (typecheck failures, upstream)
 - 5 output diffs (was 6)
-- Total diff lines: **410** (down from 1179, -769)
+- Total diff lines: **203** (down from 1179, -976)
+
+## Fixes (2026-04-22, session 15 continued) — kill `with_static_handler` when body raises
+
+Replaced the `with_static_handler` fallback in `compile_return_block` (and
+`compile_tail_loop_return_block`) with explicit-jump when the body actually
+raises to the catch's label. OCaml has no `with_static_handler` analog: its
+pseudo-jmp path (lam_compile.ml:937-962) fails `no_static_raise_in_handler`
+whenever the handler contains `Lstaticraise`, so OCaml falls through to the
+explicit-jump arm at lam_compile.ml:963-1017, emitting the handler ONCE gated
+by `if (exit === N)`. Rust's `with_static_handler` path was duplicating the
+handler at every raise site via `resolve_static_raise`.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| gpr_1698_test     | 152 → 18                    |
+| miss_colon_test   | 165 → 92                    |
+| mario_game        | 41 → 41 (unchanged)         |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+| reasonReactRouter | 25 → 25 (unchanged)         |
 
 ## Fixes (2026-04-22, session 15) — `flatten_nested_caches` port
 
