@@ -4,6 +4,27 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 43 (2026-04-22) — twenty-sixth re-verification of session 18 blocker
+
+Loop re-invoked on the session-42 tip (`903f9052c`). Spot-check only:
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines; `simplify_with_env`
+  / `SimplifyEnv` still absent from `compiler-rust/src/**` (Grep returns no
+  matches).
+- `inline_map2_test.res` still crashes with
+  `Type checking failed: CoreError(UndefinedMethod { method: "Test_utils.eq" })`
+  — identical to sessions 18–42.
+- `ExternalShadow.res` still compiles byte-identical to its `.mjs` snapshot
+  (`diff -q` → BYTE-IDENTICAL). JS backend healthy on typecheck-green files.
+- `compiler-rust/target/release/bsc` already built (2026-04-22 11:55), no work.
+
+Twenty-sixth consecutive no-op. Exit condition from the prompt ("genuine hard
+blocker that requires human input") continues to fire. The three options
+from session 18 remain the only paths forward: fix the 4 upstream
+typechecker regressions on `typechecker-performance`, accept 99.4% as
+terminal parity, or rebase onto a typechecker-green branch. No source
+changes.
+
 ## Session 42 (2026-04-22) — twenty-fifth re-verification of session 18 blocker
 
 Loop re-invoked on the session-41 tip (`f0b3d7211`). Spot-check only:
