@@ -4,6 +4,23 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 21 (2026-04-22) — fourth re-verification, state still unchanged
+
+Loop re-invoked on the session-20 tip (`ea3c1e385`). Spot-checked only — no
+30-min parity sweep, no source changes.
+
+- `compiler-rust/src/lambda/simplify.rs` still 306 lines; `simplify_with_env` /
+  `SimplifyEnv` still absent from `compiler-rust/src/**`.
+- All 4 failing files still crash at typecheck with the same errors recorded
+  in session 18: `defunctor_make_test` / `functor_ffi` / `int_map`
+  (`ExprTypeClash`), `inline_map2_test` (`UndefinedMethod { method:
+  "Test_utils.eq" }`).
+- `ExternalShadow.res` still compiles byte-identical to its `.mjs` snapshot
+  (pipeline healthy on typecheck-green files).
+
+Same three options listed in session 18 remain the only paths forward. No
+commits to source. This is the fourth consecutive session with nothing to do.
+
 ## Session 20 (2026-04-22) — third re-verification, state still unchanged
 
 Loop re-invoked on the session-19 tip (`5161eccae`). Spot-checked instead of
