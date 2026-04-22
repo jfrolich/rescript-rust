@@ -4,6 +4,21 @@
 - 4 compile errors (typecheck failures, upstream — out of scope per PLAN.md)
 - 0 output diffs
 
+## Session 19 (2026-04-22) — re-verified blocker, state unchanged
+
+Loop re-invoked on the same HEAD as session 18 (696cba702). Re-verified
+without re-running the 30-min parity sweep:
+
+- `compiler-rust/src/lambda/simplify.rs` is still 306 lines with `simplify_for_js_backend` as the orchestrator — no `simplify_with_env`, no `SimplifyEnv` anywhere. All passes (`deep_flatten`, `collect_info`, `simplify_exits`, `simplify_alias_with_jsx`, `alpha_conversion`, `simplify_lets`) are imported and called in `lam_compile_main.ml`-mirror order with line citations.
+- All 4 failing files still crash at typecheck with the exact same errors session 18 recorded (ExprTypeClash × 3, UndefinedMethod × 1 for `Test_utils.eq`).
+- Prompt's "MANDATORY FIRST TASK" remains obsolete.
+
+Exit condition from the prompt fires unchanged: **"there is a genuine
+hard blocker that requires human input."** Nothing to commit in JS
+backend code. Pointer to required human decision remains the three
+options listed in session 18. No new RALPH entries; no new commits to
+source.
+
 ## Session 18 (2026-04-22) — loop has no actionable work in scope
 
 Verified end-to-end state on the current `typechecker-performance` tip
