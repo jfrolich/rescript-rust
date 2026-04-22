@@ -1,9 +1,46 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **645 / 657** (98.2%)
+## Current baseline (2026-04-22): **646 / 657** (98.3%)
 - 4 compile errors (typecheck failures, upstream)
-- 8 output diffs (was 9)
-- Total diff lines: **1323** (down from 1364)
+- 7 output diffs (was 8)
+- Total diff lines: **1261** (down from 1323)
+
+## Recent fixes (2026-04-22, session 12)
+- **`Const_block` emits `MutableFlag::NA` + tighten `is_simple_block_binding_item`
+  (compile.rs:`compile_constant` + `is_simple_block_binding_item`)**:
+  Two coordinated changes that align Rust's JS-pass binding-hoist with
+  OCaml's `js_pass_flatten_and_mark_dead.ml:172-233`. (1) `Self::compile_constant`
+  for `Constant::Block` now emits `CamlBlock(_, NA, _, _)` instead of
+  `Immutable`, mirroring `Lam_compile_const.translate`'s
+  `Js_of_lam_block.make_block NA tag_info ...` (lam_compile_const.ml:67-69).
+  Downstream `Caml_block(_, Immutable, _, _)` matchers (notably the
+  binding-hoist outer check at js_pass_flatten_and_mark_dead.ml:172-183)
+  exclude `NA`, so `let h = list{1,2,3,4}` (a single `Lconst Const_block`)
+  stays inline. (2) `is_simple_block_binding_item` no longer recurses
+  into `CamlBlock(Immutable, Constructor)` — OCaml's "simple item" list
+  at lines 188-193 is strictly `Var | Number | Str | Bool | Undefined`.
+  Combined: `Pmakeblock`-derived module-export blocks like
+  `let CustomizeTags = {... d: {TAG: "qq", _0: 42}, ...}` get their
+  inner constants hoisted to `let CustomizeTags_d = {TAG: "qq", _0: 42}`
+  (matching OCaml byte-for-byte), while top-level `Lconst Const_block`
+  bindings (list literals, deeply nested constants) stay inline.
+  JS snapshot parity: **645 → 646 / 657 (+1)**; output diffs **8 → 7**;
+  total diff lines **1323 → 1261 (-62)**. `variantsMatching.res` now
+  matches.
+- **Port `Lam_coercion.handle_exports` for trailing module-export
+  Pmakeblock (simplify.rs:`handle_exports`)**: Direct port of
+  `compiler/core/lam_coercion.ml:82-172`. Walks the simplified Lambda
+  to find the trailing `Pmakeblock(_, ModuleExport(ids), args)` and,
+  for each non-`Lvar` arg, hoists into a fresh `Llet(Strict, newid, lam)`
+  outside the makeblock (matching OCaml's
+  `Single (Strict, newid, lam) :: groups`). Matching-name `Lvar` args
+  reuse the existing id; mismatched names get hoisted via
+  `LetKind::Alias`. Updates `meta.exports` and `meta.export_idents` to
+  the renamed list (lam_coercion.ml:200-205). No parity impact in this
+  test suite — the variantsMatching cluster needed the
+  `Const_block`/`is_simple_block_binding_item` fixes above (which act
+  on intra-module submodule Pmakeblocks), not the top-level coercion
+  step. Kept as a faithful port for future work.
 
 ## Recent fixes (2026-04-22, session 11)
 - **Tighten `compile_test_return_block_with_fallback` fold to strict single-Return
