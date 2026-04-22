@@ -1,9 +1,34 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **648 / 657** (98.6%)
+## Current baseline (2026-04-22): **649 / 657** (98.8%)
 - 4 compile errors (typecheck failures, upstream)
-- 5 output diffs (was 6)
-- Total diff lines: **203** (down from 1179, -976)
+- 4 output diffs (was 6)
+- Total diff lines: **111** (down from 1179, -1068, -91%)
+
+## Fix (2026-04-22, session 15 continued) — replace `lambda_contains_static_raise` with OCaml-faithful `has_exit_code` in the pseudo-jmp fallthrough guard
+
+Rust's `lambda_contains_static_raise` recurses into Lfunction bodies,
+over-counting static_raises that live inside nested closures and can never
+escape. OCaml's `Lam_exit_code.has_exit_code` stops at Lfunction
+(lam_exit_code.ml:28), so `no_static_raise_in_handler`
+(lam_compile_context.ml:80-81, `has_exit_code handler (fun _ -> true)`)
+returns TRUE for handlers like `switch(g.TAG) { case "Mul": continue; }`
+whose tail-call gets compiled from a self-recursive Lapply without any
+escape-capable Lstaticraise.
+
+Switching both `compile_return_block` and `compile_tail_loop_return_block`
+fallthrough guards to use `has_exit_code(handler, |_| true)` (the already
+ported `Lam_exit_code` predicate) made miss_colon_test's outer catch take
+the pseudo-jmp shape OCaml uses: handler emitted ONCE unconditionally after
+the body, no spurious `exit` layer.
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| miss_colon_test   | 92 → 0                      | **PASSES** |
+| gpr_1698_test     | 18 → 18 (unchanged)         |
+| mario_game        | 41 → 41 (unchanged)         |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+| reasonReactRouter | 25 → 25 (unchanged)         |
 
 ## Fixes (2026-04-22, session 15 continued) — kill `with_static_handler` when body raises
 

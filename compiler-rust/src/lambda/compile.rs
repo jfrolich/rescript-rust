@@ -1766,28 +1766,24 @@ impl LambdaCompiler {
                 }
                 if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
-                } else if !lambda_contains_static_raise(handler)
+                } else if !has_exit_code(handler, |_| true)
                     && !lambda_contains_staticcatch(handler)
                     && lambda_contains_static_raise_to_label(body, *label, bindings.len())
                 {
                     // OCaml's `compile_staticcatch` pseudo-jmp path
                     // (lam_compile.ml:937-962, add_pseudo_jmp at
                     // lam_compile_context.ml:99-104) fires for any single
-                    // code_table with no static raise in the handler — it
-                    // does NOT gate on bindings arity. Declare the bindings
-                    // (possibly empty), compile the body with the
-                    // fallthrough handler active (so each `LstaticRaise` to
-                    // this label assigns the bindings — a no-op when
-                    // bindings are empty — and falls through), then append
-                    // the handler ONCE after the body.  Rust's
-                    // `with_static_handler` path duplicates the handler at
-                    // every `LstaticRaise` site via `resolve_static_raise`,
-                    // which bloats the output when the body has multiple
-                    // raise sites. `no_static_raise_in_handler`
-                    // (lam_compile_context.ml:80) is mirrored via
-                    // `lambda_contains_static_raise(handler)` plus the
-                    // additional safety check that the handler has no
-                    // nested staticcatch.
+                    // code_table with `no_static_raise_in_handler`
+                    // (lam_compile_context.ml:80-81 — `has_exit_code handler
+                    // (fun _ -> true)`). We mirror that here via the ported
+                    // `Lam_exit_code.has_exit_code`, which STOPS at Lfunction
+                    // boundaries (lam_exit_code.ml:28). Rust's prior
+                    // `lambda_contains_static_raise` predicate crossed
+                    // Lfunction, over-counting raises that live inside
+                    // closures and can't escape, which kept this
+                    // fallthrough path from firing on handlers whose
+                    // tail-loop body contains an inner closure with a
+                    // static_raise.
                     self.compile_fallthrough_staticcatch_return_block(
                         *label, bindings, body, handler,
                     )
@@ -2497,6 +2493,25 @@ impl LambdaCompiler {
                     )
                 } else if requires_explicit_jump {
                     self.compile_staticcatch_tail_loop_return_block(
+                        *label, bindings, body, handler, tail_loop,
+                    )
+                } else if !has_exit_code(handler, |_| true)
+                    && !lambda_contains_staticcatch(handler)
+                    && lambda_contains_static_raise_to_label(body, *label, bindings.len())
+                {
+                    // Mirror the fallthrough / pseudo-jmp arm from
+                    // `compile_return_block`. OCaml's pseudo-jmp path
+                    // (lam_compile.ml:937-962) gates on
+                    // `no_static_raise_in_handler`
+                    // (lam_compile_context.ml:80-81) which itself wraps
+                    // `has_exit_code handler (fun _ -> true)` — stopping at
+                    // Lfunction boundaries. Using `has_exit_code` here lets
+                    // handlers whose only static_raises live inside a
+                    // nested closure reach the fallthrough emission
+                    // (lam_compile.ml:957-962), eliminating the spurious
+                    // outer explicit-jump layer that miss_colon_test saw
+                    // when `lambda_contains_static_raise` over-counted.
+                    self.compile_fallthrough_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
                     )
                 } else if lambda_contains_static_raise_to_label(body, *label, bindings.len()) {
