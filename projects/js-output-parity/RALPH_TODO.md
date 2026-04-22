@@ -1,9 +1,55 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-22): **651 / 657** (99.1%)
+## Current baseline (2026-04-22): **652 / 657** (99.2%)
 - 4 compile errors (typecheck failures, upstream)
-- 2 output diffs (was 4)
-- Total diff lines: **52** (down from 111, -59)
+- 1 output diff (was 4)
+- Total diff lines: **27** (down from 111, -84)
+
+## Fix (2026-04-22, session 16 continued) — add `Lletrec` arm to `compile_return_block_inner` and `compile_effect_block_inner`
+
+The two functions had explicit `Llet` arms but no `Lletrec` arm — `Lletrec`
+fell through to the catch-all `_ => compile_expr(lam)` which forced the
+entire `Lletrec(bindings, body)` through `NeedValue`. That dropped the
+tail-return / effect continuation context for the body, so a tail-position
+`Lprim Psequor` body skipped `compile_short_circuit_return_block`
+(compile.rs:1668) and emitted `return cond1 || cond2 || call(args);`
+instead of the `Lifthenelse(lhs, true, rhs)` desugaring that
+`compile_if_return_block` produces.
+
+OCaml's `compile_lambda` Lletrec arm (lam_compile.ml:1770-1783):
+```
+| Lletrec (id_args, body) ->
+  let v = compile_recursive_lets lambda_cxt id_args in
+  Js_output.append_output v (compile_lambda lambda_cxt body)
+```
+emits the recursive bindings and recursively compiles the body in the
+SAME continuation. The Rust port now mirrors this — emitting bindings via
+`compile_recursive_bindings`, then recursively dispatching to
+`compile_return_block` / `compile_effect_block` so the body's continuation
+is preserved.
+
+For reasonReactRouter's `urlNotEqual`:
+```
+let urlNotEqual = (a, b) => {
+  let rec listNotEqual = (...) => switch (...) { ... }
+  a.hash !== b.hash || (a.search !== b.search || listNotEqual(a.path, b.path))
+}
+```
+The body is `Lletrec ([listNotEqual = ...], Psequor (...))`. After the
+fix, the Psequor compiles in tail-return context → desugars to
+`Lifthenelse(cond, true, Psequor(...))` → recursively folds via
+`Expression::cond` into `Cond(Bin(Or, cond1, cond2), true, call)` → the
+flatten pass expands to `If(cond1 || cond2, [Return true], [Return call])`
+→ `js_pass_tailcall_inline` sees `[Return Call(Var listNotEqual, args)]`
+in the inner else and inlines the function body (matching OCaml's snapshot).
+
+| File              | Diff lines (before → after) |
+|-------------------|-----------------------------|
+| reasonReactRouter | 25 → 0                      | **PASSES** |
+| gpr_3875_test     | 27 → 27 (unchanged)         |
+
+JS snapshot parity: **651 → 652 / 657 (+1)**; output diffs **2 → 1**;
+total diff lines **52 → 27 (-25)**.
 
 ## Fix (2026-04-22, session 16 continued) — port OCaml's `compile_general_cases` per-clause `should_break` to `compile_exit_dispatch`
 

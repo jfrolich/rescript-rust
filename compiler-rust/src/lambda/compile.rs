@@ -1394,6 +1394,18 @@ impl LambdaCompiler {
                 block.extend(self.compile_effect_block(body));
                 block
             }
+            Lambda::Lletrec(bindings, body) => {
+                // Mirror OCaml's Lletrec arm (lam_compile.ml:1770-1783): emit
+                // bindings then compile body in the SAME continuation. The
+                // catch-all `_ => compile_expr(lam)` would force the body
+                // through `NeedValue`, losing the effect/tail context.
+                let mut block = self.compile_recursive_bindings(bindings);
+                if block_finishes_output(&block) {
+                    return block;
+                }
+                block.extend(self.compile_effect_block(body));
+                block
+            }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.compile_if_effect_block(cond, then_, else_)
             }
@@ -1649,6 +1661,24 @@ impl LambdaCompiler {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
+                if block_finishes_output(&block) {
+                    return block;
+                }
+                block.extend(self.compile_return_block(body));
+                block
+            }
+            Lambda::Lletrec(bindings, body) => {
+                // Mirror OCaml's `Lletrec` arm in `compile_lambda`
+                // (lam_compile.ml:1770-1783): emit the recursive bindings, then
+                // compile the body in the SAME continuation. The catch-all
+                // `_ => compile_expr(lam)` would force the body through
+                // `NeedValue Not_tail`, losing the `Maybe_tail_is_return`
+                // context — meaning a tail-position `Lprim Psequor` body
+                // skips `compile_short_circuit_return_block` and emits a flat
+                // `return cond1 || cond2 || call(args);` instead of
+                // `if (cond) return true; else { return call(args); }` that
+                // `js_pass_tailcall_inline` can later inline.
+                let mut block = self.compile_recursive_bindings(bindings);
                 if block_finishes_output(&block) {
                     return block;
                 }
