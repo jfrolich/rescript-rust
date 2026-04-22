@@ -3,7 +3,76 @@
 ## Current baseline (2026-04-22): **641 / 657** (97.6%)
 - 4 compile errors (typecheck failures, upstream)
 - 12 output diffs (down from 16)
-- Total diff lines: **1695** (down from ~2745)
+- Total diff lines: **1682** (down from ~2745)
+
+## Recent fixes (2026-04-22, session 6)
+- **`ArrayIndex` printer always +1 indent (printer.rs:1703+)**: OCaml's
+  `Array_index` printer (js_dump.ml:991-995) wraps the inner expression in
+  `P.group f 1` UNCONDITIONALLY — every multi-line shape inside the target
+  inherits +1 indent. Rust gated this on the target being a multi-element
+  Object/Array AND the previous non-space char being `(` or `,`, so
+  `Object.fromEntries([[...]])["foo"]` (the `@get_index external` shape used
+  by `Dict.getUnsafe`) lost the extra indent that nested args should
+  inherit through the surrounding group. Drop both gates so ArrayIndex
+  always passes `extra_group_indent=true` to `print_member_target_expression`,
+  matching OCaml exactly. JS snapshot parity: **641 / 657** (unchanged);
+  total diff lines **1695 → 1682**; `Stdlib_DictTests.res` diff
+  37 → 24 lines.
+
+## Investigation 2026-04-22 (session 6) — variantsMatching root cause
+**This is the missing `Lam_coercion.handle_exports` port.**
+
+For `let d = D(42)` in a module where d is exported (only used once in the
+module's export `Pmakeblock`):
+
+1. `D(42)` → typedtree `Texp_construct` → raw_lambda lowering's
+   `raw_block_or_prim` (raw_lambda/convert.rs:2838-2861) extracts all-const
+   args and returns `Lconst(Const_block(D, [42]))`. **OCaml does the same**
+   in translcore.ml:841 via the `try ... extract_constant ... with Not_constant`
+   pattern. So both end up with `Llet Strict d (Lconst Const_block) body`.
+2. `deep_flatten` calls `refine_let(Strict, d, Lconst, body)`.
+   `is_safe_to_alias(Lconst)` returns true → fires the (Alias) clause,
+   converts kind to **`Alias`**. (Same in OCaml.)
+3. `simplify_lets`'s `Alias` arm sees `times = 1, captured = false` →
+   substitutes `d`'s value into the makeblock arg list. After this pass:
+   `let CustomizeTags = makeblock([foo, "dd", 12, false, Lconst_block, Lconst_block])`.
+   (Same in OCaml — verified via `RUST_DEBUG_LETS_KIND=1` instrumentation.)
+4. **OCaml then runs `Lam_coercion.coerce_and_group_big_lambda`
+   (lam_coercion.ml:196)** which calls `handle_exports`
+   (lam_coercion.ml:82-172). `handle_exports` walks each export-arg of the
+   trailing makeblock; for any non-`Lvar` arg it calls
+   `Ident.rename original_export_id` and creates a new
+   `Single (Strict, newid, lam)` group entry. So the `Lconst Const_block`
+   args become separate top-level bindings `let CustomizeTags_d =
+   {TAG: "qq", _0: 42}; let CustomizeTags_e = {TAG: 42, _0: 0};` BEFORE JS
+   compile sees them.
+5. Then `compile_group` (lam_compile_main.ml:36-66) compiles each `Single`
+   entry with continuation `Declare (kind, id)` — emitting `let
+   CustomizeTags_d = ...` declarations one by one.
+
+**Rust has no port of `Lam_coercion.handle_exports`** — verified by
+searching for `handle_exports` and `coerce_and_group` in
+`compiler-rust/src/`. The Rust path compiles the entire post-`simplify_lets`
+lambda as one big tree, then attempts to materialize bindings back at JS
+compile via `should_materialize_block_binding_items` /
+`is_simple_block_binding_item` (compile.rs:13266-13315). The current
+`is_simple_block_binding_item` recurses into immutable `CamlBlock`s with
+`TagInfo::Constructor`, treating fully-constant constructor blocks as
+"simple enough to inline" — which keeps `D(42)` inline in the outer
+makeblock instead of extracting it.
+
+**Proper fix**: port `Lam_coercion.coerce_and_group_big_lambda` (lam_coercion.ml)
+and route the JS compile through `compile_group` per-entry. This is the
+right architectural fix — the Rust materialize hack is fragile and
+diverges from OCaml in subtle ways (small-constant strings/bools/ints get
+inlined back, but `Lconst Const_block` should not).
+
+The Rust `is_simple_block_binding_item` recursive-Constructor arm (compile.rs:13305)
+was previously identified as the "fix": removing it makes variantsMatching
+pass but regresses minimal_test (`let rec fake_y = list{2, 3}`) and
+record_debug_test (`let h = list{1, 2, 3, 4}`) because OCaml inlines list
+cells via the small-constant tail-fold logic — which Rust would lose
+without `handle_exports`.
 
 ## Recent fixes (2026-04-22, session 5)
 - **Skip scrutinee rebinding for named variant switch assignment
