@@ -1683,7 +1683,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     Statement::new(StatementDesc::If(cond, then_, else_))
 }
 
-fn block_last_is_terminal(block: &Block) -> bool {
+pub(crate) fn block_last_is_terminal(block: &Block) -> bool {
     matches!(
         last_statement(block).map(|stmt| &stmt.desc),
         Some(StatementDesc::Return(_))

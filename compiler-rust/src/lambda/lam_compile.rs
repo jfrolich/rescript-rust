@@ -16,7 +16,7 @@ use crate::js_ir::op::{
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VIdent, VariableDeclaration, unnest_block,
+    VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
@@ -3312,11 +3312,29 @@ impl LambdaCompiler {
             return block;
         }
 
-        block.push(Statement::if_(
-            cond_expr,
-            unnest_block(self.compile_effect_block(then_)),
-            unnest_block(self.compile_effect_block(else_)),
-        ));
+        // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the else branch
+        // is *exactly* `[Return _]`, flip to `if (!cond) { return; }` and
+        // emit the then branch as sibling statements.
+        let then_block = unnest_block(self.compile_effect_block(then_));
+        let else_block = unnest_block(self.compile_effect_block(else_));
+        if matches!(
+            else_block.as_slice(),
+            [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+        ) {
+            block.push(Statement::if_(Expression::not(cond_expr), else_block, vec![]));
+            block.extend(then_block);
+            return block;
+        }
+        // OCaml S.if_ rule 7 (js_stmt_make.ml:249-250): when the then branch
+        // ends with return/throw/continue/break, keep `if (cond) { then }`
+        // and append the else branch as sibling statements.
+        if !then_block.is_empty() && block_last_is_terminal(&then_block) {
+            block.push(Statement::if_(cond_expr, then_block, vec![]));
+            block.extend(else_block);
+            return block;
+        }
+
+        block.push(Statement::if_(cond_expr, then_block, else_block));
         block
     }
 
@@ -3717,6 +3735,24 @@ impl LambdaCompiler {
                 vec![Statement::return_(Expression::cond(cond, then_expr, else_expr))]
             }
             None => {
+                // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
+                // else branch is *exactly* `[Return _]`, flip to
+                // `if (!cond) { return _; }` and emit the then branch as
+                // sibling statements. This matches the `if (cond) { return; }
+                // body;` early-return shape OCaml produces for function
+                // bodies like `if cond then body else ()` in return context.
+                if matches!(
+                    else_fallback.as_slice(),
+                    [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+                ) {
+                    let mut out = vec![Statement::if_(
+                        Expression::not(cond),
+                        else_fallback,
+                        vec![],
+                    )];
+                    out.extend(then_fallback);
+                    return out;
+                }
                 // Use the normalized fallback blocks when we can't collapse
                 // to `Return(Cond)`, matching the previous behavior for
                 // non-both-single-return cases.
