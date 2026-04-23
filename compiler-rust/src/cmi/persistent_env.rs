@@ -810,8 +810,11 @@ impl PersistentEnv {
             if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name) {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
-            eprintln!("ERROR: in-process module '{}' not found in registry — dependency graph bug", name);
-            eprintln!("  alias rewrites has '{}': {:?}", name, self.alias_prefix_rewrites.get(name));
+            log::debug!(
+                "in-process module '{}' not found in registry; alias rewrite: {:?}",
+                name,
+                self.alias_prefix_rewrites.get(name)
+            );
             return None;
         }
 

@@ -3181,7 +3181,7 @@ pub fn compile_preprocessed_structure_in_process(
     let js_ms = phase_elapsed_ms(t_js);
 
     let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
-    if total_ms > 100 {
+    if std::env::var_os("RUST_IN_PROCESS_PHASES").is_some() && total_ms > 100 {
         eprintln!(
             "[phases] {} env={}ms tc={}ms raw={}ms jsir={}ms js={}ms total={}ms",
             module_name, env_ms, tc_ms, raw_lambda_ms, jsir_ms, js_ms, total_ms
