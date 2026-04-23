@@ -538,11 +538,17 @@ impl JsPrinter {
                 }
                 self.write("for ");
                 self.write_char('(');
-                self.write("let ");
+                // OCaml uses `P.paren_group f 1` (js_dump.ml:1516) which adds
+                // one indent level inside the parens so a multi-line iterable
+                // (e.g. an inline array) continues at `base + 2` rather than
+                // `base + 1`.
                 let id_name = self.ident_name(id);
-                self.write(&id_name);
-                self.write(" of ");
-                self.print_expression(iterable, 0);
+                self.with_indent(1, |this| {
+                    this.write("let ");
+                    this.write(&id_name);
+                    this.write(" of ");
+                    this.print_expression(iterable, 0);
+                });
                 self.write(") ");
                 self.print_brace_block(body);
             }
@@ -554,11 +560,13 @@ impl JsPrinter {
                 }
                 self.write("for await ");
                 self.write_char('(');
-                self.write("let ");
                 let id_name = self.ident_name(id);
-                self.write(&id_name);
-                self.write(" of ");
-                self.print_expression(iterable, 0);
+                self.with_indent(1, |this| {
+                    this.write("let ");
+                    this.write(&id_name);
+                    this.write(" of ");
+                    this.print_expression(iterable, 0);
+                });
                 self.write(") ");
                 self.print_brace_block(body);
             }
