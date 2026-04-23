@@ -86,6 +86,12 @@ const STAMP_FI_MUTABLE: i32 = 58;
 const STAMP_CI_NAME: i32 = 59;
 const STAMP_CI_ARGS: i32 = 60;
 
+// Upstream #8355: Iterable / AsyncIterable predef types.
+// Placed at the end of the predef stamp range to avoid reshuffling existing
+// stamps. type_is_builtin_path_but_option has an explicit branch below.
+const STAMP_ITERABLE: i32 = 61;
+const STAMP_ASYNC_ITERABLE: i32 = 62;
+
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
 pub const PREDEF_STAMP_BARRIER: i32 = 999;
@@ -149,6 +155,12 @@ pub fn ident_unknown() -> Ident {
 }
 pub fn ident_promise() -> Ident {
     make_ident("promise", STAMP_PROMISE)
+}
+pub fn ident_iterable() -> Ident {
+    make_ident("iterable", STAMP_ITERABLE)
+}
+pub fn ident_async_iterable() -> Ident {
+    make_ident("asyncIterable", STAMP_ASYNC_ITERABLE)
 }
 
 // Comptime type reflection idents
@@ -319,6 +331,12 @@ pub fn path_unknown() -> Path {
 pub fn path_promise() -> Path {
     Path::pident(ident_promise())
 }
+pub fn path_iterable() -> Path {
+    Path::pident(ident_iterable())
+}
+pub fn path_async_iterable() -> Path {
+    Path::pident(ident_async_iterable())
+}
 pub fn path_match_failure() -> Path {
     Path::pident(ident_match_failure())
 }
@@ -339,6 +357,11 @@ pub fn type_is_builtin_path_but_option(p: &Path) -> Option<bool> {
         Path::Pident(id) if id.stamp() == STAMP_OPTION => Some(false),
         Path::Pident(id) if id.stamp() == STAMP_UNIT => Some(false),
         Path::Pident(id) if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_PROMISE => Some(true),
+        // Upstream #8355: iterable / asyncIterable added as predef, but placed
+        // at the end of the stamp range in Rust to avoid reshuffling existing
+        // stamps. Explicitly mark them as builtin.
+        Path::Pident(id) if id.stamp() == STAMP_ITERABLE => Some(true),
+        Path::Pident(id) if id.stamp() == STAMP_ASYNC_ITERABLE => Some(true),
         _ => None,
     }
 }
@@ -363,6 +386,8 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
+        "iterable" => Some(ident_iterable()),
+        "asyncIterable" => Some(ident_async_iterable()),
         "typeInfo" => Some(ident_type_info()),
         "fieldInfo" => Some(ident_field_info()),
         "constructorInfo" => Some(ident_constructor_info()),

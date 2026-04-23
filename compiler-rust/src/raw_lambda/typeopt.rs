@@ -275,7 +275,9 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
         | "bigint"
         | "string"
         | "extension_constructor"
-        | "promise" => BuiltinPathTest::ForSureYes,
+        | "promise"
+        | "iterable"
+        | "asyncIterable" => BuiltinPathTest::ForSureYes,
         _ => BuiltinPathTest::NotApplicable,
     }
 }

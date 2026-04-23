@@ -1434,6 +1434,26 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         },
         ctx,
     );
+    // Upstream #8355: iterable / asyncIterable predef types (abstract,
+    // covariant, 1 type parameter).
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_iterable(),
+        TypeDeclaration {
+            type_variance: vec![crate::types::variance::Variance::covariant()],
+            ..decl_abstr(1, false)
+        },
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_async_iterable(),
+        TypeDeclaration {
+            type_variance: vec![crate::types::variance::Variance::covariant()],
+            ..decl_abstr(1, false)
+        },
+        ctx,
+    );
     {
         let tvar = ctx.new_generic_var(None);
         let list_ty = ctx.new_generic_constr(predef::path_list(), vec![tvar]);
