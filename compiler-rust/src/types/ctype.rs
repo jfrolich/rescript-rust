@@ -7569,6 +7569,389 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
     });
 }
 
+// ---------------------------------------------------------------------------
+// nondep_type — OCaml ctype.ml nondep_type_rec / nondep_type
+//
+// Copies a type, expanding any Tconstr whose path depends on `mid`.
+// The expanded type is looked up through `env` (which should already contain
+// the argument module under the functor-parameter ident).
+// ---------------------------------------------------------------------------
+
+/// Copy a type while eliminating dependencies on module ident `mid`.
+/// Any `Tconstr(p, tl, _)` where `p.is_free(mid)` is expanded via `env`.
+/// Returns `None` if the dependency cannot be removed.
+pub fn nondep_type<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    mid: &Ident,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    let mut cache: HashMap<TypeExprRef, TypeExprRef> = HashMap::new();
+    nondep_type_rec(ctx, env, mid, ty, &mut cache)
+}
+
+fn nondep_type_rec<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    mid: &Ident,
+    ty: TypeExprRef,
+    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+) -> Option<TypeExprRef> {
+    let ty = ctx.repr(ty);
+
+    // OCaml: Tvar | Tunivar -> ty (identity)
+    {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => return Some(ty),
+            _ => {}
+        }
+    }
+
+    if let Some(&cached) = cache.get(&ty) {
+        return Some(cached);
+    }
+
+    // Create a stub for recursion (OCaml: newgenvar ())
+    let stub = ctx.new_generic_type(TypeDesc::Tvar(None));
+    cache.insert(ty, stub);
+
+    let desc = ctx.get_desc(ty).clone();
+    let new_desc = match &desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if path.is_free(mid) {
+                // Expand the abbreviation — this is the key operation.
+                // OCaml: expand_abbrev env (newty2 ty.level ty.desc)
+                //
+                // First try the general expand_head machinery, which handles
+                // most cases (env-registered types, CMI types, etc.).
+                let temp = ctx.new_generic_type(desc.clone());
+                let expanded = try_expand_head(ctx, env, temp).or_else(|| {
+                    // Fallback: direct env lookup for types through the module.
+                    // OCaml's expand_abbrev uses Env.find_type which resolves
+                    // Pdot paths by looking up the parent module's components.
+                    // The Rust try_expand_head may not find locally-added modules
+                    // (e.g. functor param added for nondep_supertype), so do a
+                    // direct lookup here.
+                    let decl = env.lookup_type(path).ok()?;
+                    if let Some(manifest) = decl.type_manifest {
+                        let params = &decl.type_params;
+                        if params.len() == args.len() {
+                            // Substitute params -> args in manifest
+                            let expanded = subst_with_memo(
+                                ctx,
+                                env,
+                                ty,
+                                super::type_expr::AbbrevMemoRef::nil(),
+                                params,
+                                args,
+                                manifest,
+                            );
+                            Some(expanded)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                match expanded {
+                    Some(expanded) => {
+                        let expanded = ctx.repr(expanded);
+                        // Recurse on expansion (OCaml wraps in Tlink)
+                        let result = nondep_type_rec(ctx, env, mid, expanded, cache)?;
+                        ctx.set_desc(stub, TypeDesc::Tlink(result));
+                        cache.insert(ty, result);
+                        return Some(result);
+                    }
+                    None => {
+                        // Cannot expand — dependency cannot be eliminated
+                        return None;
+                    }
+                }
+            } else {
+                let new_args: Option<Vec<_>> = args
+                    .iter()
+                    .map(|a| nondep_type_rec(ctx, env, mid, *a, cache))
+                    .collect();
+                let new_args = new_args?;
+                TypeDesc::Tconstr {
+                    path: path.clone(),
+                    args: new_args,
+                    abbrev: super::type_expr::AbbrevMemoRef::nil(),
+                }
+            }
+        }
+        TypeDesc::Tarrow {
+            arg,
+            ret,
+            commutable,
+            arity,
+        } => {
+            let new_arg_typ = nondep_type_rec(ctx, env, mid, arg.typ, cache)?;
+            let new_ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
+            TypeDesc::Tarrow {
+                arg: super::type_expr::TypeArg {
+                    lbl: arg.lbl.clone(),
+                    typ: new_arg_typ,
+                },
+                ret: new_ret,
+                commutable: commutable.clone(),
+                arity: *arity,
+            }
+        }
+        TypeDesc::Ttuple(types) => {
+            let new_types: Option<Vec<_>> = types
+                .iter()
+                .map(|t| nondep_type_rec(ctx, env, mid, *t, cache))
+                .collect();
+            TypeDesc::Ttuple(new_types?)
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let new_vars: Option<Vec<_>> = vars
+                .iter()
+                .map(|t| nondep_type_rec(ctx, env, mid, *t, cache))
+                .collect();
+            let new_body = nondep_type_rec(ctx, env, mid, *body, cache)?;
+            TypeDesc::Tpoly {
+                body: new_body,
+                vars: new_vars?,
+            }
+        }
+        TypeDesc::Tvariant(row) => {
+            let row = row_repr_ref(ctx, row);
+            let row = row.as_ref();
+            let new_more = nondep_type_rec(ctx, env, mid, row.row_more, cache)?;
+            let new_fields: Option<Vec<_>> = row
+                .row_fields
+                .iter()
+                .map(|(label, field)| {
+                    let repr_field = super::btype::row_field_repr(ctx, field);
+                    let new_field = match repr_field {
+                        super::type_expr::RowField::Rpresent(Some(ty)) => {
+                            super::type_expr::RowField::Rpresent(Some(nondep_type_rec(
+                                ctx, env, mid, ty, cache,
+                            )?))
+                        }
+                        super::type_expr::RowField::Rpresent(None) => {
+                            super::type_expr::RowField::Rpresent(None)
+                        }
+                        super::type_expr::RowField::Reither {
+                            constant,
+                            types,
+                            matched,
+                            ..
+                        } => {
+                            let new_types: Option<Vec<_>> = types
+                                .iter()
+                                .map(|a| nondep_type_rec(ctx, env, mid, *a, cache))
+                                .collect();
+                            super::type_expr::RowField::Reither {
+                                constant,
+                                types: new_types?,
+                                matched,
+                                link: super::type_expr::RowFieldRef::null(),
+                            }
+                        }
+                        super::type_expr::RowField::Rabsent => {
+                            super::type_expr::RowField::Rabsent
+                        }
+                    };
+                    Some((label.clone(), new_field))
+                })
+                .collect();
+            let new_name = match &row.row_name {
+                Some((p, tl)) if !p.is_free(mid) => {
+                    let new_tl: Option<Vec<_>> = tl
+                        .iter()
+                        .map(|t| nondep_type_rec(ctx, env, mid, *t, cache))
+                        .collect();
+                    new_tl.map(|tl| Some((p.clone(), tl))).unwrap_or(None)
+                }
+                _ => None,
+            };
+            TypeDesc::Tvariant(super::type_expr::RowDesc {
+                row_fields: new_fields?,
+                row_more: new_more,
+                row_closed: row.row_closed,
+                row_fixed: row.row_fixed,
+                row_name: new_name,
+            })
+        }
+        TypeDesc::Tobject { fields, name } => {
+            let new_fields = nondep_type_rec(ctx, env, mid, *fields, cache)?;
+            let new_name = match name {
+                Some((p, tl)) if !p.is_free(mid) => {
+                    let new_tl: Option<Vec<_>> = tl
+                        .iter()
+                        .map(|t| nondep_type_rec(ctx, env, mid, *t, cache))
+                        .collect();
+                    new_tl.map(|tl| Some((p.clone(), tl))).unwrap_or(None)
+                }
+                _ => None,
+            };
+            TypeDesc::Tobject {
+                fields: new_fields,
+                name: new_name,
+            }
+        }
+        TypeDesc::Tfield {
+            name,
+            kind,
+            typ,
+            rest,
+        } => {
+            let new_typ = nondep_type_rec(ctx, env, mid, *typ, cache)?;
+            let new_rest = nondep_type_rec(ctx, env, mid, *rest, cache)?;
+            TypeDesc::Tfield {
+                name: name.clone(),
+                kind: kind.clone(),
+                typ: new_typ,
+                rest: new_rest,
+            }
+        }
+        TypeDesc::Tpackage { path, lids, args } => {
+            if path.is_free(mid) {
+                // OCaml: normalize_package_path then check again
+                return None;
+            }
+            let new_args: Option<Vec<_>> = args
+                .iter()
+                .map(|a| nondep_type_rec(ctx, env, mid, *a, cache))
+                .collect();
+            TypeDesc::Tpackage {
+                path: path.clone(),
+                lids: lids.clone(),
+                args: new_args?,
+            }
+        }
+        // Tlink should have been resolved by repr(), Tsubst shouldn't appear
+        TypeDesc::Tlink(inner) => {
+            return nondep_type_rec(ctx, env, mid, *inner, cache);
+        }
+        TypeDesc::Tsubst(_) | TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+            return Some(ty);
+        }
+    };
+
+    ctx.set_desc(stub, new_desc);
+    ctx.set_level(stub, GENERIC_LEVEL);
+    Some(stub)
+}
+
+/// Eliminate dependencies on functor parameter `mid` from a type declaration.
+/// OCaml: Ctype.nondep_type_decl
+pub fn nondep_type_decl<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    mid: &Ident,
+    _id: &Ident,
+    is_covariant: bool,
+    decl: &super::decl::TypeDeclaration,
+) -> Option<super::decl::TypeDeclaration> {
+    let params: Option<Vec<_>> = decl
+        .type_params
+        .iter()
+        .map(|ty| nondep_type(ctx, env, mid, *ty))
+        .collect();
+    let params = params?;
+
+    let type_kind = match nondep_type_kind(ctx, env, mid, &decl.type_kind) {
+        Some(tk) => tk,
+        None if is_covariant => super::decl::TypeKind::TypeAbstract,
+        None => return None,
+    };
+
+    let type_manifest = match decl.type_manifest {
+        Some(ty) => match nondep_type(ctx, env, mid, ty) {
+            Some(ty) => Some(ty),
+            None if is_covariant => None,
+            None => return None,
+        },
+        None => None,
+    };
+
+    Some(super::decl::TypeDeclaration {
+        type_params: params,
+        type_arity: decl.type_arity,
+        type_kind,
+        type_private: decl.type_private,
+        type_manifest,
+        type_variance: decl.type_variance.clone(),
+        type_newtype_level: None,
+        type_loc: decl.type_loc,
+        type_attributes: decl.type_attributes.clone(),
+        type_immediate: decl.type_immediate,
+        type_unboxed: decl.type_unboxed.clone(),
+        type_path: decl.type_path.clone(),
+        type_inlined_types: decl.type_inlined_types.clone(),
+    })
+}
+
+fn nondep_type_kind<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    mid: &Ident,
+    kind: &super::decl::TypeKind,
+) -> Option<super::decl::TypeKind> {
+    match kind {
+        super::decl::TypeKind::TypeAbstract => Some(super::decl::TypeKind::TypeAbstract),
+        super::decl::TypeKind::TypeOpen => Some(super::decl::TypeKind::TypeOpen),
+        super::decl::TypeKind::TypeRecord(labels, repr) => {
+            let new_labels: Option<Vec<_>> = labels
+                .iter()
+                .map(|label| {
+                    let new_type = nondep_type(ctx, env, mid, label.ld_type)?;
+                    Some(super::decl::LabelDeclaration {
+                        ld_type: new_type,
+                        ..label.clone()
+                    })
+                })
+                .collect();
+            Some(super::decl::TypeKind::TypeRecord(new_labels?, repr.clone()))
+        }
+        super::decl::TypeKind::TypeVariant(constructors) => {
+            let new_constructors: Option<Vec<_>> = constructors
+                .iter()
+                .map(|cd| {
+                    let new_args = match &cd.cd_args {
+                        super::decl::ConstructorArguments::CstrTuple(args) => {
+                            let new_args: Option<Vec<_>> = args
+                                .iter()
+                                .map(|a| nondep_type(ctx, env, mid, *a))
+                                .collect();
+                            super::decl::ConstructorArguments::CstrTuple(new_args?)
+                        }
+                        super::decl::ConstructorArguments::CstrRecord(labels) => {
+                            let new_labels: Option<Vec<_>> = labels
+                                .iter()
+                                .map(|label| {
+                                    let new_type = nondep_type(ctx, env, mid, label.ld_type)?;
+                                    Some(super::decl::LabelDeclaration {
+                                        ld_type: new_type,
+                                        ..label.clone()
+                                    })
+                                })
+                                .collect();
+                            super::decl::ConstructorArguments::CstrRecord(new_labels?)
+                        }
+                    };
+                    let new_res = match cd.cd_res {
+                        Some(ty) => Some(nondep_type(ctx, env, mid, ty)?),
+                        None => None,
+                    };
+                    Some(super::decl::ConstructorDeclaration {
+                        cd_args: new_args,
+                        cd_res: new_res,
+                        ..cd.clone()
+                    })
+                })
+                .collect();
+            Some(super::decl::TypeKind::TypeVariant(new_constructors?))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

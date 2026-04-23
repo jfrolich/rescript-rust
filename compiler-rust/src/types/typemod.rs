@@ -1493,6 +1493,143 @@ fn substitute_functor_param_in_module_type(
     }
 }
 
+/// OCaml: Mtype.nondep_supertype
+///
+/// Eliminate dependencies on functor parameter `mid` from a module type.
+/// The environment should already contain the argument module bound to `mid`.
+/// Returns `None` if the dependency cannot be eliminated.
+fn nondep_supertype(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    mid: &Ident,
+    mty: &crate::types::decl::ModuleType,
+) -> Option<crate::types::decl::ModuleType> {
+    nondep_mty(ctx, env, mid, mty)
+}
+
+fn nondep_mty(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    mid: &Ident,
+    mty: &crate::types::decl::ModuleType,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    match mty {
+        DeclMty::MtyIdent(path) => {
+            if path.is_free(mid) {
+                // OCaml: nondep_mty env va (Env.find_modtype_expansion p env)
+                // For simplicity, return None (cannot eliminate)
+                None
+            } else {
+                Some(mty.clone())
+            }
+        }
+        DeclMty::MtyAlias(_, path) => {
+            if path.is_free(mid) {
+                None
+            } else {
+                Some(mty.clone())
+            }
+        }
+        DeclMty::MtySignature(sig_items) => {
+            let new_items = nondep_sig(ctx, env, mid, sig_items)?;
+            Some(DeclMty::MtySignature(new_items))
+        }
+        DeclMty::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let new_param_type = match param_type {
+                Some(pt) => Some(Box::new(nondep_mty(ctx, env, mid, pt)?)),
+                None => None,
+            };
+            let inner_env = {
+                let mut e = env.clone();
+                let default_mty = param_type
+                    .as_ref()
+                    .map(|pt| (**pt).clone())
+                    .unwrap_or_else(|| DeclMty::MtySignature(vec![]));
+                e.add_module(
+                    param.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: default_mty,
+                        md_attributes: vec![],
+                        md_loc: Location::none(),
+                        md_path: None,
+                    },
+                );
+                e
+            };
+            let new_result = nondep_mty(ctx, &inner_env, mid, result)?;
+            Some(DeclMty::MtyFunctor {
+                param: param.clone(),
+                param_type: new_param_type,
+                result: Box::new(new_result),
+            })
+        }
+    }
+}
+
+fn nondep_sig(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    mid: &Ident,
+    sig_items: &[crate::types::decl::SignatureItem],
+) -> Option<Vec<crate::types::decl::SignatureItem>> {
+    use crate::types::decl::SignatureItem;
+
+    let mut result = Vec::new();
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(id, vd) => {
+                let new_type = crate::types::ctype::nondep_type(ctx, env, mid, vd.val_type)?;
+                let mut new_vd = vd.clone();
+                new_vd.val_type = new_type;
+                result.push(SignatureItem::SigValue(id.clone(), new_vd));
+            }
+            SignatureItem::SigType(id, decl, rs) => {
+                // OCaml: Ctype.nondep_type_decl env mid id (va = Co) d
+                let new_decl =
+                    crate::types::ctype::nondep_type_decl(ctx, env, mid, id, true, decl)?;
+                result.push(SignatureItem::SigType(id.clone(), new_decl, *rs));
+            }
+            SignatureItem::SigTypext(id, ext, es) => {
+                // Simplified: try to remove dep from extension constructor
+                let new_params: Option<Vec<_>> = ext
+                    .ext_type_params
+                    .iter()
+                    .map(|ty| crate::types::ctype::nondep_type(ctx, env, mid, *ty))
+                    .collect();
+                let mut new_ext = ext.clone();
+                new_ext.ext_type_params = new_params?;
+                // TODO: handle ext_args and ext_ret_type nondep
+                result.push(SignatureItem::SigTypext(id.clone(), new_ext, *es));
+            }
+            SignatureItem::SigModule(id, md, rs) => {
+                let new_md_type = nondep_mty(ctx, env, mid, &md.md_type)?;
+                let mut new_md = md.clone();
+                new_md.md_type = new_md_type;
+                result.push(SignatureItem::SigModule(id.clone(), new_md, *rs));
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                let new_mtd_type = match &mtd.mtd_type {
+                    Some(mty) => Some(nondep_mty(ctx, env, mid, mty)?),
+                    None => None,
+                };
+                let mut new_mtd = mtd.clone();
+                new_mtd.mtd_type = new_mtd_type;
+                result.push(SignatureItem::SigModtype(id.clone(), new_mtd));
+            }
+            _ => {
+                result.push(item.clone());
+            }
+        }
+    }
+    Some(result)
+}
+
 fn rewrite_module_path_prefix_with_aliases(
     path: &Path,
     old_param: &Ident,
@@ -7779,12 +7916,42 @@ fn type_module_expr_with_alias<'a>(
                 }
             };
             let applied_mty = match &functor_mty {
-                crate::types::decl::ModuleType::MtyFunctor { param, result, .. } => arg_path
-                    .as_ref()
-                    .map(|path| {
-                        substitute_functor_param_in_module_type(result, param, path, tctx.type_ctx)
-                    })
-                    .unwrap_or_else(|| (**result).clone()),
+                crate::types::decl::ModuleType::MtyFunctor {
+                    param,
+                    param_type,
+                    result,
+                } => {
+                    match arg_path.as_ref() {
+                        Some(path) => substitute_functor_param_in_module_type(
+                            result,
+                            param,
+                            path,
+                            tctx.type_ctx,
+                        ),
+                        None => {
+                            // OCaml: Mtype.nondep_supertype
+                            //   (Env.add_module ~arg:true param arg.mod_type env)
+                            //   param mty_res
+                            let generative = param_type.is_none();
+                            if generative {
+                                (**result).clone()
+                            } else {
+                                let mut nondep_env = env.clone();
+                                nondep_env.add_module(
+                                    param.clone(),
+                                    crate::types::decl::ModuleDeclaration {
+                                        md_type: arg_mty.clone(),
+                                        md_attributes: vec![],
+                                        md_loc: Location::none(),
+                                        md_path: None,
+                                    },
+                                );
+                                nondep_supertype(tctx.type_ctx, &nondep_env, param, result)
+                                    .unwrap_or_else(|| (**result).clone())
+                            }
+                        }
+                    }
+                }
                 _ => crate::types::decl::ModuleType::MtySignature(vec![]),
             };
             let typed_apply = ModuleExpr {
