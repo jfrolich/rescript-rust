@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -76,6 +77,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Directory for latest CSV/JSON output. Defaults to "
             ".performance-cache/typechecker"
+        ),
+    )
+    parser.add_argument(
+        "--typedtree-only",
+        action="store_true",
+        help=(
+            "Benchmark through typedtree serialization and skip Lambda/JS lowering. "
+            "Uses RESCRIPT_TYPEDTREE_ONLY for OCaml and RUST_TYPEDTREE_ONLY for Rust."
         ),
     )
     return parser.parse_args()
@@ -164,6 +173,8 @@ def measure_compiler(
     warmup: int,
     runs: int,
     timeout_seconds: int,
+    env: dict[str, str] | None = None,
+    discard_stderr: bool = False,
 ) -> tuple[float | None, str | None]:
     times: list[float] = []
     total_runs = warmup + runs
@@ -171,18 +182,22 @@ def measure_compiler(
         if output_file.exists():
             output_file.unlink()
         start = time.perf_counter()
+        stderr_target = subprocess.DEVNULL if discard_stderr else subprocess.PIPE
         try:
             proc = subprocess.run(
                 [str(compiler), *base_args, "-o", str(output_file)],
                 cwd=workdir,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=stderr_target,
+                env=env,
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
             return None, f"timeout after {timeout_seconds}s"
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if proc.returncode != 0:
+            if discard_stderr:
+                return None, "compiler failed; stderr discarded for typedtree-only timing"
             return None, summarize_error(proc.stderr)
         if run_idx >= warmup:
             times.append(elapsed_ms)
@@ -260,6 +275,7 @@ def write_outputs(
         "selector": args.selector,
         "material_ratio": args.material_ratio,
         "material_delta_ms": args.material_delta_ms,
+        "typedtree_only": args.typedtree_only,
         "results": [asdict(result) for result in results],
     }
     json_path.write_text(json.dumps(payload, indent=2) + "\n")
@@ -283,8 +299,9 @@ def print_summary(args: argparse.Namespace, results: list[FileResult]) -> None:
     ocaml_failures = [result for result in results if result.status.startswith("ocaml_")]
     args_failures = [result for result in results if result.status == "compiler_args_fail"]
 
-    print("Typechecker Performance Benchmark")
-    print("================================")
+    title = "Typedtree-Only Performance Benchmark" if args.typedtree_only else "Typechecker Performance Benchmark"
+    print(title)
+    print("=" * len(title))
     print(f"Files tested:              {total}")
     print(f"Comparable files:         {len(comparable)}")
     print(f"Rust faster or equal:     {rust_faster_or_equal}")
@@ -385,6 +402,18 @@ def main() -> int:
                 )
                 continue
 
+            compiler_base_args = compiler_args
+            ocaml_env = None
+            rust_env = None
+            discard_stderr = False
+            if args.typedtree_only:
+                compiler_base_args = [*compiler_args, "-dtyped-sexp"]
+                ocaml_env = os.environ.copy()
+                ocaml_env["RESCRIPT_TYPEDTREE_ONLY"] = "1"
+                rust_env = os.environ.copy()
+                rust_env["RUST_TYPEDTREE_ONLY"] = "1"
+                discard_stderr = True
+
             rel_output = Path(rel_path)
             ocaml_out = (tmp_root / rel_output).with_suffix(".ocaml.mjs")
             rust_out = (tmp_root / rel_output).with_suffix(".rust.mjs")
@@ -393,21 +422,25 @@ def main() -> int:
 
             ocaml_ms, ocaml_error = measure_compiler(
                 paths["ocaml_bsc"],
-                compiler_args,
+                compiler_base_args,
                 paths["workdir"],
                 ocaml_out,
                 args.warmup,
                 args.runs,
                 args.timeout,
+                env=ocaml_env,
+                discard_stderr=discard_stderr,
             )
             rust_ms, rust_error = measure_compiler(
                 paths["rust_bsc"],
-                compiler_args,
+                compiler_base_args,
                 paths["workdir"],
                 rust_out,
                 args.warmup,
                 args.runs,
                 args.timeout,
+                env=rust_env,
+                discard_stderr=discard_stderr,
             )
 
             if ocaml_ms is not None and rust_ms is not None:

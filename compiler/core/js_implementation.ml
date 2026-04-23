@@ -120,6 +120,8 @@ let no_export (rest : Parsetree.structure) : Parsetree.structure =
       ]
   | _ -> rest
 
+let typedtree_only () = Sys.getenv_opt "RESCRIPT_TYPEDTREE_ONLY" <> None
+
 let after_parsing_impl ppf outputprefix (ast : Parsetree.structure) =
   if !Clflags.only_parse = false then (
     Js_config.all_module_aliases :=
@@ -153,7 +155,8 @@ let after_parsing_impl ppf outputprefix (ast : Parsetree.structure) =
         Sexp_typedtree.print_typed_structure typedtree;
       print_if ppf Clflags.dump_typed_sexp_locs
         Sexp_typedtree.print_typed_structure_with_locs typedtree;
-      (if !Js_config.cmi_only then Warnings.check_fatal ()
+      (if typedtree_only () then Warnings.check_fatal ()
+       else if !Js_config.cmi_only then Warnings.check_fatal ()
        else
          let lambda, exports =
            Translmod.transl_implementation modulename typedtree_coercion
