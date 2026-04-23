@@ -1736,6 +1736,10 @@ module SexpAstWithLocs = struct
             Sexp.list (map_empty ~f:jsx_prop props);
             Sexp.list (map_empty ~f:expression xs);
           ]
+      | Pexp_break -> Sexp.list [Sexp.atom "Pexp_break"]
+      | Pexp_continue -> Sexp.list [Sexp.atom "Pexp_continue"]
+      | Pexp_for_of _ -> Sexp.list [Sexp.atom "Pexp_for_of"]
+      | Pexp_for_await_of _ -> Sexp.list [Sexp.atom "Pexp_for_await_of"]
     in
     Sexp.list [Sexp.atom "expression"; location expr.pexp_loc; desc; attributes expr.pexp_attributes]
 

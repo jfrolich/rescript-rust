@@ -534,6 +534,10 @@ and expression_desc ~with_locs desc =
     Sexp.list [Sexp.atom "Texp_pack"; me_sexp]
   | Texp_extension_constructor (li, p) ->
     Sexp.list [Sexp.atom "Texp_extension_constructor"; longident_loc li; path p]
+  | Texp_break -> Sexp.list [Sexp.atom "Texp_break"]
+  | Texp_continue -> Sexp.list [Sexp.atom "Texp_continue"]
+  | Texp_for_of _ -> Sexp.list [Sexp.atom "Texp_for_of"]
+  | Texp_for_await_of _ -> Sexp.list [Sexp.atom "Texp_for_await_of"]
 
 and case ~with_locs c =
   let lhs_sexp = pattern ~with_locs c.c_lhs in

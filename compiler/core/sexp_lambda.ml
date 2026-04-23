@@ -480,6 +480,10 @@ let rec lambda ~with_locs (lam : Lam.t) =
       ident var;
       lambda ~with_locs value;
     ]
+  | Lbreak -> Sexp.list [Sexp.atom "Lbreak"]
+  | Lcontinue -> Sexp.list [Sexp.atom "Lcontinue"]
+  | Lfor_of _ -> Sexp.list [Sexp.atom "Lfor_of"]
+  | Lfor_await_of _ -> Sexp.list [Sexp.atom "Lfor_await_of"]
 
 and ap_info_sexp ~with_locs (info : Lam.ap_info) =
   let loc_sexp = if with_locs then [location ~with_locs info.ap_loc] else [] in
