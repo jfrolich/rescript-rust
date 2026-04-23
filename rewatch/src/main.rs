@@ -58,20 +58,23 @@ fn main() -> Result<()> {
                 }
             };
             configure_rayon_for_in_process(build_mode);
-            match build::build(
-                &build_args.filter,
-                Path::new(&build_args.folder as &str),
-                show_progress,
-                build_args.no_timing,
-                true, // create_sourcedirs is now always enabled
-                plain_output,
-                (*build_args.warn_error).clone(),
-                build_mode,
-                build_args.subprocess.subprocess,
-                build_args.dump_typed_sexp_arg.dump_typed_sexp,
-                build_args.prod,
-                features,
-            ) {
+            let build_result = run_with_in_process_stack(build_mode, || {
+                build::build(
+                    &build_args.filter,
+                    Path::new(&build_args.folder as &str),
+                    show_progress,
+                    build_args.no_timing,
+                    true, // create_sourcedirs is now always enabled
+                    plain_output,
+                    (*build_args.warn_error).clone(),
+                    build_mode,
+                    build_args.subprocess.subprocess,
+                    build_args.dump_typed_sexp_arg.dump_typed_sexp,
+                    build_args.prod,
+                    features,
+                )
+            });
+            match build_result {
                 Err(e) => {
                     eprintln!("{:#}", e);
                     std::process::exit(1)
@@ -85,8 +88,6 @@ fn main() -> Result<()> {
             };
         }
         cli::Command::Watch(watch_args) => {
-            let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
-
             let features = watch_args.features.parsed();
             let build_mode = match cli::resolve_build_mode(
                 *watch_args.rust,
@@ -99,21 +100,25 @@ fn main() -> Result<()> {
                 }
             };
             configure_rayon_for_in_process(build_mode);
-            match watcher::start(
-                &watch_args.filter,
-                show_progress,
-                &watch_args.folder,
-                (*watch_args.after_build).clone(),
-                true, // create_sourcedirs is now always enabled
-                plain_output,
-                (*watch_args.warn_error).clone(),
-                build_mode,
-                watch_args.subprocess.subprocess,
-                watch_args.dump_typed_sexp_arg.dump_typed_sexp,
-                watch_args.clear_screen,
-                watch_args.prod,
-                features,
-            ) {
+            let _lock = get_lock_or_exit(LockKind::Watch, &watch_args.folder);
+            let watch_result = run_with_in_process_stack(build_mode, || {
+                watcher::start(
+                    &watch_args.filter,
+                    show_progress,
+                    &watch_args.folder,
+                    (*watch_args.after_build).clone(),
+                    true, // create_sourcedirs is now always enabled
+                    plain_output,
+                    (*watch_args.warn_error).clone(),
+                    build_mode,
+                    watch_args.subprocess.subprocess,
+                    watch_args.dump_typed_sexp_arg.dump_typed_sexp,
+                    watch_args.clear_screen,
+                    watch_args.prod,
+                    features,
+                )
+            });
+            match watch_result {
                 Err(e) => {
                     eprintln!("{:#}", e);
                     std::process::exit(1)
@@ -134,14 +139,39 @@ fn main() -> Result<()> {
 
 fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
     if build_mode.is_in_process() {
-        match rayon::ThreadPoolBuilder::new()
-            .stack_size(64 * 1024 * 1024)
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
+            .stack_size(IN_PROCESS_STACK_SIZE)
             .build_global()
-        {
-            Ok(()) => {}
-            Err(_) => {}
-        }
+            .expect("failed to configure in-process Rayon worker pool");
     }
+}
+
+const IN_PROCESS_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+fn run_with_in_process_stack<T, F>(
+    build_mode: rescript::build::build_types::BuildMode,
+    f: F,
+) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    if !build_mode.is_in_process() {
+        return f();
+    }
+
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("rewatch-in-process-main".to_string())
+            .stack_size(IN_PROCESS_STACK_SIZE)
+            .spawn_scoped(scope, f)
+            .expect("failed to spawn in-process build thread");
+        match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 struct SplitLogger {
