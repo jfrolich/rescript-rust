@@ -1631,13 +1631,17 @@ fn add_default_value_matches(
 ) -> Expression {
     for arg in args.iter().rev() {
         if let Some(default) = &arg.default {
-            // Use the label name for the match pattern, not the alias
-            // For ~foo as bar, we use "foo" in the match
+            // Mirrors OCaml jsx_v4.ml's vb_match (post #8296). Emits two
+            // nested lets:
+            //   let __<label>_value = match __<label> { Some(v) => v | None => default }
+            //   let <pattern> = __<label>_value
+            //   <expr>
+            // The intermediate `__X_value` binding lets first-class module
+            // unpack patterns survive on the inner let.
             let label_name = get_label(arena, &arg.label);
-            let alias = &arg.alias;
-            let prefixed = format!("__{}", alias);
+            let prefixed = format!("__{}", label_name);
+            let resolved_name = format!("__{}_value", label_name);
 
-            // Create: let alias = switch __alias { | Some(labelName) => labelName | None => default }
             let prefixed_str_idx = arena.push_string(prefixed);
             let some_str_idx = arena.intern_string("Some");
             let none_str_idx = arena.intern_string("None");
@@ -1712,12 +1716,12 @@ fn add_default_value_matches(
                 pexp_attributes: Attributes::new(),
             };
 
-            // OCaml uses the original arg location for the let binding pattern
-            let alias_str_idx = arena.push_interned_string(&alias);
-            let binding = ValueBinding {
+            // Outer binding: let __<label>_value = match __<label> { ... }
+            let resolved_str_idx = arena.push_string(resolved_name.clone());
+            let value_binding = ValueBinding {
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                        txt: alias_str_idx,
+                        txt: resolved_str_idx,
                         loc: arg.loc.clone(),
                     })),
                     ppat_loc: empty_loc(),
@@ -1728,12 +1732,40 @@ fn add_default_value_matches(
                 pvb_loc: empty_loc(),
             };
 
+            // Inner binding: let <pattern> = __<label>_value
+            let resolved_lid_str_idx = arena.intern_string(&resolved_name);
+            let resolved_lid = arena.push_longident(Longident::Lident(resolved_lid_str_idx));
+            let resolved_ident_idx = arena.push_expr(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+                    txt: resolved_lid,
+                    loc: empty_loc(),
+                })),
+                pexp_loc: empty_loc(),
+                pexp_attributes: Attributes::new(),
+            });
+            let inner_binding = ValueBinding {
+                pvb_pat: arena.push_pat(arg.pattern.clone()),
+                pvb_expr: resolved_ident_idx,
+                pvb_attributes: Attributes::new(),
+                pvb_loc: empty_loc(),
+            };
+
             let expr_idx = arena.push_expr(expr);
+            let inner_let = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
+                    RecFlag::Nonrecursive,
+                    vec![inner_binding],
+                    expr_idx,
+                )))),
+                pexp_loc: empty_loc(),
+                pexp_attributes: Attributes::new(),
+            };
+            let inner_let_idx = arena.push_expr(inner_let);
             expr = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
                     RecFlag::Nonrecursive,
-                    vec![binding],
-                    expr_idx,
+                    vec![value_binding],
+                    inner_let_idx,
                 )))),
                 pexp_loc: empty_loc(),
                 pexp_attributes: Attributes::new(),

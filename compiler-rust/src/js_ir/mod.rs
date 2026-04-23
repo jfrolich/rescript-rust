@@ -140,11 +140,13 @@ impl ModulePathResolver {
     }
 
     fn runtime_module_path(&self, module_name: &str) -> String {
-        let dir = match self.format {
-            ModuleFormat::EsModule => "es6",
-            ModuleFormat::CommonJs => "js",
+        // Mirror upstream PR #8207: runtime files use .mjs / .cjs extensions
+        // matching the module system, not .js.
+        let (dir, ext) = match self.format {
+            ModuleFormat::EsModule => ("es6", "mjs"),
+            ModuleFormat::CommonJs => ("js", "cjs"),
         };
-        format!("@rescript/runtime/lib/{dir}/{module_name}.js")
+        format!("@rescript/runtime/lib/{dir}/{module_name}.{ext}")
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
