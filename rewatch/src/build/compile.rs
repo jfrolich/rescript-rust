@@ -166,9 +166,12 @@ fn compute_critical_path_priorities(
 
 /// Run the short-circuit check or actual `bsc` invocation for a single module.
 /// Invoked from worker threads inside the dispatcher scope; only reads
-/// `BuildState`, never mutates it.
+/// `BuildState`, never mutates it (except via the `BuildCommandState` mutex
+/// used by the in-process path to publish results).
 fn compile_one(
     build_state: &BuildState,
+    build_command_state: &BuildCommandState,
+    registry_snapshot: &ModuleRegistry,
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
@@ -188,6 +191,31 @@ fn compile_one(
             is_clean: true,
             is_compiled: false,
         };
+    }
+
+    // In-process mode: bypass the bsc subprocess entirely and run the Rust
+    // compiler in-thread. The caller has already staged runtime modules and
+    // namespace signatures into the shared registry, and the DAG scheduler
+    // guarantees all dependencies of this module are registered before it
+    // is dispatched.
+    if build_command_state.build_mode().is_in_process() {
+        if let SourceType::SourceFile(_) = &module.source_type {
+            let result = compile_module_in_process(
+                package,
+                module,
+                module_name,
+                registry_snapshot,
+                build_state,
+                build_command_state,
+            );
+            return CompletionMsg {
+                module_name: module_name.to_string(),
+                result,
+                interface_result: None,
+                is_clean: false,
+                is_compiled: true,
+            };
+        }
     }
 
     match &module.source_type {
@@ -400,6 +428,14 @@ pub fn compile(
     let subprocess = build_state.subprocess();
     let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
+    let build_command_state_ref: &BuildCommandState = build_state;
+
+    // Snapshot the registry once before the scope. The DAG scheduler only
+    // dispatches a module once all its dependencies have completed, so their
+    // registrations have already been published to the shared registry —
+    // but workers need a lock-free view, so each worker gets a snapshot taken
+    // at spawn time. (Taking one per spawn is cheap vs. type-checking.)
+    let in_process_mode = build_state.build_mode().is_in_process();
 
     let (tx, rx) = mpsc::channel::<CompletionMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
@@ -422,9 +458,20 @@ pub fn compile(
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
+                // Take a per-spawn snapshot of the registry so workers have
+                // a stable view including any deps that published registry
+                // entries before this module was unblocked. Subprocess mode
+                // ignores the snapshot.
+                let registry_snapshot: ModuleRegistry = if in_process_mode {
+                    build_state.snapshot_module_registry()
+                } else {
+                    ModuleRegistry::new()
+                };
                 scope.spawn(move |_| {
                     let msg = compile_one(
                         build_state_ref,
+                        build_command_state_ref,
+                        &registry_snapshot,
                         &module_name,
                         is_dirty,
                         warn_override,
