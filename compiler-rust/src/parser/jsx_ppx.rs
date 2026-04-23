@@ -1587,11 +1587,22 @@ fn build_props_pattern_and_body(
         // OCaml strips constraint from pattern when building record field
         let base_pat = strip_pattern_constraint(arena, &arg.pattern);
 
-        // For optional args with default, prefix with __
+        // For args with a default value, OCaml replaces the entire pattern
+        // with a fresh `Pat.var "__<label>"` (jsx_v4.ml `pattern_with_safe_label`).
+        // This avoids ident-name collisions and, critically, keeps the props
+        // record field bound to `__<label>` regardless of any `~name as alias`
+        // renaming. The original pattern (alias and all) is bound later via
+        // `add_default_value_matches`.
         let mut pat = if arg.default.is_some() {
-            let mut p = base_pat;
-            prefix_pattern_var(arena, &mut p, "__");
-            p
+            let prefixed_str_idx = arena.push_string(format!("__{}", label));
+            Pattern {
+                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                    txt: prefixed_str_idx,
+                    loc: base_pat.ppat_loc.clone(),
+                })),
+                ppat_loc: base_pat.ppat_loc.clone(),
+                ppat_attributes: Attributes::new(),
+            }
         } else {
             base_pat
         };
