@@ -6952,27 +6952,22 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
 
     // Determine action based on type level and descriptor.
     let action = {
-        let desc = ctx.get_desc(ty);
+        let desc = ctx.borrow_desc(ty);
 
         if level != GENERIC_LEVEL {
             match &*desc {
-                // Identity for all non-Tconstr types — matches OCaml's copy
-                // which returns identity for ALL non-generic types.
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => CopyAction::ReturnSelf,
-                TypeDesc::Ttuple(_) => CopyAction::ReturnSelf,
-                TypeDesc::Tobject { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tvariant(_) => CopyAction::ReturnSelf,
-                TypeDesc::Tpoly { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tpackage { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tarrow { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tfield { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tnil => CopyAction::ReturnSelf,
-                // Tconstr: OCaml's copy returns identity for ALL non-generic types.
-                // Match that behavior: return self for all non-generic Tconstr.
-                TypeDesc::Tconstr { path, .. } => {
-                    let path_name = path.name();
-                    CopyAction::ReturnSelf
-                }
+                // OCaml's copy returns identity for all non-generic type nodes.
+                TypeDesc::Tvar(_)
+                | TypeDesc::Tunivar(_)
+                | TypeDesc::Ttuple(_)
+                | TypeDesc::Tobject { .. }
+                | TypeDesc::Tvariant(_)
+                | TypeDesc::Tpoly { .. }
+                | TypeDesc::Tpackage { .. }
+                | TypeDesc::Tarrow { .. }
+                | TypeDesc::Tfield { .. }
+                | TypeDesc::Tnil
+                | TypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         } else {
