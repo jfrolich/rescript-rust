@@ -16,7 +16,7 @@ use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
-    TypeDesc, TypeExprRef,
+    RowFieldRef, TypeDesc, TypeExprRef,
 };
 use std::borrow::Cow;
 
@@ -67,6 +67,41 @@ pub fn row_field_repr(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
     row_field_repr_aux(ctx, &[], field)
 }
 
+pub fn row_field_is_absent(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+    match field {
+        RowField::Reither { link, .. } => ctx
+            .get_row_field(*link)
+            .is_some_and(|linked| row_field_is_absent(ctx, &linked)),
+        RowField::Rabsent => true,
+        _ => false,
+    }
+}
+
+pub fn row_field_is_reither(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+    match field {
+        RowField::Reither { link, .. } => ctx
+            .get_row_field(*link)
+            .map_or(true, |linked| row_field_is_reither(ctx, &linked)),
+        _ => false,
+    }
+}
+
+pub fn row_field_unmatched_reither_link(
+    ctx: &TypeContext<'_>,
+    field: &RowField,
+) -> Option<RowFieldRef> {
+    match field {
+        RowField::Reither {
+            matched, link, ..
+        } => match ctx.get_row_field(*link) {
+            Some(linked) => row_field_unmatched_reither_link(ctx, &linked),
+            None if !*matched => Some(*link),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
 fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowField) -> RowField {
     match field {
         RowField::Reither {
@@ -113,7 +148,7 @@ pub fn row_repr(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
     row_repr_aux(ctx, &[], row)
 }
 
-pub fn row_repr_ref<'a>(ctx: &'a TypeContext<'a>, row: &'a RowDesc) -> Cow<'a, RowDesc> {
+pub fn row_repr_ref<'row>(ctx: &TypeContext<'_>, row: &'row RowDesc) -> Cow<'row, RowDesc> {
     let more = ctx.repr(row.row_more);
     let desc = ctx.borrow_desc(more);
     if matches!(&*desc, TypeDesc::Tvariant(_)) {
@@ -204,7 +239,7 @@ pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
         && row
             .row_fields
             .iter()
-            .all(|(_, f)| !matches!(row_field_repr(ctx, f), RowField::Reither { .. }))
+            .all(|(_, f)| !row_field_is_reither(ctx, f))
 }
 
 // ============================================================================

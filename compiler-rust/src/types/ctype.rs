@@ -3915,30 +3915,30 @@ fn unify_rows<'a>(
         |erase: bool, fields: &[RowFieldEntryRef<'_>]| -> Vec<(Label, RowField)> {
             let mut filtered = Vec::new();
             for (label, field) in fields.iter().copied() {
-                match super::btype::row_field_repr(ctx, field) {
-                    RowField::Rabsent => {}
-                    RowField::Reither {
-                        matched: false,
-                        link,
-                        ..
-                    } if erase => {
-                        ctx.set_row_field(link, RowField::Rabsent);
-                    }
-                    _ => filtered.push((label.clone(), field.clone())),
+                if super::btype::row_field_is_absent(ctx, field) {
+                    continue;
                 }
+                if erase {
+                    if let Some(link) = super::btype::row_field_unmatched_reither_link(ctx, field) {
+                        ctx.set_row_field(link, RowField::Rabsent);
+                        continue;
+                    }
+                }
+                filtered.push((label.clone(), field.clone()));
             }
             filtered
         };
     let empty = |fields: &[RowFieldEntryRef<'_>]| {
-        fields.iter().copied().all(|(_, f)| {
-            matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent)
-        })
+        fields
+            .iter()
+            .copied()
+            .all(|(_, f)| super::btype::row_field_is_absent(ctx, f))
     };
 
     if closed {
         let all_absent = pairs.iter().all(|(_, f1, f2)| {
-            matches!(super::btype::row_field_repr(ctx, f1), RowField::Rabsent)
-                || matches!(super::btype::row_field_repr(ctx, f2), RowField::Rabsent)
+            super::btype::row_field_is_absent(ctx, f1)
+                || super::btype::row_field_is_absent(ctx, f2)
         });
         if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) && all_absent {
             return Err(TypeError::Unify(vec![]));
@@ -3948,8 +3948,8 @@ fn unify_rows<'a>(
     let keep = |swap: bool| {
         pairs.iter().all(|(_, f1, f2)| {
             let (left, right) = if swap { (f2, f1) } else { (f1, f2) };
-            matches!(super::btype::row_field_repr(ctx, left), RowField::Rabsent)
-                || !matches!(super::btype::row_field_repr(ctx, right), RowField::Rabsent)
+            super::btype::row_field_is_absent(ctx, left)
+                || !super::btype::row_field_is_absent(ctx, right)
         })
     };
     let name = if row1.row_name.is_some()
