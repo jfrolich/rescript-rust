@@ -3888,13 +3888,13 @@ fn unify_rows<'a>(
     let row1 = row1.as_ref();
     let row2 = row2.as_ref();
 
-    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
-
     let rm1 = row_more(ctx, &row1);
     let rm2 = row_more(ctx, &row2);
     if rm1 == rm2 {
         return Ok(());
     }
+
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
 
     let fixed1 = row_fixed(ctx, &row1);
     let fixed2 = row_fixed(ctx, &row2);
