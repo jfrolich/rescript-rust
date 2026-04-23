@@ -82,8 +82,10 @@ pub struct InMemoryModuleInfo {
 pub struct ModuleRegistry {
     /// Cached module structures in portable form (TypeExprRefs are self-contained
     /// indices into each entry's PortableTypeGraph, not arena refs).
+    /// Values are shared so per-worker registry snapshots do not deep-clone
+    /// published signatures and type graphs.
     /// Keyed by module name.
-    pub cached_modules: HashMap<String, PortablePersStruct>,
+    pub cached_modules: HashMap<String, Arc<PortablePersStruct>>,
     /// Module metadata (source paths, purity, runtime status).
     pub module_info: HashMap<String, InMemoryModuleInfo>,
     /// Alias prefix rewrites (flattened_name -> qualified_path).
@@ -142,7 +144,7 @@ impl ModuleRegistry {
             fingerprint,
         };
         self.cached_modules
-            .insert(namespace_name.to_string(), portable);
+            .insert(namespace_name.to_string(), Arc::new(portable));
     }
 
     /// Remove a module from the registry (for deleted/renamed modules).
@@ -165,7 +167,8 @@ impl ModuleRegistry {
         info: InMemoryModuleInfo,
         new_alias_rewrites: HashMap<String, Path>,
     ) {
-        self.cached_modules.insert(name.to_string(), portable);
+        self.cached_modules
+            .insert(name.to_string(), Arc::new(portable));
         self.module_info.insert(name.to_string(), info);
         self.alias_rewrites.extend(new_alias_rewrites);
     }
@@ -213,7 +216,7 @@ pub struct PersistentEnv {
     /// Portable module cache for `--in-process` builds. These contain self-contained
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
-    portable_cache: HashMap<String, PortablePersStruct>,
+    portable_cache: HashMap<String, Arc<PortablePersStruct>>,
 }
 
 impl PersistentEnv {

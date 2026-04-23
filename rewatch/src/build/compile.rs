@@ -21,6 +21,7 @@ use std::collections::BinaryHeap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::SystemTime;
@@ -1385,7 +1386,9 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
                 match intf_result {
                     Ok(result) => {
                         if let Some(ps) = result.pers_struct {
-                            local_registry.cached_modules.insert(module_name.clone(), ps.clone());
+                            local_registry
+                                .cached_modules
+                                .insert(module_name.clone(), Arc::new(ps.clone()));
                             build_state.update_module_registry(
                                 module_name,
                                 ps,
@@ -1565,7 +1568,7 @@ fn compile_module_in_process(
         if let Some(ps) = intf_result.pers_struct {
             local_registry
                 .cached_modules
-                .insert(module_name.to_string(), ps.clone());
+                .insert(module_name.to_string(), Arc::new(ps.clone()));
             // Update the shared registry with the .resi result
             build_command_state.update_module_registry(
                 module_name,
