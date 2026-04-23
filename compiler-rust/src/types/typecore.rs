@@ -14930,7 +14930,18 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         }
         ExpressionDesc::Texp_pack(module_expr) => is_nonexpansive_module_expr(tctx, module_expr),
         ExpressionDesc::Texp_assert(expr) => is_nonexpansive_expression(tctx, expr),
-        ExpressionDesc::Texp_apply { funct, args, .. } => {
+        ExpressionDesc::Texp_apply {
+            funct,
+            args,
+            partial,
+            ..
+        } => {
+            // Upstream #8343: ReScript partial applications (`foo(args, ...)`)
+            // lower to wrapper functions in codegen, so creating the partial
+            // itself is nonexpansive like an explicit lambda.
+            if *partial {
+                return true;
+            }
             if let Some((first_arg, rest_args)) = args.split_first() {
                 if first_arg.expression.is_none() {
                     return is_nonexpansive_expression(tctx, funct)
