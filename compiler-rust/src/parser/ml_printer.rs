@@ -1436,6 +1436,12 @@ fn print_expression_inner<W: Write>(
                 f.string(")");
             }
         }
+        ExpressionDesc::Pexp_break => {
+            f.string("break");
+        }
+        ExpressionDesc::Pexp_continue => {
+            f.string("continue");
+        }
         ExpressionDesc::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body) = **inner;
             // OCaml: @[<2>%a in@;<1 -2>%a@]

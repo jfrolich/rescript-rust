@@ -136,6 +136,8 @@ impl LoweringContext {
                 let lowered_start = self.lower_lambda(*start);
                 Lambda::for_(var, lowered_start, lowered_end, dir, lowered_body)
             }
+            RawLambda::Lbreak => Lambda::break_(),
+            RawLambda::Lcontinue => Lambda::continue_(),
             RawLambda::Lassign(id, value) => Lambda::assign(id, self.lower_lambda(*value)),
             RawLambda::Lsend(name, obj, loc) => Lambda::prim(
                 Primitive::PjsUnsafeDowngrade {
@@ -570,6 +572,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
             collect_exported_idents(end, exports);
             collect_exported_idents(body, exports);
         }
+        RawLambda::Lbreak | RawLambda::Lcontinue => {}
         RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => {
             collect_exported_idents(value, exports);
         }
@@ -1288,6 +1291,7 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
         Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
             exception_id_destructed(first, exn) || exception_id_destructed(second, exn)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
     }
 }
 
@@ -1342,6 +1346,7 @@ fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
         Lambda::Lfor(_, start, end, _, body) => {
             hit_variable(target, start) || hit_variable(target, end) || hit_variable(target, body)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
     }
 }
@@ -1634,6 +1639,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_raw(max_stamp, value);
             }
             RawLambda::Lsend(_, obj, _) => visit_raw(max_stamp, obj),
+            RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }
 

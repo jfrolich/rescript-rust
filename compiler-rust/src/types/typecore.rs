@@ -4372,6 +4372,33 @@ pub fn type_expect<'a>(
             ))
         }
 
+        ED::Pexp_break => {
+            // break / continue both type as unit; semantics handled later in lowering.
+            let unit_ty = env.type_unit(ctx);
+            let inst_expected = instance_if_generic(ctx, expected_ty);
+            unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+            Ok(Expression::new(
+                ExpressionDesc::Texp_break,
+                loc,
+                unit_ty,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
+        ED::Pexp_continue => {
+            let unit_ty = env.type_unit(ctx);
+            let inst_expected = instance_if_generic(ctx, expected_ty);
+            unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
+            Ok(Expression::new(
+                ExpressionDesc::Texp_continue,
+                loc,
+                unit_ty,
+                exp_env_ref,
+                expr.pexp_attributes.clone(),
+            ))
+        }
+
         ED::Pexp_tuple(exprs) => {
             // Tuple expression
             assert!(exprs.len() >= 2, "Tuple must have at least 2 elements");
@@ -10094,7 +10121,11 @@ fn collect_lident_idents_in_expression(
                 out.push(arena.get_string(*id).to_string());
             }
         }
-        ED::Pexp_constant(_) | ED::Pexp_construct(_, None) | ED::Pexp_extension(_) => {}
+        ED::Pexp_constant(_)
+        | ED::Pexp_construct(_, None)
+        | ED::Pexp_extension(_)
+        | ED::Pexp_break
+        | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
             for binding in inner.1.iter() {
                 collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);

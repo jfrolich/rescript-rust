@@ -1031,6 +1031,8 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_constant(c) => {
             Sexp::list(vec![Sexp::atom("Texp_constant"), sexp_constant(c)])
         }
+        ExpressionDesc::Texp_break => Sexp::atom("Texp_break"),
+        ExpressionDesc::Texp_continue => Sexp::atom("Texp_continue"),
         ExpressionDesc::Texp_let(flag, vbs, body) => {
             let mut vb_items = Vec::new();
             for vb in vbs.iter() {

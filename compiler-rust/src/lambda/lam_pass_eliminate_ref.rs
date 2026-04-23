@@ -250,6 +250,11 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
             let new_e = eliminate_ref(id, e)?;
             Ok(Lambda::Lassign(v.clone(), Box::new(new_e)))
         }
+
+        // OCaml `Lam_pass_eliminate_ref.eliminate_ref` after #8348:
+        // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
+        Lambda::Lbreak => Ok(Lambda::break_()),
+        Lambda::Lcontinue => Ok(Lambda::continue_()),
     }
 }
 

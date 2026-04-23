@@ -627,6 +627,11 @@ pub enum ExpressionDesc {
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Sequence: `E1; E2`.
     Pexp_sequence(ExprIdx, ExprIdx),
+    /// `break` (upstream #8348). Exits the nearest enclosing loop.
+    Pexp_break,
+    /// `continue` (upstream #8348). Skips to the next iteration of the
+    /// nearest enclosing loop.
+    Pexp_continue,
     /// While: `while E1 { E2 }`.
     Pexp_while(ExprIdx, ExprIdx),
     /// For: `for i in E1 to E2 { E3 }`.

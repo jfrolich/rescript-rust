@@ -60,6 +60,7 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::LifThenElse(e1, e2, e3) => hit(fv, e1) || hit(fv, e2) || hit(fv, e3),
             Lambda::Lsequence(e1, e2) => hit(fv, e1) || hit(fv, e2),
             Lambda::Lwhile(e1, e2) => hit(fv, e1) || hit(fv, e2),
+            Lambda::Lbreak | Lambda::Lcontinue => false,
         }
     }
     hit(fv, l)

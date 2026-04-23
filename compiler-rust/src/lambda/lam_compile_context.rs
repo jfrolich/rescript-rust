@@ -4,7 +4,9 @@
 //! Lambda IR to JavaScript IR. It tracks continuation, exception handlers,
 //! and compilation metadata.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;
@@ -256,6 +258,28 @@ pub struct Handler {
     pub bindings: Vec<Ident>,
 }
 
+/// Frame describing one enclosing loop. The label is allocated lazily via
+/// [`CompileContext::ensure_loop_label`] when a nested switch needs to
+/// emit a labeled `break`/`continue`. Mirrors OCaml's
+/// `Lam_compile_context.loop_frame`.
+#[derive(Debug, Clone, Default)]
+pub struct LoopFrame {
+    label: Rc<RefCell<Option<String>>>,
+}
+
+impl LoopFrame {
+    /// Get the currently-attached JS label for this loop, if any.
+    pub fn label(&self) -> Option<String> {
+        self.label.borrow().clone()
+    }
+
+    /// Attach a JS label to this frame (used by
+    /// `LambdaCompiler::ensure_loop_label`).
+    pub fn set_label(&self, label: String) {
+        *self.label.borrow_mut() = Some(label);
+    }
+}
+
 /// Lambda compilation context.
 ///
 /// This is the main context used during Lambda to JS IR compilation.
@@ -268,6 +292,20 @@ pub struct CompileContext {
     pub jmp_table: JmpTable,
     /// Compilation metadata
     pub meta: LamStats,
+    /// Number of enclosing JS `switch` statements between the current
+    /// expression and the closest enclosing loop. Mirrors OCaml's
+    /// `switch_depth` field. Bumped by [`CompileContext::enter_switch`]
+    /// when compiling switch arms.
+    pub switch_depth: i32,
+    /// Stack of enclosing loops, innermost first. Mirrors OCaml's
+    /// `loop_stack` field. Pushed by [`CompileContext::push_loop`] when
+    /// compiling `Lwhile`/`Lfor` bodies.
+    pub loop_stack: Vec<LoopFrame>,
+    /// Counter shared across the whole compilation unit, used to mint
+    /// unique JS labels (`loop_0`, `loop_1`, ...) when nested switches
+    /// need labeled break/continue. Mirrors OCaml's
+    /// `loop_label_counter`.
+    pub loop_label_counter: Rc<Cell<i32>>,
 }
 
 impl CompileContext {
@@ -277,6 +315,9 @@ impl CompileContext {
             continuation,
             jmp_table: HashMap::new(),
             meta,
+            switch_depth: 0,
+            loop_stack: Vec::new(),
+            loop_label_counter: Rc::new(Cell::new(0)),
         }
     }
 
@@ -288,6 +329,43 @@ impl CompileContext {
     /// Create a context for value-needed compilation.
     pub fn need_value(meta: LamStats) -> Self {
         Self::new(Continuation::NeedValue(TailType::NotTail), meta)
+    }
+
+    /// Bump `switch_depth`. Mirrors OCaml's `enter_switch`.
+    pub fn enter_switch(&self) -> Self {
+        let mut next = self.clone();
+        next.switch_depth += 1;
+        next
+    }
+
+    /// Push a fresh loop frame onto `loop_stack` and return both the
+    /// new context and the frame handle (so callers can read back the
+    /// lazily-attached label after compiling the body). Mirrors OCaml's
+    /// `push_loop`.
+    pub fn push_loop(&self) -> (Self, LoopFrame) {
+        let frame = LoopFrame::default();
+        let mut next = self.clone();
+        next.loop_stack.insert(0, frame.clone());
+        (next, frame)
+    }
+
+    /// Allocate a JS label for `frame` if it does not already have one,
+    /// then return it. Mirrors OCaml's `ensure_loop_label`.
+    pub fn ensure_loop_label(&self, frame: &LoopFrame) -> String {
+        let mut slot = frame.label.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            return existing.clone();
+        }
+        let next_id = self.loop_label_counter.get();
+        self.loop_label_counter.set(next_id + 1);
+        let label = format!("loop_{next_id}");
+        *slot = Some(label.clone());
+        label
+    }
+
+    /// Innermost enclosing loop frame, if any.
+    pub fn current_loop_frame(&self) -> Option<&LoopFrame> {
+        self.loop_stack.first()
     }
 
     /// Find a handler by label.
@@ -338,11 +416,9 @@ impl CompileContext {
 
     /// Create a new context with a different continuation.
     pub fn with_continuation(&self, continuation: Continuation) -> Self {
-        Self {
-            continuation,
-            jmp_table: self.jmp_table.clone(),
-            meta: self.meta.clone(),
-        }
+        let mut next = self.clone();
+        next.continuation = continuation;
+        next
     }
 }
 

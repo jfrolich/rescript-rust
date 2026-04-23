@@ -1032,6 +1032,9 @@ pub fn print_expression(
         ExpressionDesc::Pexp_constant(c) => {
             print_constant(parsetree_viewer::is_template_literal(arena, e), c)
         }
+        // break / continue (leaf nodes)
+        ExpressionDesc::Pexp_break => Doc::text("break"),
+        ExpressionDesc::Pexp_continue => Doc::text("continue"),
         // Unit constructor: ()
         ExpressionDesc::Pexp_construct(lid, None) if arena.is_lident(lid.txt, "()") => {
             Doc::text("()")

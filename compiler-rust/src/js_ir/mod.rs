@@ -1324,17 +1324,26 @@ pub enum StatementDesc {
     /// If statement
     If(Expression, Block, Block),
 
-    /// While loop
-    While(Expression, Block),
+    /// While loop. The optional label is lazily attached when a nested
+    /// switch emits `break`/`continue` targeting this loop (matches OCaml's
+    /// `While (label option, expression, block)`).
+    While(Option<String>, Expression, Block),
 
-    /// For loop (init, end, ident, direction, body)
-    ForRange(Option<Expression>, Expression, Ident, ForDirection, Block),
+    /// For loop (label, init, end, ident, direction, body).
+    ForRange(
+        Option<String>,
+        Option<Expression>,
+        Expression,
+        Ident,
+        ForDirection,
+        Block,
+    ),
 
-    /// Continue statement
-    Continue,
+    /// Continue statement (optional target label)
+    Continue(Option<String>),
 
-    /// Break statement
-    Break,
+    /// Break statement (optional target label)
+    Break(Option<String>),
 
     /// Return statement
     Return(Expression),
@@ -1412,9 +1421,15 @@ impl Statement {
         simplify_if_statement(cond, then_, else_)
     }
 
-    /// Create a while loop
+    /// Create a while loop (no label — use `while_with_label` when a
+    /// nested switch requires a labeled target).
     pub fn while_(cond: Expression, body: Block) -> Self {
-        Self::new(StatementDesc::While(cond, body))
+        Self::new(StatementDesc::While(None, cond, body))
+    }
+
+    /// Create a labeled while loop.
+    pub fn while_with_label(label: Option<String>, cond: Expression, body: Block) -> Self {
+        Self::new(StatementDesc::While(label, cond, body))
     }
 
     /// Create a return statement
@@ -1427,14 +1442,24 @@ impl Statement {
         Self::new(StatementDesc::Throw(expr))
     }
 
-    /// Create a break statement
+    /// Create a break statement (no label)
     pub fn break_() -> Self {
-        Self::new(StatementDesc::Break)
+        Self::new(StatementDesc::Break(None))
     }
 
-    /// Create a continue statement
+    /// Create a break statement targeting the given label.
+    pub fn break_label(label: Option<String>) -> Self {
+        Self::new(StatementDesc::Break(label))
+    }
+
+    /// Create a continue statement (no label)
     pub fn continue_() -> Self {
-        Self::new(StatementDesc::Continue)
+        Self::new(StatementDesc::Continue(None))
+    }
+
+    /// Create a continue statement targeting the given label.
+    pub fn continue_label(label: Option<String>) -> Self {
+        Self::new(StatementDesc::Continue(label))
     }
 
     /// Create a debugger statement
@@ -1636,7 +1661,8 @@ fn block_last_is_terminal(block: &Block) -> bool {
         last_statement(block).map(|stmt| &stmt.desc),
         Some(StatementDesc::Return(_))
             | Some(StatementDesc::Throw(_))
-            | Some(StatementDesc::Continue)
+            | Some(StatementDesc::Continue(_))
+            | Some(StatementDesc::Break(_))
     )
 }
 
@@ -1960,10 +1986,10 @@ fn statement_contains_await(stmt: &Statement) -> bool {
                 || then_block.iter().any(statement_contains_await)
                 || else_block.iter().any(statement_contains_await)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_contains_await(cond) || body.iter().any(statement_contains_await)
         }
-        StatementDesc::ForRange(start, finish, _, _, body) => {
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
             start.as_ref().is_some_and(expression_contains_await)
                 || expression_contains_await(finish)
                 || body.iter().any(statement_contains_await)
@@ -1995,7 +2021,7 @@ fn statement_contains_await(stmt: &Statement) -> bool {
                     .as_ref()
                     .is_some_and(|block| block.iter().any(statement_contains_await))
         }
-        StatementDesc::Continue | StatementDesc::Break | StatementDesc::Debugger => false,
+        StatementDesc::Continue(_) | StatementDesc::Break(_) | StatementDesc::Debugger => false,
     }
 }
 
@@ -2669,8 +2695,10 @@ fn ocaml_eq_statement(left: &Statement, right: &Statement) -> bool {
         | (StatementDesc::Return(left_expr), StatementDesc::Return(right_expr)) => {
             ocaml_eq_expression(left_expr, right_expr)
         }
-        (StatementDesc::Debugger, StatementDesc::Debugger)
-        | (StatementDesc::Break, StatementDesc::Break) => true,
+        (StatementDesc::Debugger, StatementDesc::Debugger) => true,
+        (StatementDesc::Break(left_label), StatementDesc::Break(right_label)) => {
+            left_label == right_label
+        }
         (StatementDesc::Block(left_block), StatementDesc::Block(right_block)) => {
             ocaml_eq_block(left_block, right_block)
         }
@@ -3287,7 +3315,7 @@ mod tests {
     fn test_statement_creation() {
         let stmt = Statement::break_();
         match stmt.desc {
-            StatementDesc::Break => {}
+            StatementDesc::Break(None) => {}
             _ => panic!("Expected Break"),
         }
     }
@@ -4409,7 +4437,7 @@ mod tests {
                 ) if target_id.same(&next_value) && source_id.same(&value)
             )
         ));
-        assert!(matches!(continue_stmt.desc, StatementDesc::Continue));
+        assert!(matches!(continue_stmt.desc, StatementDesc::Continue(None)));
     }
 
     #[test]

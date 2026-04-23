@@ -151,6 +151,9 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Box::new(subst_aux(s, e3)),
         ),
 
+        Lambda::Lbreak => Lambda::break_(),
+        Lambda::Lcontinue => Lambda::continue_(),
+
         Lambda::Lassign(id, e) => Lambda::Lassign(id.clone(), Box::new(subst_aux(s, e))),
     }
 }

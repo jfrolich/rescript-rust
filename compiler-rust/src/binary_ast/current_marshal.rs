@@ -1379,7 +1379,12 @@ impl Marshal for ExpressionDesc {
         // Pexp_extension = tag 27
         // Pexp_await = tag 28
         // Pexp_jsx_element = tag 29
+        // Constant constructors (no payload):
+        // Pexp_break = int 0
+        // Pexp_continue = int 1
         match self {
+            ExpressionDesc::Pexp_break => w.write_int(0),
+            ExpressionDesc::Pexp_continue => w.write_int(1),
             ExpressionDesc::Pexp_ident(lid) => {
                 w.write_block_header(0, 1);
                 lid.marshal(w);

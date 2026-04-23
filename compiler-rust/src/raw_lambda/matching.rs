@@ -1694,6 +1694,10 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                     Location::none(),
                 ))
             }
+            // OCaml `Lambda.make_key` after #8348:
+            // `Lbreak -> Lbreak | Lcontinue -> Lcontinue`.
+            RawLambda::Lbreak => Some(RawLambda::Lbreak),
+            RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
             // Functions, letrec, loops are not simple
             RawLambda::Lletrec(..)
             | RawLambda::Lfunction(..)
@@ -2623,6 +2627,7 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lsend(_, obj, _) => {
                 collect(obj, fv);
             }
+            RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }
 

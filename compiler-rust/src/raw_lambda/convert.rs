@@ -190,6 +190,7 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
                 fv.insert(id.clone());
             }
             RawLambda::Lsend(_, obj, _) => collect(obj, fv),
+            RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }
 
@@ -323,6 +324,8 @@ fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLa
             Box::new(raw_subst_lambda(subst, obj)),
             loc.clone(),
         ),
+        RawLambda::Lbreak => RawLambda::Lbreak,
+        RawLambda::Lcontinue => RawLambda::Lcontinue,
     }
 }
 
@@ -961,6 +964,7 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Lsend(_, obj, _) => {
                 self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(obj, false);
             }
+            RawLambda::Lbreak | RawLambda::Lcontinue => {}
         }
     }
 
@@ -1544,6 +1548,8 @@ impl<'a> RawLambdaConverter<'a> {
                 Box::new(Self::normalize_for_key(obj, env, counter)?),
                 Location::none(),
             )),
+            RawLambda::Lbreak => Some(RawLambda::Lbreak),
+            RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
         }
     }
 
@@ -5149,6 +5155,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let first = self.convert_expr_raw(a);
                 RawLambda::seq(first, second)
             }
+            // OCaml `Translcore.transl_exp0` after #8348:
+            // `Texp_break -> Lbreak | Texp_continue -> Lcontinue`.
+            ExpressionDesc::Texp_break => RawLambda::Lbreak,
+            ExpressionDesc::Texp_continue => RawLambda::Lcontinue,
             ExpressionDesc::Texp_while(cond, body) => RawLambda::Lwhile(
                 Box::new(self.convert_expr_raw(cond)),
                 Box::new(self.convert_expr_raw(body)),
@@ -5327,6 +5337,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let b_lam = self.convert_expr(b);
                 Lambda::seq(a_lam, b_lam)
             }
+            // OCaml `Translcore.transl_exp0` after #8348:
+            // `Texp_break -> Lbreak | Texp_continue -> Lcontinue`.
+            ExpressionDesc::Texp_break => Lambda::break_(),
+            ExpressionDesc::Texp_continue => Lambda::continue_(),
             ExpressionDesc::Texp_while(cond, body) => {
                 let cond_lam = self.convert_expr(cond);
                 let body_lam = self.convert_expr(body);
@@ -5376,6 +5390,8 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_array(_) => "Texp_array",
             ExpressionDesc::Texp_ifthenelse(_, _, _) => "Texp_ifthenelse",
             ExpressionDesc::Texp_sequence(_, _) => "Texp_sequence",
+            ExpressionDesc::Texp_break => "Texp_break",
+            ExpressionDesc::Texp_continue => "Texp_continue",
             ExpressionDesc::Texp_while(_, _) => "Texp_while",
             ExpressionDesc::Texp_for(_, _, _, _, _, _) => "Texp_for",
             ExpressionDesc::Texp_send(_, _, _) => "Texp_send",

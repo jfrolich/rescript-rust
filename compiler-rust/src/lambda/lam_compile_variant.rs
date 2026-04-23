@@ -118,6 +118,15 @@ pub(crate) fn is_builtin_untagged_switch_name(name: &str) -> bool {
 
 impl LambdaCompiler {
     pub(crate) fn compile_switch(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Compiled {
+        // OCaml's `compile_switch` builds `switch_cxt = enter_switch cxt`
+        // and threads it into every case body and the default branch
+        // (compiler/core/lam_compile.ml). Wrap the whole switch with
+        // `with_switch_depth` so any nested `Lbreak`/`Lcontinue` knows it
+        // must use a labeled JS break/continue to escape the loop.
+        self.with_switch_depth(|this| this.compile_switch_inner(scrut, switch))
+    }
+
+    fn compile_switch_inner(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Compiled {
         if self.uses_untagged_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut prelude, scrut_expr) =
@@ -216,6 +225,15 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn compile_string_switch(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Compiled {
+        self.with_switch_depth(|this| this.compile_string_switch_inner(scrut, cases, default))
+    }
+
+    fn compile_string_switch_inner(
         &mut self,
         scrut: &Lambda,
         cases: &[(String, Lambda)],

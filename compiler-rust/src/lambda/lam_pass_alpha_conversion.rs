@@ -282,6 +282,11 @@ impl<'a> Alpha<'a> {
                 self.simpl(l3),
             ),
 
+            // OCaml `Lam_pass_alpha_conversion.simpl` after #8348:
+            // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
+            Lambda::Lbreak => Lambda::break_(),
+            Lambda::Lcontinue => Lambda::continue_(),
+
             // lam_pass_alpha_conversion.ml:122-125
             Lambda::Lassign(v, l) => Lambda::assign(v.clone(), self.simpl(l)),
         }

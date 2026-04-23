@@ -4248,6 +4248,7 @@ impl<'a> LocCloner<'a> {
         match desc {
             ExpressionDesc::Pexp_ident(lid) => self.located(lid),
             ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
                 let (_, ref mut bindings, ref mut body) = **inner;
                 for binding in bindings.iter_mut() {

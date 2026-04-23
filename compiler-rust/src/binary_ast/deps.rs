@@ -406,6 +406,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_lident_idx(lid.txt);
             }
             ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_break | ExpressionDesc::Pexp_continue => {}
             ExpressionDesc::Pexp_let(inner) => {
                 let (ref _rec_flag, ref bindings, ref body) = **inner;
                 // OCaml's add_bindings collects pattern bindings (including Ppat_unpack)

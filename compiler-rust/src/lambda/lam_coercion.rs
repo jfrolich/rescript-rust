@@ -384,10 +384,10 @@ pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
         StatementDesc::If(cond, then_block, else_block) => max_ident_stamp_in_expression(cond)
             .max(max_ident_stamp_in_block(then_block))
             .max(max_ident_stamp_in_block(else_block)),
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             max_ident_stamp_in_expression(cond).max(max_ident_stamp_in_block(body))
         }
-        StatementDesc::ForRange(start, finish, ident, _, body) => start
+        StatementDesc::ForRange(_, start, finish, ident, _, body) => start
             .as_ref()
             .map(max_ident_stamp_in_expression)
             .unwrap_or(0)
@@ -426,7 +426,7 @@ pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
             }
             max_stamp
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => 0,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => 0,
     }
 }
 

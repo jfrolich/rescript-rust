@@ -312,6 +312,13 @@ pub enum Lambda {
     /// Sequence of expressions
     Lsequence(Box<Lambda>, Box<Lambda>),
 
+    /// Break out of the enclosing loop (port of OCaml `Lbreak`)
+    Lbreak,
+
+    /// Continue to the next iteration of the enclosing loop (port of
+    /// OCaml `Lcontinue`)
+    Lcontinue,
+
     /// While loop
     Lwhile(Box<Lambda>, Box<Lambda>),
 
@@ -913,6 +920,16 @@ impl Lambda {
         Lambda::Lwhile(Box::new(cond), Box::new(body))
     }
 
+    /// Break out of the enclosing loop. Port of OCaml `Lam.break`.
+    pub fn break_() -> Self {
+        Lambda::Lbreak
+    }
+
+    /// Continue the enclosing loop. Port of OCaml `Lam.continue`.
+    pub fn continue_() -> Self {
+        Lambda::Lcontinue
+    }
+
     /// Create a for loop
     pub fn for_(var: Ident, start: Lambda, end: Lambda, dir: DirectionFlag, body: Lambda) -> Self {
         Lambda::Lfor(var, Box::new(start), Box::new(end), dir, Box::new(body))
@@ -1237,6 +1254,7 @@ fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
         | (Lambda::Lwhile(a1, b1), Lambda::Lwhile(a2, b2)) => {
             lambda_eq_approx(a1, a2) && lambda_eq_approx(b1, b2)
         }
+        (Lambda::Lbreak, Lambda::Lbreak) | (Lambda::Lcontinue, Lambda::Lcontinue) => true,
         (Lambda::Lassign(v1, l1), Lambda::Lassign(v2, l2)) => {
             v1.same(v2) && lambda_eq_approx(l1, l2)
         }

@@ -240,7 +240,9 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     fn visit_expression(max_stamp: &mut i32, expr: &Expression) {
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, _) => visit_path(max_stamp, path),
-            ExpressionDesc::Texp_constant(_) => {}
+            ExpressionDesc::Texp_constant(_)
+            | ExpressionDesc::Texp_break
+            | ExpressionDesc::Texp_continue => {}
             ExpressionDesc::Texp_let(_, bindings, body) => {
                 for binding in bindings {
                     visit_value_binding(max_stamp, binding);
@@ -887,6 +889,8 @@ fn expression_has_string_literal(
             payload_has_string_literal(payload, value, arena)
         }
         ED::Pexp_ident(_)
+        | ED::Pexp_break
+        | ED::Pexp_continue
         | ED::Pexp_jsx_element(_)
         | ED::Pexp_inline_for(_)
         | ED::Pexp_comptime_typeinfo(_)

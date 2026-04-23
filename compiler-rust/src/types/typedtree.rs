@@ -254,6 +254,13 @@ pub enum ExpressionDesc {
     /// Sequence: `E1; E2`.
     Texp_sequence(Box<Expression>, Box<Expression>),
 
+    /// `break` (upstream #8348). Exits the nearest enclosing loop.
+    Texp_break,
+
+    /// `continue` (upstream #8348). Skips to the next iteration of the
+    /// nearest enclosing loop.
+    Texp_continue,
+
     /// While loop: `while E1 do E2 done`.
     Texp_while(Box<Expression>, Box<Expression>),
 

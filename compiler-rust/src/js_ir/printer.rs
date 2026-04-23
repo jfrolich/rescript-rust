@@ -440,7 +440,11 @@ impl JsPrinter {
                 }
             }
 
-            StatementDesc::While(cond, body) => {
+            StatementDesc::While(label, cond, body) => {
+                if let Some(label) = label {
+                    self.write(label);
+                    self.write(": ");
+                }
                 self.write("while ");
                 self.write_char('(');
                 self.with_indent(1, |this| this.print_expression(cond, 0));
@@ -449,7 +453,11 @@ impl JsPrinter {
                 self.semi();
             }
 
-            StatementDesc::ForRange(init, end, id, direction, body) => {
+            StatementDesc::ForRange(label, init, end, id, direction, body) => {
+                if let Some(label) = label {
+                    self.write(label);
+                    self.write(": ");
+                }
                 // OCaml's js_dump.ml:1415 threads its Ext_pp_scope cxt through
                 // the for-body without calling sub_scope — sub_scope only runs
                 // on function entry (js_dump.ml:369). Keeping the body in the
@@ -523,13 +531,21 @@ impl JsPrinter {
                 self.print_brace_block(body);
             }
 
-            StatementDesc::Continue => {
+            StatementDesc::Continue(label) => {
                 self.write("continue");
+                if let Some(label) = label {
+                    self.write(" ");
+                    self.write(label);
+                }
                 self.semi();
             }
 
-            StatementDesc::Break => {
+            StatementDesc::Break(label) => {
                 self.write("break");
+                if let Some(label) = label {
+                    self.write(" ");
+                    self.write(label);
+                }
                 self.semi();
             }
 
@@ -3529,8 +3545,8 @@ fn statement_terminates(stmt: &Statement) -> bool {
         StatementDesc::Block(inner) => block_terminates(inner),
         StatementDesc::Return(_)
         | StatementDesc::Throw(_)
-        | StatementDesc::Break
-        | StatementDesc::Continue => true,
+        | StatementDesc::Break(_)
+        | StatementDesc::Continue(_) => true,
         _ => false,
     }
 }
@@ -3560,10 +3576,10 @@ fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
                 || block_mentions_ident(then_block, ident)
                 || block_mentions_ident(else_block, ident)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_mentions_ident(cond, ident) || block_mentions_ident(body, ident)
         }
-        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             loop_ident.same(ident)
                 || start
                     .as_ref()
@@ -3598,7 +3614,7 @@ fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
                     .as_ref()
                     .is_some_and(|block| block_mentions_ident(block, ident))
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
     }
 }
 
@@ -4316,11 +4332,11 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_block_idents(then_block, stats);
             collect_block_idents(else_block, stats);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             collect_expression_idents(cond, stats);
             collect_block_idents(body, stats);
         }
-        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             if let Some(start) = start {
                 collect_expression_idents(start, stats);
             }
@@ -4360,7 +4376,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
                 collect_block_idents(finally, stats);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -4751,6 +4767,7 @@ mod tests {
     #[test]
     fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
         let first = Statement::new(StatementDesc::ForRange(
+            None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
                 Expression::var(Ident::create_local("finishExpr")),
@@ -4763,6 +4780,7 @@ mod tests {
         ));
 
         let second = Statement::new(StatementDesc::ForRange(
+            None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
                 Expression::var(Ident::create_local("finishExpr")),
@@ -5655,6 +5673,7 @@ mod tests {
             LengthObject::Array,
         ));
         let stmt = Statement::new(StatementDesc::ForRange(
+            None,
             Some(Expression::number(Number::int(0))),
             finish,
             i,
@@ -5676,6 +5695,7 @@ mod tests {
             LengthObject::Array,
         ));
         let stmt = Statement::new(StatementDesc::ForRange(
+            None,
             None,
             finish,
             i,
@@ -5706,6 +5726,7 @@ mod tests {
             LengthObject::Array,
         ));
         let stmt = Statement::new(StatementDesc::ForRange(
+            None,
             Some(init),
             finish,
             i,
@@ -6799,6 +6820,7 @@ mod tests {
                         vec![],
                     )),
                     Statement::new(StatementDesc::ForRange(
+                        None,
                         Some(Expression::number(Number::int(0))),
                         Expression::number(Number::int(1)),
                         k,

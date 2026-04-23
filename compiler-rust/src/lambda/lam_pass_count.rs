@@ -278,6 +278,10 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
                 count(occ, bv, l1);
                 count(occ, bv, l2);
             }
+
+            // OCaml `Lam_pass_count.collect_occurs` after #8348:
+            // `Lbreak | Lcontinue -> ()`.
+            Lambda::Lbreak | Lambda::Lcontinue => {}
         }
     }
 

@@ -336,6 +336,8 @@ pub fn is_block_expr_start(token: &Token<'_>) -> bool {
         Token::Assert
             | Token::At
             | Token::Await
+            | Token::Break
+            | Token::Continue
             | Token::Backtick
             | Token::Bang
             | Token::Codepoint { .. }

@@ -124,6 +124,10 @@ pub enum RawLambda {
         DirectionFlag,
         Box<RawLambda>,
     ),
+    /// Break out of the enclosing loop (port of OCaml `Lbreak`).
+    Lbreak,
+    /// Continue the enclosing loop (port of OCaml `Lcontinue`).
+    Lcontinue,
     /// Assignment.
     Lassign(Ident, Box<RawLambda>),
     /// Method send.
@@ -305,6 +309,8 @@ impl RawLambda {
                 dir,
                 Box::new(RawLambda::from_lowered(*body)),
             ),
+            Lambda::Lbreak => RawLambda::Lbreak,
+            Lambda::Lcontinue => RawLambda::Lcontinue,
             Lambda::Lassign(id, value) => {
                 RawLambda::Lassign(id, Box::new(RawLambda::from_lowered(*value)))
             }
@@ -412,6 +418,8 @@ impl RawLambda {
                 dir,
                 Box::new(body.into_lowered()),
             ),
+            RawLambda::Lbreak => Lambda::Lbreak,
+            RawLambda::Lcontinue => Lambda::Lcontinue,
             RawLambda::Lassign(id, value) => Lambda::Lassign(id, Box::new(value.into_lowered())),
             RawLambda::Lsend(name, obj, loc) => Lambda::Lprim(crate::lambda::PrimInfo {
                 primitive: Primitive::PjsCall {

@@ -586,6 +586,11 @@ impl<'a> Simplifier<'a> {
                 self.simpl(l3),
             ),
 
+            // OCaml `Lam_pass_remove_alias.simplify_alias` after #8348:
+            // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
+            Lambda::Lbreak => Lambda::break_(),
+            Lambda::Lcontinue => Lambda::continue_(),
+
             // lam_pass_remove_alias.ml:285-288
             Lambda::Lassign(v, l) => Lambda::assign(v.clone(), self.simpl(l)),
         }

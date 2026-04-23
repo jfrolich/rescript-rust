@@ -497,6 +497,9 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
             write!(f, ")")
         }
 
+        Lambda::Lbreak => write!(f, "break"),
+        Lambda::Lcontinue => write!(f, "continue"),
+
         Lambda::Lassign(id, expr) => {
             write!(f, "(assign {} ", id.name())?;
             format_lambda(expr, f, indent)?;
@@ -895,6 +898,8 @@ fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) ->
             format_raw_lambda(body, f, indent + 1)?;
             write!(f, ")")
         }
+        Lambda::Lbreak => write!(f, "break"),
+        Lambda::Lcontinue => write!(f, "continue"),
         Lambda::Lassign(id, expr) => {
             write!(f, "(assign ")?;
             format_raw_ident(id, f)?;

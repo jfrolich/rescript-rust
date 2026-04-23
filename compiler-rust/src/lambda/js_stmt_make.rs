@@ -33,8 +33,8 @@ pub(crate) fn statement_terminates(stmt: &crate::js_ir::Statement) -> bool {
         StatementDesc::Block(block) => block_terminates(block),
         StatementDesc::Return(_)
         | StatementDesc::Throw(_)
-        | StatementDesc::Break
-        | StatementDesc::Continue => true,
+        | StatementDesc::Break(_)
+        | StatementDesc::Continue(_) => true,
         StatementDesc::If(_, then_block, else_block) => {
             !then_block.is_empty()
                 && !else_block.is_empty()

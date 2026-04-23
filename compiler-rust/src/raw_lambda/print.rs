@@ -611,5 +611,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
+        RawLambda::Lbreak => f.string("break"),
+        RawLambda::Lcontinue => f.string("continue"),
     }
 }

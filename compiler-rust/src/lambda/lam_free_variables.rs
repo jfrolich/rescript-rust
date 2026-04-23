@@ -152,6 +152,8 @@ fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
             collect_free_variables(cond, fv);
             collect_free_variables(body, fv);
         }
+
+        Lambda::Lbreak | Lambda::Lcontinue => {}
     }
 }
 

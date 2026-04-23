@@ -262,7 +262,7 @@ fn rebind_materialized_local_module_field_aliases_in_statement(
                 dynamic_import_bindings,
             );
         }
-        StatementDesc::While(_, body) => {
+        StatementDesc::While(_, _, body) => {
             let mut counts = HashMap::new();
             collect_transparent_block_var_name_counts(body, &mut counts);
             *body = rebind_materialized_local_module_field_aliases_with_counts(
@@ -271,7 +271,7 @@ fn rebind_materialized_local_module_field_aliases_in_statement(
                 dynamic_import_bindings,
             );
         }
-        StatementDesc::ForRange(_, _, _, _, body) => {
+        StatementDesc::ForRange(_, _, _, _, _, body) => {
             let mut counts = HashMap::new();
             collect_transparent_block_var_name_counts(body, &mut counts);
             *body = rebind_materialized_local_module_field_aliases_with_counts(
@@ -352,8 +352,8 @@ fn rebind_materialized_local_module_field_aliases_in_statement(
         | StatementDesc::Return(_)
         | StatementDesc::Throw(_)
         | StatementDesc::Debugger
-        | StatementDesc::Break
-        | StatementDesc::Continue => {}
+        | StatementDesc::Break(_)
+        | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -446,11 +446,11 @@ fn rename_ident_in_statement(stmt: &mut Statement, from: &Ident, to: &Ident) {
             rename_ident_in_statements(then_block, from, to);
             rename_ident_in_statements(else_block, from, to);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             rename_ident_in_expression(cond, from, to);
             rename_ident_in_statements(body, from, to);
         }
-        StatementDesc::ForRange(start, finish, ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, ident, _, body) => {
             if let Some(start) = start {
                 rename_ident_in_expression(start, from, to);
             }
@@ -490,7 +490,7 @@ fn rename_ident_in_statement(stmt: &mut Statement, from: &Ident, to: &Ident) {
                 rename_ident_in_statements(finally, from, to);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -610,10 +610,10 @@ fn statement_mentions_ident(stmt: &Statement, target: &Ident) -> bool {
                 || statements_mention_ident(then_block, target)
                 || statements_mention_ident(else_block, target)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_mentions_ident(cond, target) || statements_mention_ident(body, target)
         }
-        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             loop_ident.same(target)
                 || start
                     .as_ref()
@@ -648,7 +648,7 @@ fn statement_mentions_ident(stmt: &Statement, target: &Ident) -> bool {
                     .as_ref()
                     .is_some_and(|block| statements_mention_ident(block, target))
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
     }
 }
 
@@ -919,15 +919,17 @@ fn flatten_and_mark_dead_statement(
             ),
             comment,
         },
-        StatementDesc::While(cond, body) => Statement {
+        StatementDesc::While(label, cond, body) => Statement {
             desc: StatementDesc::While(
+                label,
                 flatten_and_mark_dead_expression(cond, id_gen, substitution, jsx_preserve),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
         },
-        StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
+        StatementDesc::ForRange(label, start, finish, ident, direction, body) => Statement {
             desc: StatementDesc::ForRange(
+                label,
                 start.map(|expr| {
                     flatten_and_mark_dead_expression(expr, id_gen, substitution, jsx_preserve)
                 }),
@@ -1018,12 +1020,12 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::Debugger,
             comment,
         },
-        StatementDesc::Break => Statement {
-            desc: StatementDesc::Break,
+        StatementDesc::Break(label) => Statement {
+            desc: StatementDesc::Break(label),
             comment,
         },
-        StatementDesc::Continue => Statement {
-            desc: StatementDesc::Continue,
+        StatementDesc::Continue(label) => Statement {
+            desc: StatementDesc::Continue(label),
             comment,
         },
     }
@@ -1548,11 +1550,11 @@ fn collect_mark_dead_states_statement(
             collect_mark_dead_states_block(then_block, export_set, states);
             collect_mark_dead_states_block(else_block, export_set, states);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             collect_mark_dead_states_expression(cond, states);
             collect_mark_dead_states_block(body, export_set, states);
         }
-        StatementDesc::ForRange(start, finish, _, _, body) => {
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
             if let Some(start) = start {
                 collect_mark_dead_states_expression(start, states);
             }
@@ -1586,7 +1588,7 @@ fn collect_mark_dead_states_statement(
                 collect_mark_dead_states_block(block, export_set, states);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -1763,8 +1765,8 @@ fn apply_mark_dead_states_statement(stmt: &mut Statement, states: &HashMap<Ident
             apply_mark_dead_states_block(then_block, states);
             apply_mark_dead_states_block(else_block, states);
         }
-        StatementDesc::While(_, body) => apply_mark_dead_states_block(body, states),
-        StatementDesc::ForRange(_, _, _, _, body) => apply_mark_dead_states_block(body, states),
+        StatementDesc::While(_, _, body) => apply_mark_dead_states_block(body, states),
+        StatementDesc::ForRange(_, _, _, _, _, body) => apply_mark_dead_states_block(body, states),
         StatementDesc::IntSwitch(_, clauses, default) => {
             for (_, clause) in clauses {
                 apply_mark_dead_states_block(&mut clause.body, states);
@@ -1790,7 +1792,7 @@ fn apply_mark_dead_states_statement(stmt: &mut Statement, states: &HashMap<Ident
                 apply_mark_dead_states_block(block, states);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -2071,12 +2073,13 @@ fn flatten_statement(stmt: Statement) -> Statement {
             ),
             comment,
         },
-        StatementDesc::While(cond, body) => Statement {
-            desc: StatementDesc::While(flatten_expression(cond), flatten_block(body)),
+        StatementDesc::While(label, cond, body) => Statement {
+            desc: StatementDesc::While(label, flatten_expression(cond), flatten_block(body)),
             comment,
         },
-        StatementDesc::ForRange(start, finish, ident, direction, body) => Statement {
+        StatementDesc::ForRange(label, start, finish, ident, direction, body) => Statement {
             desc: StatementDesc::ForRange(
+                label,
                 start.map(flatten_expression),
                 flatten_expression(finish),
                 ident,
@@ -2126,12 +2129,12 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::Debugger,
             comment,
         },
-        StatementDesc::Break => Statement {
-            desc: StatementDesc::Break,
+        StatementDesc::Break(label) => Statement {
+            desc: StatementDesc::Break(label),
             comment,
         },
-        StatementDesc::Continue => Statement {
-            desc: StatementDesc::Continue,
+        StatementDesc::Continue(label) => Statement {
+            desc: StatementDesc::Continue(label),
             comment,
         },
     }

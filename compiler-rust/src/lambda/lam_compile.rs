@@ -269,6 +269,20 @@ pub struct LambdaCompiler {
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
     pub(crate) fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
     pub(crate) return_unit_stack: Vec<bool>,
+    /// Number of enclosing JS `switch` statements between the current
+    /// expression and the closest enclosing loop. Mirrors OCaml
+    /// `lambda_cxt.switch_depth`. Used to decide whether a `Lbreak` /
+    /// `Lcontinue` must emit a labeled JS `break`/`continue`.
+    pub(crate) switch_depth: i32,
+    /// Stack of enclosing loops, innermost first. Each entry is the
+    /// loop's lazily-allocated label slot (mirrors OCaml's
+    /// `loop_frame`). Pushed when compiling `Lwhile`/`Lfor` bodies and
+    /// popped after.
+    pub(crate) loop_stack: Vec<crate::lambda::lam_compile_context::LoopFrame>,
+    /// Counter shared across the whole compilation unit, used to mint
+    /// unique JS labels (`loop_0`, `loop_1`, ...) on demand. Mirrors
+    /// OCaml's `loop_label_counter`.
+    pub(crate) loop_label_counter: std::rc::Rc<std::cell::Cell<i32>>,
 }
 
 impl Default for LambdaCompiler {
@@ -339,6 +353,9 @@ impl LambdaCompiler {
             static_jump_handlers: Vec::new(),
             fallthrough_return_handlers: Vec::new(),
             return_unit_stack: Vec::new(),
+            switch_depth: 0,
+            loop_stack: Vec::new(),
+            loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
         }
     }
 
@@ -372,6 +389,9 @@ impl LambdaCompiler {
             static_jump_handlers: Vec::new(),
             fallthrough_return_handlers: Vec::new(),
             return_unit_stack: Vec::new(),
+            switch_depth: 0,
+            loop_stack: Vec::new(),
+            loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
         }
     }
 
@@ -656,8 +676,12 @@ impl LambdaCompiler {
                     .try_compile_identity_module_return_expr(&func.body)
                     .map(|expr| vec![Statement::return_(expr)])
                     .unwrap_or_else(|| {
-                        self.with_return_unit_context(func.attr.return_unit, |this| {
-                            this.compile_return_block(&func.body)
+                        // Mirror OCaml: nested function bodies start with a
+                        // fresh `switch_depth = 0; loop_stack = []`.
+                        self.with_function_scope(|this| {
+                            this.with_return_unit_context(func.attr.return_unit, |that| {
+                                that.compile_return_block(&func.body)
+                            })
                         })
                     });
                 let expr = Expression::new(ExpressionDesc::Fun {
@@ -818,14 +842,58 @@ impl LambdaCompiler {
                 let cond_compiled = self.compile_expr(cond);
                 let cond_expr =
                     block_with_return_expr_iife(cond_compiled.prelude, cond_compiled.expr);
+                // Mirror OCaml's `push_loop` (compiler/core/lam_compile.ml):
+                // a fresh loop frame is pushed before compiling the body;
+                // its label is filled in lazily if a nested switch needs
+                // labeled break/continue.
+                let frame = self.push_loop();
                 let body_block = self.compile_block(body);
+                self.pop_loop();
+                let label = frame.label();
                 Compiled {
-                    prelude: vec![Statement::while_(cond_expr, body_block)],
+                    prelude: vec![Statement::while_with_label(label, cond_expr, body_block)],
                     expr: Expression::undefined(false),
                 }
             }
             Lambda::Lfor(var, start, end, dir, body) => {
                 self.compile_for_loop(var, start, end, dir, body)
+            }
+            Lambda::Lbreak => {
+                // OCaml: see compiler/core/lam_compile.ml `Lbreak` arm.
+                // When inside a switch, target the enclosing loop with a
+                // labeled `break` so we don't break out of the switch.
+                let frame = self
+                    .loop_stack
+                    .first()
+                    .cloned()
+                    .expect("Lbreak outside a loop — typecore should reject this");
+                let stmt = if self.switch_depth > 0 {
+                    let label = self.ensure_loop_label(&frame);
+                    Statement::break_label(Some(label))
+                } else {
+                    Statement::break_()
+                };
+                Compiled {
+                    prelude: vec![stmt],
+                    expr: Expression::undefined(false),
+                }
+            }
+            Lambda::Lcontinue => {
+                let frame = self
+                    .loop_stack
+                    .first()
+                    .cloned()
+                    .expect("Lcontinue outside a loop — typecore should reject this");
+                let stmt = if self.switch_depth > 0 {
+                    let label = self.ensure_loop_label(&frame);
+                    Statement::continue_label(Some(label))
+                } else {
+                    Statement::continue_()
+                };
+                Compiled {
+                    prelude: vec![stmt],
+                    expr: Expression::undefined(false),
+                }
             }
             Lambda::Lassign(id, value) => {
                 let compiled = self.compile_expr(value);
@@ -849,6 +917,63 @@ impl LambdaCompiler {
         self.compile_effect_block(lam)
     }
 
+    /// Run `f` with `switch_depth` temporarily incremented. Mirrors
+    /// OCaml's `enter_switch` shadowing in `compile_switch`.
+    pub(crate) fn with_switch_depth<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.switch_depth += 1;
+        let result = f(self);
+        self.switch_depth -= 1;
+        result
+    }
+
+    /// Run `f` with the loop tracking state reset (empty `loop_stack`
+    /// and `switch_depth = 0`). Used when entering a fresh function
+    /// body. Mirrors OCaml's nested-function compilation in
+    /// `lam_compile.ml`, which builds a brand-new compile context with
+    /// `switch_depth = 0; loop_stack = []` whenever it descends into a
+    /// closure body.
+    pub(crate) fn with_function_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved_switch_depth = std::mem::replace(&mut self.switch_depth, 0);
+        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let result = f(self);
+        self.switch_depth = saved_switch_depth;
+        self.loop_stack = saved_loop_stack;
+        result
+    }
+
+    /// Push a fresh loop frame onto the stack (mirrors OCaml's
+    /// `push_loop`). The returned frame can be queried for a label
+    /// after the body has been compiled — `label()` returns `Some` only
+    /// if [`Self::ensure_loop_label`] was called from inside the body.
+    pub(crate) fn push_loop(&mut self) -> crate::lambda::lam_compile_context::LoopFrame {
+        let frame = crate::lambda::lam_compile_context::LoopFrame::default();
+        self.loop_stack.insert(0, frame.clone());
+        frame
+    }
+
+    /// Pop the innermost loop frame.
+    pub(crate) fn pop_loop(&mut self) {
+        self.loop_stack.remove(0);
+    }
+
+    /// Lazily allocate a JS label for `frame`. Mirrors OCaml's
+    /// `ensure_loop_label`. Idempotent: subsequent calls return the
+    /// same label.
+    pub(crate) fn ensure_loop_label(
+        &self,
+        frame: &crate::lambda::lam_compile_context::LoopFrame,
+    ) -> String {
+        if let Some(existing) = frame.label() {
+            return existing;
+        }
+        let next_id = self.loop_label_counter.get();
+        self.loop_label_counter.set(next_id + 1);
+        let label = format!("loop_{next_id}");
+        // We can mutate the frame's label slot through the shared Rc.
+        frame.set_label(label.clone());
+        label
+    }
+
     fn compile_for_loop(
         &mut self,
         var: &Ident,
@@ -860,7 +985,13 @@ impl LambdaCompiler {
         let start_compiled = self.compile_expr(start);
         let (finish, direction) = lower_ocaml_for_range_direction(dir, end);
         let finish_compiled = self.compile_expr(finish);
+        // Push a fresh loop frame before compiling the body so any
+        // nested `Lbreak`/`Lcontinue` resolves against this for-loop.
+        // See OCaml `push_loop` in compiler/core/lam_compile.ml.
+        let frame = self.push_loop();
         let body_block = self.compile_block(body);
+        self.pop_loop();
+        let loop_label = frame.label();
 
         let mut prelude = start_compiled.prelude;
         if block_terminates(&prelude) {
@@ -872,6 +1003,7 @@ impl LambdaCompiler {
 
         let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
             block.push(Statement::new(StatementDesc::ForRange(
+                loop_label.clone(),
                 init,
                 finish,
                 var.clone(),
@@ -2657,6 +2789,17 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
         tail_loop: &mut TailLoopState,
     ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_tail_loop_switch_return_block_inner(scrut, switch, tail_loop)
+        })
+    }
+
+    fn compile_tail_loop_switch_return_block_inner(
+        &mut self,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) = if self.named_variant_switch_needs_bound_scrutinee(switch)
@@ -2713,6 +2856,20 @@ impl LambdaCompiler {
     }
 
     fn compile_tail_loop_string_switch_return_block(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+        tail_loop: &mut TailLoopState,
+    ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_tail_loop_string_switch_return_block_inner(
+                scrut, cases, default, tail_loop,
+            )
+        })
+    }
+
+    fn compile_tail_loop_string_switch_return_block_inner(
         &mut self,
         scrut: &Lambda,
         cases: &[(String, Lambda)],
@@ -3506,6 +3663,17 @@ impl LambdaCompiler {
         scrut: &Lambda,
         switch: &LambdaSwitch,
     ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_switch_assignment_block_inner(result, scrut, switch)
+        })
+    }
+
+    fn compile_switch_assignment_block_inner(
+        &mut self,
+        result: &Ident,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+    ) -> Block {
         if self.uses_untagged_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) =
@@ -3578,6 +3746,18 @@ impl LambdaCompiler {
         cases: &[(String, Lambda)],
         default: Option<&Lambda>,
     ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_string_switch_assignment_block_inner(result, scrut, cases, default)
+        })
+    }
+
+    fn compile_string_switch_assignment_block_inner(
+        &mut self,
+        result: &Ident,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
         let borrowed_cases: Vec<_> = cases
@@ -3625,6 +3805,14 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_return_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        self.with_switch_depth(|this| this.compile_switch_return_block_inner(scrut, switch))
+    }
+
+    fn compile_switch_return_block_inner(
+        &mut self,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+    ) -> Block {
         if self.uses_untagged_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) =
@@ -3714,6 +3902,17 @@ impl LambdaCompiler {
         cases: &[(String, Lambda)],
         default: Option<&Lambda>,
     ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_string_switch_return_block_inner(scrut, cases, default)
+        })
+    }
+
+    fn compile_string_switch_return_block_inner(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
         let borrowed_cases: Vec<_> = cases
@@ -3749,6 +3948,14 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_effect_block(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Block {
+        self.with_switch_depth(|this| this.compile_switch_effect_block_inner(scrut, switch))
+    }
+
+    fn compile_switch_effect_block_inner(
+        &mut self,
+        scrut: &Lambda,
+        switch: &LambdaSwitch,
+    ) -> Block {
         if self.uses_untagged_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
             let (mut block, scrut_expr) =
@@ -3836,6 +4043,17 @@ impl LambdaCompiler {
     }
 
     fn compile_string_switch_effect_block(
+        &mut self,
+        scrut: &Lambda,
+        cases: &[(String, Lambda)],
+        default: Option<&Lambda>,
+    ) -> Block {
+        self.with_switch_depth(|this| {
+            this.compile_string_switch_effect_block_inner(scrut, cases, default)
+        })
+    }
+
+    fn compile_string_switch_effect_block_inner(
         &mut self,
         scrut: &Lambda,
         cases: &[(String, Lambda)],
@@ -4285,6 +4503,7 @@ impl LambdaCompiler {
                     || self.return_handler_requires_explicit_staticcatch_jump(finish)
                     || self.return_handler_requires_explicit_staticcatch_jump(body)
             }
+            Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(_, value) => self.return_handler_requires_explicit_staticcatch_jump(value),
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.return_handler_requires_explicit_staticcatch_jump(cond)
@@ -4433,6 +4652,7 @@ impl LambdaCompiler {
                     || self.lambda_requires_explicit_staticcatch_jump(finish)
                     || self.lambda_requires_explicit_staticcatch_jump(body)
             }
+            Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(_, value) => self.lambda_requires_explicit_staticcatch_jump(value),
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.lambda_requires_explicit_staticcatch_jump(cond)
@@ -4952,6 +5172,8 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
         Lambda::Lletrec(_, _) => "letrec",
         Lambda::Lwhile(_, _) => "while",
         Lambda::Lfor(_, _, _, _, _) => "for",
+        Lambda::Lbreak => "break",
+        Lambda::Lcontinue => "continue",
         Lambda::Lassign(_, _) => "assign",
         Lambda::LglobalModule(_, _) => "global_module",
     }
@@ -5313,6 +5535,8 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
         | Lambda::Lfunction(_)
         | Lambda::Lletrec(_, _)
         | Lambda::LstaticRaise(_, _)
+        | Lambda::Lbreak
+        | Lambda::Lcontinue
         | Lambda::Lwhile(_, _)
         | Lambda::Lfor(_, _, _, _, _)
         | Lambda::Lassign(_, _) => false,
@@ -5720,6 +5944,7 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSe
             collect_modules_from_lambda(finish, seen);
             collect_modules_from_lambda(body, seen);
         }
+        Lambda::Lbreak | Lambda::Lcontinue => {}
         Lambda::Lassign(_, value) => collect_modules_from_lambda(value, seen),
     }
 }
@@ -5919,6 +6144,7 @@ fn lambda_contains_static_raise(lam: &Lambda) -> bool {
                 || lambda_contains_static_raise(finish)
                 || lambda_contains_static_raise(body)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_static_raise(value),
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_contains_static_raise(cond)
@@ -5966,6 +6192,7 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
         Lambda::Lfor(_, start, finish, _, body) => {
             lambda_has_exit(start) || lambda_has_exit(finish) || lambda_has_exit(body)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_has_exit(value),
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_has_exit(cond) || lambda_has_exit(then_) || lambda_has_exit(else_)
@@ -6029,6 +6256,7 @@ fn lambda_contains_staticcatch(lam: &Lambda) -> bool {
                 || lambda_contains_staticcatch(finish)
                 || lambda_contains_staticcatch(body)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_staticcatch(value),
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_contains_staticcatch(cond)
@@ -6105,6 +6333,7 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
                 || lambda_contains_static_raise_to_label(finish, label, arity)
                 || lambda_contains_static_raise_to_label(body, label, arity)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_static_raise_to_label(value, label, arity),
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_contains_static_raise_to_label(cond, label, arity)
@@ -6266,6 +6495,7 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
                 lambda_static_raise_count_to_label(body, label, arity),
             )
         }
+        Lambda::Lbreak | Lambda::Lcontinue => 0,
         Lambda::Lassign(_, value) => lambda_static_raise_count_to_label(value, label, arity),
         Lambda::LifThenElse(cond, then_, else_) => {
             let count = add_count(
@@ -6347,6 +6577,7 @@ fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool
                 || lambda_contains_static_raise_to_other_label(finish, label)
                 || lambda_contains_static_raise_to_other_label(body, label)
         }
+        Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_static_raise_to_other_label(value, label),
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_contains_static_raise_to_other_label(cond, label)
@@ -6397,11 +6628,11 @@ fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet
             collect_modules_from_block(then_block, modules);
             collect_modules_from_block(else_block, modules);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             collect_modules_from_expression(cond, modules);
             collect_modules_from_block(body, modules);
         }
-        StatementDesc::ForRange(init, finish, _, _, body) => {
+        StatementDesc::ForRange(_, init, finish, _, _, body) => {
             if let Some(init) = init {
                 collect_modules_from_expression(init, modules);
             }
@@ -6435,7 +6666,7 @@ fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet
                 collect_modules_from_block(finalizer_block, modules);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 

@@ -263,9 +263,10 @@ fn rewrite_expression(
     let_unwrap_enabled: bool,
 ) -> Result<Expression, String> {
     let desc = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
-            (*expr.pexp_desc).clone()
-        }
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue => (*expr.pexp_desc).clone(),
         ExpressionDesc::Pexp_let(inner) => {
             let (rec_flag, bindings, body) = &**inner;
             return rewrite_let_expression(

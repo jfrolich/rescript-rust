@@ -251,6 +251,8 @@ pub fn free_variables_with_stats(
                 iter(e3, Position::Sink, fv, local_set);
             }
 
+            Lambda::Lbreak | Lambda::Lcontinue => {}
+
             Lambda::Lassign(id, e) => {
                 if !local_set.contains(id) {
                     fv.entry(id.clone())

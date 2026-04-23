@@ -604,6 +604,8 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
             )
         }
+        Lambda::Lbreak => Lambda::break_(),
+        Lambda::Lcontinue => Lambda::continue_(),
         Lambda::Lassign(id, value) => Lambda::Lassign(
             id.clone(),
             Box::new(rewrite_bounded_vars(substitution, value, id_gen)),
@@ -686,6 +688,7 @@ pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
             .max(max_ident_stamp_in_lambda(start))
             .max(max_ident_stamp_in_lambda(end))
             .max(max_ident_stamp_in_lambda(body)),
+        Lambda::Lbreak | Lambda::Lcontinue => 0,
         Lambda::Lassign(id, value) => id.stamp().max(max_ident_stamp_in_lambda(value)),
     }
 }

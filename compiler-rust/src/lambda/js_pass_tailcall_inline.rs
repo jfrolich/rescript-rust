@@ -136,29 +136,33 @@ impl TailcallInlineState {
                 ),
                 comment,
             }],
-            StatementDesc::While(cond, body) => vec![Statement {
+            StatementDesc::While(label, cond, body) => vec![Statement {
                 desc: StatementDesc::While(
+                    label,
                     self.transform_expression(cond),
                     self.transform_block(body),
                 ),
                 comment,
             }],
-            StatementDesc::ForRange(start, finish, ident, direction, body) => vec![Statement {
-                desc: StatementDesc::ForRange(
-                    start.map(|expr| self.transform_expression(expr)),
-                    self.transform_expression(finish),
-                    ident,
-                    direction,
-                    self.transform_block(body),
-                ),
+            StatementDesc::ForRange(label, start, finish, ident, direction, body) => {
+                vec![Statement {
+                    desc: StatementDesc::ForRange(
+                        label,
+                        start.map(|expr| self.transform_expression(expr)),
+                        self.transform_expression(finish),
+                        ident,
+                        direction,
+                        self.transform_block(body),
+                    ),
+                    comment,
+                }]
+            }
+            StatementDesc::Continue(label) => vec![Statement {
+                desc: StatementDesc::Continue(label),
                 comment,
             }],
-            StatementDesc::Continue => vec![Statement {
-                desc: StatementDesc::Continue,
-                comment,
-            }],
-            StatementDesc::Break => vec![Statement {
-                desc: StatementDesc::Break,
+            StatementDesc::Break(label) => vec![Statement {
+                desc: StatementDesc::Break(label),
                 comment,
             }],
             StatementDesc::Return(expr) => vec![Statement {
@@ -473,11 +477,11 @@ fn collect_tailcall_use_counts_statement(
             collect_tailcall_use_counts_block(then_block, decls, counts);
             collect_tailcall_use_counts_block(else_block, decls, counts);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             collect_tailcall_use_counts_expression(cond, decls, counts);
             collect_tailcall_use_counts_block(body, decls, counts);
         }
-        StatementDesc::ForRange(start, finish, _, _, body) => {
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
             if let Some(start) = start {
                 collect_tailcall_use_counts_expression(start, decls, counts);
             }
@@ -511,7 +515,7 @@ fn collect_tailcall_use_counts_statement(
                 collect_tailcall_use_counts_block(block, decls, counts);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -634,10 +638,10 @@ fn statement_assigns_ident(stmt: &Statement, ident: &Ident) -> bool {
                 || block_assigns_ident(then_block, ident)
                 || block_assigns_ident(else_block, ident)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_assigns_ident(cond, ident) || block_assigns_ident(body, ident)
         }
-        StatementDesc::ForRange(start, finish, _, _, body) => {
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
             start
                 .as_ref()
                 .is_some_and(|expr| expression_assigns_ident(expr, ident))
@@ -671,7 +675,7 @@ fn statement_assigns_ident(stmt: &Statement, ident: &Ident) -> bool {
                     .as_ref()
                     .is_some_and(|block| block_assigns_ident(block, ident))
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
     }
 }
 
@@ -829,13 +833,15 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
             substitute_inline_block(then_block, substitution),
             substitute_inline_block(else_block, substitution),
         ),
-        StatementDesc::While(cond, body) => StatementDesc::While(
+        StatementDesc::While(label, cond, body) => StatementDesc::While(
+            label,
             substitute_inline_expression(cond, substitution),
             substitute_inline_block(body, substitution),
         ),
-        StatementDesc::ForRange(start, finish, ident, direction, body) => {
+        StatementDesc::ForRange(label, start, finish, ident, direction, body) => {
             let body_substitution = prune_inline_substitution(substitution, [&ident]);
             StatementDesc::ForRange(
+                label,
                 start.map(|expr| substitute_inline_expression(expr, substitution)),
                 substitute_inline_expression(finish, substitution),
                 ident,
@@ -843,8 +849,8 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
                 substitute_inline_block(body, &body_substitution),
             )
         }
-        StatementDesc::Continue => StatementDesc::Continue,
-        StatementDesc::Break => StatementDesc::Break,
+        StatementDesc::Continue(label) => StatementDesc::Continue(label),
+        StatementDesc::Break(label) => StatementDesc::Break(label),
         StatementDesc::Return(expr) => {
             StatementDesc::Return(substitute_inline_expression(expr, substitution))
         }
@@ -1100,8 +1106,8 @@ fn apply_tailcall_used_stats_statement(stmt: &mut Statement, statuses: &HashMap<
             apply_tailcall_used_stats_block(then_block, statuses);
             apply_tailcall_used_stats_block(else_block, statuses);
         }
-        StatementDesc::While(_, body) => apply_tailcall_used_stats_block(body, statuses),
-        StatementDesc::ForRange(_, _, _, _, body) => {
+        StatementDesc::While(_, _, body) => apply_tailcall_used_stats_block(body, statuses),
+        StatementDesc::ForRange(_, _, _, _, _, body) => {
             apply_tailcall_used_stats_block(body, statuses)
         }
         StatementDesc::IntSwitch(_, clauses, default) => {
@@ -1129,7 +1135,7 @@ fn apply_tailcall_used_stats_statement(stmt: &mut Statement, statuses: &HashMap<
                 apply_tailcall_used_stats_block(block, statuses);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 

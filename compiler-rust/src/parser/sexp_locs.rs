@@ -880,6 +880,8 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             expression(arena.get_expr(*e1), arena),
             expression(arena.get_expr(*e2), arena),
         ]),
+        ExpressionDesc::Pexp_break => Sexp::list(vec![Sexp::atom("Pexp_break")]),
+        ExpressionDesc::Pexp_continue => Sexp::list(vec![Sexp::atom("Pexp_continue")]),
         ExpressionDesc::Pexp_while(cond, body) => Sexp::list(vec![
             Sexp::atom("Pexp_while"),
             expression(arena.get_expr(*cond), arena),

@@ -6037,7 +6037,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
     arena.mark_rewritten_expr_loc(expr.pexp_loc);
 
     let new_desc = match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_) | ExpressionDesc::Pexp_constant(_) => {
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue => {
             // Even for simple expressions, we need to rewrite attributes
             // to transform strings (e.g., "js" -> "*j" in @warning("-3"))
             // This matches OCaml's default_mapper which always maps attrs.

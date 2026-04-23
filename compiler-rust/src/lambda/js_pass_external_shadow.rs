@@ -83,20 +83,24 @@ fn rewrite_statement(stmt: &Statement, shadowed_globals: &HashSet<String>) -> St
             rewrite_block(then_block, shadowed_globals),
             rewrite_block(else_block, shadowed_globals),
         ),
-        StatementDesc::While(cond, body) => StatementDesc::While(
+        StatementDesc::While(label, cond, body) => StatementDesc::While(
+            label.clone(),
             rewrite_global_static_index_expr(cond, shadowed_globals),
             rewrite_block(body, shadowed_globals),
         ),
-        StatementDesc::ForRange(init, end, id, direction, body) => StatementDesc::ForRange(
-            init.as_ref()
-                .map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
-            rewrite_global_static_index_expr(end, shadowed_globals),
-            id.clone(),
-            *direction,
-            rewrite_block(body, shadowed_globals),
-        ),
-        StatementDesc::Continue => StatementDesc::Continue,
-        StatementDesc::Break => StatementDesc::Break,
+        StatementDesc::ForRange(label, init, end, id, direction, body) => {
+            StatementDesc::ForRange(
+                label.clone(),
+                init.as_ref()
+                    .map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
+                rewrite_global_static_index_expr(end, shadowed_globals),
+                id.clone(),
+                *direction,
+                rewrite_block(body, shadowed_globals),
+            )
+        }
+        StatementDesc::Continue(label) => StatementDesc::Continue(label.clone()),
+        StatementDesc::Break(label) => StatementDesc::Break(label.clone()),
         StatementDesc::Return(expr) => {
             StatementDesc::Return(rewrite_global_static_index_expr(expr, shadowed_globals))
         }

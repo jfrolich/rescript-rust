@@ -190,9 +190,11 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
         // lam_arity_analysis.ml:131
         Lambda::LstaticRaise(_, _) => Arity::na(),
         // lam_arity_analysis.ml:132
-        Lambda::Lwhile(_, _) | Lambda::Lfor(_, _, _, _, _) | Lambda::Lassign(_, _) => {
-            Arity::non_function()
-        }
+        Lambda::Lwhile(_, _)
+        | Lambda::Lfor(_, _, _, _, _)
+        | Lambda::Lbreak
+        | Lambda::Lcontinue
+        | Lambda::Lassign(_, _) => Arity::non_function(),
     }
 }
 
@@ -415,6 +417,9 @@ fn collect(meta: &mut LamStats, lam: &Lambda) {
             collect(meta, l2);
             collect(meta, l3);
         }
+        // OCaml `Lam_pass_collect.collect` after #8348:
+        // `Lbreak | Lcontinue -> ()`.
+        Lambda::Lbreak | Lambda::Lcontinue => {}
         // lam_pass_collect.ml:147-150
         Lambda::Lassign(_, l) => collect(meta, l),
     }

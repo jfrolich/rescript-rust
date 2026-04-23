@@ -25,6 +25,10 @@ pub enum Token<'a> {
     Await,
     /// `open` keyword
     Open,
+    /// `break` keyword (upstream #8348)
+    Break,
+    /// `continue` keyword (upstream #8348)
+    Continue,
     /// `true` literal
     True,
     /// `false` literal
@@ -320,6 +324,8 @@ impl<'a> Token<'a> {
         matches!(
             self,
             Token::Await
+                | Token::Break
+                | Token::Continue
                 | Token::And
                 | Token::As
                 | Token::Assert
@@ -362,7 +368,9 @@ impl<'a> Token<'a> {
             "as" => Token::As,
             "assert" => Token::Assert,
             "await" => Token::Await,
+            "break" => Token::Break,
             "constraint" => Token::Constraint,
+            "continue" => Token::Continue,
             "else" => Token::Else,
             "exception" => Token::Exception,
             "external" => Token::External,
@@ -409,7 +417,9 @@ impl<'a> Token<'a> {
                 | "as"
                 | "assert"
                 | "await"
+                | "break"
                 | "constraint"
+                | "continue"
                 | "else"
                 | "exception"
                 | "external"
@@ -448,6 +458,8 @@ impl<'a> Token<'a> {
         match self {
             Token::Await => Token::Await,
             Token::Open => Token::Open,
+            Token::Break => Token::Break,
+            Token::Continue => Token::Continue,
             Token::True => Token::True,
             Token::False => Token::False,
             Token::As => Token::As,
@@ -580,6 +592,8 @@ impl<'a> std::fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Token::Await => write!(f, "await"),
+            Token::Break => write!(f, "break"),
+            Token::Continue => write!(f, "continue"),
             Token::Open => write!(f, "open"),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),

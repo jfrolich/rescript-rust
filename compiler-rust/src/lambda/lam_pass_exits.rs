@@ -134,6 +134,9 @@ fn count(exits: &mut Collection, lam: &Lambda) {
         }
         // lam_exit_count.ml:99
         Lambda::Lassign(_, l) => count(exits, l),
+        // OCaml `Lam_exit_count.count_helper` after #8348:
+        // `Lbreak | Lcontinue -> ()`.
+        Lambda::Lbreak | Lambda::Lcontinue => {}
     }
 }
 
@@ -208,6 +211,9 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
         Lambda::LtryWith(_, _, _) => false,
         Lambda::Llet(_, _, _, _) => false,
         Lambda::Lletrec(decl, body) => decl.is_empty() && no_bounded_variables(body),
+        // OCaml `Lam_pass_exits.no_bounded_variables` after #8348:
+        // `Lbreak | Lcontinue -> true`.
+        Lambda::Lbreak | Lambda::Lcontinue => true,
     }
 }
 
@@ -415,6 +421,10 @@ fn subst_helper(
         ),
         // lam_pass_exits.ml:237
         Lambda::Lassign(v, l) => Lambda::assign(v.clone(), subst_helper(subst, counts, id_gen, l)),
+        // OCaml `Lam_pass_exits.subst_helper` after #8348:
+        // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
+        Lambda::Lbreak => Lambda::break_(),
+        Lambda::Lcontinue => Lambda::continue_(),
     }
 }
 

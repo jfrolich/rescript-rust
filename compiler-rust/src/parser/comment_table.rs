@@ -1443,7 +1443,9 @@ fn walk_expression(
     }
 
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_constant { .. } => {
+        ExpressionDesc::Pexp_constant { .. }
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue => {
             let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             t.attach_leading(expr.pexp_loc, leading, arena);
             t.attach_trailing(expr.pexp_loc, trailing, arena);

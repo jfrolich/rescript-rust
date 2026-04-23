@@ -967,6 +967,20 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_expr_idx(*e2_idx)),
                 )
             }
+            current::ExpressionDesc::Pexp_break => {
+                let full_loc = self.loc(loc);
+                pt0::ExpressionDesc::Extension((
+                    OldLocated::new("res.break".to_string(), full_loc),
+                    pt0::Payload::PStr(vec![]),
+                ))
+            }
+            current::ExpressionDesc::Pexp_continue => {
+                let full_loc = self.loc(loc);
+                pt0::ExpressionDesc::Extension((
+                    OldLocated::new("res.continue".to_string(), full_loc),
+                    pt0::Payload::PStr(vec![]),
+                ))
+            }
             current::ExpressionDesc::Pexp_while(e1_idx, e2_idx) => pt0::ExpressionDesc::While(
                 Box::new(self.map_expr_idx(*e1_idx)),
                 Box::new(self.map_expr_idx(*e2_idx)),

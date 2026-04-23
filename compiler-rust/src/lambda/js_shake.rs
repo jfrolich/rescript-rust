@@ -518,14 +518,14 @@ fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, targe
             ) && tail_move_uses_are_safe_to_inline(then_block, target)
                 && tail_move_uses_are_safe_to_inline(else_block, target)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 cond,
                 target,
                 TailMoveUseContext::Other,
             ) && tail_move_uses_are_safe_to_inline(body, target)
         }
-        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             !loop_ident.same(target)
                 && start.as_ref().is_none_or(|expr| {
                     expression_uses_ident_only_in_tail_move_safe_positions(
@@ -572,7 +572,7 @@ fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, targe
                     .as_ref()
                     .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => true,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => true,
     }
 }
 
@@ -943,13 +943,13 @@ fn substitute_export_alias_use_in_statement(
                 substitute_export_alias_use_in_statement(stmt, target, replacement);
             }
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             substitute_export_alias_use_in_expression(cond, target, replacement);
             for stmt in body {
                 substitute_export_alias_use_in_statement(stmt, target, replacement);
             }
         }
-        StatementDesc::ForRange(start, finish, ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, ident, _, body) => {
             if !ident.same(target) {
                 if let Some(start) = start {
                     substitute_export_alias_use_in_expression(start, target, replacement);
@@ -1003,7 +1003,7 @@ fn substitute_export_alias_use_in_statement(
                 }
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -1122,13 +1122,13 @@ pub(crate) fn statement_mentions_ident_anywhere(stmt: &Statement, target: &Ident
                     .iter()
                     .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             expression_mentions_ident_anywhere(cond, target)
                 || body
                     .iter()
                     .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
         }
-        StatementDesc::ForRange(start, finish, ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, ident, _, body) => {
             !ident.same(target)
                 && (start
                     .as_ref()
@@ -1182,7 +1182,7 @@ pub(crate) fn statement_mentions_ident_anywhere(stmt: &Statement, target: &Ident
                         .any(|stmt| statement_mentions_ident_anywhere(stmt, target))
                 })
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => false,
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
     }
 }
 
@@ -1449,11 +1449,11 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
             collect_block_idents(then_block, stats);
             collect_block_idents(else_block, stats);
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             collect_expression_idents(cond, stats);
             collect_block_idents(body, stats);
         }
-        StatementDesc::ForRange(start, finish, loop_ident, _, body) => {
+        StatementDesc::ForRange(_, start, finish, loop_ident, _, body) => {
             if let Some(start) = start {
                 collect_expression_idents(start, stats);
             }
@@ -1493,7 +1493,7 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
                 collect_block_idents(finally, stats);
             }
         }
-        StatementDesc::Debugger | StatementDesc::Break | StatementDesc::Continue => {}
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
     }
 }
 
@@ -1591,9 +1591,9 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
     match &stmt.desc {
         StatementDesc::Throw(_)
         | StatementDesc::Debugger
-        | StatementDesc::Break
+        | StatementDesc::Break(_)
         | StatementDesc::Variable(_)
-        | StatementDesc::Continue => false,
+        | StatementDesc::Continue(_) => false,
         StatementDesc::Exp(expr) | StatementDesc::Return(expr) => js_expr_no_side_effects(expr),
         StatementDesc::Block(block) => js_block_no_side_effects(block),
         StatementDesc::If(cond, then_block, else_block) => {
@@ -1601,10 +1601,10 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
                 && js_block_no_side_effects(then_block)
                 && js_block_no_side_effects(else_block)
         }
-        StatementDesc::While(cond, body) => {
+        StatementDesc::While(_, cond, body) => {
             js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
         }
-        StatementDesc::ForRange(start, finish, _, _, body) => {
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
             start.as_ref().is_none_or(js_expr_no_side_effects)
                 && js_expr_no_side_effects(finish)
                 && js_block_no_side_effects(body)

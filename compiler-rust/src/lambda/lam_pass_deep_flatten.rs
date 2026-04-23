@@ -93,6 +93,7 @@ pub fn deep_flatten(lam: &Lambda) -> Lambda {
                     || hit_variable(target, end)
                     || hit_variable(target, body)
             }
+            Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
         }
     }
@@ -325,6 +326,8 @@ pub fn deep_flatten(lam: &Lambda) -> Lambda {
                 *direction,
                 Box::new(aux(body)),
             ),
+            Lambda::Lbreak => Lambda::break_(),
+            Lambda::Lcontinue => Lambda::continue_(),
             Lambda::Lassign(id, value) => Lambda::Lassign(id.clone(), Box::new(aux(value))),
         }
     }

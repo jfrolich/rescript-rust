@@ -2096,6 +2096,23 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                 pexp_attributes: Attributes::new(),
             }
         }
+        // Upstream #8348: break / continue as atomic expressions.
+        Token::Break => {
+            p.next();
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_break),
+                pexp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::Continue => {
+            p.next();
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_continue),
+                pexp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+                pexp_attributes: Attributes::new(),
+            }
+        }
         Token::Percent => {
             // Extension expression: %ext, %ext.with.dots, %ext(payload)
             // OCaml includes the % in the extension name location
@@ -3931,6 +3948,18 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         };
     }
 
+    // Upstream #8348: braced break/continue treated as block expressions
+    // wrapped with the braces attribute. Mirrors OCaml's `Break`/`Continue`
+    // arms in `parse_braced_or_record_expr`.
+    if p.token == Token::Break || p.token == Token::Continue {
+        let mut expr = parse_expr_block(p);
+        p.expect(Token::Rbrace);
+        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+        let braces = super::core::make_braces_attr(p.arena_mut(), loc);
+        expr.pexp_attributes.push(braces);
+        return expr;
+    }
+
     // OCaml: Token.is_keyword token case in parse_braced_or_record_expr
     // Check for keyword as first token (before block expression check)
     if p.token.is_keyword() {
@@ -4357,6 +4386,53 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
     //   for invalid constructs (matches OCaml's parse_expr_block_item flow)
     if attrs.is_empty() && !grammar::is_block_expr_start(&p.token) {
         return None;
+    }
+
+    // Upstream #8348: break/continue as block items.
+    if matches!(p.token, Token::Break | Token::Continue) {
+        let start_idx = p.start_pos_idx();
+        let is_break = matches!(p.token, Token::Break);
+        p.next();
+        let loc = p.mk_loc_idx_to_prev_end(start_idx);
+        let desc = if is_break {
+            ExpressionDesc::Pexp_break
+        } else {
+            ExpressionDesc::Pexp_continue
+        };
+        let mut expr = Expression {
+            pexp_desc: Box::new(desc),
+            pexp_loc: loc,
+            pexp_attributes: attrs,
+        };
+        // Continue with sequence handling like other block items.
+        if p.token == Token::Semicolon {
+            p.next();
+            return match parse_block_body(p) {
+                Some(rest) => {
+                    let e_idx = p.arena_mut().push_expr(expr);
+                    let r_idx = p.arena_mut().push_expr(rest);
+                    Some(Expression {
+                        pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
+                        pexp_loc: loc,
+                        pexp_attributes: Attributes::new(),
+                    })
+                }
+                None => Some(expr),
+            };
+        }
+        // No semicolon — try newline-or-semicolon expr block continuation
+        parse_newline_or_semicolon_expr_block(p);
+        if let Some(rest) = parse_block_body(p) {
+            let e_idx = p.arena_mut().push_expr(expr);
+            let r_idx = p.arena_mut().push_expr(rest);
+            return Some(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_sequence(e_idx, r_idx)),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            });
+        }
+        let _ = expr.pexp_attributes; // appease borrow if any
+        return Some(expr);
     }
 
     // Parse the first expression/statement

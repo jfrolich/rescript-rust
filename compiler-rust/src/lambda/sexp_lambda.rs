@@ -654,6 +654,8 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             direction_flag(dir),
             lambda(body, with_locs),
         ]),
+        Lambda::Lbreak => Sexp::atom("Lbreak"),
+        Lambda::Lcontinue => Sexp::atom("Lcontinue"),
         Lambda::Lassign(var, value) => Sexp::list(vec![
             Sexp::atom("Lassign"),
             ident(var),

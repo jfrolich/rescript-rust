@@ -161,6 +161,10 @@ impl<'a> LambdaConverter<'a> {
                 ValueKind::ValReg => self.translate_value_path(expr.exp_loc, path),
             },
             ExpressionDesc::Texp_constant(cst) => Lambda::const_(self.convert_constant(cst)),
+            // OCaml `Translcore.transl_exp0` after #8348:
+            // `Texp_break -> Lbreak | Texp_continue -> Lcontinue`.
+            ExpressionDesc::Texp_break => Lambda::break_(),
+            ExpressionDesc::Texp_continue => Lambda::continue_(),
             ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
                 let body_lam = self.convert_expr(body);
                 self.convert_let_with_body(*rec_flag, bindings, body_lam)

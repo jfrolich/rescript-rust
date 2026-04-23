@@ -440,6 +440,11 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             let s = lets_helper(state, l);
             Lambda::Lassign(v.clone(), Box::new(s))
         }
+
+        // OCaml `Lam_pass_lets_dce.lets_helper` after #8348:
+        // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
+        Lambda::Lbreak => Lambda::break_(),
+        Lambda::Lcontinue => Lambda::continue_(),
     }
 }
 
