@@ -1031,8 +1031,8 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_constant(c) => {
             Sexp::list(vec![Sexp::atom("Texp_constant"), sexp_constant(c)])
         }
-        ExpressionDesc::Texp_break => Sexp::atom("Texp_break"),
-        ExpressionDesc::Texp_continue => Sexp::atom("Texp_continue"),
+        ExpressionDesc::Texp_break => Sexp::list(vec![Sexp::atom("Texp_break")]),
+        ExpressionDesc::Texp_continue => Sexp::list(vec![Sexp::atom("Texp_continue")]),
         ExpressionDesc::Texp_let(flag, vbs, body) => {
             let mut vb_items = Vec::new();
             for vb in vbs.iter() {
@@ -1271,18 +1271,12 @@ fn sexp_expression_desc(
             sexp_direction_flag(flag),
             sexp_expression(arena, ctx, with_locs, dedup, e3),
         ]),
-        ExpressionDesc::Texp_for_of(id, _, iterable, body) => Sexp::list(vec![
-            Sexp::atom("Texp_for_of"),
-            sexp_ident(id),
-            sexp_expression(arena, ctx, with_locs, dedup, iterable),
-            sexp_expression(arena, ctx, with_locs, dedup, body),
-        ]),
-        ExpressionDesc::Texp_for_await_of(id, _, iterable, body) => Sexp::list(vec![
-            Sexp::atom("Texp_for_await_of"),
-            sexp_ident(id),
-            sexp_expression(arena, ctx, with_locs, dedup, iterable),
-            sexp_expression(arena, ctx, with_locs, dedup, body),
-        ]),
+        ExpressionDesc::Texp_for_of(_, _, _, _) => {
+            Sexp::list(vec![Sexp::atom("Texp_for_of")])
+        }
+        ExpressionDesc::Texp_for_await_of(_, _, _, _) => {
+            Sexp::list(vec![Sexp::atom("Texp_for_await_of")])
+        }
         ExpressionDesc::Texp_send(e, meth, opt_arg) => {
             use crate::types::typedtree::MethKind;
             let e_sexp = sexp_expression(arena, ctx, with_locs, dedup, e);
