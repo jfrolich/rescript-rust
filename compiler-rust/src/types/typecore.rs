@@ -6476,6 +6476,58 @@ fn translate_unified_ops(
     }
 }
 
+/// Mirrors OCaml `should_unify_expected_result_before_typing_lowered_apply`.
+/// True when the application is a desugared dict literal or async wrapper
+/// whose expected result type should be threaded into the call before its
+/// arguments are typed.
+fn should_unify_expected_result_before_typing_lowered_apply(
+    tctx: &TypeCheckContext<'_>,
+    typed_funct: &Expression,
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+) -> bool {
+    let path_name = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => path.name(),
+        _ => return false,
+    };
+    match path_name.as_str() {
+        "Primitive_dict.make" => {
+            args.len() == 1
+                && matches!(args[0].0, ArgLabel::Nolabel)
+                && matches!(
+                    *tctx.arena.get_expr(args[0].1).pexp_desc,
+                    crate::parser::ast::ExpressionDesc::Pexp_array(_)
+                )
+        }
+        "Primitive_promise.unsafe_async" => {
+            args.len() == 1 && matches!(args[0].0, ArgLabel::Nolabel)
+        }
+        _ => false,
+    }
+}
+
+/// One-step `filter_arrow` analogue: walk through the function type's arrows
+/// `arity` times, returning the first parameter type and the ultimate result
+/// type. Returns None if the type does not have at least `arity` arrows.
+fn filter_arrow_for_lowered_apply(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    funct_ty: TypeExprRef,
+    arity: usize,
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let ctx = tctx.type_ctx;
+    let mut current = funct_ty;
+    let mut first_arg: Option<TypeExprRef> = None;
+    for _ in 0..arity {
+        let expanded = crate::types::ctype::expand_head(ctx, env, current);
+        let (arg_ty, ret_ty) = crate::types::ctype::split_arrow(ctx, expanded)?;
+        if first_arg.is_none() {
+            first_arg = Some(arg_ty);
+        }
+        current = ret_ty;
+    }
+    Some((first_arg?, current))
+}
+
 fn type_application(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -6599,6 +6651,26 @@ fn type_application(
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
+
+    // Backport of upstream #8359:
+    // Lowered syntax like `dict{...}` and async wrappers becomes a regular
+    // application during parsing/PPX. Thread the expected result type into
+    // the application before typing its arguments so element/value types
+    // can be inferred from the surrounding context.
+    if should_unify_expected_result_before_typing_lowered_apply(
+        tctx, &typed_funct, args,
+    ) {
+        if let Some((_arg_ty, ty_res)) = filter_arrow_for_lowered_apply(
+            tctx,
+            env,
+            typed_funct.exp_type,
+            args.len(),
+        ) {
+            let expected_inst = crate::types::instance(ctx, expected_ty);
+            unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
+        }
+    }
+
     let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
     ctx.end_def();
     crate::types::ctype::lower_args(ctx, env, lowered_ty);
