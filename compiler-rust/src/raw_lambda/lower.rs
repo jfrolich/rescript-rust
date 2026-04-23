@@ -136,6 +136,16 @@ impl LoweringContext {
                 let lowered_start = self.lower_lambda(*start);
                 Lambda::for_(var, lowered_start, lowered_end, dir, lowered_body)
             }
+            RawLambda::Lfor_of(var, iterable, body) => {
+                let lowered_body = self.lower_lambda(*body);
+                let lowered_iterable = self.lower_lambda(*iterable);
+                Lambda::for_of(var, lowered_iterable, lowered_body)
+            }
+            RawLambda::Lfor_await_of(var, iterable, body) => {
+                let lowered_body = self.lower_lambda(*body);
+                let lowered_iterable = self.lower_lambda(*iterable);
+                Lambda::for_await_of(var, lowered_iterable, lowered_body)
+            }
             RawLambda::Lbreak => Lambda::break_(),
             RawLambda::Lcontinue => Lambda::continue_(),
             RawLambda::Lassign(id, value) => Lambda::assign(id, self.lower_lambda(*value)),
@@ -570,6 +580,10 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
         RawLambda::Lfor(_, start, end, _, body) => {
             collect_exported_idents(start, exports);
             collect_exported_idents(end, exports);
+            collect_exported_idents(body, exports);
+        }
+        RawLambda::Lfor_of(_, iterable, body) | RawLambda::Lfor_await_of(_, iterable, body) => {
+            collect_exported_idents(iterable, exports);
             collect_exported_idents(body, exports);
         }
         RawLambda::Lbreak | RawLambda::Lcontinue => {}
@@ -1250,6 +1264,9 @@ fn exception_id_destructed(lam: &Lambda, exn: &Ident) -> bool {
                 || exception_id_destructed(hi, exn)
                 || exception_id_destructed(body, exn)
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            exception_id_destructed(iterable, exn) || exception_id_destructed(body, exn)
+        }
         Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => false,
         Lambda::Lapply(apply) => {
             exception_id_destructed(&apply.ap_func, exn)
@@ -1345,6 +1362,9 @@ fn hit_variable(target: &Ident, lam: &Lambda) -> bool {
         }
         Lambda::Lfor(_, start, end, _, body) => {
             hit_variable(target, start) || hit_variable(target, end) || hit_variable(target, body)
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            hit_variable(target, iterable) || hit_variable(target, body)
         }
         Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
@@ -1632,6 +1652,12 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_ident(max_stamp, id);
                 visit_raw(max_stamp, start);
                 visit_raw(max_stamp, end);
+                visit_raw(max_stamp, body);
+            }
+            RawLambda::Lfor_of(id, iterable, body)
+            | RawLambda::Lfor_await_of(id, iterable, body) => {
+                visit_ident(max_stamp, id);
+                visit_raw(max_stamp, iterable);
                 visit_raw(max_stamp, body);
             }
             RawLambda::Lassign(id, value) => {

@@ -157,6 +157,24 @@ impl TailcallInlineState {
                     comment,
                 }]
             }
+            StatementDesc::ForOf(label, ident, iterable, body) => vec![Statement {
+                desc: StatementDesc::ForOf(
+                    label,
+                    ident,
+                    self.transform_expression(iterable),
+                    self.transform_block(body),
+                ),
+                comment,
+            }],
+            StatementDesc::ForAwaitOf(label, ident, iterable, body) => vec![Statement {
+                desc: StatementDesc::ForAwaitOf(
+                    label,
+                    ident,
+                    self.transform_expression(iterable),
+                    self.transform_block(body),
+                ),
+                comment,
+            }],
             StatementDesc::Continue(label) => vec![Statement {
                 desc: StatementDesc::Continue(label),
                 comment,
@@ -488,6 +506,11 @@ fn collect_tailcall_use_counts_statement(
             collect_tailcall_use_counts_expression(finish, decls, counts);
             collect_tailcall_use_counts_block(body, decls, counts);
         }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            collect_tailcall_use_counts_expression(iterable, decls, counts);
+            collect_tailcall_use_counts_block(body, decls, counts);
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             collect_tailcall_use_counts_expression(test, decls, counts);
             for (_, clause) in clauses {
@@ -647,6 +670,10 @@ fn statement_assigns_ident(stmt: &Statement, ident: &Ident) -> bool {
                 .is_some_and(|expr| expression_assigns_ident(expr, ident))
                 || expression_assigns_ident(finish, ident)
                 || block_assigns_ident(body, ident)
+        }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            expression_assigns_ident(iterable, ident) || block_assigns_ident(body, ident)
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
             expression_assigns_ident(test, ident)
@@ -846,6 +873,24 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
                 substitute_inline_expression(finish, substitution),
                 ident,
                 direction,
+                substitute_inline_block(body, &body_substitution),
+            )
+        }
+        StatementDesc::ForOf(label, ident, iterable, body) => {
+            let body_substitution = prune_inline_substitution(substitution, [&ident]);
+            StatementDesc::ForOf(
+                label,
+                ident,
+                substitute_inline_expression(iterable, substitution),
+                substitute_inline_block(body, &body_substitution),
+            )
+        }
+        StatementDesc::ForAwaitOf(label, ident, iterable, body) => {
+            let body_substitution = prune_inline_substitution(substitution, [&ident]);
+            StatementDesc::ForAwaitOf(
+                label,
+                ident,
+                substitute_inline_expression(iterable, substitution),
                 substitute_inline_block(body, &body_substitution),
             )
         }
@@ -1108,6 +1153,9 @@ fn apply_tailcall_used_stats_statement(stmt: &mut Statement, statuses: &HashMap<
         }
         StatementDesc::While(_, _, body) => apply_tailcall_used_stats_block(body, statuses),
         StatementDesc::ForRange(_, _, _, _, _, body) => {
+            apply_tailcall_used_stats_block(body, statuses)
+        }
+        StatementDesc::ForOf(_, _, _, body) | StatementDesc::ForAwaitOf(_, _, _, body) => {
             apply_tailcall_used_stats_block(body, statuses)
         }
         StatementDesc::IntSwitch(_, clauses, default) => {

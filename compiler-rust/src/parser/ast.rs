@@ -636,6 +636,10 @@ pub enum ExpressionDesc {
     Pexp_while(ExprIdx, ExprIdx),
     /// For: `for i in E1 to E2 { E3 }`.
     Pexp_for(Box<(PatIdx, ExprIdx, ExprIdx, DirectionFlag, ExprIdx)>),
+    /// For-of: `for pat of iterable { body }` (upstream #7887).
+    Pexp_for_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
+    /// For-await-of: `for await pat of asyncIterable { body }` (upstream #7887).
+    Pexp_for_await_of(Box<(PatIdx, ExprIdx, ExprIdx)>),
     /// Constraint: `(E: T)`.
     Pexp_constraint(Box<(ExprIdx, CoreTypeIdx)>),
     /// Coercion: `(E :> T)`.

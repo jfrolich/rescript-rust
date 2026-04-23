@@ -334,6 +334,12 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 visit_expression(max_stamp, hi);
                 visit_expression(max_stamp, body);
             }
+            ExpressionDesc::Texp_for_of(id, _pat, iterable, body)
+            | ExpressionDesc::Texp_for_await_of(id, _pat, iterable, body) => {
+                visit_ident(max_stamp, id);
+                visit_expression(max_stamp, iterable);
+                visit_expression(max_stamp, body);
+            }
             ExpressionDesc::Texp_send(expr, meth, maybe_arg) => {
                 visit_expression(max_stamp, expr);
                 if let MethKind::Tmeth_val(id) = meth {
@@ -866,6 +872,11 @@ fn expression_has_string_literal(
             let (_, start, end, _, body) = &**inner;
             expression_has_string_literal(arena.get_expr(*start), value, arena)
                 || expression_has_string_literal(arena.get_expr(*end), value, arena)
+                || expression_has_string_literal(arena.get_expr(*body), value, arena)
+        }
+        ED::Pexp_for_of(inner) | ED::Pexp_for_await_of(inner) => {
+            let (_, iterable, body) = &**inner;
+            expression_has_string_literal(arena.get_expr(*iterable), value, arena)
                 || expression_has_string_literal(arena.get_expr(*body), value, arena)
         }
         ED::Pexp_letmodule(inner) => {

@@ -591,6 +591,28 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             f.string(")");
             f.close_box();
         }
+        RawLambda::Lfor_of(param, iterable, body) => {
+            f.open_box(BoxKind::Box, 2);
+            f.string("(for ");
+            print_ident(f, param);
+            f.string(" of ");
+            lam(f, iterable, reraise_exn);
+            f.space();
+            lam(f, body, reraise_exn);
+            f.string(")");
+            f.close_box();
+        }
+        RawLambda::Lfor_await_of(param, iterable, body) => {
+            f.open_box(BoxKind::Box, 2);
+            f.string("(for await ");
+            print_ident(f, param);
+            f.string(" of ");
+            lam(f, iterable, reraise_exn);
+            f.space();
+            lam(f, body, reraise_exn);
+            f.string(")");
+            f.close_box();
+        }
         RawLambda::Lassign(id, expr) => {
             f.open_box(BoxKind::Box, 2);
             f.string("(assign");

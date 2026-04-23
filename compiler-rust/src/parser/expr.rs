@@ -6130,6 +6130,16 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
     p.leave_breadcrumb(Grammar::ExprFor);
     p.begin_region();
 
+    // Upstream #7887 (`compiler/syntax/src/res_core.ml` `parse_for_expression`):
+    // accept an optional `await` immediately after `for`, marking this as a
+    // `for await ... of ...` loop.
+    let await_kw = if p.token == Token::Await {
+        p.next();
+        true
+    } else {
+        false
+    };
+
     let (pat, has_opening_paren) = if p.token == Token::Lparen {
         let lparen_pos_idx = p.start_pos_idx();
         p.next();
@@ -6169,50 +6179,127 @@ fn parse_for_expr(p: &mut Parser<'_>) -> Expression {
         (pat, false)
     };
 
-    p.expect(Token::In);
-    let start_expr = parse_expr(p);
+    parse_for_rest(p, start_pos_idx, has_opening_paren, await_kw, pat)
+}
 
-    let direction = if matches!(&p.token, Token::Lident(s) if s == "to") {
-        p.next();
-        DirectionFlag::Upto
-    } else if matches!(&p.token, Token::Lident(s) if s == "downto") {
-        p.next();
-        DirectionFlag::Downto
-    } else {
-        p.err(DiagnosticCategory::Message(
-            "Expected 'to' or 'downto'".to_string(),
-        ));
-        DirectionFlag::Upto
-    };
+/// Continuation of `parse_for_expr`. Mirrors OCaml's `parse_for_rest`
+/// (`compiler/syntax/src/res_core.ml` after #7887): dispatches on whether
+/// we see `of` (for-of / for-await-of) or `in` (regular for-loop).
+fn parse_for_rest(
+    p: &mut Parser<'_>,
+    start_pos_idx: crate::parse_arena::PosIdx,
+    has_opening_paren: bool,
+    await_kw: bool,
+    pattern: super::ast::Pattern,
+) -> Expression {
+    match p.token {
+        Token::Of => {
+            p.next();
+            let pattern = normalize_for_of_pattern(p, pattern);
+            let iterable = parse_expr_with_context(p, ExprContext::When);
+            let body = parse_for_loop_body(p, has_opening_paren);
+            p.eat_breadcrumb();
+            p.end_region();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let pat_idx = p.arena_mut().push_pat(pattern);
+            let it_idx = p.arena_mut().push_expr(iterable);
+            let b_idx = p.arena_mut().push_expr(body);
+            let desc = if await_kw {
+                ExpressionDesc::Pexp_for_await_of(Box::new((pat_idx, it_idx, b_idx)))
+            } else {
+                ExpressionDesc::Pexp_for_of(Box::new((pat_idx, it_idx, b_idx)))
+            };
+            Expression {
+                pexp_desc: Box::new(desc),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::In => {
+            if await_kw {
+                p.err(DiagnosticCategory::Message(
+                    "A `for await` loop must use `of`, like `for await item of items`."
+                        .to_string(),
+                ));
+            }
+            p.next();
+            let start_expr = parse_expr(p);
+            let direction = if matches!(&p.token, Token::Lident(s) if s == "to") {
+                p.next();
+                DirectionFlag::Upto
+            } else if matches!(&p.token, Token::Lident(s) if s == "downto") {
+                p.next();
+                DirectionFlag::Downto
+            } else {
+                p.err(DiagnosticCategory::Message(
+                    "Expected 'to' or 'downto'".to_string(),
+                ));
+                DirectionFlag::Upto
+            };
+            let end_expr = parse_expr_with_context(p, ExprContext::When);
+            let body = parse_for_loop_body(p, has_opening_paren);
+            p.eat_breadcrumb();
+            p.end_region();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            Expression {
+                pexp_desc: {
+                    let pat_idx = p.arena_mut().push_pat(pattern);
+                    let s_idx = p.arena_mut().push_expr(start_expr);
+                    let e_idx = p.arena_mut().push_expr(end_expr);
+                    let b_idx = p.arena_mut().push_expr(body);
+                    Box::new(ExpressionDesc::Pexp_for(Box::new((
+                        pat_idx, s_idx, e_idx, direction, b_idx,
+                    ))))
+                },
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        _ => {
+            p.err(DiagnosticCategory::Message(
+                "A for-loop has the following form: `for i in 0 to 10` or `for item of items`. \
+                 Did you forget an `in` or `of` here?"
+                    .to_string(),
+            ));
+            p.eat_breadcrumb();
+            p.end_region();
+            crate::parser::core::recover::default_expr(p.arena_mut())
+        }
+    }
+}
 
-    let end_expr = parse_expr_with_context(p, ExprContext::When);
-
+/// Shared body parser used by both for-loop variants.
+fn parse_for_loop_body(p: &mut Parser<'_>, has_opening_paren: bool) -> Expression {
     if has_opening_paren {
         p.expect(Token::Rparen);
     }
-
     p.expect(Token::Lbrace);
-    // Use parse_expr_block (no res.braces) for for loop body, matching OCaml behavior
     let body = parse_expr_block(p);
     p.expect(Token::Rbrace);
+    body
+}
 
-    p.eat_breadcrumb();
-    p.end_region();
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-    Expression {
-        pexp_desc: {
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let s_idx = p.arena_mut().push_expr(start_expr);
-            let e_idx = p.arena_mut().push_expr(end_expr);
-            let b_idx = p.arena_mut().push_expr(body);
-            Box::new(ExpressionDesc::Pexp_for(Box::new((
-                pat_idx, s_idx, e_idx, direction, b_idx,
-            ))))
-        },
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
+/// Mirrors OCaml's `normalize_for_of_pattern` (`res_core.ml` after #7887):
+/// reject anything other than `_` or a variable. We replace destructuring
+/// patterns with `_` and emit an error so parsing can continue.
+fn normalize_for_of_pattern(
+    p: &mut Parser<'_>,
+    pattern: super::ast::Pattern,
+) -> super::ast::Pattern {
+    match &*pattern.ppat_desc {
+        super::ast::PatternDesc::Ppat_any | super::ast::PatternDesc::Ppat_var(_) => pattern,
+        _ => {
+            p.err(DiagnosticCategory::Message(
+                "A `for...of` or `for await...of` loop only supports a variable or `_` on the \
+                 left side. Destructuring patterns are not supported here."
+                    .to_string(),
+            ));
+            super::ast::Pattern {
+                ppat_desc: Box::new(super::ast::PatternDesc::Ppat_any),
+                ppat_loc: pattern.ppat_loc,
+                ppat_attributes: super::ast::Attributes::new(),
+            }
+        }
     }
 }
 

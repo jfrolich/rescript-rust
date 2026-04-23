@@ -1702,6 +1702,8 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Lletrec(..)
             | RawLambda::Lfunction(..)
             | RawLambda::Lfor(..)
+            | RawLambda::Lfor_of(..)
+            | RawLambda::Lfor_await_of(..)
             | RawLambda::Lwhile(..) => None,
         }
     }
@@ -2617,6 +2619,12 @@ fn raw_lambda_free_variables(lam: &RawLambda) -> IdentSet {
             RawLambda::Lfor(id, lo, hi, _, body) => {
                 collect(lo, fv);
                 collect(hi, fv);
+                collect(body, fv);
+                fv.remove(id);
+            }
+            RawLambda::Lfor_of(id, iterable, body)
+            | RawLambda::Lfor_await_of(id, iterable, body) => {
+                collect(iterable, fv);
                 collect(body, fv);
                 fv.remove(id);
             }

@@ -60,6 +60,9 @@ where
             Lambda::Lfor(_, e1, e2, _, e3) => {
                 aux(e1, exits) || aux(e2, exits) || aux(e3, exits)
             }
+            Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => {
+                aux(e1, exits) || aux(e2, exits)
+            }
             Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(_, e) => aux(e, exits),
         }

@@ -192,6 +192,8 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
         // lam_arity_analysis.ml:132
         Lambda::Lwhile(_, _)
         | Lambda::Lfor(_, _, _, _, _)
+        | Lambda::Lfor_of(_, _, _)
+        | Lambda::Lfor_await_of(_, _, _)
         | Lambda::Lbreak
         | Lambda::Lcontinue
         | Lambda::Lassign(_, _) => Arity::non_function(),
@@ -416,6 +418,11 @@ fn collect(meta: &mut LamStats, lam: &Lambda) {
             collect(meta, l1);
             collect(meta, l2);
             collect(meta, l3);
+        }
+        // lam_pass_collect.ml after #7887: Lfor_of / Lfor_await_of.
+        Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
+            collect(meta, l1);
+            collect(meta, l2);
         }
         // OCaml `Lam_pass_collect.collect` after #8348:
         // `Lbreak | Lcontinue -> ()`.

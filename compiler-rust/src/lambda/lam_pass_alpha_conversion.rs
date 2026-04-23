@@ -282,6 +282,14 @@ impl<'a> Alpha<'a> {
                 self.simpl(l3),
             ),
 
+            // lam_pass_alpha_conversion.ml after #7887: Lfor_of / Lfor_await_of.
+            Lambda::Lfor_of(var, l1, l2) => {
+                Lambda::for_of(var.clone(), self.simpl(l1), self.simpl(l2))
+            }
+            Lambda::Lfor_await_of(var, l1, l2) => {
+                Lambda::for_await_of(var.clone(), self.simpl(l1), self.simpl(l2))
+            }
+
             // OCaml `Lam_pass_alpha_conversion.simpl` after #8348:
             // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
             Lambda::Lbreak => Lambda::break_(),

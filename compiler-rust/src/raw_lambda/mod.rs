@@ -124,6 +124,10 @@ pub enum RawLambda {
         DirectionFlag,
         Box<RawLambda>,
     ),
+    /// For-of loop (upstream #7887).
+    Lfor_of(Ident, Box<RawLambda>, Box<RawLambda>),
+    /// For-await-of loop (upstream #7887).
+    Lfor_await_of(Ident, Box<RawLambda>, Box<RawLambda>),
     /// Break out of the enclosing loop (port of OCaml `Lbreak`).
     Lbreak,
     /// Continue the enclosing loop (port of OCaml `Lcontinue`).
@@ -309,6 +313,16 @@ impl RawLambda {
                 dir,
                 Box::new(RawLambda::from_lowered(*body)),
             ),
+            Lambda::Lfor_of(var, iterable, body) => RawLambda::Lfor_of(
+                var,
+                Box::new(RawLambda::from_lowered(*iterable)),
+                Box::new(RawLambda::from_lowered(*body)),
+            ),
+            Lambda::Lfor_await_of(var, iterable, body) => RawLambda::Lfor_await_of(
+                var,
+                Box::new(RawLambda::from_lowered(*iterable)),
+                Box::new(RawLambda::from_lowered(*body)),
+            ),
             Lambda::Lbreak => RawLambda::Lbreak,
             Lambda::Lcontinue => RawLambda::Lcontinue,
             Lambda::Lassign(id, value) => {
@@ -416,6 +430,16 @@ impl RawLambda {
                 Box::new(start.into_lowered()),
                 Box::new(end.into_lowered()),
                 dir,
+                Box::new(body.into_lowered()),
+            ),
+            RawLambda::Lfor_of(var, iterable, body) => Lambda::Lfor_of(
+                var,
+                Box::new(iterable.into_lowered()),
+                Box::new(body.into_lowered()),
+            ),
+            RawLambda::Lfor_await_of(var, iterable, body) => Lambda::Lfor_await_of(
+                var,
+                Box::new(iterable.into_lowered()),
                 Box::new(body.into_lowered()),
             ),
             RawLambda::Lbreak => Lambda::Lbreak,

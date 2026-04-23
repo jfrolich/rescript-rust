@@ -413,6 +413,22 @@ fn rewrite_expression(
                 rewritten_body,
             )))
         }
+        ExpressionDesc::Pexp_for_of(inner) => {
+            let (pat, iterable, body) = &**inner;
+            let rewritten_iterable = rewrite_expr_idx(*iterable, arena, let_unwrap_enabled)?;
+            let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_for_of(Box::new((*pat, rewritten_iterable, rewritten_body)))
+        }
+        ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (pat, iterable, body) = &**inner;
+            let rewritten_iterable = rewrite_expr_idx(*iterable, arena, let_unwrap_enabled)?;
+            let rewritten_body = rewrite_expr_idx(*body, arena, let_unwrap_enabled)?;
+            ExpressionDesc::Pexp_for_await_of(Box::new((
+                *pat,
+                rewritten_iterable,
+                rewritten_body,
+            )))
+        }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (subject, typ) = &**inner;
             let rewritten_subject = rewrite_expr_idx(*subject, arena, let_unwrap_enabled)?;

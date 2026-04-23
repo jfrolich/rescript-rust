@@ -86,6 +86,12 @@ fn collect_free_variables(lam: &Lambda, fv: &mut IdentSet) {
             fv.remove(v);
         }
 
+        Lambda::Lfor_of(v, e1, e2) | Lambda::Lfor_await_of(v, e1, e2) => {
+            collect_free_variables(e1, fv);
+            collect_free_variables(e2, fv);
+            fv.remove(v);
+        }
+
         Lambda::Lconst(_) => {
             // Constants have no free variables
         }

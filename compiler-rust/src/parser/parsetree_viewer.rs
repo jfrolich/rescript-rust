@@ -604,6 +604,8 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Pexp_open(_)
             | ExpressionDesc::Pexp_ifthenelse(_)
             | ExpressionDesc::Pexp_for(_)
+            | ExpressionDesc::Pexp_for_of(_)
+            | ExpressionDesc::Pexp_for_await_of(_)
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_try(_)
             | ExpressionDesc::Pexp_array(_)

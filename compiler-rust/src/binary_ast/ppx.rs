@@ -6484,6 +6484,25 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             )))
         }
 
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (ref pat, ref iterable, ref body) = **inner;
+            let iterable_expr = arena.get_expr(*iterable).clone();
+            let body_expr = arena.get_expr(*body).clone();
+            let pat_expr = arena.get_pat(*pat).clone();
+            let rw_pat = rewrite_pattern(&pat_expr, arena);
+            let rw_iterable = rewrite_expression(&iterable_expr, arena);
+            let rw_body = rewrite_expression(&body_expr, arena);
+            let new_inner = Box::new((
+                arena.push_pat(rw_pat),
+                arena.push_expr(rw_iterable),
+                arena.push_expr(rw_body),
+            ));
+            match &*expr.pexp_desc {
+                ExpressionDesc::Pexp_for_of(_) => ExpressionDesc::Pexp_for_of(new_inner),
+                _ => ExpressionDesc::Pexp_for_await_of(new_inner),
+            }
+        }
+
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e, ref ty) = **inner;
             let e_expr = arena.get_expr(*e).clone();

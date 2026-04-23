@@ -744,11 +744,48 @@ impl<'a> Mapper<'a> {
         if is_jsx {
             attrs.insert(0, self.mk_jsx_attr(expr.pexp_loc));
         }
+        // Upstream #7887: for-of / for-await-of are encoded in parsetree0 as
+        // a regular `for` loop carrying an `_res.for_of` / `_res.for_await_of`
+        // attribute whose payload is the iterable (PPat (Pat.any (), Some
+        // iterable)). Mirrors `compiler/ml/ast_mapper_to0.ml` after the PR.
+        match &*expr.pexp_desc {
+            current::ExpressionDesc::Pexp_for_of(inner) => {
+                let (_pat, iterable_idx, _body) = inner.as_ref();
+                let attr = self.mk_for_of_attr("_res.for_of", expr.pexp_loc, *iterable_idx);
+                attrs.insert(0, attr);
+            }
+            current::ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (_pat, iterable_idx, _body) = inner.as_ref();
+                let attr =
+                    self.mk_for_of_attr("_res.for_await_of", expr.pexp_loc, *iterable_idx);
+                attrs.insert(0, attr);
+            }
+            _ => {}
+        }
         pt0::Expression {
             pexp_desc: self.map_expression_desc(&*expr.pexp_desc, expr.pexp_loc, owner_idx),
             pexp_loc: self.loc(expr.pexp_loc),
             pexp_attributes: attrs,
         }
+    }
+
+    /// Build the `_res.for_of` / `_res.for_await_of` attribute used to encode
+    /// `for ... of` / `for await ... of` in the legacy parsetree0 format.
+    fn mk_for_of_attr(
+        &mut self,
+        name: &str,
+        loc_idx: LocIdx,
+        iterable_idx: ExprIdx,
+    ) -> pt0::Attribute {
+        let loc = self.loc(loc_idx);
+        let pat_any = pt0::Pattern {
+            ppat_desc: pt0::PatternDesc::Any,
+            ppat_loc: loc.clone(),
+            ppat_attributes: vec![],
+        };
+        let iterable = self.map_expr_idx(iterable_idx);
+        let payload = pt0::Payload::PPat(Box::new(pat_any), Some(Box::new(iterable)));
+        (OldLocated::new(name.to_string(), loc), payload)
     }
 
     fn map_expression_desc(
@@ -993,6 +1030,30 @@ impl<'a> Mapper<'a> {
                     Box::new(self.map_expr_idx(*e2_idx)),
                     self.map_direction_flag(*flag),
                     Box::new(self.map_expr_idx(*e3_idx)),
+                )
+            }
+            // Upstream #7887: encode for-of / for-await-of as a regular `for`
+            // loop with dummy 0..0 bounds — the iterable is carried by the
+            // `_res.for_of` / `_res.for_await_of` attribute attached to the
+            // outer expression in `map_expression_with_owner`.
+            current::ExpressionDesc::Pexp_for_of(inner)
+            | current::ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (pat_idx, _iterable_idx, body_idx) = inner.as_ref();
+                let dummy_loc = self.loc(loc);
+                let dummy_int = || pt0::Expression {
+                    pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::Integer(
+                        "0".to_string(),
+                        None,
+                    )),
+                    pexp_loc: dummy_loc.clone(),
+                    pexp_attributes: vec![],
+                };
+                pt0::ExpressionDesc::For(
+                    Box::new(self.map_pat_idx(*pat_idx)),
+                    Box::new(dummy_int()),
+                    Box::new(dummy_int()),
+                    pt0::DirectionFlag::Upto,
+                    Box::new(self.map_expr_idx(*body_idx)),
                 )
             }
             current::ExpressionDesc::Pexp_constraint(inner) => {

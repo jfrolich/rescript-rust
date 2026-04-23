@@ -604,6 +604,22 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 Box::new(rewrite_bounded_vars(substitution, body, id_gen)),
             )
         }
+        Lambda::Lfor_of(id, iterable, body) => {
+            let id = rebind(id, substitution, id_gen);
+            Lambda::for_of(
+                id,
+                rewrite_bounded_vars(substitution, iterable, id_gen),
+                rewrite_bounded_vars(substitution, body, id_gen),
+            )
+        }
+        Lambda::Lfor_await_of(id, iterable, body) => {
+            let id = rebind(id, substitution, id_gen);
+            Lambda::for_await_of(
+                id,
+                rewrite_bounded_vars(substitution, iterable, id_gen),
+                rewrite_bounded_vars(substitution, body, id_gen),
+            )
+        }
         Lambda::Lbreak => Lambda::break_(),
         Lambda::Lcontinue => Lambda::continue_(),
         Lambda::Lassign(id, value) => Lambda::Lassign(
@@ -687,6 +703,10 @@ pub(crate) fn max_ident_stamp_in_lambda(lam: &Lambda) -> i32 {
             .stamp()
             .max(max_ident_stamp_in_lambda(start))
             .max(max_ident_stamp_in_lambda(end))
+            .max(max_ident_stamp_in_lambda(body)),
+        Lambda::Lfor_of(id, iterable, body) | Lambda::Lfor_await_of(id, iterable, body) => id
+            .stamp()
+            .max(max_ident_stamp_in_lambda(iterable))
             .max(max_ident_stamp_in_lambda(body)),
         Lambda::Lbreak | Lambda::Lcontinue => 0,
         Lambda::Lassign(id, value) => id.stamp().max(max_ident_stamp_in_lambda(value)),

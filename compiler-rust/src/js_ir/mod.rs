@@ -1339,6 +1339,15 @@ pub enum StatementDesc {
         Block,
     ),
 
+    /// `for (let ident of iterable) { body }` (upstream #7887).
+    /// The optional label is lazily attached when a nested switch needs to
+    /// emit a labeled `break`/`continue` targeting this loop.
+    ForOf(Option<String>, Ident, Expression, Block),
+
+    /// `for await (let ident of iterable) { body }` (upstream #7887).
+    /// Only emitted inside async functions.
+    ForAwaitOf(Option<String>, Ident, Expression, Block),
+
     /// Continue statement (optional target label)
     Continue(Option<String>),
 
@@ -1430,6 +1439,24 @@ impl Statement {
     /// Create a labeled while loop.
     pub fn while_with_label(label: Option<String>, cond: Expression, body: Block) -> Self {
         Self::new(StatementDesc::While(label, cond, body))
+    }
+
+    /// Create a `for (let id of iterable) { body }` statement.
+    /// Port of OCaml `S.for_of`. The optional label is lazily attached when
+    /// a nested switch requires a labeled break/continue target.
+    pub fn for_of(label: Option<String>, ident: Ident, iterable: Expression, body: Block) -> Self {
+        Self::new(StatementDesc::ForOf(label, ident, iterable, body))
+    }
+
+    /// Create a `for await (let id of iterable) { body }` statement.
+    /// Port of OCaml `S.for_await_of`.
+    pub fn for_await_of(
+        label: Option<String>,
+        ident: Ident,
+        iterable: Expression,
+        body: Block,
+    ) -> Self {
+        Self::new(StatementDesc::ForAwaitOf(label, ident, iterable, body))
     }
 
     /// Create a return statement
@@ -1993,6 +2020,11 @@ fn statement_contains_await(stmt: &Statement) -> bool {
             start.as_ref().is_some_and(expression_contains_await)
                 || expression_contains_await(finish)
                 || body.iter().any(statement_contains_await)
+        }
+        // `for await ... of` is itself an `await` site, so always returns true.
+        StatementDesc::ForAwaitOf(_, _, _, _) => true,
+        StatementDesc::ForOf(_, _, iterable, body) => {
+            expression_contains_await(iterable) || body.iter().any(statement_contains_await)
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {
             expression_contains_await(expr)

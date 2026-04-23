@@ -394,6 +394,10 @@ pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
             .max(max_ident_stamp_in_expression(finish))
             .max(ident.stamp())
             .max(max_ident_stamp_in_block(body)),
+        StatementDesc::ForOf(_, ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => max_ident_stamp_in_expression(iterable)
+            .max(ident.stamp())
+            .max(max_ident_stamp_in_block(body)),
         StatementDesc::IntSwitch(test, clauses, default) => {
             let mut max_stamp = max_ident_stamp_in_expression(test);
             for (_, clause) in clauses {

@@ -142,6 +142,48 @@ fn remove_arity_attribute(
         .collect()
 }
 
+// ========== for-of helpers (upstream #7887) ==========
+
+const FOR_OF_ATTR_NAME: &str = "_res.for_of";
+const FOR_AWAIT_OF_ATTR_NAME: &str = "_res.for_await_of";
+
+fn extract_for_of_iterable(attrs: &[pt0::Attribute]) -> Option<&pt0::Expression> {
+    extract_for_of_iterable_with_name(attrs, FOR_OF_ATTR_NAME)
+}
+
+fn extract_for_await_of_iterable(attrs: &[pt0::Attribute]) -> Option<&pt0::Expression> {
+    extract_for_of_iterable_with_name(attrs, FOR_AWAIT_OF_ATTR_NAME)
+}
+
+fn extract_for_of_iterable_with_name<'a>(
+    attrs: &'a [pt0::Attribute],
+    name: &str,
+) -> Option<&'a pt0::Expression> {
+    attrs.iter().find_map(|(attr_name, payload)| {
+        if attr_name.txt != name {
+            return None;
+        }
+        match payload {
+            pt0::Payload::PPat(_, Some(expr)) => Some(expr.as_ref()),
+            _ => None,
+        }
+    })
+}
+
+fn remove_for_of_attributes(attrs: &[pt0::Attribute]) -> Vec<pt0::Attribute> {
+    attrs
+        .iter()
+        .filter(|(name, _)| name.txt != FOR_OF_ATTR_NAME && name.txt != FOR_AWAIT_OF_ATTR_NAME)
+        .cloned()
+        .collect()
+}
+
+fn has_for_of_attribute(attrs: &[pt0::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|(name, _)| name.txt == FOR_OF_ATTR_NAME || name.txt == FOR_AWAIT_OF_ATTR_NAME)
+}
+
 // ========== JSX helpers ==========
 
 fn has_jsx_attribute(attrs: &[pt0::Attribute]) -> bool {
@@ -805,7 +847,16 @@ impl<'a> Mapper<'a> {
 
     fn map_expression(&mut self, expr: &pt0::Expression) -> current::Expression {
         let loc = self.loc(&expr.pexp_loc);
-        let attrs = self.map_attributes(&expr.pexp_attributes);
+        // Strip the `_res.for_of` / `_res.for_await_of` attributes — they
+        // exist purely as carrier of the iterable in the legacy parsetree0
+        // encoding (see `ast_mapper_from0.ml` after #7887). The for-of /
+        // for-await-of variant is reconstructed below via
+        // `extract_for_*_iterable` on the original (unfiltered) attrs.
+        let attrs = if has_for_of_attribute(&expr.pexp_attributes) {
+            self.map_attributes(&remove_for_of_attributes(&expr.pexp_attributes))
+        } else {
+            self.map_attributes(&expr.pexp_attributes)
+        };
 
         // Check for res.await attribute - convert to Pexp_await
         if has_await_attribute(&expr.pexp_attributes) {
@@ -1123,16 +1174,40 @@ impl<'a> Mapper<'a> {
                 current::ExpressionDesc::Pexp_while(e1_idx, e2_idx)
             }
             pt0::ExpressionDesc::For(pat, e1, e2, dir, e3) => {
-                let e1_idx = self.push_expr(e1);
-                let e2_idx = self.push_expr(e2);
-                let e3_idx = self.push_expr(e3);
-                current::ExpressionDesc::Pexp_for(Box::new((
-                    self.push_pat(pat),
-                    e1_idx,
-                    e2_idx,
-                    map_direction_flag(*dir),
-                    e3_idx,
-                )))
+                // Upstream #7887: a for-loop carrying `_res.for_of` /
+                // `_res.for_await_of` attributes is actually a `for ... of`
+                // / `for await ... of` loop in disguise — recover the proper
+                // variant. Mirrors `compiler/ml/ast_mapper_from0.ml`.
+                if let Some(iterable_expr) =
+                    extract_for_await_of_iterable(&expr.pexp_attributes)
+                {
+                    let pat_idx = self.push_pat(pat);
+                    let it_idx = self.push_expr(iterable_expr);
+                    let body_idx = self.push_expr(e3);
+                    current::ExpressionDesc::Pexp_for_await_of(Box::new((
+                        pat_idx, it_idx, body_idx,
+                    )))
+                } else if let Some(iterable_expr) =
+                    extract_for_of_iterable(&expr.pexp_attributes)
+                {
+                    let pat_idx = self.push_pat(pat);
+                    let it_idx = self.push_expr(iterable_expr);
+                    let body_idx = self.push_expr(e3);
+                    current::ExpressionDesc::Pexp_for_of(Box::new((
+                        pat_idx, it_idx, body_idx,
+                    )))
+                } else {
+                    let e1_idx = self.push_expr(e1);
+                    let e2_idx = self.push_expr(e2);
+                    let e3_idx = self.push_expr(e3);
+                    current::ExpressionDesc::Pexp_for(Box::new((
+                        self.push_pat(pat),
+                        e1_idx,
+                        e2_idx,
+                        map_direction_flag(*dir),
+                        e3_idx,
+                    )))
+                }
             }
             pt0::ExpressionDesc::Coerce(e, _, t) => {
                 let e_idx = self.push_expr(e);

@@ -4346,6 +4346,13 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(end);
                 self.expression_idx(body);
             }
+            ExpressionDesc::Pexp_for_of(inner)
+            | ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref mut pat, ref mut iterable, ref mut body) = **inner;
+                self.pattern_idx(pat);
+                self.expression_idx(iterable);
+                self.expression_idx(body);
+            }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref mut expr, ref mut typ) = **inner;
                 self.expression_idx(expr);

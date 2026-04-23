@@ -271,6 +271,19 @@ impl<'a> LambdaConverter<'a> {
                 };
                 Lambda::for_(var.clone(), start_lam, end_lam, dir, body_lam)
             }
+            // Upstream #7887: for-of / for-await-of typed-tree variants.
+            // Mirrors `compiler/ml/translcore.ml`: lower to the matching
+            // Lambda variant.
+            ExpressionDesc::Texp_for_of(var, _pat, iterable, body) => {
+                let iterable_lam = self.convert_expr(iterable);
+                let body_lam = self.convert_expr(body);
+                Lambda::for_of(var.clone(), iterable_lam, body_lam)
+            }
+            ExpressionDesc::Texp_for_await_of(var, _pat, iterable, body) => {
+                let iterable_lam = self.convert_expr(iterable);
+                let body_lam = self.convert_expr(body);
+                Lambda::for_await_of(var.clone(), iterable_lam, body_lam)
+            }
             ExpressionDesc::Texp_send(_, _, _) => Lambda::unit(),
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),

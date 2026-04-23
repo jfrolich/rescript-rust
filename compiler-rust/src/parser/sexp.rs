@@ -893,6 +893,24 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 expression(arena, arena.get_expr(*body)),
             ])
         }
+        ExpressionDesc::Pexp_for_of(inner) => {
+            let (ref pat, ref iterable, ref body) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_for_of"),
+                pattern(arena, arena.get_pat(*pat)),
+                expression(arena, arena.get_expr(*iterable)),
+                expression(arena, arena.get_expr(*body)),
+            ])
+        }
+        ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (ref pat, ref iterable, ref body) = **inner;
+            Sexp::list(vec![
+                Sexp::atom("Pexp_for_await_of"),
+                pattern(arena, arena.get_pat(*pat)),
+                expression(arena, arena.get_expr(*iterable)),
+                expression(arena, arena.get_expr(*body)),
+            ])
+        }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e, ref t) = **inner;
             Sexp::list(vec![

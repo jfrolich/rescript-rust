@@ -99,6 +99,8 @@ pub fn call_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_)
+        | ExpressionDesc::Pexp_for_of(_)
+        | ExpressionDesc::Pexp_for_await_of(_)
         | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_uncurried_fun(arena, expr) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
@@ -155,6 +157,8 @@ pub fn unary_expr_operand(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_)
+        | ExpressionDesc::Pexp_for_of(_)
+        | ExpressionDesc::Pexp_for_await_of(_)
         | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
@@ -431,6 +435,8 @@ fn assert_or_await_expr_rhs_inner(
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_)
+        | ExpressionDesc::Pexp_for_of(_)
+        | ExpressionDesc::Pexp_for_await_of(_)
         | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
         _ if !in_await && parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,
@@ -481,6 +487,8 @@ pub fn field_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
         | ExpressionDesc::Pexp_try(_)
         | ExpressionDesc::Pexp_while(_, _)
         | ExpressionDesc::Pexp_for(_)
+        | ExpressionDesc::Pexp_for_of(_)
+        | ExpressionDesc::Pexp_for_await_of(_)
         | ExpressionDesc::Pexp_ifthenelse(_) => ParenKind::Parenthesized,
         _ if parsetree_viewer::expr_is_await(expr) => ParenKind::Parenthesized,
         _ => ParenKind::Nothing,

@@ -466,6 +466,9 @@ pub enum TypeCoreError {
     /// Invalid for loop index.
     InvalidForLoopIndex,
 
+    /// Invalid for...of binding (only `_` or a variable allowed). Upstream #7887.
+    InvalidForOfPattern,
+
     /// No value clauses.
     NoValueClauses,
 
@@ -4921,6 +4924,49 @@ pub fn type_expect<'a>(
                 end_expr,
                 *direction,
                 body,
+                expected_ty,
+                context,
+                &expr.pexp_attributes,
+            )
+        }
+
+        // Upstream #7887: for-of / for-await-of typing.
+        // - `for x of e { body }`: `e` should unify with `iterable<'a>`. To
+        //   match OCaml's convenience fallback for raw arrays, also accept
+        //   `array<'a>` if iterable unification fails.
+        // - `for await x of e { body }`: `e` must unify with
+        //   `asyncIterable<'a>`. (No array fallback for the await form.)
+        ED::Pexp_for_of(inner) => {
+            let (ref pat_idx, ref iterable_idx, ref body_idx) = **inner;
+            let pat_ref = tctx.arena.get_pat(*pat_idx);
+            let iterable_expr = tctx.arena.get_expr(*iterable_idx);
+            let body = tctx.arena.get_expr(*body_idx);
+            type_for_of(
+                tctx,
+                env,
+                loc,
+                pat_ref,
+                iterable_expr,
+                body,
+                /*await=*/ false,
+                expected_ty,
+                context,
+                &expr.pexp_attributes,
+            )
+        }
+        ED::Pexp_for_await_of(inner) => {
+            let (ref pat_idx, ref iterable_idx, ref body_idx) = **inner;
+            let pat_ref = tctx.arena.get_pat(*pat_idx);
+            let iterable_expr = tctx.arena.get_expr(*iterable_idx);
+            let body = tctx.arena.get_expr(*body_idx);
+            type_for_of(
+                tctx,
+                env,
+                loc,
+                pat_ref,
+                iterable_expr,
+                body,
+                /*await=*/ true,
                 expected_ty,
                 context,
                 &expr.pexp_attributes,
@@ -10197,6 +10243,10 @@ fn collect_lident_idents_in_expression(
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.4), out);
         }
+        ED::Pexp_for_of(inner) | ED::Pexp_for_await_of(inner) => {
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+        }
         ED::Pexp_constraint(inner) => {
             collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
         }
@@ -11074,6 +11124,160 @@ fn type_for(
             Box::new(typed_body),
         ),
         loc.clone(),
+        result_unit_ty,
+        EnvRef(0),
+        attributes.to_vec().into(),
+    ))
+}
+
+/// Type check a `for ... of` / `for await ... of` loop. Mirrors
+/// `compiler/ml/typecore.ml` (#7887): types the iterable against
+/// `iterable<'a>` (or `array<'a>` as a fallback) for plain for-of, or
+/// `asyncIterable<'a>` for the await form. The loop var is bound to the
+/// element type in the body env. The whole expression has type `unit`.
+#[allow(clippy::too_many_arguments)]
+fn type_for_of(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    pat: &ParsedPattern,
+    iterable_expr: &ParsedExpression,
+    body: &ParsedExpression,
+    await_kw: bool,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    attributes: &[crate::parser::ast::Attribute],
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+
+    // OCaml only accepts `_` or a variable for the for-of binding.
+    if !matches!(
+        &*pat.ppat_desc,
+        crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
+    ) {
+        return Err(TypeCoreError::InvalidForOfPattern);
+    }
+
+    let ty_elem = ctx.new_var(None);
+
+    // Type-check the iterable. For `for await ... of`, expect
+    // `asyncIterable<ty_elem>` directly. For `for ... of`, type without an
+    // expected type and then unify with `iterable<ty_elem>`. If that fails,
+    // try the `array<ty_elem>` fallback (OCaml accepts raw arrays as a
+    // convenience).
+    let typed_iterable = if await_kw {
+        let async_iter_ty = env.type_async_iterable(ctx, ty_elem);
+        type_expect(tctx, env, iterable_expr, async_iter_ty, None)?
+    } else {
+        let typed = type_exp(tctx, env, iterable_expr, None)?;
+        let iterable_ty = env.type_iterable(ctx, ty_elem);
+        // Try iterable first.
+        match crate::types::ctype::unify(ctx, &mut tctx.unify_state, typed.exp_type, iterable_ty)
+        {
+            Ok(()) => typed,
+            Err(_) => {
+                // Fall back to array<'a> (matches OCaml's convenience path).
+                // We can't backtrack the failed unify perfectly, so peek at
+                // the head and decide based on its constructor — if it's
+                // `array`, use array; otherwise re-raise the iterable error.
+                let array_ty = env.type_array(ctx, ty_elem);
+                let head =
+                    crate::types::ctype::expand_head(ctx, env, typed.exp_type);
+                let is_array = match &*ctx.get_desc(head) {
+                    crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                        path.same(&crate::types::predef::path_array())
+                    }
+                    _ => false,
+                };
+                if is_array {
+                    crate::types::ctype::unify(
+                        ctx,
+                        &mut tctx.unify_state,
+                        typed.exp_type,
+                        array_ty,
+                    )
+                    .map_err(|e| TypeCoreError::Other(format!(
+                        "for-of array fallback unification failed: {:?}",
+                        e
+                    )))?;
+                    typed
+                } else {
+                    return Err(TypeCoreError::Other(format!(
+                        "for...of expects an iterable<'a>, got a non-iterable type"
+                    )));
+                }
+            }
+        }
+    };
+
+    // Bind the loop variable (if any) into the body environment.
+    let mut state = PatternState::new();
+    let _typed_pat =
+        type_pattern(tctx, env, pat, ty_elem, PatternMode::Normal, &mut state)?;
+    let loop_var_id = match &*pat.ppat_desc {
+        crate::parser::ast::PatternDesc::Ppat_any => {
+            if !state.pattern_variables.is_empty() {
+                return Err(TypeCoreError::InvalidForOfPattern);
+            }
+            if await_kw {
+                ctx.create_ident("_for_await_of")
+            } else {
+                ctx.create_ident("_for_of")
+            }
+        }
+        crate::parser::ast::PatternDesc::Ppat_var(_) => {
+            if state.pattern_variables.len() == 1 {
+                state.pattern_variables[0].id.clone()
+            } else {
+                return Err(TypeCoreError::InvalidForOfPattern);
+            }
+        }
+        _ => return Err(TypeCoreError::InvalidForOfPattern),
+    };
+
+    let mut body_env = if state.pattern_variables.is_empty() {
+        env.clone_preserve_id()
+    } else {
+        env.clone()
+    };
+    for pv in &state.pattern_variables {
+        let desc = ValueDescription {
+            val_type: pv.ty,
+            val_kind: crate::types::ValueKind::ValReg,
+            val_loc: tctx.arena.to_location(loc),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        body_env.add_value(pv.id.clone(), desc);
+    }
+
+    let typed_body = type_statement(tctx, &body_env, body)?;
+
+    // Result type is unit, matching OCaml `instance_def Predef.type_unit`.
+    let result_unit_ty = env.type_unit(ctx);
+    let inst_expected = instance_if_generic(ctx, expected_ty);
+    unify_expression_types(tctx, loc, inst_expected, result_unit_ty, context)?;
+
+    let pat_box = Box::new(pat.clone());
+    let desc = if await_kw {
+        ExpressionDesc::Texp_for_await_of(
+            loop_var_id,
+            pat_box,
+            Box::new(typed_iterable),
+            Box::new(typed_body),
+        )
+    } else {
+        ExpressionDesc::Texp_for_of(
+            loop_var_id,
+            pat_box,
+            Box::new(typed_iterable),
+            Box::new(typed_body),
+        )
+    };
+
+    Ok(Expression::new(
+        desc,
+        loc,
         result_unit_ty,
         EnvRef(0),
         attributes.to_vec().into(),
@@ -16087,6 +16291,16 @@ impl Env {
     /// Get the array type.
     pub fn type_array(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty])
+    }
+
+    /// Get the iterable type (upstream #7887).
+    pub fn type_iterable(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+        ctx.new_constr(crate::types::predef::path_iterable(), vec![elem_ty])
+    }
+
+    /// Get the asyncIterable type (upstream #7887).
+    pub fn type_async_iterable(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+        ctx.new_constr(crate::types::predef::path_async_iterable(), vec![elem_ty])
     }
 
     /// Get the option type.

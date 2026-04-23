@@ -132,6 +132,11 @@ fn count(exits: &mut Collection, lam: &Lambda) {
             count(exits, l2);
             count(exits, l3);
         }
+        // lam_exit_count.ml after #7887: Lfor_of / Lfor_await_of.
+        Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
+            count(exits, l1);
+            count(exits, l2);
+        }
         // lam_exit_count.ml:99
         Lambda::Lassign(_, l) => count(exits, l),
         // OCaml `Lam_exit_count.count_helper` after #8348:
@@ -208,6 +213,8 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
         }
         // lam_pass_exits.ml:55-58
         Lambda::Lfor(_, _, _, _, _) => false,
+        // lam_pass_exits.ml after #7887: for_of / for_await_of bind a variable, so false.
+        Lambda::Lfor_of(_, _, _) | Lambda::Lfor_await_of(_, _, _) => false,
         Lambda::LtryWith(_, _, _) => false,
         Lambda::Llet(_, _, _, _) => false,
         Lambda::Lletrec(decl, body) => decl.is_empty() && no_bounded_variables(body),
@@ -418,6 +425,17 @@ fn subst_helper(
             subst_helper(subst, counts, id_gen, l2),
             *dir,
             subst_helper(subst, counts, id_gen, l3),
+        ),
+        // lam_pass_exits.ml after #7887: Lfor_of / Lfor_await_of.
+        Lambda::Lfor_of(v, l1, l2) => Lambda::for_of(
+            v.clone(),
+            subst_helper(subst, counts, id_gen, l1),
+            subst_helper(subst, counts, id_gen, l2),
+        ),
+        Lambda::Lfor_await_of(v, l1, l2) => Lambda::for_await_of(
+            v.clone(),
+            subst_helper(subst, counts, id_gen, l1),
+            subst_helper(subst, counts, id_gen, l2),
         ),
         // lam_pass_exits.ml:237
         Lambda::Lassign(v, l) => Lambda::assign(v.clone(), subst_helper(subst, counts, id_gen, l)),

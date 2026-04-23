@@ -247,6 +247,8 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             // They are in expression2, which means they need parens when nested.
             // OCaml's simple_expr handles these directly (no paren wrapping)
             | ExpressionDesc::Pexp_for(_)
+            | ExpressionDesc::Pexp_for_of(_)
+            | ExpressionDesc::Pexp_for_await_of(_)
             | ExpressionDesc::Pexp_while(_, _)
             | ExpressionDesc::Pexp_jsx_element(_) // JSX elements are simple in OCaml
     )
@@ -2020,6 +2022,37 @@ fn print_expression_inner<W: Write>(
             f.string(dir_str);
             f.space();
             print_expression(f, arena, arena.get_expr(*end));
+            f.space();
+            f.string("do");
+            f.close_box();
+            f.space();
+            print_expression(f, arena, arena.get_expr(*body));
+            f.close_box();
+            f.space();
+            f.string("done");
+            f.close_box();
+            if use_parens {
+                f.string(")");
+            }
+        }
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (ref pat, ref iterable, ref body) = **inner;
+            let is_await = matches!(&*expr.pexp_desc, ExpressionDesc::Pexp_for_await_of(_));
+            if use_parens {
+                f.string("(");
+            }
+            f.open_box(BoxKind::HV, 0);
+            f.open_box(BoxKind::HV, 2);
+            f.open_box(BoxKind::Box, 2);
+            if is_await {
+                f.string("for await ");
+            } else {
+                f.string("for ");
+            }
+            print_pattern(f, arena, arena.get_pat(*pat));
+            f.string(" of");
+            f.space();
+            print_expression(f, arena, arena.get_expr(*iterable));
             f.space();
             f.string("do");
             f.close_box();

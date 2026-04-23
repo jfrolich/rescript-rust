@@ -274,6 +274,24 @@ pub enum ExpressionDesc {
         Box<Expression>,
     ),
 
+    /// For-of loop: `for pat of iterable { body }` (upstream #7887).
+    /// The pattern stored is the original parser pattern (as in OCaml's
+    /// `Texp_for_of of Ident.t * Parsetree.pattern * expression * expression`).
+    Texp_for_of(
+        Ident,
+        Box<crate::parser::ast::Pattern>,
+        Box<Expression>,
+        Box<Expression>,
+    ),
+
+    /// For-await-of loop: `for await pat of asyncIterable { body }` (upstream #7887).
+    Texp_for_await_of(
+        Ident,
+        Box<crate::parser::ast::Pattern>,
+        Box<Expression>,
+        Box<Expression>,
+    ),
+
     /// Send: `E#m` (object method call).
     Texp_send(Box<Expression>, MethKind, Option<Box<Expression>>),
 

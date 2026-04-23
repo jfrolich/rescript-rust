@@ -531,6 +531,38 @@ impl JsPrinter {
                 self.print_brace_block(body);
             }
 
+            StatementDesc::ForOf(label, id, iterable, body) => {
+                if let Some(label) = label {
+                    self.write(label);
+                    self.write(": ");
+                }
+                self.write("for ");
+                self.write_char('(');
+                self.write("let ");
+                let id_name = self.ident_name(id);
+                self.write(&id_name);
+                self.write(" of ");
+                self.print_expression(iterable, 0);
+                self.write(") ");
+                self.print_brace_block(body);
+            }
+
+            StatementDesc::ForAwaitOf(label, id, iterable, body) => {
+                if let Some(label) = label {
+                    self.write(label);
+                    self.write(": ");
+                }
+                self.write("for await ");
+                self.write_char('(');
+                self.write("let ");
+                let id_name = self.ident_name(id);
+                self.write(&id_name);
+                self.write(" of ");
+                self.print_expression(iterable, 0);
+                self.write(") ");
+                self.print_brace_block(body);
+            }
+
             StatementDesc::Continue(label) => {
                 self.write("continue");
                 if let Some(label) = label {
@@ -3587,6 +3619,12 @@ fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
                 || expression_mentions_ident(finish, ident)
                 || block_mentions_ident(body, ident)
         }
+        StatementDesc::ForOf(_, loop_ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
+            loop_ident.same(ident)
+                || expression_mentions_ident(iterable, ident)
+                || block_mentions_ident(body, ident)
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             expression_mentions_ident(test, ident)
                 || clauses
@@ -4341,6 +4379,14 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
                 collect_expression_idents(start, stats);
             }
             collect_expression_idents(finish, stats);
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                std::iter::once(loop_ident.clone()),
+            ));
+        }
+        StatementDesc::ForOf(_, loop_ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
+            collect_expression_idents(iterable, stats);
             stats.extend_free_idents(free_variables_of_block_with_defined(
                 body,
                 std::iter::once(loop_ident.clone()),

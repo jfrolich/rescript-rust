@@ -93,6 +93,9 @@ pub fn deep_flatten(lam: &Lambda) -> Lambda {
                     || hit_variable(target, end)
                     || hit_variable(target, body)
             }
+            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+                hit_variable(target, iterable) || hit_variable(target, body)
+            }
             Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(id, value) => id.same(target) || hit_variable(target, value),
         }
@@ -326,6 +329,12 @@ pub fn deep_flatten(lam: &Lambda) -> Lambda {
                 *direction,
                 Box::new(aux(body)),
             ),
+            Lambda::Lfor_of(id, iterable, body) => {
+                Lambda::for_of(id.clone(), aux(iterable), aux(body))
+            }
+            Lambda::Lfor_await_of(id, iterable, body) => {
+                Lambda::for_await_of(id.clone(), aux(iterable), aux(body))
+            }
             Lambda::Lbreak => Lambda::break_(),
             Lambda::Lcontinue => Lambda::continue_(),
             Lambda::Lassign(id, value) => Lambda::Lassign(id.clone(), Box::new(aux(value))),

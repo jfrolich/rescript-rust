@@ -99,6 +99,18 @@ fn rewrite_statement(stmt: &Statement, shadowed_globals: &HashSet<String>) -> St
                 rewrite_block(body, shadowed_globals),
             )
         }
+        StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
+            label.clone(),
+            id.clone(),
+            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            rewrite_block(body, shadowed_globals),
+        ),
+        StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
+            label.clone(),
+            id.clone(),
+            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            rewrite_block(body, shadowed_globals),
+        ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label.clone()),
         StatementDesc::Break(label) => StatementDesc::Break(label.clone()),
         StatementDesc::Return(expr) => {

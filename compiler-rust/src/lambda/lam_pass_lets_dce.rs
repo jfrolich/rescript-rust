@@ -435,6 +435,18 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             Lambda::Lfor(v.clone(), Box::new(s1), Box::new(s2), *dir, Box::new(s3))
         }
 
+        // Lfor_of / Lfor_await_of (lam_pass_lets_dce.ml after #7887).
+        Lambda::Lfor_of(v, l1, l2) => {
+            let s1 = lets_helper(state, l1);
+            let s2 = lets_helper(state, l2);
+            Lambda::for_of(v.clone(), s1, s2)
+        }
+        Lambda::Lfor_await_of(v, l1, l2) => {
+            let s1 = lets_helper(state, l1);
+            let s2 = lets_helper(state, l2);
+            Lambda::for_await_of(v.clone(), s1, s2)
+        }
+
         // Lassign (lam_pass_lets_dce.ml:203).
         Lambda::Lassign(v, l) => {
             let s = lets_helper(state, l);

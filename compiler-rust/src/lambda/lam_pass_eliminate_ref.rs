@@ -245,6 +245,18 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
             ))
         }
 
+        // Lfor_of / Lfor_await_of (lam_pass_eliminate_ref.ml after #7887).
+        Lambda::Lfor_of(v, e1, e2) => {
+            let new_e1 = eliminate_ref(id, e1)?;
+            let new_e2 = eliminate_ref(id, e2)?;
+            Ok(Lambda::for_of(v.clone(), new_e1, new_e2))
+        }
+        Lambda::Lfor_await_of(v, e1, e2) => {
+            let new_e1 = eliminate_ref(id, e1)?;
+            let new_e2 = eliminate_ref(id, e2)?;
+            Ok(Lambda::for_await_of(v.clone(), new_e1, new_e2))
+        }
+
         // Lassign (lam_pass_eliminate_ref.ml:102).
         Lambda::Lassign(v, e) => {
             let new_e = eliminate_ref(id, e)?;

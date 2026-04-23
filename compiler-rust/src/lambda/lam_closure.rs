@@ -251,6 +251,12 @@ pub fn free_variables_with_stats(
                 iter(e3, Position::Sink, fv, local_set);
             }
 
+            Lambda::Lfor_of(v, e1, e2) | Lambda::Lfor_await_of(v, e1, e2) => {
+                local_set.insert(v.clone());
+                iter(e1, Position::Sink, fv, local_set);
+                iter(e2, Position::Sink, fv, local_set);
+            }
+
             Lambda::Lbreak | Lambda::Lcontinue => {}
 
             Lambda::Lassign(id, e) => {

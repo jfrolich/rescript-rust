@@ -137,6 +137,14 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
                 count(occ, &empty, l3);
             }
 
+            // Lfor_of / Lfor_await_of (lam_pass_count.ml after #7887):
+            // iterable counted with `bv`, body counted with empty local scope.
+            Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
+                count(occ, bv, l1);
+                let empty = LocalTbl::new();
+                count(occ, &empty, l2);
+            }
+
             // Lwhile (lam_pass_count.ml:122-124): both arms counted with empty
             // local scope.
             Lambda::Lwhile(l1, l2) => {

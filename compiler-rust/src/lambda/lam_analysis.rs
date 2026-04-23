@@ -91,6 +91,9 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
         // For loops are not pure
         Lambda::Lfor(_, _, _, _, _) => false,
 
+        // for-of / for-await-of run the iterator protocol; not pure.
+        Lambda::Lfor_of(_, _, _) | Lambda::Lfor_await_of(_, _, _) => false,
+
         // break/continue divert control flow — not pure (matches OCaml
         // `Lam_analysis.no_side_effects` after #8348).
         Lambda::Lbreak | Lambda::Lcontinue => false,
@@ -361,6 +364,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
         Lambda::LtryWith(_, _, _) => None,
         Lambda::Lwhile(_, _) => None,
         Lambda::Lfor(_, _, _, _, _) => None,
+        Lambda::Lfor_of(_, _, _) | Lambda::Lfor_await_of(_, _, _) => None,
 
         // OCaml `Lam_analysis.size`: `Lbreak | Lcontinue -> 1`.
         Lambda::Lbreak | Lambda::Lcontinue => Some(1),

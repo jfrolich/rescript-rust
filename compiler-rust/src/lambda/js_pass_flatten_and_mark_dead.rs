@@ -280,6 +280,15 @@ fn rebind_materialized_local_module_field_aliases_in_statement(
                 dynamic_import_bindings,
             );
         }
+        StatementDesc::ForOf(_, _, _, body) | StatementDesc::ForAwaitOf(_, _, _, body) => {
+            let mut counts = HashMap::new();
+            collect_transparent_block_var_name_counts(body, &mut counts);
+            *body = rebind_materialized_local_module_field_aliases_with_counts(
+                std::mem::take(body),
+                &counts,
+                dynamic_import_bindings,
+            );
+        }
         StatementDesc::IntSwitch(_, clauses, default) => {
             for (_, clause) in clauses {
                 let mut counts = HashMap::new();
@@ -460,6 +469,14 @@ fn rename_ident_in_statement(stmt: &mut Statement, from: &Ident, to: &Ident) {
             }
             rename_ident_in_statements(body, from, to);
         }
+        StatementDesc::ForOf(_, ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
+            rename_ident_in_expression(iterable, from, to);
+            if ident.same(from) {
+                *ident = to.clone();
+            }
+            rename_ident_in_statements(body, from, to);
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             rename_ident_in_expression(test, from, to);
             for (_, clause) in clauses {
@@ -619,6 +636,12 @@ fn statement_mentions_ident(stmt: &Statement, target: &Ident) -> bool {
                     .as_ref()
                     .is_some_and(|start| expression_mentions_ident(start, target))
                 || expression_mentions_ident(finish, target)
+                || statements_mention_ident(body, target)
+        }
+        StatementDesc::ForOf(_, loop_ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
+            loop_ident.same(target)
+                || expression_mentions_ident(iterable, target)
                 || statements_mention_ident(body, target)
         }
         StatementDesc::IntSwitch(test, clauses, default) => {
@@ -936,6 +959,24 @@ fn flatten_and_mark_dead_statement(
                 flatten_and_mark_dead_expression(finish, id_gen, substitution, jsx_preserve),
                 ident,
                 direction,
+                flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
+            ),
+            comment,
+        },
+        StatementDesc::ForOf(label, ident, iterable, body) => Statement {
+            desc: StatementDesc::ForOf(
+                label,
+                ident,
+                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
+            ),
+            comment,
+        },
+        StatementDesc::ForAwaitOf(label, ident, iterable, body) => Statement {
+            desc: StatementDesc::ForAwaitOf(
+                label,
+                ident,
+                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -1561,6 +1602,11 @@ fn collect_mark_dead_states_statement(
             collect_mark_dead_states_expression(finish, states);
             collect_mark_dead_states_block(body, export_set, states);
         }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            collect_mark_dead_states_expression(iterable, states);
+            collect_mark_dead_states_block(body, export_set, states);
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             collect_mark_dead_states_expression(test, states);
             for (_, clause) in clauses {
@@ -1767,6 +1813,9 @@ fn apply_mark_dead_states_statement(stmt: &mut Statement, states: &HashMap<Ident
         }
         StatementDesc::While(_, _, body) => apply_mark_dead_states_block(body, states),
         StatementDesc::ForRange(_, _, _, _, _, body) => apply_mark_dead_states_block(body, states),
+        StatementDesc::ForOf(_, _, _, body) | StatementDesc::ForAwaitOf(_, _, _, body) => {
+            apply_mark_dead_states_block(body, states)
+        }
         StatementDesc::IntSwitch(_, clauses, default) => {
             for (_, clause) in clauses {
                 apply_mark_dead_states_block(&mut clause.body, states);
@@ -2086,6 +2135,14 @@ fn flatten_statement(stmt: Statement) -> Statement {
                 direction,
                 flatten_block(body),
             ),
+            comment,
+        },
+        StatementDesc::ForOf(label, ident, iterable, body) => Statement {
+            desc: StatementDesc::ForOf(label, ident, flatten_expression(iterable), flatten_block(body)),
+            comment,
+        },
+        StatementDesc::ForAwaitOf(label, ident, iterable, body) => Statement {
+            desc: StatementDesc::ForAwaitOf(label, ident, flatten_expression(iterable), flatten_block(body)),
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {

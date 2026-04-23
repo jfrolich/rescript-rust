@@ -1932,6 +1932,35 @@ fn walk_expression(
                 t.attach_trailing(body.pexp_loc, trailing, arena);
             }
         }
+        ExpressionDesc::Pexp_for_of(for_inner) | ExpressionDesc::Pexp_for_await_of(for_inner) => {
+            let (ref pat_idx, ref iterable_idx, ref body_idx) = **for_inner;
+            // Safety: arena is append-only, expressions/patterns won't be invalidated
+            let iterable = arena.get_expr(*iterable_idx).clone();
+            let body = arena.get_expr(*body_idx).clone();
+            let pat = arena.get_pat(*pat_idx).clone();
+
+            let (leading, inside, trailing) = partition_by_loc(comments, pat.ppat_loc, arena);
+            t.attach_leading(pat.ppat_loc, leading, arena);
+            walk_pattern(&pat, t, inside, arena);
+            let (after_pat, rest) = partition_adjacent_trailing(pat.ppat_loc, trailing, arena);
+            t.attach_trailing(pat.ppat_loc, after_pat, arena);
+
+            let (leading, inside, trailing) = partition_by_loc(rest, iterable.pexp_loc, arena);
+            t.attach_leading(iterable.pexp_loc, leading, arena);
+            walk_expression(&iterable, t, inside, arena);
+            let (after_expr, rest) =
+                partition_adjacent_trailing(iterable.pexp_loc, trailing, arena);
+            t.attach_trailing(iterable.pexp_loc, after_expr, arena);
+
+            if is_block_expr(arena, &body) {
+                walk_expression(&body, t, rest, arena);
+            } else {
+                let (leading, inside, trailing) = partition_by_loc(rest, body.pexp_loc, arena);
+                t.attach_leading(body.pexp_loc, leading, arena);
+                walk_expression(&body, t, inside, arena);
+                t.attach_trailing(body.pexp_loc, trailing, arena);
+            }
+        }
         ExpressionDesc::Pexp_for(for_inner) => {
             let (ref pat_idx, ref from_idx, ref to_idx, _, ref body_idx) = **for_inner;
             // Safety: arena is append-only, expressions/patterns won't be invalidated

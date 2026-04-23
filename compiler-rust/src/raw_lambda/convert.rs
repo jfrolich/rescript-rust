@@ -185,6 +185,12 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
                 collect(body, fv);
                 fv.remove(var);
             }
+            RawLambda::Lfor_of(var, iterable, body)
+            | RawLambda::Lfor_await_of(var, iterable, body) => {
+                collect(iterable, fv);
+                collect(body, fv);
+                fv.remove(var);
+            }
             RawLambda::Lassign(id, expr) => {
                 collect(expr, fv);
                 fv.insert(id.clone());
@@ -314,6 +320,16 @@ fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLa
             Box::new(raw_subst_lambda(subst, lo)),
             Box::new(raw_subst_lambda(subst, hi)),
             *dir,
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lfor_of(var, iterable, body) => RawLambda::Lfor_of(
+            var.clone(),
+            Box::new(raw_subst_lambda(subst, iterable)),
+            Box::new(raw_subst_lambda(subst, body)),
+        ),
+        RawLambda::Lfor_await_of(var, iterable, body) => RawLambda::Lfor_await_of(
+            var.clone(),
+            Box::new(raw_subst_lambda(subst, iterable)),
             Box::new(raw_subst_lambda(subst, body)),
         ),
         RawLambda::Lassign(id, expr) => {
@@ -958,6 +974,13 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
             }
+            RawLambda::Lfor_of(_, iterable, body)
+            | RawLambda::Lfor_await_of(_, iterable, body) => {
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
+                    iterable, false,
+                );
+                self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
+            }
             RawLambda::Lassign(_, value) => {
                 self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(value, false);
             }
@@ -1484,7 +1507,9 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Lfunction(_)
             | RawLambda::Lletrec(_, _)
             | RawLambda::Lwhile(_, _)
-            | RawLambda::Lfor(_, _, _, _, _) => None,
+            | RawLambda::Lfor(_, _, _, _, _)
+            | RawLambda::Lfor_of(_, _, _)
+            | RawLambda::Lfor_await_of(_, _, _) => None,
             RawLambda::Lswitch(scrut, sw, loc) => {
                 let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
                 let mut consts = Vec::new();
@@ -5178,6 +5203,19 @@ impl<'a> RawLambdaConverter<'a> {
                     Box::new(self.convert_expr_raw(body)),
                 )
             }
+            // Upstream #7887: typed for-of / for-await-of -> raw lambda.
+            ExpressionDesc::Texp_for_of(var, _pat, iterable, body) => RawLambda::Lfor_of(
+                var.clone(),
+                Box::new(self.convert_expr_raw(iterable)),
+                Box::new(self.convert_expr_raw(body)),
+            ),
+            ExpressionDesc::Texp_for_await_of(var, _pat, iterable, body) => {
+                RawLambda::Lfor_await_of(
+                    var.clone(),
+                    Box::new(self.convert_expr_raw(iterable)),
+                    Box::new(self.convert_expr_raw(body)),
+                )
+            }
             ExpressionDesc::Texp_send(obj_expr, MethKind::Tmeth_name(name), _) => RawLambda::Lsend(
                 name.clone(),
                 Box::new(self.convert_expr_raw(obj_expr)),
@@ -5358,6 +5396,16 @@ impl<'a> RawLambdaConverter<'a> {
                 };
                 Lambda::for_(var.clone(), start_lam, end_lam, dir, body_lam)
             }
+            ExpressionDesc::Texp_for_of(var, _pat, iterable, body) => {
+                let iterable_lam = self.convert_expr(iterable);
+                let body_lam = self.convert_expr(body);
+                Lambda::for_of(var.clone(), iterable_lam, body_lam)
+            }
+            ExpressionDesc::Texp_for_await_of(var, _pat, iterable, body) => {
+                let iterable_lam = self.convert_expr(iterable);
+                let body_lam = self.convert_expr(body);
+                Lambda::for_await_of(var.clone(), iterable_lam, body_lam)
+            }
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {
@@ -5394,6 +5442,8 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_continue => "Texp_continue",
             ExpressionDesc::Texp_while(_, _) => "Texp_while",
             ExpressionDesc::Texp_for(_, _, _, _, _, _) => "Texp_for",
+            ExpressionDesc::Texp_for_of(_, _, _, _) => "Texp_for_of",
+            ExpressionDesc::Texp_for_await_of(_, _, _, _) => "Texp_for_await_of",
             ExpressionDesc::Texp_send(_, _, _) => "Texp_send",
             ExpressionDesc::Texp_letmodule(_, _, _, _) => "Texp_letmodule",
             ExpressionDesc::Texp_letexception(_, _) => "Texp_letexception",

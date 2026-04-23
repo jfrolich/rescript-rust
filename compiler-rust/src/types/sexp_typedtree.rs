@@ -1271,6 +1271,18 @@ fn sexp_expression_desc(
             sexp_direction_flag(flag),
             sexp_expression(arena, ctx, with_locs, dedup, e3),
         ]),
+        ExpressionDesc::Texp_for_of(id, _, iterable, body) => Sexp::list(vec![
+            Sexp::atom("Texp_for_of"),
+            sexp_ident(id),
+            sexp_expression(arena, ctx, with_locs, dedup, iterable),
+            sexp_expression(arena, ctx, with_locs, dedup, body),
+        ]),
+        ExpressionDesc::Texp_for_await_of(id, _, iterable, body) => Sexp::list(vec![
+            Sexp::atom("Texp_for_await_of"),
+            sexp_ident(id),
+            sexp_expression(arena, ctx, with_locs, dedup, iterable),
+            sexp_expression(arena, ctx, with_locs, dedup, body),
+        ]),
         ExpressionDesc::Texp_send(e, meth, opt_arg) => {
             use crate::types::typedtree::MethKind;
             let e_sexp = sexp_expression(arena, ctx, with_locs, dedup, e);

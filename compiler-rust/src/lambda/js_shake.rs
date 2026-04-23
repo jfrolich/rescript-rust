@@ -541,6 +541,16 @@ fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, targe
                 )
                 && tail_move_uses_are_safe_to_inline(body, target)
         }
+        StatementDesc::ForOf(_, loop_ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
+            !loop_ident.same(target)
+                && expression_uses_ident_only_in_tail_move_safe_positions(
+                    iterable,
+                    target,
+                    TailMoveUseContext::Other,
+                )
+                && tail_move_uses_are_safe_to_inline(body, target)
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 test,
@@ -960,6 +970,15 @@ fn substitute_export_alias_use_in_statement(
                 }
             }
         }
+        StatementDesc::ForOf(_, ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
+            if !ident.same(target) {
+                substitute_export_alias_use_in_expression(iterable, target, replacement);
+                for stmt in body {
+                    substitute_export_alias_use_in_statement(stmt, target, replacement);
+                }
+            }
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             substitute_export_alias_use_in_expression(test, target, replacement);
             for (_, clause) in clauses {
@@ -1134,6 +1153,14 @@ pub(crate) fn statement_mentions_ident_anywhere(stmt: &Statement, target: &Ident
                     .as_ref()
                     .is_some_and(|start| expression_mentions_ident_anywhere(start, target))
                     || expression_mentions_ident_anywhere(finish, target)
+                    || body
+                        .iter()
+                        .any(|stmt| statement_mentions_ident_anywhere(stmt, target)))
+        }
+        StatementDesc::ForOf(_, ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
+            !ident.same(target)
+                && (expression_mentions_ident_anywhere(iterable, target)
                     || body
                         .iter()
                         .any(|stmt| statement_mentions_ident_anywhere(stmt, target)))
@@ -1463,6 +1490,14 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
                 std::iter::once(loop_ident.clone()),
             ));
         }
+        StatementDesc::ForOf(_, loop_ident, iterable, body)
+        | StatementDesc::ForAwaitOf(_, loop_ident, iterable, body) => {
+            collect_expression_idents(iterable, stats);
+            stats.extend_free_idents(free_variables_of_block_with_defined(
+                body,
+                std::iter::once(loop_ident.clone()),
+            ));
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             collect_expression_idents(test, stats);
             for (_, clause) in clauses {
@@ -1609,6 +1644,10 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
                 && js_expr_no_side_effects(finish)
                 && js_block_no_side_effects(body)
         }
+        // OCaml `js_analyzer.ml` `no_side_effect_obj`: `ForOf` / `ForAwaitOf`
+        // raise Not_found, i.e. always considered side-effecting (the iterator
+        // protocol can run arbitrary user code).
+        StatementDesc::ForOf(_, _, _, _) | StatementDesc::ForAwaitOf(_, _, _, _) => false,
         StatementDesc::IntSwitch(test, clauses, default) => {
             js_expr_no_side_effects(test)
                 && clauses

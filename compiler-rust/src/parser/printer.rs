@@ -1717,6 +1717,36 @@ pub fn print_expression(
                 true, // force_break
             )
         }
+        // For-of loop (upstream #7887)
+        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (ref pat, ref iterable_idx, ref body_idx) = **inner;
+            let iterable = arena.get_expr(*iterable_idx);
+            let body = arena.get_expr(*body_idx);
+            let iterable_doc = {
+                let doc = print_expression_with_comments(state, iterable, cmt_tbl, arena);
+                match parens::expr(arena, iterable) {
+                    ParenKind::Parenthesized => add_parens(doc),
+                    ParenKind::Braced(loc) => print_braces(doc, iterable, loc, arena),
+                    ParenKind::Nothing => doc,
+                }
+            };
+            let lead = if matches!(&*e.pexp_desc, ExpressionDesc::Pexp_for_await_of(_)) {
+                "for await "
+            } else {
+                "for "
+            };
+            Doc::breakable_group(
+                Doc::concat(vec![
+                    Doc::text(lead),
+                    print_pattern(state, arena.get_pat(*pat), cmt_tbl, arena),
+                    Doc::text(" of "),
+                    iterable_doc,
+                    Doc::space(),
+                    print_expression_block(state, true, body, cmt_tbl, arena),
+                ]),
+                true,
+            )
+        }
         // For loop
         ExpressionDesc::Pexp_for(inner) => {
             let (ref pat, ref start_idx, ref finish_idx, ref direction, ref body_idx) = **inner;

@@ -40,6 +40,7 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Llet(_, _, arg, body) => hit(fv, arg) || hit(fv, body),
             Lambda::Lletrec(decl, body) => hit(fv, body) || hit_list_snd(fv, decl),
             Lambda::Lfor(_, e1, e2, _, e3) => hit(fv, e1) || hit(fv, e2) || hit(fv, e3),
+            Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => hit(fv, e1) || hit(fv, e2),
             Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => hit(fv, &apply.ap_func) || hit_list(fv, &apply.ap_args),
             // Global persistent module — play safe (lam_hit.ml:48).

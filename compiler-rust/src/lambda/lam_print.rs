@@ -497,6 +497,22 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt
             write!(f, ")")
         }
 
+        Lambda::Lfor_of(v, iterable, body) => {
+            write!(f, "(for {} of ", v.name())?;
+            format_lambda(iterable, f, indent)?;
+            write!(f, " ")?;
+            format_lambda(body, f, indent + 1)?;
+            write!(f, ")")
+        }
+
+        Lambda::Lfor_await_of(v, iterable, body) => {
+            write!(f, "(for await {} of ", v.name())?;
+            format_lambda(iterable, f, indent)?;
+            write!(f, " ")?;
+            format_lambda(body, f, indent + 1)?;
+            write!(f, ")")
+        }
+
         Lambda::Lbreak => write!(f, "break"),
         Lambda::Lcontinue => write!(f, "continue"),
 
@@ -894,6 +910,24 @@ fn format_raw_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>, indent: usize) ->
             format_raw_lambda(lo, f, indent)?;
             write!(f, " {dir_str} ")?;
             format_raw_lambda(hi, f, indent)?;
+            write!(f, " ")?;
+            format_raw_lambda(body, f, indent + 1)?;
+            write!(f, ")")
+        }
+        Lambda::Lfor_of(v, iterable, body) => {
+            write!(f, "(for ")?;
+            format_raw_ident(v, f)?;
+            write!(f, " of ")?;
+            format_raw_lambda(iterable, f, indent)?;
+            write!(f, " ")?;
+            format_raw_lambda(body, f, indent + 1)?;
+            write!(f, ")")
+        }
+        Lambda::Lfor_await_of(v, iterable, body) => {
+            write!(f, "(for await ")?;
+            format_raw_ident(v, f)?;
+            write!(f, " of ")?;
+            format_raw_lambda(iterable, f, indent)?;
             write!(f, " ")?;
             format_raw_lambda(body, f, indent + 1)?;
             write!(f, ")")

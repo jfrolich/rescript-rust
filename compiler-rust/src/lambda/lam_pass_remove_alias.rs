@@ -586,6 +586,14 @@ impl<'a> Simplifier<'a> {
                 self.simpl(l3),
             ),
 
+            // lam_pass_remove_alias.ml after #7887: Lfor_of / Lfor_await_of.
+            Lambda::Lfor_of(var, l1, l2) => {
+                Lambda::for_of(var.clone(), self.simpl(l1), self.simpl(l2))
+            }
+            Lambda::Lfor_await_of(var, l1, l2) => {
+                Lambda::for_await_of(var.clone(), self.simpl(l1), self.simpl(l2))
+            }
+
             // OCaml `Lam_pass_remove_alias.simplify_alias` after #8348:
             // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
             Lambda::Lbreak => Lambda::break_(),

@@ -699,7 +699,36 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Llet(kind, id, value, body) => {
-                let mut prelude = self.compile_let_binding(*kind, id, value);
+                // Mirror OCaml's per-Single counter reset
+                // (`lam_compile_main.ml`): each top-level binding compiles
+                // its RHS with `loop_label_counter = ref 0`. Inner Llets
+                // inside an expression keep the surrounding counter (so
+                // the OCaml flow naturally inherits across function bodies
+                // within one Single group). Detect "top-level" by checking
+                // whether the body is itself an Llet/Lletrec/Lsequence —
+                // anything else means we're already inside an inner
+                // expression context.
+                let is_top_level_let = matches!(
+                    body.as_ref(),
+                    Lambda::Llet(..)
+                        | Lambda::Lletrec(..)
+                        | Lambda::Lsequence(..)
+                        | Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(
+                                _,
+                                TagInfo::ModuleExport(_),
+                                _,
+                            ),
+                            ..
+                        })
+                );
+                let mut prelude = if is_top_level_let {
+                    self.with_fresh_loop_label_counter(|this| {
+                        this.compile_let_binding(*kind, id, value)
+                    })
+                } else {
+                    self.compile_let_binding(*kind, id, value)
+                };
                 let body_compiled = self.compile_expr(body);
                 if block_terminates(&prelude) {
                     return Compiled {
@@ -714,7 +743,29 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lletrec(bindings, body) => {
-                let mut prelude = self.compile_recursive_bindings(bindings);
+                // Same as Llet: per-Recursive group, OCaml resets
+                // `loop_label_counter` (`lam_compile_main.ml:77`).
+                let is_top_level = matches!(
+                    body.as_ref(),
+                    Lambda::Llet(..)
+                        | Lambda::Lletrec(..)
+                        | Lambda::Lsequence(..)
+                        | Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(
+                                _,
+                                TagInfo::ModuleExport(_),
+                                _,
+                            ),
+                            ..
+                        })
+                );
+                let mut prelude = if is_top_level {
+                    self.with_fresh_loop_label_counter(|this| {
+                        this.compile_recursive_bindings(bindings)
+                    })
+                } else {
+                    self.compile_recursive_bindings(bindings)
+                };
                 let body_compiled = self.compile_expr(body);
                 prelude.extend(body_compiled.prelude);
                 Compiled {
@@ -834,7 +885,30 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Lsequence(a, b) => {
-                let first = self.compile_effect_output(a);
+                // Mirror OCaml's per-Nop counter reset: a top-level
+                // sequence (its tail is itself a top-level construct)
+                // compiles its head with a fresh `loop_label_counter`,
+                // matching `Lam_compile_main.compile_lambda` for `Nop`
+                // groups (`lam_compile_main.ml:86`).
+                let head_is_top_level = matches!(
+                    b.as_ref(),
+                    Lambda::Llet(..)
+                        | Lambda::Lletrec(..)
+                        | Lambda::Lsequence(..)
+                        | Lambda::Lprim(crate::lambda::PrimInfo {
+                            primitive: Primitive::Pmakeblock(
+                                _,
+                                TagInfo::ModuleExport(_),
+                                _,
+                            ),
+                            ..
+                        })
+                );
+                let first = if head_is_top_level {
+                    self.with_fresh_loop_label_counter(|this| this.compile_effect_output(a))
+                } else {
+                    self.compile_effect_output(a)
+                };
                 let second = self.compile_expr(b);
                 self.append_effect_output(first, second)
             }
@@ -857,6 +931,17 @@ impl LambdaCompiler {
             }
             Lambda::Lfor(var, start, end, dir, body) => {
                 self.compile_for_loop(var, start, end, dir, body)
+            }
+            // Upstream #7887: `for ... of` / `for await ... of` lower to a
+            // dedicated JS for-of statement. The body is compiled with a
+            // fresh loop frame pushed (so nested break/continue resolve to
+            // this loop) and `switch_depth = 0` reset to match OCaml's
+            // `compile_for_of` (`compiler/core/lam_compile.ml`).
+            Lambda::Lfor_of(var, iterable, body) => {
+                self.compile_for_of(var, iterable, body, /*await=*/ false)
+            }
+            Lambda::Lfor_await_of(var, iterable, body) => {
+                self.compile_for_of(var, iterable, body, /*await=*/ true)
             }
             Lambda::Lbreak => {
                 // OCaml: see compiler/core/lam_compile.ml `Lbreak` arm.
@@ -938,6 +1023,24 @@ impl LambdaCompiler {
         let result = f(self);
         self.switch_depth = saved_switch_depth;
         self.loop_stack = saved_loop_stack;
+        result
+    }
+
+    /// Run `f` with a fresh `loop_label_counter`. Mirrors OCaml's
+    /// per-`Single` / per-`Recursive` / per-`Nop` reset in
+    /// `lam_compile_main.ml`: each top-level group starts label numbering
+    /// from `loop_0`, so cross-group labels never collide and the JS
+    /// labels reset between unrelated declarations.
+    pub(crate) fn with_fresh_loop_label_counter<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(
+            &mut self.loop_label_counter,
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
+        let result = f(self);
+        self.loop_label_counter = saved;
         result
     }
 
@@ -1047,6 +1150,58 @@ impl LambdaCompiler {
             }
             push_loop(&mut prelude, None, finish_compiled.expr);
         }
+
+        Compiled {
+            prelude,
+            expr: Expression::undefined(false),
+        }
+    }
+
+    /// Compile a `Lfor_of` / `Lfor_await_of` lambda. Mirrors OCaml
+    /// `compile_for_of` / `compile_for_await_of` in
+    /// `compiler/core/lam_compile.ml` (#7887): evaluate the iterable, push
+    /// a fresh loop frame, compile the body and emit a JS `for-of` /
+    /// `for await ... of` statement. If the loop variable is unused in the
+    /// body, mint a fresh `_for_of` / `_for_await_of` placeholder so JS
+    /// dump output matches OCaml.
+    fn compile_for_of(
+        &mut self,
+        var: &Ident,
+        iterable: &Lambda,
+        body: &Lambda,
+        await_kw: bool,
+    ) -> Compiled {
+        let iterable_compiled = self.compile_expr(iterable);
+        let mut prelude = iterable_compiled.prelude;
+        if block_terminates(&prelude) {
+            return Compiled {
+                prelude,
+                expr: Expression::undefined(false),
+            };
+        }
+
+        // Match OCaml: when the loop variable is not actually used by the
+        // body, emit a fresh placeholder so the source name doesn't leak.
+        let body_fvs = crate::lambda::lam_free_variables::free_variables(body);
+        let emitted_id = if body_fvs.contains(var) {
+            var.clone()
+        } else if await_kw {
+            self.fresh_ident("_for_await_of")
+        } else {
+            self.fresh_ident("_for_of")
+        };
+
+        let frame = self.push_loop();
+        let body_block = self.compile_block(body);
+        self.pop_loop();
+        let label = frame.label();
+
+        let stmt = if await_kw {
+            Statement::for_await_of(label, emitted_id, iterable_compiled.expr, body_block)
+        } else {
+            Statement::for_of(label, emitted_id, iterable_compiled.expr, body_block)
+        };
+        prelude.push(stmt);
 
         Compiled {
             prelude,
@@ -4503,6 +4658,10 @@ impl LambdaCompiler {
                     || self.return_handler_requires_explicit_staticcatch_jump(finish)
                     || self.return_handler_requires_explicit_staticcatch_jump(body)
             }
+            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+                self.return_handler_requires_explicit_staticcatch_jump(iterable)
+                    || self.return_handler_requires_explicit_staticcatch_jump(body)
+            }
             Lambda::Lbreak | Lambda::Lcontinue => false,
             Lambda::Lassign(_, value) => self.return_handler_requires_explicit_staticcatch_jump(value),
             Lambda::LifThenElse(cond, then_, else_) => {
@@ -4650,6 +4809,10 @@ impl LambdaCompiler {
             Lambda::Lfor(_, start, finish, _, body) => {
                 self.lambda_requires_explicit_staticcatch_jump(start)
                     || self.lambda_requires_explicit_staticcatch_jump(finish)
+                    || self.lambda_requires_explicit_staticcatch_jump(body)
+            }
+            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+                self.lambda_requires_explicit_staticcatch_jump(iterable)
                     || self.lambda_requires_explicit_staticcatch_jump(body)
             }
             Lambda::Lbreak | Lambda::Lcontinue => false,
@@ -5172,6 +5335,8 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
         Lambda::Lletrec(_, _) => "letrec",
         Lambda::Lwhile(_, _) => "while",
         Lambda::Lfor(_, _, _, _, _) => "for",
+        Lambda::Lfor_of(_, _, _) => "for_of",
+        Lambda::Lfor_await_of(_, _, _) => "for_await_of",
         Lambda::Lbreak => "break",
         Lambda::Lcontinue => "continue",
         Lambda::Lassign(_, _) => "assign",
@@ -5539,6 +5704,8 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
         | Lambda::Lcontinue
         | Lambda::Lwhile(_, _)
         | Lambda::Lfor(_, _, _, _, _)
+        | Lambda::Lfor_of(_, _, _)
+        | Lambda::Lfor_await_of(_, _, _)
         | Lambda::Lassign(_, _) => false,
     }
 }
@@ -5944,6 +6111,10 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSe
             collect_modules_from_lambda(finish, seen);
             collect_modules_from_lambda(body, seen);
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            collect_modules_from_lambda(iterable, seen);
+            collect_modules_from_lambda(body, seen);
+        }
         Lambda::Lbreak | Lambda::Lcontinue => {}
         Lambda::Lassign(_, value) => collect_modules_from_lambda(value, seen),
     }
@@ -6144,6 +6315,9 @@ fn lambda_contains_static_raise(lam: &Lambda) -> bool {
                 || lambda_contains_static_raise(finish)
                 || lambda_contains_static_raise(body)
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            lambda_contains_static_raise(iterable) || lambda_contains_static_raise(body)
+        }
         Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_static_raise(value),
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -6191,6 +6365,9 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
         Lambda::Lwhile(cond, body) => lambda_has_exit(cond) || lambda_has_exit(body),
         Lambda::Lfor(_, start, finish, _, body) => {
             lambda_has_exit(start) || lambda_has_exit(finish) || lambda_has_exit(body)
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            lambda_has_exit(iterable) || lambda_has_exit(body)
         }
         Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_has_exit(value),
@@ -6255,6 +6432,9 @@ fn lambda_contains_staticcatch(lam: &Lambda) -> bool {
             lambda_contains_staticcatch(start)
                 || lambda_contains_staticcatch(finish)
                 || lambda_contains_staticcatch(body)
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            lambda_contains_staticcatch(iterable) || lambda_contains_staticcatch(body)
         }
         Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_staticcatch(value),
@@ -6331,6 +6511,10 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
         Lambda::Lfor(_, start, finish, _, body) => {
             lambda_contains_static_raise_to_label(start, label, arity)
                 || lambda_contains_static_raise_to_label(finish, label, arity)
+                || lambda_contains_static_raise_to_label(body, label, arity)
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            lambda_contains_static_raise_to_label(iterable, label, arity)
                 || lambda_contains_static_raise_to_label(body, label, arity)
         }
         Lambda::Lbreak | Lambda::Lcontinue => false,
@@ -6495,6 +6679,12 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
                 lambda_static_raise_count_to_label(body, label, arity),
             )
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            add_count(
+                lambda_static_raise_count_to_label(iterable, label, arity),
+                lambda_static_raise_count_to_label(body, label, arity),
+            )
+        }
         Lambda::Lbreak | Lambda::Lcontinue => 0,
         Lambda::Lassign(_, value) => lambda_static_raise_count_to_label(value, label, arity),
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -6577,6 +6767,10 @@ fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool
                 || lambda_contains_static_raise_to_other_label(finish, label)
                 || lambda_contains_static_raise_to_other_label(body, label)
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            lambda_contains_static_raise_to_other_label(iterable, label)
+                || lambda_contains_static_raise_to_other_label(body, label)
+        }
         Lambda::Lbreak | Lambda::Lcontinue => false,
         Lambda::Lassign(_, value) => lambda_contains_static_raise_to_other_label(value, label),
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -6637,6 +6831,11 @@ fn collect_modules_from_statement(stmt: &Statement, modules: &mut OcamlModuleSet
                 collect_modules_from_expression(init, modules);
             }
             collect_modules_from_expression(finish, modules);
+            collect_modules_from_block(body, modules);
+        }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            collect_modules_from_expression(iterable, modules);
             collect_modules_from_block(body, modules);
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {

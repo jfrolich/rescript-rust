@@ -325,6 +325,12 @@ pub enum Lambda {
     /// For loop: variable, start, end, direction, body
     Lfor(Ident, Box<Lambda>, Box<Lambda>, DirectionFlag, Box<Lambda>),
 
+    /// For-of loop: variable, iterable, body (upstream #7887).
+    Lfor_of(Ident, Box<Lambda>, Box<Lambda>),
+
+    /// For-await-of loop: variable, async iterable, body (upstream #7887).
+    Lfor_await_of(Ident, Box<Lambda>, Box<Lambda>),
+
     /// Assignment to a mutable variable
     Lassign(Ident, Box<Lambda>),
 }
@@ -935,6 +941,16 @@ impl Lambda {
         Lambda::Lfor(var, Box::new(start), Box::new(end), dir, Box::new(body))
     }
 
+    /// Create a for-of loop. Port of OCaml `Lam.for_of`.
+    pub fn for_of(var: Ident, iterable: Lambda, body: Lambda) -> Self {
+        Lambda::Lfor_of(var, Box::new(iterable), Box::new(body))
+    }
+
+    /// Create a for-await-of loop. Port of OCaml `Lam.for_await_of`.
+    pub fn for_await_of(var: Ident, iterable: Lambda, body: Lambda) -> Self {
+        Lambda::Lfor_await_of(var, Box::new(iterable), Box::new(body))
+    }
+
     /// Create a try-with block
     pub fn try_(body: Lambda, exn: Ident, handler: Lambda) -> Self {
         Lambda::LtryWith(Box::new(body), exn, Box::new(handler))
@@ -1255,6 +1271,9 @@ fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
             lambda_eq_approx(a1, a2) && lambda_eq_approx(b1, b2)
         }
         (Lambda::Lbreak, Lambda::Lbreak) | (Lambda::Lcontinue, Lambda::Lcontinue) => true,
+        // OCaml `Lam.eq_approx`: Lfor / Lfor_of / Lfor_await_of are
+        // conservatively false (mirrors `compiler/core/lam.ml` `eq_approx`).
+        // Falls through to the catch-all `_ => false` below.
         (Lambda::Lassign(v1, l1), Lambda::Lassign(v2, l2)) => {
             v1.same(v2) && lambda_eq_approx(l1, l2)
         }

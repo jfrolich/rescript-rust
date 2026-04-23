@@ -301,6 +301,10 @@ fn walk(lam: &Lambda, exports: &mut Vec<Ident>, seen: &mut std::collections::Has
             walk(end, exports, seen);
             walk(body, exports, seen);
         }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            walk(iterable, exports, seen);
+            walk(body, exports, seen);
+        }
         Lambda::Lbreak | Lambda::Lcontinue => {}
         Lambda::Lassign(_, value) => walk(value, exports, seen),
     }

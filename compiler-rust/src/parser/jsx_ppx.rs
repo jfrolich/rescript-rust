@@ -3736,6 +3736,30 @@ fn transform_expression(
                 arena.push_expr(transformed_body),
             )))
         }
+        ExpressionDesc::Pexp_for_of(inner) => {
+            let (pat, iterable, body) = *inner;
+            let iterable_expr = arena.get_expr(iterable).clone();
+            let body_expr = arena.get_expr(body).clone();
+            let transformed_iterable = transform_expression(iterable_expr, config, arena);
+            let transformed_body = transform_expression(body_expr, config, arena);
+            ExpressionDesc::Pexp_for_of(Box::new((
+                pat,
+                arena.push_expr(transformed_iterable),
+                arena.push_expr(transformed_body),
+            )))
+        }
+        ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (pat, iterable, body) = *inner;
+            let iterable_expr = arena.get_expr(iterable).clone();
+            let body_expr = arena.get_expr(body).clone();
+            let transformed_iterable = transform_expression(iterable_expr, config, arena);
+            let transformed_body = transform_expression(body_expr, config, arena);
+            ExpressionDesc::Pexp_for_await_of(Box::new((
+                pat,
+                arena.push_expr(transformed_iterable),
+                arena.push_expr(transformed_body),
+            )))
+        }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (inner_expr_idx, typ) = *inner;
             let inner_expr = arena.get_expr(inner_expr_idx).clone();
