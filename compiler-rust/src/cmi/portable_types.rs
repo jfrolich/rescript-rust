@@ -22,8 +22,8 @@ use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
     ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
-    ModuleDeclaration, ModuleType, ModtypeDeclaration, Signature, SignatureItem, TypeDeclaration,
-    TypeKind, ValueDescription,
+    ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration,
+    TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
@@ -150,15 +150,13 @@ fn compute_type_graph_fingerprint(entries: &[PortableTypeEntry], sig: &Signature
     use std::collections::hash_map::DefaultHasher;
     let mut hasher = DefaultHasher::new();
 
-    // Hash the signature structure (item names and kinds)
-    hash_signature(&mut hasher, sig);
-
-    // Hash the type graph entries
-    entries.len().hash(&mut hasher);
-    for entry in entries {
-        entry.level.hash(&mut hasher);
-        hash_portable_desc(&mut hasher, &entry.desc);
-    }
+    // Hash the public signature through its remapped TypeExprRef roots instead
+    // of hashing the portable arena linearly. The same interface can serialize
+    // its internal type graph in a different allocation order depending on
+    // whether it was produced during a cold parallel build or a later watch
+    // rebuild; dependency invalidation needs the interface shape, not arena
+    // ordering.
+    hash_signature(&mut hasher, sig, entries);
 
     hasher.finish()
 }
@@ -185,7 +183,47 @@ fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
     }
 }
 
-fn hash_portable_desc(hasher: &mut impl Hasher, desc: &PortableTypeDesc) {
+fn hash_type_ref(
+    hasher: &mut impl Hasher,
+    idx: usize,
+    entries: &[PortableTypeEntry],
+    visiting: &mut Vec<usize>,
+) {
+    if idx >= entries.len() {
+        0xfeu8.hash(hasher);
+        idx.hash(hasher);
+        return;
+    }
+
+    if let Some(pos) = visiting.iter().position(|seen| *seen == idx) {
+        0xffu8.hash(hasher);
+        pos.hash(hasher);
+        return;
+    }
+
+    visiting.push(idx);
+    hash_portable_desc(hasher, &entries[idx].desc, entries, visiting);
+    visiting.pop();
+}
+
+fn hash_type_refs(
+    hasher: &mut impl Hasher,
+    refs: &[usize],
+    entries: &[PortableTypeEntry],
+    visiting: &mut Vec<usize>,
+) {
+    refs.len().hash(hasher);
+    for idx in refs {
+        hash_type_ref(hasher, *idx, entries, visiting);
+    }
+}
+
+fn hash_portable_desc(
+    hasher: &mut impl Hasher,
+    desc: &PortableTypeDesc,
+    entries: &[PortableTypeEntry],
+    visiting: &mut Vec<usize>,
+) {
     std::mem::discriminant(desc).hash(hasher);
     match desc {
         PortableTypeDesc::Tvar(name) => name.hash(hasher),
@@ -196,78 +234,95 @@ fn hash_portable_desc(hasher: &mut impl Hasher, desc: &PortableTypeDesc) {
             arity,
         } => {
             arg_label.hash(hasher);
-            arg.hash(hasher);
-            ret.hash(hasher);
+            hash_type_ref(hasher, *arg, entries, visiting);
+            hash_type_ref(hasher, *ret, entries, visiting);
             arity.hash(hasher);
         }
-        PortableTypeDesc::Ttuple(elems) => elems.hash(hasher),
+        PortableTypeDesc::Ttuple(elems) => hash_type_refs(hasher, elems, entries, visiting),
         PortableTypeDesc::Tconstr { path, args } => {
             hash_path_by_name(hasher, path);
-            args.hash(hasher);
+            hash_type_refs(hasher, args, entries, visiting);
         }
         PortableTypeDesc::Tobject { fields, name } => {
-            fields.hash(hasher);
+            hash_type_ref(hasher, *fields, entries, visiting);
             if let Some((p, args)) = name {
                 true.hash(hasher);
                 hash_path_by_name(hasher, p);
-                args.hash(hasher);
+                hash_type_refs(hasher, args, entries, visiting);
             } else {
                 false.hash(hasher);
             }
         }
         PortableTypeDesc::Tfield { name, typ, rest } => {
             name.hash(hasher);
-            typ.hash(hasher);
-            rest.hash(hasher);
+            hash_type_ref(hasher, *typ, entries, visiting);
+            hash_type_ref(hasher, *rest, entries, visiting);
         }
         PortableTypeDesc::Tnil => {}
-        PortableTypeDesc::Tlink(idx) => idx.hash(hasher),
-        PortableTypeDesc::Tsubst(idx) => idx.hash(hasher),
-        PortableTypeDesc::Tvariant(rd) => hash_portable_row_desc(hasher, rd),
+        PortableTypeDesc::Tlink(idx) => hash_type_ref(hasher, *idx, entries, visiting),
+        PortableTypeDesc::Tsubst(idx) => hash_type_ref(hasher, *idx, entries, visiting),
+        PortableTypeDesc::Tvariant(rd) => hash_portable_row_desc(hasher, rd, entries, visiting),
         PortableTypeDesc::Tunivar(name) => name.hash(hasher),
         PortableTypeDesc::Tpoly { body, vars } => {
-            body.hash(hasher);
-            vars.hash(hasher);
+            hash_type_ref(hasher, *body, entries, visiting);
+            hash_type_refs(hasher, vars, entries, visiting);
         }
         PortableTypeDesc::Tpackage { path, lids, args } => {
             hash_path_by_name(hasher, path);
             // Longident contains StrIdx; hash raw discriminant + index.
             // Same-session comparisons are correct; cross-session is best-effort.
             lids.hash(hasher);
-            args.hash(hasher);
+            hash_type_refs(hasher, args, entries, visiting);
         }
     }
 }
 
-fn hash_portable_row_desc(hasher: &mut impl Hasher, rd: &PortableRowDesc) {
+fn hash_portable_row_desc(
+    hasher: &mut impl Hasher,
+    rd: &PortableRowDesc,
+    entries: &[PortableTypeEntry],
+    visiting: &mut Vec<usize>,
+) {
     rd.row_fields.len().hash(hasher);
     for (label, field) in &rd.row_fields {
         label.hash(hasher);
-        hash_portable_row_field(hasher, field);
+        hash_portable_row_field(hasher, field, entries, visiting);
     }
-    rd.row_more.hash(hasher);
+    hash_type_ref(hasher, rd.row_more, entries, visiting);
     rd.row_closed.hash(hasher);
     rd.row_fixed.hash(hasher);
     if let Some((p, args)) = &rd.row_name {
         true.hash(hasher);
         hash_path_by_name(hasher, p);
-        args.hash(hasher);
+        hash_type_refs(hasher, args, entries, visiting);
     } else {
         false.hash(hasher);
     }
 }
 
-fn hash_portable_row_field(hasher: &mut impl Hasher, rf: &PortableRowField) {
+fn hash_portable_row_field(
+    hasher: &mut impl Hasher,
+    rf: &PortableRowField,
+    entries: &[PortableTypeEntry],
+    visiting: &mut Vec<usize>,
+) {
     std::mem::discriminant(rf).hash(hasher);
     match rf {
-        PortableRowField::Rpresent(opt) => opt.hash(hasher),
+        PortableRowField::Rpresent(opt) => {
+            if let Some(idx) = opt {
+                true.hash(hasher);
+                hash_type_ref(hasher, *idx, entries, visiting);
+            } else {
+                false.hash(hasher);
+            }
+        }
         PortableRowField::Reither {
             constant,
             types,
             matched,
         } => {
             constant.hash(hasher);
-            types.hash(hasher);
+            hash_type_refs(hasher, types, entries, visiting);
             matched.hash(hasher);
         }
         PortableRowField::Rabsent => {}
@@ -276,41 +331,195 @@ fn hash_portable_row_field(hasher: &mut impl Hasher, rf: &PortableRowField) {
 
 /// Hash the signature structure: item names and kinds.
 /// Uses name-based identity for all paths.
-fn hash_signature(hasher: &mut impl Hasher, sig: &Signature) {
+fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &[PortableTypeEntry]) {
     sig.len().hash(hasher);
     for item in sig {
-        hash_sig_item(hasher, item);
+        hash_sig_item(hasher, item, entries);
     }
 }
 
-fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem) {
+fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[PortableTypeEntry]) {
     std::mem::discriminant(item).hash(hasher);
     match item {
-        SignatureItem::SigValue(ident, _vd) => {
+        SignatureItem::SigValue(ident, vd) => {
             ident.name().hash(hasher);
+            hash_value_desc(hasher, vd, entries);
         }
-        SignatureItem::SigType(ident, _td, _rec) => {
+        SignatureItem::SigType(ident, td, rec) => {
             ident.name().hash(hasher);
+            std::mem::discriminant(rec).hash(hasher);
+            hash_type_decl(hasher, td, entries);
         }
-        SignatureItem::SigTypext(ident, _ext, _es) => {
+        SignatureItem::SigTypext(ident, ext, es) => {
             ident.name().hash(hasher);
+            std::mem::discriminant(es).hash(hasher);
+            hash_extension_constructor(hasher, ext, entries);
         }
         SignatureItem::SigModule(ident, md, _rec) => {
             ident.name().hash(hasher);
-            hash_module_type(hasher, &md.md_type);
+            hash_module_type(hasher, &md.md_type, entries);
         }
-        SignatureItem::SigModtype(ident, _mtd) => {
+        SignatureItem::SigModtype(ident, mtd) => {
             ident.name().hash(hasher);
+            hash_modtype_decl(hasher, mtd, entries);
         }
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
 }
 
-fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType) {
+fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[PortableTypeEntry]) {
+    hash_type_ref(hasher, vd.val_type.0, entries, &mut Vec::new());
+    match &vd.val_kind {
+        ValueKind::ValReg => {
+            0u8.hash(hasher);
+        }
+        ValueKind::ValPrim(prim) => {
+            1u8.hash(hasher);
+            prim.prim_name.hash(hasher);
+            prim.prim_arity.hash(hasher);
+            prim.prim_native_name.hash(hasher);
+            prim.prim_native_float.hash(hasher);
+            prim.prim_from_constructor.hash(hasher);
+        }
+    }
+    if let Some(path) = &vd.val_path {
+        true.hash(hasher);
+        hash_path_by_name(hasher, path);
+    } else {
+        false.hash(hasher);
+    }
+}
+
+fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[PortableTypeEntry]) {
+    td.type_arity.hash(hasher);
+    hash_type_expr_refs(hasher, &td.type_params, entries);
+    td.type_private.hash(hasher);
+    if let Some(manifest) = td.type_manifest {
+        true.hash(hasher);
+        hash_type_ref(hasher, manifest.0, entries, &mut Vec::new());
+    } else {
+        false.hash(hasher);
+    }
+    td.type_variance.hash(hasher);
+    td.type_newtype_level.hash(hasher);
+    td.type_immediate.hash(hasher);
+    td.type_unboxed.unboxed.hash(hasher);
+    td.type_unboxed.default.hash(hasher);
+    if let Some(path) = &td.type_path {
+        true.hash(hasher);
+        hash_path_by_name(hasher, path);
+    } else {
+        false.hash(hasher);
+    }
+    hash_type_kind(hasher, &td.type_kind, entries);
+    td.type_inlined_types.len().hash(hasher);
+    for inlined in &td.type_inlined_types {
+        match inlined {
+            TypeInlinedType::Record { type_name, labels } => {
+                type_name.hash(hasher);
+                hash_label_decls(hasher, labels, entries);
+            }
+        }
+    }
+}
+
+fn hash_type_expr_refs(
+    hasher: &mut impl Hasher,
+    refs: &[TypeExprRef],
+    entries: &[PortableTypeEntry],
+) {
+    refs.len().hash(hasher);
+    for r in refs {
+        hash_type_ref(hasher, r.0, entries, &mut Vec::new());
+    }
+}
+
+fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[PortableTypeEntry]) {
+    std::mem::discriminant(kind).hash(hasher);
+    match kind {
+        TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+        TypeKind::TypeRecord(labels, repr) => {
+            hash_label_decls(hasher, labels, entries);
+            std::mem::discriminant(repr).hash(hasher);
+        }
+        TypeKind::TypeVariant(ctors) => {
+            ctors.len().hash(hasher);
+            for ctor in ctors {
+                ctor.cd_id.name().hash(hasher);
+                hash_constructor_args(hasher, &ctor.cd_args, entries);
+                if let Some(res) = ctor.cd_res {
+                    true.hash(hasher);
+                    hash_type_ref(hasher, res.0, entries, &mut Vec::new());
+                } else {
+                    false.hash(hasher);
+                }
+            }
+        }
+    }
+}
+
+fn hash_label_decls(
+    hasher: &mut impl Hasher,
+    labels: &[LabelDeclaration],
+    entries: &[PortableTypeEntry],
+) {
+    labels.len().hash(hasher);
+    for label in labels {
+        label.ld_id.name().hash(hasher);
+        label.ld_mutable.hash(hasher);
+        label.ld_optional.hash(hasher);
+        hash_type_ref(hasher, label.ld_type.0, entries, &mut Vec::new());
+    }
+}
+
+fn hash_constructor_args(
+    hasher: &mut impl Hasher,
+    args: &ConstructorArguments,
+    entries: &[PortableTypeEntry],
+) {
+    std::mem::discriminant(args).hash(hasher);
+    match args {
+        ConstructorArguments::CstrTuple(types) => hash_type_expr_refs(hasher, types, entries),
+        ConstructorArguments::CstrRecord(labels) => hash_label_decls(hasher, labels, entries),
+    }
+}
+
+fn hash_extension_constructor(
+    hasher: &mut impl Hasher,
+    ext: &ExtensionConstructor,
+    entries: &[PortableTypeEntry],
+) {
+    hash_path_by_name(hasher, &ext.ext_type_path);
+    hash_type_expr_refs(hasher, &ext.ext_type_params, entries);
+    hash_constructor_args(hasher, &ext.ext_args, entries);
+    if let Some(ret) = ext.ext_ret_type {
+        true.hash(hasher);
+        hash_type_ref(hasher, ret.0, entries, &mut Vec::new());
+    } else {
+        false.hash(hasher);
+    }
+    ext.ext_private.hash(hasher);
+    ext.ext_is_exception.hash(hasher);
+}
+
+fn hash_modtype_decl(
+    hasher: &mut impl Hasher,
+    mtd: &ModtypeDeclaration,
+    entries: &[PortableTypeEntry],
+) {
+    if let Some(mty) = &mtd.mtd_type {
+        true.hash(hasher);
+        hash_module_type(hasher, mty, entries);
+    } else {
+        false.hash(hasher);
+    }
+}
+
+fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &[PortableTypeEntry]) {
     std::mem::discriminant(mty).hash(hasher);
     match mty {
         ModuleType::MtyIdent(path) => hash_path_by_name(hasher, path),
-        ModuleType::MtySignature(sig) => hash_signature(hasher, sig),
+        ModuleType::MtySignature(sig) => hash_signature(hasher, sig, entries),
         ModuleType::MtyFunctor {
             param,
             param_type,
@@ -318,9 +527,9 @@ fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType) {
         } => {
             param.name().hash(hasher);
             if let Some(pt) = param_type {
-                hash_module_type(hasher, pt);
+                hash_module_type(hasher, pt, entries);
             }
-            hash_module_type(hasher, result);
+            hash_module_type(hasher, result, entries);
         }
         ModuleType::MtyAlias(_presence, path) => hash_path_by_name(hasher, path),
     }
@@ -343,14 +552,14 @@ pub fn serialize_pers_struct(ps: &PersStruct, ctx: &TypeContext<'_>) -> Portable
     ser.remap_signature(&mut sig);
     let entries = ser.entries;
     let fingerprint = compute_type_graph_fingerprint(&entries, &sig);
-        PortablePersStruct {
-            ps_name: ps.ps_name.clone(),
-            ps_filename: ps.ps_filename.clone(),
-            ps_sig: sig,
-            cmi_longident_names: ctx.snapshot_cmi_longident_names(),
-            type_graph: PortableTypeGraph { entries },
-            fingerprint,
-        }
+    PortablePersStruct {
+        ps_name: ps.ps_name.clone(),
+        ps_filename: ps.ps_filename.clone(),
+        ps_sig: sig,
+        cmi_longident_names: ctx.snapshot_cmi_longident_names(),
+        type_graph: PortableTypeGraph { entries },
+        fingerprint,
+    }
 }
 
 struct TypeGraphSerializer<'a, 'b> {
@@ -388,10 +597,7 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
             TypeDesc::Tarrow {
-                arg,
-                ret,
-                arity,
-                ..
+                arg, ret, arity, ..
             } => PortableTypeDesc::Tarrow {
                 arg_label: arg.lbl.clone(),
                 arg: self.serialize_type(arg.typ),
@@ -707,7 +913,12 @@ fn internalize_row_desc(
         row_fields: prd
             .row_fields
             .iter()
-            .map(|(label, field)| (label.as_str().into(), internalize_row_field(field, remap, ctx)))
+            .map(|(label, field)| {
+                (
+                    label.as_str().into(),
+                    internalize_row_field(field, remap, ctx),
+                )
+            })
             .collect(),
         row_more: remap[prd.row_more],
         row_closed: prd.row_closed,

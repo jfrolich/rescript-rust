@@ -407,7 +407,9 @@ pub fn incremental_build(
         eprintln!("{}", &parse_warnings);
     }
 
-    mark_modules_with_expired_deps_dirty(build_state);
+    if !build_state.build_mode().is_in_process() {
+        mark_modules_with_expired_deps_dirty(build_state);
+    }
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;
 

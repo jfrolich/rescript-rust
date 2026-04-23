@@ -203,6 +203,8 @@ fn compile_one(
     // is dispatched.
     if build_command_state.build_mode().is_in_process() {
         if let SourceType::SourceFile(_) = &module.source_type {
+            let interface_generation_before =
+                build_command_state.get_interface_generation(module_name);
             let result = compile_module_in_process(
                 package,
                 module,
@@ -211,11 +213,16 @@ fn compile_one(
                 build_state,
                 build_command_state,
             );
+            let interface_generation_after =
+                build_command_state.get_interface_generation(module_name);
+            let is_clean_interface = matches!(&result, Ok(None))
+                && interface_generation_before.is_some()
+                && interface_generation_before == interface_generation_after;
             return CompletionMsg {
                 module_name: module_name.to_string(),
                 result,
                 interface_result: None,
-                is_clean: false,
+                is_clean: is_clean_interface,
                 is_compiled: true,
             };
         }
