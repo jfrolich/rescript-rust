@@ -11222,11 +11222,35 @@ fn type_structure_item<'a>(
                                 for label in labels {
                                     let label_name =
                                         arena.get_string(label.pld_name.txt).to_string();
-                                    let (typed_ct, ty_ref) = transl_type(
-                                        tctx,
-                                        env,
-                                        arena.get_core_type(label.pld_type),
-                                    )?;
+                                    let lbl_type = arena.get_core_type(label.pld_type);
+                                    let (typed_ct, ty_ref) = transl_type(tctx, env, lbl_type)?;
+                                    // Upstream #8319: exception inline-record fields get
+                                    // the same optional → option wrapping as regular record
+                                    // fields and type-extension (Pext_decl) constructors.
+                                    let (typed_ct, ty_ref) = if label.pld_optional {
+                                        let option_path =
+                                            crate::types::predef::path_option();
+                                        let option_type_ref = ctx
+                                            .new_constr(option_path.clone(), vec![ty_ref]);
+                                        let option_lid = crate::parse_arena::Located {
+                                            txt: arena.placeholder_lid(),
+                                            loc: lbl_type.ptyp_loc,
+                                        };
+                                        let option_typed = TypedCoreType {
+                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                                option_path,
+                                                option_lid,
+                                                vec![typed_ct],
+                                            ),
+                                            ctyp_type: option_type_ref,
+                                            ctyp_env: EnvRef(0),
+                                            ctyp_loc: lbl_type.ptyp_loc,
+                                            ctyp_attributes: Attributes::new(),
+                                        };
+                                        (option_typed, option_type_ref)
+                                    } else {
+                                        (typed_ct, ty_ref)
+                                    };
                                     let (poly_typed_ct, poly_ty_ref) =
                                         force_poly_typed_core_type(ctx, typed_ct, ty_ref);
                                     let internal_ty_ref = match &*ctx.get_desc(poly_ty_ref) {
