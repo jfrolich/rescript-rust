@@ -14,6 +14,7 @@ OCaml-to-Rust rewrite of the full ReScript compiler (~135K lines across 653 file
 | [PROGRESS.md](./compiler-rewrite/PROGRESS.md) | Current progress across all phases, test results, blockers |
 | [GLOBAL_STATE_AUDIT.md](./compiler-rewrite/GLOBAL_STATE_AUDIT.md) | Catalog of ~80+ OCaml global mutable state refs to eliminate |
 | [BINARY_AST.md](./compiler-rewrite/BINARY_AST.md) | Binary AST format spec, OCaml Marshal encoding, sharing model |
+| [UPSTREAM_BACKPORTS.md](./compiler-rewrite/UPSTREAM_BACKPORTS.md) | Status of upstream rescript-lang PRs in the Rust port (ported / deferred / N/A) |
 
 ### [parser-parity](./parser-parity/)
 
