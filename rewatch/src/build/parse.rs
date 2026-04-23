@@ -12,12 +12,21 @@ use anyhow::{Context, anyhow};
 use log::debug;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
+    Dependencies, extract_signature_deps, extract_structure_deps, ppx,
     write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
 };
 use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::{env, io::IsTerminal};
+
+struct GeneratedAst {
+    path: PathBuf,
+    stderr: Option<helpers::StdErr>,
+    stored_ast: Option<super::build_types::StoredAst>,
+    deps: Option<Dependencies>,
+}
 
 pub fn generate_asts(
     build_state: &mut BuildCommandState,
@@ -26,7 +35,8 @@ pub fn generate_asts(
     let mut has_failure = false;
     let mut stderr = "".to_string();
     let use_rust_parser = build_state.use_rust_parser();
-    let store_ast = build_state.dump_typed_sexp() && use_rust_parser;
+    let in_process = build_state.build_mode().is_in_process();
+    let store_ast = use_rust_parser && (in_process || build_state.dump_typed_sexp());
 
     build_state
         .modules
@@ -40,7 +50,12 @@ pub fn generate_asts(
                     let path = package.get_mlmap_path();
                     (
                         module_name.to_owned(),
-                        Ok((Path::new(&path).to_path_buf(), None, None)),
+                        Ok(GeneratedAst {
+                            path: Path::new(&path).to_path_buf(),
+                            stderr: None,
+                            stored_ast: None,
+                            deps: None,
+                        }),
                         Ok(None),
                         false,
                     )
@@ -63,6 +78,7 @@ pub fn generate_asts(
                             build_state.get_warn_error_override(),
                             use_rust_parser,
                             store_ast,
+                            in_process,
                         )
                         .map_err(|e| e.to_string());
 
@@ -75,6 +91,7 @@ pub fn generate_asts(
                                     build_state.get_warn_error_override(),
                                     use_rust_parser,
                                     store_ast,
+                                    in_process,
                                 ) {
                                     Ok(v) => Ok(Some(v)),
                                     Err(e) => Err(e.to_string()),
@@ -86,18 +103,18 @@ pub fn generate_asts(
                         (ast_result, iast_result, true)
                     } else {
                         (
-                            Ok((
-                                PathBuf::from(helpers::get_basename(&source_file.implementation.path))
+                            Ok(GeneratedAst {
+                                path: PathBuf::from(helpers::get_basename(&source_file.implementation.path))
                                     .with_extension("ast"),
-                                None,
-                                None,
-                            )),
-                            Ok(source_file.interface.as_ref().map(|i| {
-                                (
-                                    PathBuf::from(helpers::get_basename(&i.path)).with_extension("iast"),
-                                    None,
-                                    None,
-                                )
+                                stderr: None,
+                                stored_ast: None,
+                                deps: None,
+                            }),
+                            Ok(source_file.interface.as_ref().map(|i| GeneratedAst {
+                                path: PathBuf::from(helpers::get_basename(&i.path)).with_extension("iast"),
+                                stderr: None,
+                                stored_ast: None,
+                                deps: None,
                             })),
                             false,
                         )
@@ -109,8 +126,8 @@ pub fn generate_asts(
         })
         .collect::<Vec<(
             String,
-            Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>), String>,
-            Result<Option<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>)>, String>,
+            Result<GeneratedAst, String>,
+            Result<Option<GeneratedAst>, String>,
             bool,
         )>>()
         .into_iter()
@@ -147,16 +164,37 @@ pub fn generate_asts(
                         // In case of an internal dependency, we want to keep on
                         // propagating the warning with every compile. So we mark it as dirty for
                         // the next round
-                        Ok((_path, Some(stderr_warnings), stored_ast)) if package.is_local_dep => {
+                        Ok(GeneratedAst {
+                            stderr: Some(stderr_warnings),
+                            stored_ast,
+                            deps,
+                            ..
+                        }) if package.is_local_dep => {
                             source_file.implementation.parse_state = ParseState::Warning;
                             source_file.implementation.parse_dirty = true;
                             logs::append(package, &stderr_warnings);
                             stderr.push_str(&stderr_warnings);
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), deps);
                             }
                         }
-                        Ok((_path, Some(stderr_warnings), stored_ast)) => {
+                        Ok(GeneratedAst {
+                            stderr: Some(stderr_warnings),
+                            stored_ast,
+                            deps,
+                            ..
+                        }) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
                             // External dep: surface only the critical warnings
@@ -167,14 +205,41 @@ pub fn generate_asts(
                                 stderr.push_str(&kept);
                             }
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), deps);
                             }
                         }
-                        Ok((_path, None, stored_ast)) => {
+                        Ok(GeneratedAst {
+                            stderr: None,
+                            stored_ast,
+                            deps,
+                            ..
+                        }) => {
                             source_file.implementation.parse_state = ParseState::Success;
                             source_file.implementation.parse_dirty = false;
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:impl"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:impl"), deps);
                             }
                         }
                         Err(err) => {
@@ -193,7 +258,12 @@ pub fn generate_asts(
                         // In case of an internal dependency, we want to keep on
                         // propagating the warning with every compile. So we mark it as dirty for
                         // the next round
-                        Ok(Some((_path, Some(stderr_warnings), stored_ast))) if package.is_local_dep => {
+                        Ok(Some(GeneratedAst {
+                            stderr: Some(stderr_warnings),
+                            stored_ast,
+                            deps,
+                            ..
+                        })) if package.is_local_dep => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Warning;
                                 interface.parse_dirty = true;
@@ -201,10 +271,26 @@ pub fn generate_asts(
                             logs::append(package, &stderr_warnings);
                             stderr.push_str(&stderr_warnings);
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), deps);
                             }
                         }
-                        Ok(Some((_, Some(stderr_warnings), stored_ast))) => {
+                        Ok(Some(GeneratedAst {
+                            stderr: Some(stderr_warnings),
+                            stored_ast,
+                            deps,
+                            ..
+                        })) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
                                 interface.parse_dirty = false;
@@ -214,16 +300,43 @@ pub fn generate_asts(
                                 stderr.push_str(&kept);
                             }
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), deps);
                             }
                         }
-                        Ok(Some((_, None, stored_ast))) => {
+                        Ok(Some(GeneratedAst {
+                            stderr: None,
+                            stored_ast,
+                            deps,
+                            ..
+                        })) => {
                             if let Some(interface) = source_file.interface.as_mut() {
                                 interface.parse_state = ParseState::Success;
                                 interface.parse_dirty = false;
                             }
                             if let Some(ast) = stored_ast {
-                                build_state.stored_asts.lock().unwrap().insert(format!("{module_name}:intf"), ast);
+                                build_state
+                                    .stored_asts
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), ast);
+                            }
+                            if let Some(deps) = deps {
+                                build_state
+                                    .in_memory_deps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(format!("{module_name}:intf"), deps);
                             }
                         }
                         Err(err) => {
@@ -382,7 +495,8 @@ fn generate_ast(
     warn_error_override: Option<String>,
     use_rust_parser: bool,
     store_ast: bool,
-) -> anyhow::Result<(PathBuf, Option<helpers::StdErr>, Option<super::build_types::StoredAst>)> {
+    in_process: bool,
+) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
     let contents = helpers::read_file(&file_path).expect("Error reading file");
 
@@ -393,14 +507,14 @@ fn generate_ast(
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
     let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
-    let let_unwrap_enabled = rust_parser_let_unwrap_enabled(
-        build_state.project_context.get_root_config(),
-        &package.config,
-    );
+    let let_unwrap_enabled =
+        rust_parser_let_unwrap_enabled(build_state.project_context.get_root_config(), &package.config);
 
     // generate the dir of the ast_path (it mirrors the source file dir)
-    let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
-    helpers::create_path(&ast_parent_path);
+    if !in_process {
+        let ast_parent_path = package.get_build_path().join(ast_path.parent().unwrap());
+        helpers::create_path(&ast_parent_path);
+    }
 
     /* Create .ast */
     let result = if use_rust_parser {
@@ -412,8 +526,14 @@ fn generate_ast(
             jsx_version,
             let_unwrap_enabled,
             store_ast,
+            in_process,
         )
-        .map(|(stderr, stored)| (ast_path.clone(), stderr, stored))
+        .map(|(stderr, stored_ast, deps)| GeneratedAst {
+            path: ast_path.clone(),
+            stderr,
+            stored_ast,
+            deps,
+        })
     } else {
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
@@ -442,12 +562,22 @@ fn generate_ast(
 
                 if helpers::contains_ascii_characters(&stderr) {
                     if res_to_ast.status.success() {
-                        Ok((ast_path.clone(), Some(stderr.to_string()), None))
+                        Ok(GeneratedAst {
+                            path: ast_path.clone(),
+                            stderr: Some(stderr.to_string()),
+                            stored_ast: None,
+                            deps: None,
+                        })
                     } else {
                         Err(anyhow!("Error in {}:\n{}", package.name, stderr))
                     }
                 } else {
-                    Ok((ast_path.clone(), None, None))
+                    Ok(GeneratedAst {
+                        path: ast_path.clone(),
+                        stderr: None,
+                        stored_ast: None,
+                        deps: None,
+                    })
                 }
             }
             _ => {
@@ -461,7 +591,7 @@ fn generate_ast(
             }
         }
     };
-    if let Ok((ast_path, _, _)) = &result {
+    if !in_process && let Ok(GeneratedAst { path: ast_path, .. }) = &result {
         let _ = std::fs::copy(
             Path::new(&build_path_abs).join(ast_path),
             package.get_ocaml_build_path().join(ast_path.file_name().unwrap()),
@@ -505,11 +635,7 @@ fn open_dependencies_from_bsc_flags(flags: &[String]) -> Vec<String> {
 }
 
 fn rust_parser_effective_jsx_version(root_config: &Config) -> i32 {
-    let version = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.version)
-        .unwrap_or(-1);
+    let version = root_config.jsx.as_ref().and_then(|jsx| jsx.version).unwrap_or(-1);
     let preserve = root_config
         .jsx
         .as_ref()
@@ -598,7 +724,12 @@ fn generate_ast_with_rust_parser(
     jsx_version: i32,
     let_unwrap_enabled: bool,
     store_ast: bool,
-) -> anyhow::Result<(Option<helpers::StdErr>, Option<super::build_types::StoredAst>)> {
+    in_process: bool,
+) -> anyhow::Result<(
+    Option<helpers::StdErr>,
+    Option<super::build_types::StoredAst>,
+    Option<Dependencies>,
+)> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
     let source = source_bytes_to_latin1(&bytes);
@@ -633,34 +764,39 @@ fn generate_ast_with_rust_parser(
 
         let (signature, jsx_warnings) =
             jsx_ppx::transform_signature_with_warnings(signature, jsx_version, parser.arena_mut());
-        append_jsx_preprocessor_warnings(
-            &mut warnings,
-            &source,
-            source_path_for_ast,
-            &jsx_warnings,
-        );
-        let signature = let_unwrap_ppx::rewrite_signature(
-            &signature,
-            parser.arena_mut(),
-            let_unwrap_enabled,
-        )
-        .map_err(|e| anyhow!(e))?;
+        append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
+        let signature = let_unwrap_ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap_enabled)
+            .map_err(|e| anyhow!(e))?;
 
-        write_signature_ast_current_with_extra_deps(
-            ast_output_path,
-            source_path_for_ast,
-            parser.arena_mut(),
-            &signature,
-            extra_deps,
-        )
-        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+        let (signature, deps) = if in_process {
+            let signature = ppx::rewrite_signature(&signature, parser.arena_mut())
+                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let mut deps = extract_signature_deps(parser.arena(), &signature);
+            deps.extend(extra_deps.iter().cloned());
+            (signature, Some(deps))
+        } else {
+            write_signature_ast_current_with_extra_deps(
+                ast_output_path,
+                source_path_for_ast,
+                parser.arena_mut(),
+                &signature,
+                extra_deps,
+            )
+            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+            (signature, None)
+        };
 
         let stored = if store_ast {
-            Some(super::build_types::StoredAst::Signature(parser.into_arena(), signature))
+            Some(super::build_types::StoredAst::Signature(Arc::new(
+                super::build_types::StoredSignatureAst {
+                    arena: parser.into_arena(),
+                    signature,
+                },
+            )))
         } else {
             None
         };
-        Ok(((!warnings.is_empty()).then_some(warnings), stored))
+        Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
     } else {
         let structure = module::parse_structure(&mut parser);
         if parser.has_errors() {
@@ -684,34 +820,42 @@ fn generate_ast_with_rust_parser(
 
         let (structure, jsx_warnings) =
             jsx_ppx::transform_structure_with_warnings(structure, jsx_version, parser.arena_mut());
-        append_jsx_preprocessor_warnings(
-            &mut warnings,
-            &source,
-            source_path_for_ast,
-            &jsx_warnings,
-        );
-        let structure = let_unwrap_ppx::rewrite_structure(
-            &structure,
-            parser.arena_mut(),
-            let_unwrap_enabled,
-        )
-        .map_err(|e| anyhow!(e))?;
+        append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
+        let structure = let_unwrap_ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap_enabled)
+            .map_err(|e| anyhow!(e))?;
 
-        write_structure_ast_current_with_extra_deps(
-            ast_output_path,
-            source_path_for_ast,
-            parser.arena_mut(),
-            &structure,
-            extra_deps,
-        )
-        .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+        let (structure, deps) = if in_process {
+            let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+            let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let structure =
+                rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+            let mut deps = extract_structure_deps(parser.arena(), &structure);
+            deps.extend(extra_deps.iter().cloned());
+            (structure, Some(deps))
+        } else {
+            write_structure_ast_current_with_extra_deps(
+                ast_output_path,
+                source_path_for_ast,
+                parser.arena_mut(),
+                &structure,
+                extra_deps,
+            )
+            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+            (structure, None)
+        };
 
         let stored = if store_ast {
-            Some(super::build_types::StoredAst::Structure(parser.into_arena(), structure))
+            Some(super::build_types::StoredAst::Structure(Arc::new(
+                super::build_types::StoredStructureAst {
+                    arena: parser.into_arena(),
+                    structure,
+                },
+            )))
         } else {
             None
         };
-        Ok(((!warnings.is_empty()).then_some(warnings), stored))
+        Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
     }
 }
 
@@ -735,8 +879,7 @@ fn filter_ppx_flags(
 #[cfg(test)]
 mod tests {
     use super::{
-        open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version,
-        rust_parser_let_unwrap_enabled,
+        open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version, rust_parser_let_unwrap_enabled,
     };
     use crate::config::Config;
 

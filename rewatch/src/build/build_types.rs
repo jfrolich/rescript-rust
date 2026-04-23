@@ -9,8 +9,8 @@ use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::Signature as DeclSignature;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
 /// The three explicit build modes for rewatch.
@@ -141,16 +141,29 @@ impl Display for SourceType {
     }
 }
 
+#[derive(Debug)]
+pub struct StoredStructureAst {
+    pub arena: ParseArena,
+    pub structure: Structure,
+}
+
+#[derive(Debug)]
+pub struct StoredSignatureAst {
+    pub arena: ParseArena,
+    pub signature: Signature,
+}
+
+#[derive(Clone)]
 pub enum StoredAst {
-    Structure(ParseArena, Structure),
-    Signature(ParseArena, Signature),
+    Structure(Arc<StoredStructureAst>),
+    Signature(Arc<StoredSignatureAst>),
 }
 
 impl std::fmt::Debug for StoredAst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoredAst::Structure(_, _) => write!(f, "StoredAst::Structure(..)"),
-            StoredAst::Signature(_, _) => write!(f, "StoredAst::Signature(..)"),
+            StoredAst::Structure(_) => write!(f, "StoredAst::Structure(..)"),
+            StoredAst::Signature(_) => write!(f, "StoredAst::Signature(..)"),
         }
     }
 }
@@ -460,6 +473,10 @@ impl BuildCommandState {
     /// Returns None if no deps have been stored (e.g., not in --in-process mode).
     pub fn get_in_memory_deps(&self, key: &str) -> Option<Dependencies> {
         self.in_memory_deps.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn get_stored_ast(&self, key: &str) -> Option<StoredAst> {
+        self.stored_asts.lock().unwrap().get(key).cloned()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

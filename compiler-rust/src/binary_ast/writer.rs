@@ -139,11 +139,7 @@ pub fn write_structure_ast_current_with_extra_deps(
     })?;
 
     // 2. Process @@config attributes (e.g., no_export wrapping)
-    let rewritten_ast = if has_no_export_config(&rewritten_ast, arena) {
-        wrap_no_export(arena, rewritten_ast)
-    } else {
-        rewritten_ast
-    };
+    let rewritten_ast = apply_no_export_config(arena, rewritten_ast);
 
     // 3. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_structure_deps(arena, &rewritten_ast);
@@ -378,6 +374,17 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
         }
     }
     false
+}
+
+pub fn apply_no_export_config(
+    arena: &mut ParseArena,
+    structure: Vec<StructureItem>,
+) -> Vec<StructureItem> {
+    if has_no_export_config(&structure, arena) {
+        wrap_no_export(arena, structure)
+    } else {
+        structure
+    }
 }
 
 /// Wrap a structure with `include (struct ... end : sig end)` for no_export.

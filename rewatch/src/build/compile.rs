@@ -1514,21 +1514,36 @@ fn compile_module_in_process(
     // Step 1: If .resi exists, typecheck the interface first
     if let Some(interface) = &source_file.interface {
         let intf_source_abs = Path::new(&package.path).join(&interface.path);
-        let intf_source = std::fs::read_to_string(&intf_source_abs).map_err(|e| {
-            anyhow!(
-                "Failed to read interface file {}: {}",
-                intf_source_abs.display(),
-                e
-            )
-        })?;
+        let intf_key = format!("{module_name}:intf");
+        let intf_result = match build_command_state.get_stored_ast(&intf_key) {
+            Some(StoredAst::Signature(stored)) => {
+                rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+                    &stored.arena,
+                    &stored.signature,
+                    &intf_source_abs.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                )
+            }
+            _ => {
+                let intf_source = std::fs::read_to_string(&intf_source_abs).map_err(|e| {
+                    anyhow!(
+                        "Failed to read interface file {}: {}",
+                        intf_source_abs.display(),
+                        e
+                    )
+                })?;
 
-        let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
-            &intf_source,
-            &intf_source_abs.to_string_lossy(),
-            module_name,
-            &options,
-            &local_registry,
-        )
+                rescript_compiler::driver::typecheck_interface_in_process(
+                    &intf_source,
+                    &intf_source_abs.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                )
+            }
+        }
         .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
 
         let intf_result = match intf_result {
@@ -1572,23 +1587,38 @@ fn compile_module_in_process(
     }
 
     // Step 2: Compile the implementation
-    let impl_source = std::fs::read_to_string(&source_abs).map_err(|e| {
-        anyhow!(
-            "Failed to read source file {}: {}",
-            source_abs.display(),
-            e
-        )
-    })?;
-
+    let impl_key = format!("{module_name}:impl");
     let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rescript_compiler::driver::compile_source_in_process(
-            &impl_source,
-            &source_abs.to_string_lossy(),
-            module_name,
-            &options,
-            &local_registry,
-            has_interface,
-        )
+        match build_command_state.get_stored_ast(&impl_key) {
+            Some(StoredAst::Structure(stored)) => {
+                rescript_compiler::driver::compile_preprocessed_structure_in_process(
+                    &stored.arena,
+                    &stored.structure,
+                    &source_abs.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                    has_interface,
+                )
+            }
+            _ => {
+                let impl_source = std::fs::read_to_string(&source_abs).map_err(|e| {
+                    anyhow!(
+                        "Failed to read source file {}: {}",
+                        source_abs.display(),
+                        e
+                    )
+                })?;
+                rescript_compiler::driver::compile_source_in_process(
+                    &impl_source,
+                    &source_abs.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                    has_interface,
+                )
+            }
+        }
     }));
 
     let compile_result = match compile_result {
@@ -1742,9 +1772,6 @@ fn compile_file(
     // --subprocess: run bsc as subprocess with timeout (non-fatal on crash/timeout).
     // This REPLACES the normal bsc call — only one bsc runs per compile_file.
     if subprocess {
-        let module_name =
-            helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
-
         // Redirect stderr to sexp file when dump_typed_sexp is set
         let sexp_file = if dump_typed_sexp {
             let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));

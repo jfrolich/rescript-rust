@@ -3,36 +3,17 @@ use super::packages;
 use crate::helpers;
 use ahash::AHashSet;
 use rayon::prelude::*;
+use rescript_compiler::binary_ast::Dependencies;
 
-fn get_dep_modules(
-    ast_file: &str,
+fn resolve_dep_modules<'a>(
+    raw_deps: impl Iterator<Item = &'a String>,
     namespace: Option<String>,
     package_modules: &AHashSet<String>,
     valid_modules: &AHashSet<String>,
     package: &packages::Package,
     build_state: &BuildState,
 ) -> AHashSet<String> {
-    let mut deps = AHashSet::new();
-    let ast_file = package.get_build_path().join(ast_file);
-    match helpers::read_lines(&ast_file) {
-        Ok(lines) => {
-            // we skip the first line with is some null characters
-            // the following lines in the AST are the dependency modules
-            // we stop when we hit a line that is an absolute path, this is the path of the file.
-            // this is the point where the dependencies end and the actual AST starts
-            for line in lines.skip(1).flatten() {
-                let line = line.trim().to_string();
-                if std::path::Path::new(&line).is_absolute() {
-                    break;
-                } else if !line.is_empty() {
-                    deps.insert(line);
-                }
-            }
-        }
-        _ => {
-            panic!("Could not read file {}", ast_file.to_string_lossy());
-        }
-    }
+    let deps = raw_deps.cloned().collect::<AHashSet<String>>();
 
     // Get the list of allowed dependency packages for this package
     let allowed_dependencies: AHashSet<String> = package
@@ -93,7 +74,65 @@ fn get_dep_modules(
         .collect::<AHashSet<String>>()
 }
 
-pub fn get_deps(build_state: &mut BuildState, deleted_modules: &AHashSet<String>) {
+fn get_dep_modules(
+    ast_file: &str,
+    namespace: Option<String>,
+    package_modules: &AHashSet<String>,
+    valid_modules: &AHashSet<String>,
+    package: &packages::Package,
+    build_state: &BuildState,
+) -> AHashSet<String> {
+    let mut deps = Dependencies::new();
+    let ast_file = package.get_build_path().join(ast_file);
+    match helpers::read_lines(&ast_file) {
+        Ok(lines) => {
+            // we skip the first line with is some null characters
+            // the following lines in the AST are the dependency modules
+            // we stop when we hit a line that is an absolute path, this is the path of the file.
+            // this is the point where the dependencies end and the actual AST starts
+            for line in lines.skip(1).flatten() {
+                let line = line.trim().to_string();
+                if std::path::Path::new(&line).is_absolute() {
+                    break;
+                } else if !line.is_empty() {
+                    deps.insert(line);
+                }
+            }
+        }
+        _ => {
+            panic!("Could not read file {}", ast_file.to_string_lossy());
+        }
+    }
+
+    resolve_dep_modules(
+        deps.iter(),
+        namespace,
+        package_modules,
+        valid_modules,
+        package,
+        build_state,
+    )
+}
+
+fn get_dep_modules_from_memory(
+    deps: &Dependencies,
+    namespace: Option<String>,
+    package_modules: &AHashSet<String>,
+    valid_modules: &AHashSet<String>,
+    package: &packages::Package,
+    build_state: &BuildState,
+) -> AHashSet<String> {
+    resolve_dep_modules(
+        deps.iter(),
+        namespace,
+        package_modules,
+        valid_modules,
+        package,
+        build_state,
+    )
+}
+
+pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
     build_state
         .modules
@@ -106,26 +145,79 @@ pub fn get_deps(build_state: &mut BuildState, deleted_modules: &AHashSet<String>
                     .expect("Package not found");
                 let ast_path = helpers::get_ast_path(&source_file.implementation.path);
                 if module.deps_dirty || !build_state.deps_initialized {
-                    let mut deps = get_dep_modules(
-                        &ast_path.to_string_lossy(),
-                        package.namespace.to_suffix(),
-                        package.modules.as_ref().unwrap(),
-                        all_mod,
-                        package,
-                        build_state,
-                    );
-
-                    if let Some(interface) = &source_file.interface {
-                        let iast_path = helpers::get_ast_path(&interface.path);
-
-                        deps.extend(get_dep_modules(
-                            &iast_path.to_string_lossy(),
+                    let impl_key = format!("{module_name}:impl");
+                    let mut deps = if build_state.build_mode().is_in_process() {
+                        build_state
+                            .get_in_memory_deps(&impl_key)
+                            .map(|in_memory_deps| {
+                                get_dep_modules_from_memory(
+                                    &in_memory_deps,
+                                    package.namespace.to_suffix(),
+                                    package.modules.as_ref().unwrap(),
+                                    all_mod,
+                                    package,
+                                    build_state,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                get_dep_modules(
+                                    &ast_path.to_string_lossy(),
+                                    package.namespace.to_suffix(),
+                                    package.modules.as_ref().unwrap(),
+                                    all_mod,
+                                    package,
+                                    build_state,
+                                )
+                            })
+                    } else {
+                        get_dep_modules(
+                            &ast_path.to_string_lossy(),
                             package.namespace.to_suffix(),
                             package.modules.as_ref().unwrap(),
                             all_mod,
                             package,
                             build_state,
-                        ))
+                        )
+                    };
+
+                    if let Some(interface) = &source_file.interface {
+                        let iast_path = helpers::get_ast_path(&interface.path);
+
+                        let intf_key = format!("{module_name}:intf");
+                        let intf_deps = if build_state.build_mode().is_in_process() {
+                            build_state
+                                .get_in_memory_deps(&intf_key)
+                                .map(|in_memory_deps| {
+                                    get_dep_modules_from_memory(
+                                        &in_memory_deps,
+                                        package.namespace.to_suffix(),
+                                        package.modules.as_ref().unwrap(),
+                                        all_mod,
+                                        package,
+                                        build_state,
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    get_dep_modules(
+                                        &iast_path.to_string_lossy(),
+                                        package.namespace.to_suffix(),
+                                        package.modules.as_ref().unwrap(),
+                                        all_mod,
+                                        package,
+                                        build_state,
+                                    )
+                                })
+                        } else {
+                            get_dep_modules(
+                                &iast_path.to_string_lossy(),
+                                package.namespace.to_suffix(),
+                                package.modules.as_ref().unwrap(),
+                                all_mod,
+                                package,
+                                build_state,
+                            )
+                        };
+                        deps.extend(intf_deps)
                     }
                     match &package.namespace {
                         packages::Namespace::NamespaceWithEntry { namespace: _, entry }

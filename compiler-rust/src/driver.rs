@@ -2977,9 +2977,6 @@ pub fn compile_source_in_process(
     registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessCompileResult> {
-    let original_alias_count = registry.alias_rewrites.len();
-
-    // Parse
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     if parser.has_errors() {
@@ -2988,7 +2985,6 @@ pub fn compile_source_in_process(
             parser.diagnostics().len()
         ));
     }
-    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
         jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
@@ -2998,14 +2994,38 @@ pub fn compile_source_in_process(
     let structure = ppx::expand_extensions(&structure, parser.arena_mut());
     let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+    let structure =
+        crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
 
-    // Type check
+    compile_preprocessed_structure_in_process(
+        parser.arena(),
+        &structure,
+        filename,
+        module_name,
+        options,
+        registry,
+        has_interface,
+    )
+}
+
+pub fn compile_preprocessed_structure_in_process(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+) -> Result<InProcessCompileResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+    let file_directives = extract_file_directives_from_structure(structure, arena)?;
+
     log::debug!("[compile_source_in_process] {} type-check start", module_name);
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     let mut env = initial_env(&type_ctx);
 
     let t_env = phase_now();
@@ -3030,7 +3050,7 @@ pub fn compile_source_in_process(
     tctx.set_persistent_env(pers_env);
 
     let t_tc = phase_now();
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+    let (typed_structure, final_env) = type_structure(&mut tctx, &env, arena, structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
     let tc_ms = phase_elapsed_ms(t_tc);
 
@@ -3056,7 +3076,7 @@ pub fn compile_source_in_process(
     let typed_tree_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
         let _ = crate::types::sexp_typedtree::print_typed_structure_with_locs(
-            parser.arena(),
+            arena,
             &type_ctx,
             &typed_structure,
             &mut buf,
@@ -3080,7 +3100,7 @@ pub fn compile_source_in_process(
         compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            parser.arena(),
+            arena,
             &type_ctx,
             &env,
             lambda_start_stamp,
@@ -3193,8 +3213,6 @@ pub fn typecheck_interface_in_process(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
 ) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrites.len();
-
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
     if parser.has_errors() {
@@ -3204,11 +3222,31 @@ pub fn typecheck_interface_in_process(
         ));
     }
 
+    typecheck_preprocessed_signature_in_process(
+        parser.arena(),
+        &signature,
+        filename,
+        module_name,
+        options,
+        registry,
+    )
+}
+
+pub fn typecheck_preprocessed_signature_in_process(
+    arena: &crate::parse_arena::ParseArena,
+    signature: &Signature,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<InProcessInterfaceResult> {
+    let original_alias_count = registry.alias_rewrites.len();
+
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -3230,7 +3268,7 @@ pub fn typecheck_interface_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
+    let typed_signature = transl_signature(&mut tctx, &env, arena, signature)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
     let typed_module_type = crate::types::typedtree::ModuleType {
