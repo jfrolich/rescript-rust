@@ -1449,23 +1449,23 @@ fn compile_module_in_process(
     let is_runtime = package.name == "@rescript/runtime";
     let provisional_is_pure = true;
 
-    // For .resi + .res, we need the .resi to be in the registry before compiling .res.
-    // Build a local registry that includes the .resi result (if any).
-    let mut local_registry = registry.clone();
-
-    // Register this module's metadata in the local registry
-    local_registry.module_info.insert(
-        module_name.to_string(),
-        rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
-            source_path: source_abs.clone(),
-            is_pure: provisional_is_pure,
-            cmj_export_constants: AHashMap::new(),
-            is_runtime,
-        },
-    );
+    // For .resi + .res, the implementation must see the just-checked interface.
+    // Most modules have no interface, so avoid cloning the registry on that path.
+    let mut interface_registry: Option<ModuleRegistry> = None;
 
     // Step 1: If .resi exists, typecheck the interface first
     if let Some(interface) = &source_file.interface {
+        let mut local_registry = registry.clone();
+        local_registry.module_info.insert(
+            module_name.to_string(),
+            rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
+                source_path: source_abs.clone(),
+                is_pure: provisional_is_pure,
+                cmj_export_constants: AHashMap::new(),
+                is_runtime,
+            },
+        );
+
         let intf_source_abs = Path::new(&package.path).join(&interface.path);
         let intf_key = format!("{module_name}:intf");
         let intf_result = match build_command_state.get_stored_ast(&intf_key) {
@@ -1538,10 +1538,13 @@ fn compile_module_in_process(
             intf_fingerprint,
             provisional_is_pure,
         );
+
+        interface_registry = Some(local_registry);
     }
 
     // Step 2: Compile the implementation
     let impl_key = format!("{module_name}:impl");
+    let compile_registry = interface_registry.as_ref().unwrap_or(registry);
     let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match build_command_state.get_stored_ast(&impl_key) {
             Some(StoredAst::Structure(stored)) => {
@@ -1551,7 +1554,7 @@ fn compile_module_in_process(
                     &source_abs.to_string_lossy(),
                     module_name,
                     &options,
-                    &local_registry,
+                    compile_registry,
                     has_interface,
                 )
             }
@@ -1568,7 +1571,7 @@ fn compile_module_in_process(
                     &source_abs.to_string_lossy(),
                     module_name,
                     &options,
-                    &local_registry,
+                    compile_registry,
                     has_interface,
                 )
             }
