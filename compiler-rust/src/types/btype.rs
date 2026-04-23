@@ -41,19 +41,19 @@ pub fn is_unmarked(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 /// Check if a type is a type variable (Tvar).
 pub fn is_tvar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(_))
 }
 
 /// Check if a type is a universal type variable (Tunivar).
 pub fn is_tunivar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tunivar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(_))
 }
 
 /// Check if a type is a type constructor (Tconstr).
 pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tconstr { .. })
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tconstr { .. })
 }
 
 // ============================================================================
@@ -100,7 +100,7 @@ fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowFiel
 /// This follows variant type chains to find the underlying type variable.
 pub fn row_more(ctx: &TypeContext<'_>, row: &RowDesc) -> TypeExprRef {
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_more(ctx, inner_row),
         _ => more,
     }
@@ -115,7 +115,7 @@ pub fn row_repr(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
 
 pub fn row_repr_ref<'a>(ctx: &'a TypeContext<'a>, row: &'a RowDesc) -> Cow<'a, RowDesc> {
     let more = ctx.repr(row.row_more);
-    let desc = ctx.get_desc(more);
+    let desc = ctx.borrow_desc(more);
     if matches!(&*desc, TypeDesc::Tvariant(_)) {
         drop(desc);
         Cow::Owned(row_repr(ctx, row))
@@ -130,7 +130,7 @@ fn row_repr_aux(
     row: &RowDesc,
 ) -> RowDesc {
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => {
             let f = &row.row_fields;
             let new_ll: Vec<Vec<(crate::types::asttypes::Label, RowField)>> = if f.is_empty() {
@@ -176,7 +176,7 @@ pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
 
     // Check nested variant
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_field(ctx, tag, inner_row),
         _ => RowField::Rabsent,
     }
@@ -189,7 +189,7 @@ pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
     }
 
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_fixed(ctx, inner_row),
         TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
         TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => true,

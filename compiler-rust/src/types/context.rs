@@ -843,6 +843,15 @@ impl<'a> TypeContext<'a> {
         TypeDescSnapshot(self.types.get(r).desc().clone())
     }
 
+    /// Borrow the descriptor of a type without cloning it.
+    ///
+    /// Prefer this in short read-only hot paths. Use `get_desc()` when the
+    /// descriptor must be held across code that may mutate the same type node.
+    #[inline]
+    pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        self.types.get(r).desc()
+    }
+
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
@@ -1519,7 +1528,7 @@ impl<'a> TypeContext<'a> {
         // Fast path: check if t is already a representative (no link).
         // This avoids any allocation for the common case.
         let first_next = {
-            let desc = self.get_desc(t);
+            let desc = self.borrow_desc(t);
             match &*desc {
                 TypeDesc::Tlink(next) => *next,
                 TypeDesc::Tfield {
@@ -1541,7 +1550,7 @@ impl<'a> TypeContext<'a> {
         let mut current = first_next;
         for _ in 0..10_000 {
             let next = {
-                let desc = self.get_desc(current);
+                let desc = self.borrow_desc(current);
                 match &*desc {
                     TypeDesc::Tlink(next) => Some(*next),
                     TypeDesc::Tfield {

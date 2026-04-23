@@ -533,7 +533,7 @@ pub fn occurs(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef)
         // OCaml ctype.ml occur_rec does not recurse into object/variant nodes
         // for regular expression-mode occurs checks.
         let should_recurse = {
-            let desc = ctx.get_desc(haystack);
+            let desc = ctx.borrow_desc(haystack);
             !matches!(&*desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_))
         };
         if !should_recurse {
@@ -598,13 +598,13 @@ pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExpr
 /// contaminated across branches (e.g. result<string, [#InvalidString]>).
 pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tvariant(_) => true,
         TypeDesc::Tconstr { args, .. } => args
             .iter()
             .copied()
-            .any(|arg| matches!(&*ctx.get_desc(ctx.repr(arg)), TypeDesc::Tvariant(_))),
+            .any(|arg| matches!(&*ctx.borrow_desc(ctx.repr(arg)), TypeDesc::Tvariant(_))),
         _ => false,
     }
 }
@@ -621,14 +621,14 @@ pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
     let source_name = {
-        let desc = ctx.get_desc(t1_repr);
+        let desc = ctx.borrow_desc(t1_repr);
         match &*desc {
             TypeDesc::Tvar(name) => Some(name.clone()),
             _ => None,
         }
     };
     let target_name = {
-        let desc = ctx.get_desc(t2_repr);
+        let desc = ctx.borrow_desc(t2_repr);
         match &*desc {
             TypeDesc::Tvar(name) => Some(name.clone()),
             _ => None,
@@ -687,7 +687,7 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
     let current = ctx.get_level(ty);
 
     if level < current {
-        let desc = ctx.get_desc(ty);
+        let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tconstr { path, .. } => {
                 let path = path.clone();
@@ -716,7 +716,7 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                         decl.type_manifest.is_some_and(|manifest| {
                             let m = ctx.repr(manifest);
                             let m_level = ctx.get_level(m);
-                            let m_desc = ctx.get_desc(m);
+                            let m_desc = ctx.borrow_desc(m);
                             m_level != crate::types::type_expr::GENERIC_LEVEL
                                 && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
                                     if matches!(mp, Path::Pident(id)
@@ -1796,7 +1796,7 @@ fn try_expand_head_with_mode<'a>(
     mode: ExpandHeadMode,
 ) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             // OCaml runs check_abbrev_env from expand_abbrev_gen, which is only
@@ -1831,7 +1831,7 @@ fn try_expand_head_with_mode<'a>(
             {
                 let cached_repr = ctx.repr(cached);
                 let stale_same_path = {
-                    let desc = ctx.get_desc(cached_repr);
+                    let desc = ctx.borrow_desc(cached_repr);
                     matches!(
                         &*desc,
                         TypeDesc::Tconstr {
@@ -1887,7 +1887,7 @@ fn try_expand_head_with_mode<'a>(
                 if exact_lookup {
                     let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
                         let manifest = ctx.repr(manifest);
-                        let manifest_desc = ctx.get_desc(manifest);
+                        let manifest_desc = ctx.borrow_desc(manifest);
                         matches!(
                             &*manifest_desc,
                             TypeDesc::Tconstr {
@@ -1989,7 +1989,7 @@ fn try_expand_head_with_mode<'a>(
                 if let Some(manifest) = decl.type_manifest {
                     let synthetic_self_manifest = {
                         let manifest_repr = ctx.repr(manifest);
-                        let manifest_desc = ctx.get_desc(manifest_repr);
+                        let manifest_desc = ctx.borrow_desc(manifest_repr);
                         matches!(
                             &*manifest_desc,
                             TypeDesc::Tconstr {
@@ -2676,8 +2676,8 @@ fn unify_after_expansion<'a>(
     }
 
     {
-        let lhs_desc = ctx.get_desc(lhs);
-        let rhs_desc = ctx.get_desc(rhs);
+        let lhs_desc = ctx.borrow_desc(lhs);
+        let rhs_desc = ctx.borrow_desc(rhs);
         if let (
             TypeDesc::Tconstr {
                 path: path1,
@@ -2741,21 +2741,21 @@ fn should_keep_expanded_manifest_alias_repr(
     swap: bool,
 ) -> bool {
     let (lhs_path, lhs_args_len) = {
-        let lhs_desc = ctx.get_desc(ctx.repr(lhs));
+        let lhs_desc = ctx.borrow_desc(ctx.repr(lhs));
         match &*lhs_desc {
             TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.len()),
             _ => return false,
         }
     };
     let rhs_path = {
-        let rhs_desc = ctx.get_desc(ctx.repr(rhs));
+        let rhs_desc = ctx.borrow_desc(ctx.repr(rhs));
         match &*rhs_desc {
             TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
             _ => return false,
         }
     };
     let relink_path = {
-        let relink_desc = ctx.get_desc(ctx.repr(relink_target));
+        let relink_desc = ctx.borrow_desc(ctx.repr(relink_target));
         match &*relink_desc {
             TypeDesc::Tconstr { path, .. } => path.clone(),
             _ => return false,
@@ -2775,7 +2775,7 @@ fn should_keep_expanded_manifest_alias_repr(
         return false;
     };
     let manifest_path = {
-        let manifest_desc = ctx.get_desc(ctx.repr(manifest));
+        let manifest_desc = ctx.borrow_desc(ctx.repr(manifest));
         match &*manifest_desc {
             TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
             _ => return false,
@@ -2827,8 +2827,8 @@ fn unify_types<'a>(
     }
 
     {
-        let desc1 = ctx.get_desc(t1);
-        let desc2 = ctx.get_desc(t2);
+        let desc1 = ctx.borrow_desc(t1);
+        let desc2 = ctx.borrow_desc(t2);
         if let (
             TypeDesc::Tconstr {
                 path: path1,
@@ -6897,7 +6897,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     // if row_more currently carries a temporary marker, reuse the
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
-        if let TypeDesc::Tvariant(row0) = &*ctx.get_desc(ty) {
+        if let TypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
             let row = row_repr_ref(ctx, row0);
             let row = row.as_ref();
             let more = ctx.repr(row.row_more);
@@ -7333,13 +7333,13 @@ fn copy_row_cached(
 /// Check if a type is a function type.
 pub fn is_function(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
-    matches!(*ctx.get_desc(ty), TypeDesc::Tarrow { .. })
+    matches!(*ctx.borrow_desc(ty), TypeDesc::Tarrow { .. })
 }
 
 /// Get the arity of a function type (number of arguments).
 pub fn function_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> usize {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tarrow { ret, .. } => {
             let ret = *ret;
@@ -7353,7 +7353,7 @@ pub fn function_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> usize {
 /// Extract the argument and return types from an arrow type.
 pub fn split_arrow(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, *ret)),
         _ => None,
@@ -7366,7 +7366,7 @@ pub fn split_arrow_with_label(
     ty: TypeExprRef,
 ) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tarrow { arg, ret, .. } => Some((arg.lbl.clone(), arg.typ, *ret)),
         _ => None,
@@ -7377,7 +7377,7 @@ pub fn split_arrow_with_label(
 /// Returns None if the type is not option<T>.
 pub fn extract_option_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
             if path.head_name() == "option" && args.len() == 1 {
@@ -7393,7 +7393,7 @@ pub fn extract_option_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Typ
 /// Get the element types of a tuple.
 pub fn tuple_elements(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Vec<TypeExprRef>> {
     let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Ttuple(types) => Some(types.clone()),
         _ => None,
