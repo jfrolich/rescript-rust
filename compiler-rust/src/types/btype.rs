@@ -263,21 +263,36 @@ where
         }
     }
 
+    enum MoreAction {
+        Variant(RowDesc),
+        RowNameTypes,
+        None,
+    }
+
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
-        TypeDesc::Tvariant(inner_row) => iter_row(ctx, inner_row, f),
-        TypeDesc::Tvar(_)
-        | TypeDesc::Tunivar(_)
-        | TypeDesc::Tsubst(_)
-        | TypeDesc::Tconstr { .. }
-        | TypeDesc::Tnil => {
+    let action = {
+        let desc = ctx.borrow_desc(more);
+        match &*desc {
+            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(inner_row.clone()),
+            TypeDesc::Tvar(_)
+            | TypeDesc::Tunivar(_)
+            | TypeDesc::Tsubst(_)
+            | TypeDesc::Tconstr { .. }
+            | TypeDesc::Tnil => MoreAction::RowNameTypes,
+            _ => MoreAction::None,
+        }
+    };
+
+    match action {
+        MoreAction::Variant(inner_row) => iter_row(ctx, &inner_row, f),
+        MoreAction::RowNameTypes => {
             if let Some((_, types)) = &row.row_name {
                 for ty in types {
                     f(*ty);
                 }
             }
         }
-        _ => {}
+        MoreAction::None => {}
     }
 }
 
@@ -298,7 +313,7 @@ where
     }
 
     let children = {
-        let desc = ctx.get_desc(ty);
+        let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tvar(_) => Children::None,
             TypeDesc::Tarrow { arg, ret, .. } => Children::Two(arg.typ, *ret),
@@ -485,7 +500,7 @@ pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     }
 
     let action = {
-        let desc = ctx.get_desc(ty0);
+        let desc = ctx.borrow_desc(ty0);
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 // Clone the row to check static_row outside the borrow
@@ -510,7 +525,7 @@ pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 }
 
 fn proxy_obj(ctx: &TypeContext<'_>, ty: TypeExprRef, original: TypeExprRef) -> TypeExprRef {
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
@@ -540,7 +555,7 @@ pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
     }
 
     let action = {
-        let desc = ctx.get_desc(t);
+        let desc = ctx.borrow_desc(t);
         match &*desc {
             TypeDesc::Tobject { fields, .. } => RowAction::ObjectFields(*fields),
             TypeDesc::Tvariant(row) => RowAction::VariantRow(row.clone()),
@@ -557,7 +572,7 @@ pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
 
 fn get_row(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
     let t = ctx.repr(t);
-    let desc = ctx.get_desc(t);
+    let desc = ctx.borrow_desc(t);
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
@@ -580,7 +595,7 @@ pub fn is_row_name(s: &str) -> bool {
 
 /// Check if a type is a constructor row type.
 pub fn is_constr_row(ctx: &TypeContext<'_>, t: TypeExprRef, allow_ident: bool) -> bool {
-    let desc = ctx.get_desc(t);
+    let desc = ctx.borrow_desc(t);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => match path {
             Path::Pident(id) if allow_ident => is_row_name(id.name()),
