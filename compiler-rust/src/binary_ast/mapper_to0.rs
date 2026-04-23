@@ -288,21 +288,35 @@ impl<'a> Mapper<'a> {
                     optional,
                     value,
                 } => {
-                    // Use the StrIdx directly
                     let name_idx = name.txt;
                     let label = if *optional {
                         pt0::ArgLabel::Optional(name_idx)
                     } else {
                         pt0::ArgLabel::Labelled(name_idx)
                     };
-                    (label, self.map_expr_idx(*value))
+                    let name_loc = self.loc(name.loc);
+                    let mut value_expr = self.map_expr_idx(*value);
+                    value_expr.pexp_attributes.insert(
+                        0,
+                        (
+                            OldLocated::new("res.jsxPropLoc".to_string(), name_loc),
+                            pt0::Payload::PStr(vec![]),
+                        ),
+                    );
+                    (label, value_expr)
                 }
-                current::JsxProp::Spreading { expr, .. } => {
+                current::JsxProp::Spreading { loc, expr } => {
                     let spread_idx = self.intern("_spreadProps");
-                    (
-                        pt0::ArgLabel::Labelled(spread_idx),
-                        self.map_expr_idx(*expr),
-                    )
+                    let spread_loc = self.loc(*loc);
+                    let mut value_expr = self.map_expr_idx(*expr);
+                    value_expr.pexp_attributes.insert(
+                        0,
+                        (
+                            OldLocated::new("res.jsxSpreadLoc".to_string(), spread_loc),
+                            pt0::Payload::PStr(vec![]),
+                        ),
+                    );
+                    (pt0::ArgLabel::Labelled(spread_idx), value_expr)
                 }
             };
             result.push(item);

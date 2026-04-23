@@ -732,18 +732,49 @@ impl<'a> Mapper<'a> {
         children
     }
 
+    /// Extract an internal `[@<attr_name>]` loc-carrying attribute from the list,
+    /// returning its location (if found) and the attributes with it removed.
+    /// Mirrors OCaml `ast_mapper_from0.extract_internal_loc_attr`.
+    fn extract_internal_loc_attr(
+        &mut self,
+        attr_name: &str,
+        attrs: &[pt0::Attribute],
+    ) -> (Option<FullLocation>, Vec<pt0::Attribute>) {
+        let mut found: Option<FullLocation> = None;
+        let mut out = Vec::with_capacity(attrs.len());
+        for attr in attrs {
+            let (name, payload) = attr;
+            let is_match = found.is_none()
+                && name.txt == attr_name
+                && matches!(payload, pt0::Payload::PStr(items) if items.is_empty());
+            if is_match {
+                found = Some(name.loc.clone());
+            } else {
+                out.push(attr.clone());
+            }
+        }
+        (found, out)
+    }
+
     /// Tries to extract a JSX prop from a labeled argument
     fn try_map_jsx_prop(
         &mut self,
         label: &pt0::ArgLabel,
         expr: &pt0::Expression,
     ) -> Option<current::JsxProp> {
+        const JSX_PROP_LOC_ATTR: &str = "res.jsxPropLoc";
+        const JSX_SPREAD_LOC_ATTR: &str = "res.jsxSpreadLoc";
+
         match label {
             pt0::ArgLabel::Labelled(name_idx) if self.get_str(*name_idx) == "_spreadProps" => {
-                let expr_loc = self.loc(&expr.pexp_loc);
+                let (loc, attrs) =
+                    self.extract_internal_loc_attr(JSX_SPREAD_LOC_ATTR, &expr.pexp_attributes);
+                let mut stripped = expr.clone();
+                stripped.pexp_attributes = attrs;
+                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
                 Some(current::JsxProp::Spreading {
-                    loc: expr_loc,
-                    expr: self.push_expr(expr),
+                    loc: self.loc(&loc),
+                    expr: self.push_expr(&stripped),
                 })
             }
             pt0::ArgLabel::Labelled(name_idx) => {
@@ -759,10 +790,15 @@ impl<'a> Mapper<'a> {
                         }
                     }
                 }
+                let (loc, attrs) =
+                    self.extract_internal_loc_attr(JSX_PROP_LOC_ATTR, &expr.pexp_attributes);
+                let mut stripped = expr.clone();
+                stripped.pexp_attributes = attrs;
+                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
                 Some(current::JsxProp::Value {
-                    name: self.mk_string_noloc(&name_str),
+                    name: self.mk_string_loc(&name_str, &loc),
                     optional: false,
-                    value: self.push_expr(expr),
+                    value: self.push_expr(&stripped),
                 })
             }
             pt0::ArgLabel::Optional(name_idx) => {
@@ -778,10 +814,15 @@ impl<'a> Mapper<'a> {
                         }
                     }
                 }
+                let (loc, attrs) =
+                    self.extract_internal_loc_attr(JSX_PROP_LOC_ATTR, &expr.pexp_attributes);
+                let mut stripped = expr.clone();
+                stripped.pexp_attributes = attrs;
+                let loc = loc.unwrap_or_else(|| expr.pexp_loc.clone());
                 Some(current::JsxProp::Value {
-                    name: self.mk_string_noloc(&name_str),
+                    name: self.mk_string_loc(&name_str, &loc),
                     optional: true,
-                    value: self.push_expr(expr),
+                    value: self.push_expr(&stripped),
                 })
             }
             pt0::ArgLabel::Nolabel => None,
