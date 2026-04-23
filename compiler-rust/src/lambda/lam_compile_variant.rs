@@ -646,6 +646,52 @@ impl LambdaCompiler {
         Some(test)
     }
 
+    /// Compute the null/array guard expression for an untagged-variant typeof
+    /// switch (mirrors OCaml `lam_compile.ml` switch helper after upstream
+    /// PRs ebed19abd / fbe7a7391 / ccdec51fc — #8251).
+    ///
+    /// When a typeof switch has an `"object"` case (because some variant arm
+    /// is `SwitchBlockType::Object`), null and arrays would otherwise match
+    /// that case too (`typeof null === typeof [] === "object"`). Returns a
+    /// guard expression that should be wrapped around the typeof switch to
+    /// route null / array values to the default body instead.
+    fn untagged_typeof_object_guard(
+        &self,
+        scrut: &Expression,
+        typeof_cases: &[(SwitchCaseTag, &Lambda)],
+        runtime_test_cases: &[(&SwitchBlock, &Lambda)],
+        all_block_types: &[SwitchBlockType],
+        has_null_case: bool,
+    ) -> Option<Expression> {
+        let has_object_typeof = typeof_cases
+            .iter()
+            .any(|(tag, _)| matches!(tag, SwitchCaseTag::String(s) if s == "object"));
+        if !has_object_typeof {
+            return None;
+        }
+        let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
+            matches!(&case.block_type, Some(SwitchBlockType::Instance(name)) if name == "Array")
+        });
+        let type_has_array_case = all_block_types
+            .iter()
+            .any(|t| matches!(t, SwitchBlockType::Instance(name) if name == "Array"));
+        let needs_null_guard = has_null_case;
+        let needs_array_guard = type_has_array_case && !clauses_have_array_case;
+
+        let null_check = || self.is_null_expr(scrut.clone());
+        let array_check = || {
+            self.builtin_untagged_instance_test(scrut.clone(), "Array")
+                .expect("Array instance test always available")
+        };
+
+        match (needs_null_guard, needs_array_guard) {
+            (true, true) => Some(Expression::bin(BinOp::Or, null_check(), array_check())),
+            (true, false) => Some(null_check()),
+            (false, true) => Some(array_check()),
+            (false, false) => None,
+        }
+    }
+
     fn compile_builtin_untagged_block_chain<F>(
         &mut self,
         scrut_expr: Expression,
@@ -842,6 +888,25 @@ impl LambdaCompiler {
             )
         };
 
+        // #8251: guard typeof "object" against null / arrays
+        if !typeof_cases.is_empty()
+            && let Some(guard) = self.untagged_typeof_object_guard(
+                &scrut_expr,
+                &typeof_cases,
+                &runtime_test_cases,
+                &all_block_types,
+                has_null_case,
+            )
+        {
+            let default_body = self
+                .block_switch_default(switch)
+                .map(|fallback| self.compile_assign_to_target_block(result, fallback));
+            tail = match default_body {
+                Some(default_block) => vec![Statement::if_(guard, default_block, tail)],
+                None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
+            };
+        }
+
         for (case, body) in runtime_test_cases.into_iter().rev() {
             let test = self
                 .builtin_untagged_block_test(
@@ -975,6 +1040,25 @@ impl LambdaCompiler {
             )
         };
 
+        // #8251: guard typeof "object" against null / arrays
+        if !typeof_cases.is_empty()
+            && let Some(guard) = self.untagged_typeof_object_guard(
+                &scrut_expr,
+                &typeof_cases,
+                &runtime_test_cases,
+                &all_block_types,
+                has_null_case,
+            )
+        {
+            let default_body = self
+                .block_switch_default(switch)
+                .map(|fallback| self.compile_return_block(fallback));
+            tail = match default_body {
+                Some(default_block) => Self::normalized_if_block(guard, default_block, tail),
+                None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
+            };
+        }
+
         for (case, body) in runtime_test_cases.into_iter().rev() {
             let test = self
                 .builtin_untagged_block_test(
@@ -1107,6 +1191,25 @@ impl LambdaCompiler {
             )
         };
 
+        // #8251: guard typeof "object" against null / arrays
+        if !typeof_cases.is_empty()
+            && let Some(guard) = self.untagged_typeof_object_guard(
+                &scrut_expr,
+                &typeof_cases,
+                &runtime_test_cases,
+                &all_block_types,
+                has_null_case,
+            )
+        {
+            let default_body = self
+                .block_switch_default(switch)
+                .map(|fallback| self.compile_effect_block(fallback));
+            tail = match default_body {
+                Some(default_block) => vec![Statement::if_(guard, default_block, tail)],
+                None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
+            };
+        }
+
         for (case, body) in runtime_test_cases.into_iter().rev() {
             let test = self
                 .builtin_untagged_block_test(
@@ -1215,9 +1318,7 @@ impl LambdaCompiler {
 
         let literal_cases = self.literal_cases(switch).unwrap_or_default();
         let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let has_null_case = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Null));
+        let _ = literal_cases;
         let const_complete = self.const_switch_complete(switch);
         let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
@@ -1233,11 +1334,15 @@ impl LambdaCompiler {
                 const_complete,
             )
         };
+        // Mixed path (const cases + block cases): null is dispatched by the
+        // outer const_branch, so when we fall into block_branch, x cannot be
+        // null. Match OCaml's `compile_cases` default `has_null_case = false`
+        // in the else branch of lam_compile.ml:755.
         let block_branch = self.compile_untagged_block_switch_assignment_statements(
             result,
             scrut_expr.clone(),
             switch,
-            has_null_case,
+            false,
         );
 
         let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr.clone(), switch)
@@ -1297,9 +1402,7 @@ impl LambdaCompiler {
 
         let literal_cases = self.literal_cases(switch).unwrap_or_default();
         let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let has_null_case = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Null));
+        let _ = literal_cases;
         let const_complete = self.const_switch_complete(switch);
         let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
@@ -1314,10 +1417,11 @@ impl LambdaCompiler {
                 const_complete,
             )
         };
+        // Mixed path: null handled by const_branch; block_branch sees non-null x.
         let block_branch = self.compile_untagged_block_switch_return_statements(
             scrut_expr.clone(),
             switch,
-            has_null_case,
+            false,
         );
 
         let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr.clone(), switch)
@@ -1377,9 +1481,7 @@ impl LambdaCompiler {
 
         let literal_cases = self.literal_cases(switch).unwrap_or_default();
         let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let has_null_case = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Null));
+        let _ = literal_cases;
         let const_complete = self.const_switch_complete(switch);
         let const_default = self.const_switch_default(switch);
         let const_branch = if const_cases.is_empty() {
@@ -1394,10 +1496,11 @@ impl LambdaCompiler {
                 const_complete,
             )
         };
+        // Mixed path: null handled by const_branch; block_branch sees non-null x.
         let block_branch = self.compile_untagged_block_switch_effect_statements(
             scrut_expr.clone(),
             switch,
-            has_null_case,
+            false,
         );
 
         let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr.clone(), switch)
