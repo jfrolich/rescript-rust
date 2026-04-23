@@ -909,6 +909,15 @@ impl LambdaCompiler {
                 } else {
                     self.compile_effect_output(a)
                 };
+                // OCaml's Lbreak / Lcontinue compile to `Js_output.make ...
+                // ~output_finished:True` (compiler/core/lam_compile.ml:1928,
+                // 1943). `Js_output.append_output` then drops the tail's
+                // contribution when the head is finished. Mirror that here:
+                // when the sequence head is an exit terminator, skip typing
+                // the tail entirely — its statements are unreachable.
+                if lambda_is_unconditional_exit(a) {
+                    return first;
+                }
                 let second = self.compile_expr(b);
                 self.append_effect_output(first, second)
             }
@@ -1657,7 +1666,13 @@ impl LambdaCompiler {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let mut block = self.compile_let_binding(*kind, id, value);
-                if block_finishes_output(&block) {
+                // Mirror OCaml's output_finished:True from Lbreak/Lcontinue:
+                // if the binding's RHS is an unconditional exit, the body is
+                // unreachable and must not be emitted. block_finishes_output
+                // only recognises Return/Throw (Break/Continue inside a switch
+                // case must not terminate the enclosing block), so check the
+                // Lambda form directly.
+                if lambda_is_unconditional_exit(value) || block_finishes_output(&block) {
                     return block;
                 }
                 block.extend(self.compile_effect_block(body));
@@ -1680,7 +1695,7 @@ impl LambdaCompiler {
             }
             Lambda::Lsequence(first, second) => {
                 let mut block = self.compile_effect_block(first);
-                if block_finishes_output(&block) {
+                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
                     return block;
                 }
                 block.extend(self.compile_effect_block(second));
@@ -5315,6 +5330,15 @@ impl LambdaCompiler {
         ocaml_sort_modules(&mut modules);
         modules
     }
+}
+
+/// True if this Lambda unconditionally transfers control out of the
+/// enclosing block — its compiled form has no usable fall-through. Matches
+/// OCaml's `Js_output.output_finished:True`: `Lbreak` and `Lcontinue` set
+/// it directly (lam_compile.ml:1928, 1943); nothing else in this code path
+/// is compiled with that flag.
+fn lambda_is_unconditional_exit(lam: &Lambda) -> bool {
+    matches!(lam, Lambda::Lbreak | Lambda::Lcontinue)
 }
 
 fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
