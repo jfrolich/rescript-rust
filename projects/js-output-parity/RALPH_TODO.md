@@ -1,23 +1,30 @@
 # Ralph TODO: JS Output Parity
 
-## Current baseline (2026-04-23): **658 / 660** (99.7%)
+## Current baseline (2026-04-23): **660 / 660** (100.0%)
 
 Measured on the `combined` branch (post-typechecker-performance merge,
-post-13.0.0-alpha.4 backports) after fixing the last typechecker crash.
+post-13.0.0-alpha.4 backports) after fixing the last typechecker crash
+and the final two JS output shape diffs.
 Set size grew from 657 → 660 because `tests/tests/src` now includes the
 test files added by the upstream backports (DictScopedRecordLiteral,
 test_for_of, etc.).
 
 - 0 compile errors / 0 Rust crashes
-- 2 output diffs (both semantically equivalent — see remaining items below)
+- 0 output diffs
+- `timeout 1800 ./scripts/test_js_output_parity.sh` reports 660 / 660.
+- Spice PPX was skipped locally because `/Users/jaapf/conductor/repos/ppx_spice/ppx` is not present.
 
-## Remaining JS output parity diffs (2 files, ~15 hunks total)
+## Remaining JS output parity diffs
+
+None in the canonical in-repo JS snapshot suite.
+
+## Final fixed diffs
 
 ### 1. `tests/tests/src/js_json_test.res`
 
-Pattern-match compiler emits a different (semantically equivalent)
-control-flow shape for a `switch` whose only side-effecting arm is
-guarded by structural type checks:
+The final Rust drift was a different (semantically equivalent) control-flow
+shape for a `switch` whose only side-effecting arm is guarded by structural type
+checks:
 
 ```rescript
 let classifyStatement = (json: J.t) => {
@@ -45,7 +52,8 @@ let classifyStatement = json => {
 };
 ```
 
-Rust keeps the inverted predicate as a wrapping `if` around the switch:
+Rust previously kept the inverted predicate as a wrapping `if` around the
+switch:
 
 ```js
 let classifyStatement = json => {
@@ -58,25 +66,18 @@ let classifyStatement = json => {
 };
 ```
 
-**Root cause:** OCaml's `Matching` / `Lambda` lowering for the `null` /
-`Array(_)` arms emits a fall-through that, combined with `S.if_` rule 5
-in tail-return position, produces the early-return shape. Rust's
-`raw_lambda::matching` produces a single `Lifthenelse` whose then-branch
-is the switch, so there's nothing for rule 5 to flatten — the compiled
-form keeps the wrapping `if`. Both outputs return `undefined` on every
-path; behavior is identical.
-
-**Fix direction (when prioritized):** Trace the OCaml `Matching.split_or`
-/ `Matching.do_compile_matching` decisions for the
-`Object | Array | String | _` constructor combination and align
-`raw_lambda::matching::split_constructor_cases` so the array/null guard
-is emitted as a separate stmt-level branch ahead of the typeof switch.
+**Fix:** The untagged-block switch compiler now filters default-equivalent
+runtime-test cases before building the `typeof` switch, while still using the
+unfiltered runtime-test presence to prevent small-tail collapse. In unit-return
+tail position it emits the OCaml-shaped early-return object guard directly, so
+the final output is the `null || Array.isArray` guard followed by
+`switch (typeof json)`.
 
 ### 2. `tests/tests/src/stdlib/Stdlib_IteratorTests.res`
 
-DCE elides `let match$N = pure_call();` bindings whose result is unused,
-converting them to bare expression statements. OCaml keeps the
-declaration, even though `match$N` has no later use:
+The final Rust drift elided effect-position switches whose result was unused,
+converting them into `undefined` expressions and shifting later `match$N`
+bindings. OCaml keeps the switch effects:
 
 ```js
 // OCaml
@@ -99,27 +100,13 @@ switch iter->IterableIterator.next {
 }
 ```
 
-— every arm returns `()`, so the scrutinee binding is unused. OCaml's
-`Js_pass_flatten_and_mark_dead.mark_dead_code` (js_pass_flatten_and_
-mark_dead.ml:155-171) DOES rewrite `let x = call()` to `Exp(call())`
-when `x` is `Dead_non_pure`, but that pass evidently never marks the
-scrutinee binding here as dead — the pattern-match compiler downstream
-of the `Matching` stage keeps the binding "live" for shape reasons even
-when no arm references it. Rust's `lam_pass_lets_dce` is more aggressive
-and elides the declaration form entirely.
+— every arm returns `()`, but OCaml still compiles the effectful switch
+structure in statement position.
 
-The cascading effect is downstream `match$N` numbering shifts, so every
-later mention of `match$5..match$14` in OCaml renumbers to
-`match$5..match$10` in Rust. Behavior is identical (every `next()` call
-still happens; every conditional reads the right `done`/`value`).
-
-**Fix direction (when prioritized):** Walk OCaml's `Js_op_util` use-stats
-flow for the `match$N` binder produced by `do_compile_matching` over an
-all-`()` arm match. Identify what keeps it as `Used` rather than
-`Dead_non_pure` (likely the implicit Texp_match scrutinee binding kept
-alive by the `Matching` exit-tree shape) and mirror that in Rust's
-`lam_pass_collect` / `lam_pass_lets_dce` so the `let` declaration
-survives.
+**Fix:** Effect-position `Lswitch` and `Lstringswitch` compilation now preserves
+their emitted switch blocks in the statement prelude instead of reducing the
+whole expression to `undefined`. This keeps the OCaml switch shape and prevents
+the downstream binding-number cascade.
 
 ## Notes on already-fixed items (this session)
 

@@ -10,21 +10,11 @@ use std::collections::{HashMap, HashSet};
 use crate::cmi::persistent_env::CmjExportConstant;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::js_ir::op::{
-    IdentInfo, Kind, MutableFlag, Number, UsedStats,
-};
+use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, UsedStats};
 use crate::js_ir::{
     BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
     ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
     VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
-};
-use crate::lambda::lam_analysis;
-use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, PointerInfo};
-use crate::lambda::lam_free_variables::free_variables;
-use crate::lambda::lam_exit_code::has_exit_code;
-use crate::lambda::lam_primitive::{
-    ExternalArgConst, ExternalArgDelim, Primitive,
 };
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
@@ -32,11 +22,16 @@ use crate::lambda::js_pass_flatten_and_mark_dead::{
 };
 use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
 use crate::lambda::js_shake::{
-    apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
-    move_reused_same_name_export_binding_to_export_tail, move_same_name_export_alias_to_export_tail,
-    resolve_tail_move_replacement_expression,
-    TailMoveInitializerKind,
+    TailMoveInitializerKind, apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
+    move_reused_same_name_export_binding_to_export_tail,
+    move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
+use crate::lambda::lam_analysis;
+use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
+use crate::lambda::lam_constant::{Constant, PointerInfo};
+use crate::lambda::lam_exit_code::has_exit_code;
+use crate::lambda::lam_free_variables::free_variables;
+use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
@@ -45,26 +40,20 @@ use crate::lambda::{
 use crate::location::Location;
 
 use super::js_exp_make::{
-    block_with_return_expr_iife, direct_projection_from_pure_literal,
-    int_expr, int_literal, is_optional_block, is_zero_int, js_expr_no_side_effects,
-    js_seq, remove_pure_subexpression, to_int32,
+    block_with_return_expr_iife, direct_projection_from_pure_literal, int_expr, int_literal,
+    is_optional_block, is_zero_int, js_expr_no_side_effects, js_seq, remove_pure_subexpression,
+    to_int32,
 };
+use super::js_stmt_make::{block_finishes_output, block_terminates, strict_single_return_expr};
 use super::lam_coercion::{
-    block_declares_initialized_ident,
-    can_reuse_existing_undefined_export_binding,
-    collect_declared_idents, extract_toplevel_exports,
+    ExtractedExports, block_declares_initialized_ident,
+    can_reuse_existing_undefined_export_binding, collect_declared_idents, extract_toplevel_exports,
     insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
-    max_ident_stamp_in_expression,
-    push_effect_expression, push_s_exp,
-    reorder_trailing_export_bindings_by_export_order,
-    resolve_declared_same_name_self_alias_target, resolve_export_aliases,
-    reusable_same_name_export_binding,
+    max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
+    reorder_trailing_export_bindings_by_export_order, resolve_declared_same_name_self_alias_target,
+    resolve_export_aliases, reusable_same_name_export_binding,
     rewrite_toplevel_variable_initializers_through_rewriteable_aliases,
-    ExtractedExports,
-};
-use super::js_stmt_make::{
-    block_finishes_output, block_terminates, strict_single_return_expr,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
 
@@ -226,7 +215,10 @@ pub(crate) fn short_circuit_primitive<'a>(
 ///
 /// The printer's eta-reduction rewrite (js_dump.ml:299-344) gates on
 /// `call_info = Call_ml | Call_builtin_runtime` AND `arity = Full`.
-pub(crate) fn call_info_of_apply_status(call_transformed_jsx: bool, status: ApplyStatus) -> CallInfo {
+pub(crate) fn call_info_of_apply_status(
+    call_transformed_jsx: bool,
+    status: ApplyStatus,
+) -> CallInfo {
     use crate::js_ir::{CallArity, CallKind};
     match status {
         ApplyStatus::InferFull => CallInfo {
@@ -249,7 +241,6 @@ pub(crate) fn call_info_of_apply_status(call_transformed_jsx: bool, status: Appl
         },
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExternalModuleCacheKey {
@@ -714,11 +705,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(
-                                _,
-                                TagInfo::ModuleExport(_),
-                                _,
-                            ),
+                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -751,11 +738,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(
-                                _,
-                                TagInfo::ModuleExport(_),
-                                _,
-                            ),
+                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -812,8 +795,7 @@ impl LambdaCompiler {
                 // (it allocates a tmp, assigns through it, then dispatches).
                 // Take that path here; the `with_static_handler` inline
                 // shortcut has no OCaml analog for NeedValue.
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 calls `flatten_nested_caches` at the
                     // top of `compile_staticcatch`; a `code_table` with >1
@@ -826,9 +808,11 @@ impl LambdaCompiler {
                         property: LetKind::Strict,
                         ident_info: IdentInfo::default(),
                     })];
-                    prelude.extend(self.compile_multi_staticcatch_assignment_block(
-                        &result, &handlers, flat_body,
-                    ));
+                    prelude.extend(
+                        self.compile_multi_staticcatch_assignment_block(
+                            &result, &handlers, flat_body,
+                        ),
+                    );
                     Compiled {
                         prelude,
                         expr: Expression::var(result),
@@ -896,11 +880,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(
-                                _,
-                                TagInfo::ModuleExport(_),
-                                _,
-                            ),
+                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1040,10 +1020,7 @@ impl LambdaCompiler {
     /// `lam_compile_main.ml`: each top-level group starts label numbering
     /// from `loop_0`, so cross-group labels never collide and the JS
     /// labels reset between unrelated declarations.
-    pub(crate) fn with_fresh_loop_label_counter<R>(
-        &mut self,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
+    pub(crate) fn with_fresh_loop_label_counter<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let saved = std::mem::replace(
             &mut self.loop_label_counter,
             std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -1578,14 +1555,13 @@ impl LambdaCompiler {
                     property: kind,
                     ident_info: IdentInfo::default(),
                 })];
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 + 989-996 — `Declare (kind, id)`
                     // with flattened multi-handler code_table.
-                    block.extend(self.compile_multi_staticcatch_assignment_block(
-                        id, &handlers, flat_body,
-                    ));
+                    block.extend(
+                        self.compile_multi_staticcatch_assignment_block(id, &handlers, flat_body),
+                    );
                 } else {
                     block.extend(
                         self.compile_staticcatch_assignment_block(
@@ -1711,8 +1687,7 @@ impl LambdaCompiler {
                 // lam_compile.ml:963-1017. Mirror that by always taking the
                 // Rust explicit-jump path here; the inline `with_static_handler`
                 // shortcut is a Rust-only optimization with no OCaml analog.
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 + 1000-1010 — `EffectCall Not_tail`
                     // with flattened multi-handler code_table.
@@ -2015,14 +1990,16 @@ impl LambdaCompiler {
                 block
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
-                if flatten_nested_caches(*label, bindings, body, handler).0.len() > 1 =>
+                if flatten_nested_caches(*label, bindings, body, handler)
+                    .0
+                    .len()
+                    > 1 =>
             {
                 // lam_compile.ml:935 — `flatten_nested_caches` is the FIRST
                 // thing `compile_staticcatch` does. A code_table with >1
                 // entries goes through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=flatten-multi count={} bindings={} body_kind={} handler_kind={}",
@@ -2083,11 +2060,10 @@ impl LambdaCompiler {
                 self.compile_fallthrough_staticcatch_return_block(*label, bindings, body, handler)
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                let requires_explicit_jump =
-                    (self.return_unit_stack.last().copied() == Some(true) && !bindings.is_empty())
-                        || self.return_staticcatch_requires_explicit_jump(
-                            *label, bindings, body, handler,
-                        );
+                let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
+                    && !bindings.is_empty())
+                    || self
+                        .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
                     eprintln!(
                         "[staticcatch-return] label={label} path={} bindings={} body_kind={} handler_kind={}",
@@ -2193,7 +2169,8 @@ impl LambdaCompiler {
         match lam {
             Lambda::Lconst(Constant::JsUndefined { is_unit: true }) => true,
             Lambda::Lsequence(first, second) => {
-                lam_analysis::no_side_effects(first) && self.lambda_is_trivial_unit_undefined(second)
+                lam_analysis::no_side_effects(first)
+                    && self.lambda_is_trivial_unit_undefined(second)
             }
             Lambda::Llet(_, _, value, body) => {
                 lam_analysis::no_side_effects(value) && self.lambda_is_trivial_unit_undefined(body)
@@ -2588,8 +2565,7 @@ impl LambdaCompiler {
             // case body resolved away through a fallthrough static-raise
             // handler, OCaml still prints an explicit `break;` to exit the
             // switch so the subsequent appended handler reads cleanly.
-            let should_break =
-                !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -2811,8 +2787,7 @@ impl LambdaCompiler {
                 // step of `compile_staticcatch`. A >1 entry code_table goes
                 // through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010).
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     return self.compile_multi_staticcatch_tail_loop_return_block(
                         &handlers, flat_body, tail_loop,
@@ -3161,14 +3136,12 @@ impl LambdaCompiler {
                 compiled_from_effect_block(vec![self.try_statement(body_block, exn, handler_block)])
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     // lam_compile.ml:935 + 1000-1010 — multi-handler
                     // explicit-jump arm for an effect-value continuation.
                     return Compiled {
-                        prelude: self
-                            .compile_multi_staticcatch_effect_block(&handlers, flat_body),
+                        prelude: self.compile_multi_staticcatch_effect_block(&handlers, flat_body),
                         expr: Expression::undefined(false),
                     };
                 }
@@ -3186,12 +3159,14 @@ impl LambdaCompiler {
                     })
                 }
             }
-            Lambda::Lswitch(scrut, switch) => {
-                compiled_from_effect_block(self.compile_switch_effect_block(scrut, switch))
-            }
-            Lambda::LstringSwitch(scrut, cases, default) => compiled_from_effect_block(
-                self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
-            ),
+            Lambda::Lswitch(scrut, switch) => Compiled {
+                prelude: self.compile_switch_effect_block(scrut, switch),
+                expr: Expression::undefined(false),
+            },
+            Lambda::LstringSwitch(scrut, cases, default) => Compiled {
+                prelude: self.compile_string_switch_effect_block(scrut, cases, default.as_deref()),
+                expr: Expression::undefined(false),
+            },
             _ => self.compile_expr(lam),
         }
     }
@@ -3321,7 +3296,11 @@ impl LambdaCompiler {
             else_block.as_slice(),
             [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
         ) {
-            block.push(Statement::if_(Expression::not(cond_expr), else_block, vec![]));
+            block.push(Statement::if_(
+                Expression::not(cond_expr),
+                else_block,
+                vec![],
+            ));
             block.extend(then_block);
             return block;
         }
@@ -3337,7 +3316,6 @@ impl LambdaCompiler {
         block.push(Statement::if_(cond_expr, then_block, else_block));
         block
     }
-
 
     fn compile_if_assignment_block(
         &mut self,
@@ -3732,7 +3710,9 @@ impl LambdaCompiler {
         };
         match folded {
             Some((then_expr, else_expr)) => {
-                vec![Statement::return_(Expression::cond(cond, then_expr, else_expr))]
+                vec![Statement::return_(Expression::cond(
+                    cond, then_expr, else_expr,
+                ))]
             }
             None => {
                 // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
@@ -3745,11 +3725,8 @@ impl LambdaCompiler {
                     else_fallback.as_slice(),
                     [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
                 ) {
-                    let mut out = vec![Statement::if_(
-                        Expression::not(cond),
-                        else_fallback,
-                        vec![],
-                    )];
+                    let mut out =
+                        vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
                     out.extend(then_fallback);
                     return out;
                 }
@@ -3801,8 +3778,7 @@ impl LambdaCompiler {
                 // explicit-jump path unconditionally; the `with_static_handler`
                 // shortcut is a Rust-only optimization with no OCaml analog in
                 // this continuation.
-                let (handlers, flat_body) =
-                    flatten_nested_caches(*label, bindings, body, handler);
+                let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
                 if handlers.len() > 1 {
                     self.compile_multi_staticcatch_assignment_block(result, &handlers, flat_body)
                 } else {
@@ -4063,8 +4039,7 @@ impl LambdaCompiler {
             // case body resolved away through a fallthrough static-raise
             // handler, OCaml still prints an explicit `break;` to exit the
             // switch so the subsequent appended handler reads cleanly.
-            let should_break =
-                !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -4396,7 +4371,6 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
-
     pub(crate) fn compile_external_arg_const(&self, cst: &ExternalArgConst) -> Expression {
         match cst {
             ExternalArgConst::IntLit(i) => Expression::number(Number::Int {
@@ -4483,7 +4457,6 @@ impl LambdaCompiler {
             Expression::bin(BinOp::Mod, left, right)
         }
     }
-
 
     fn with_static_handler<T>(
         &mut self,
@@ -4654,28 +4627,27 @@ impl LambdaCompiler {
                     .any(|(_, value)| self.return_handler_requires_explicit_staticcatch_jump(value))
                     || self.return_handler_requires_explicit_staticcatch_jump(body)
             }
-            Lambda::Lprim(info) => info.args.iter().any(|arg| {
-                self.return_handler_requires_explicit_staticcatch_jump(arg)
-            }),
+            Lambda::Lprim(info) => info
+                .args
+                .iter()
+                .any(|arg| self.return_handler_requires_explicit_staticcatch_jump(arg)),
             Lambda::Lswitch(scrut, switch) => {
                 self.return_handler_requires_explicit_staticcatch_jump(scrut)
-                    || switch
-                        .sw_consts
-                        .iter()
-                        .any(|(_, body)| self.return_handler_requires_explicit_staticcatch_jump(body))
-                    || switch
-                        .sw_blocks
-                        .iter()
-                        .any(|(_, body)| self.return_handler_requires_explicit_staticcatch_jump(body))
+                    || switch.sw_consts.iter().any(|(_, body)| {
+                        self.return_handler_requires_explicit_staticcatch_jump(body)
+                    })
+                    || switch.sw_blocks.iter().any(|(_, body)| {
+                        self.return_handler_requires_explicit_staticcatch_jump(body)
+                    })
                     || switch.sw_failaction.as_deref().is_some_and(|body| {
                         self.return_handler_requires_explicit_staticcatch_jump(body)
                     })
             }
             Lambda::LstringSwitch(scrut, cases, default) => {
                 self.return_handler_requires_explicit_staticcatch_jump(scrut)
-                    || cases
-                        .iter()
-                        .any(|(_, body)| self.return_handler_requires_explicit_staticcatch_jump(body))
+                    || cases.iter().any(|(_, body)| {
+                        self.return_handler_requires_explicit_staticcatch_jump(body)
+                    })
                     || default.as_deref().is_some_and(|body| {
                         self.return_handler_requires_explicit_staticcatch_jump(body)
                     })
@@ -4688,9 +4660,8 @@ impl LambdaCompiler {
             }
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 ((self.return_unit_stack.last().copied() == Some(true)) && !bindings.is_empty())
-                    || self.return_staticcatch_requires_explicit_jump(
-                        *label, bindings, body, handler,
-                    )
+                    || self
+                        .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler)
             }
             Lambda::LtryWith(body, _, handler) => {
                 self.return_handler_requires_explicit_staticcatch_jump(body)
@@ -4714,7 +4685,9 @@ impl LambdaCompiler {
                     || self.return_handler_requires_explicit_staticcatch_jump(body)
             }
             Lambda::Lbreak | Lambda::Lcontinue => false,
-            Lambda::Lassign(_, value) => self.return_handler_requires_explicit_staticcatch_jump(value),
+            Lambda::Lassign(_, value) => {
+                self.return_handler_requires_explicit_staticcatch_jump(value)
+            }
             Lambda::LifThenElse(cond, then_, else_) => {
                 self.return_handler_requires_explicit_staticcatch_jump(cond)
                     || self.return_handler_requires_explicit_staticcatch_jump(then_)
@@ -4772,7 +4745,9 @@ impl LambdaCompiler {
                 }
                 Some(has_terminal_value)
             }
-            Lambda::LstringSwitch(scrut, cases, default) if lam_analysis::no_side_effects(scrut) => {
+            Lambda::LstringSwitch(scrut, cases, default)
+                if lam_analysis::no_side_effects(scrut) =>
+            {
                 let mut has_terminal_value = false;
                 for (_, body) in cases {
                     has_terminal_value |=
@@ -5113,10 +5088,7 @@ impl LambdaCompiler {
     /// assigns the corresponding exit code. After the body, a dispatch is
     /// emitted via `compile_exit_dispatch` — the OCaml `compile_cases` call
     /// with NonComplete default at lam_compile.ml:987/996/1010/1017.
-    fn emit_multi_staticcatch_prelude(
-        &mut self,
-        handlers: &[FlatHandler],
-    ) -> (Ident, i32, Block) {
+    fn emit_multi_staticcatch_prelude(&mut self, handlers: &[FlatHandler]) -> (Ident, i32, Block) {
         let exit_id = self.fresh_ident("exit");
         let first_code = self.next_static_jump_exit_code();
         let mut block = vec![Statement::variable(VariableDeclaration {
@@ -6268,7 +6240,9 @@ fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
                     (!lam_analysis::no_side_effects(&body)).then(|| id.name().to_string())
                 })
             }
-            TopLevelEffectGroup::Nop(body) => (!lam_analysis::no_side_effects(&body)).then(String::new),
+            TopLevelEffectGroup::Nop(body) => {
+                (!lam_analysis::no_side_effects(&body)).then(String::new)
+            }
         })
         .or_else(|| (!lam_analysis::no_side_effects(&result)).then(String::new))
 }
@@ -6289,8 +6263,6 @@ fn required_module_side_effect_reason(
         }
     })
 }
-
-
 
 pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
     if block.len() == 1 {
@@ -6739,12 +6711,10 @@ fn lambda_static_raise_count_to_label(lam: &Lambda, label: i32, arity: usize) ->
                 lambda_static_raise_count_to_label(body, label, arity),
             )
         }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            add_count(
-                lambda_static_raise_count_to_label(iterable, label, arity),
-                lambda_static_raise_count_to_label(body, label, arity),
-            )
-        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => add_count(
+            lambda_static_raise_count_to_label(iterable, label, arity),
+            lambda_static_raise_count_to_label(body, label, arity),
+        ),
         Lambda::Lbreak | Lambda::Lcontinue => 0,
         Lambda::Lassign(_, value) => lambda_static_raise_count_to_label(value, label, arity),
         Lambda::LifThenElse(cond, then_, else_) => {
@@ -6840,7 +6810,6 @@ fn lambda_contains_static_raise_to_other_label(lam: &Lambda, label: i32) -> bool
         }
     }
 }
-
 
 fn runtime_module_id(module_name: &str) -> ModuleId {
     ModuleId {
@@ -7024,7 +6993,6 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
     }
 }
 
-
 #[derive(Clone, Copy)]
 pub(crate) enum GroupedSwitchDefault<'a> {
     Complete,
@@ -7044,4 +7012,3 @@ pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option
 #[cfg(test)]
 #[path = "lam_compile_tests.rs"]
 mod tests;
-

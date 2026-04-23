@@ -141,8 +141,17 @@ check_prerequisites() {
 
 # Setup temp directory
 setup_temp_dir() {
-    rm -rf "$TEMP_DIR"
+    if [[ -z "$PROJECT_ROOT" || "$PROJECT_ROOT" == "/" || "$TEMP_DIR" != "$PROJECT_ROOT/temp/rust-parity" ]]; then
+        echo "Refusing to clean unexpected parity temp directory: $TEMP_DIR" >&2
+        exit 2
+    fi
+    if [[ -L "$TEMP_DIR" || ( -e "$TEMP_DIR" && ! -d "$TEMP_DIR" ) ]]; then
+        echo "Refusing to clean unsafe parity temp path: $TEMP_DIR" >&2
+        exit 2
+    fi
     mkdir -p "$TEMP_DIR"
+    find "$TEMP_DIR" -mindepth 1 -type f -delete
+    find "$TEMP_DIR" -mindepth 1 -depth -type d -empty -delete
     mkdir -p "$DIFF_DIR"
 }
 

@@ -3,6 +3,16 @@
 //! Port of `js_of_lam_variant.ml` + variant/switch compilation logic.
 //! Extracted from `lam_compile.rs` for organization.
 
+use super::js_exp_make::{
+    is_type_number_expr, is_type_object_expr, ocaml_typeof_expr, raw_typeof_comparison,
+    string_switch_iife,
+};
+use super::js_stmt_make::{block_terminates, strict_single_return_expr};
+use super::lam_coercion::push_s_exp;
+use super::lam_compile::{
+    Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
+    lambda_has_exit, pointer_info_comment_text, trailing_return_expression,
+};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
@@ -13,21 +23,7 @@ use crate::js_ir::{
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_exit_code::has_exit_code;
-use crate::lambda::{
-    Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchTag,
-};
-use super::js_exp_make::{
-    is_type_number_expr, is_type_object_expr, ocaml_typeof_expr, raw_typeof_comparison,
-    string_switch_iife,
-};
-use super::js_stmt_make::{
-    block_terminates, strict_single_return_expr,
-};
-use super::lam_coercion::push_s_exp;
-use super::lam_compile::{
-    Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
-    lambda_has_exit, pointer_info_comment_text, trailing_return_expression,
-};
+use crate::lambda::{Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchTag};
 
 pub(crate) fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
@@ -876,9 +872,14 @@ impl LambdaCompiler {
             return self.compile_assign_to_target_block(result, block_cases[0].1);
         }
 
+        let has_unfiltered_runtime_test_cases = block_cases
+            .iter()
+            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+        let filtered_block_cases =
+            self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
-        for (case, body) in block_cases.iter().copied() {
+        for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
                 Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
@@ -889,7 +890,7 @@ impl LambdaCompiler {
                 None => {}
             }
         }
-        let allow_small_typeof_tail = runtime_test_cases.is_empty();
+        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
         let mut tail = if typeof_cases.is_empty() {
             self.block_switch_default(switch)
@@ -1029,9 +1030,14 @@ impl LambdaCompiler {
             return self.compile_return_block(block_cases[0].1);
         }
 
+        let has_unfiltered_runtime_test_cases = block_cases
+            .iter()
+            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+        let filtered_block_cases =
+            self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
-        for (case, body) in block_cases.iter().copied() {
+        for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
                 Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
@@ -1042,7 +1048,7 @@ impl LambdaCompiler {
                 None => {}
             }
         }
-        let allow_small_typeof_tail = runtime_test_cases.is_empty();
+        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
         let mut tail = if typeof_cases.is_empty() {
             self.block_switch_default(switch)
@@ -1072,8 +1078,25 @@ impl LambdaCompiler {
                 .block_switch_default(switch)
                 .map(|fallback| self.compile_return_block(fallback));
             tail = match default_body {
+                Some(default_block)
+                    if self.return_unit_stack.last().copied() == Some(true)
+                        && (default_block.is_empty()
+                            || Self::is_unit_undefined_return_block(&default_block)) =>
+                {
+                    let mut block = vec![Statement::new(StatementDesc::If(
+                        guard,
+                        vec![Statement::return_(Expression::undefined(true))],
+                        Vec::new(),
+                    ))];
+                    block.extend(tail);
+                    block
+                }
                 Some(default_block) => Self::normalized_if_block(guard, default_block, tail),
-                None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
+                None => Self::normalized_if_block(
+                    guard,
+                    vec![Statement::return_(Expression::undefined(true))],
+                    tail,
+                ),
             };
         }
 
@@ -1094,6 +1117,17 @@ impl LambdaCompiler {
         }
 
         tail
+    }
+
+    fn is_unit_undefined_return_block(block: &Block) -> bool {
+        let block = Self::peel_single_block_statement(block.clone());
+        matches!(
+            strict_single_return_expr(&block),
+            Some(Expression {
+                desc: ExpressionDesc::Undefined { is_unit: true },
+                ..
+            })
+        )
     }
 
     fn compile_small_untagged_block_switch_return(
@@ -1180,9 +1214,14 @@ impl LambdaCompiler {
             return block;
         }
 
+        let has_unfiltered_runtime_test_cases = block_cases
+            .iter()
+            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+        let filtered_block_cases =
+            self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
-        for (case, body) in block_cases.iter().copied() {
+        for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
                 Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
@@ -1193,7 +1232,7 @@ impl LambdaCompiler {
                 None => {}
             }
         }
-        let allow_small_typeof_tail = runtime_test_cases.is_empty();
+        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
         let mut tail = if typeof_cases.is_empty() {
             self.block_switch_default(switch)
@@ -1224,6 +1263,13 @@ impl LambdaCompiler {
                 .map(|fallback| self.compile_effect_block(fallback));
             tail = match default_body {
                 Some(default_block) => vec![Statement::if_(guard, default_block, tail)],
+                None if self.return_unit_stack.last().copied() == Some(true) => {
+                    Self::normalized_if_block(
+                        guard,
+                        vec![Statement::return_(Expression::undefined(true))],
+                        tail,
+                    )
+                }
                 None => vec![Statement::if_(Expression::not(guard), tail, Vec::new())],
             };
         }
@@ -1436,11 +1482,8 @@ impl LambdaCompiler {
             )
         };
         // Mixed path: null handled by const_branch; block_branch sees non-null x.
-        let block_branch = self.compile_untagged_block_switch_return_statements(
-            scrut_expr.clone(),
-            switch,
-            false,
-        );
+        let block_branch =
+            self.compile_untagged_block_switch_return_statements(scrut_expr.clone(), switch, false);
 
         let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr.clone(), switch)
         else {
@@ -1448,11 +1491,19 @@ impl LambdaCompiler {
         };
 
         if const_branch.is_empty() {
-            vec![Statement::if_(
-                Expression::not(dispatch_test),
-                block_branch,
-                vec![],
-            )]
+            if self.return_unit_stack.last().copied() == Some(true) {
+                Self::normalized_if_block(
+                    dispatch_test,
+                    vec![Statement::return_(Expression::undefined(true))],
+                    block_branch,
+                )
+            } else {
+                vec![Statement::if_(
+                    Expression::not(dispatch_test),
+                    block_branch,
+                    vec![],
+                )]
+            }
         } else if block_branch.is_empty() {
             vec![Statement::if_(dispatch_test, const_branch, vec![])]
         } else {
@@ -1515,11 +1566,8 @@ impl LambdaCompiler {
             )
         };
         // Mixed path: null handled by const_branch; block_branch sees non-null x.
-        let block_branch = self.compile_untagged_block_switch_effect_statements(
-            scrut_expr.clone(),
-            switch,
-            false,
-        );
+        let block_branch =
+            self.compile_untagged_block_switch_effect_statements(scrut_expr.clone(), switch, false);
 
         let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr.clone(), switch)
         else {
@@ -1707,7 +1755,12 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn compile_effect_if(&self, cond: Expression, then_block: Block, else_block: Block) -> Block {
+    pub(crate) fn compile_effect_if(
+        &self,
+        cond: Expression,
+        then_block: Block,
+        else_block: Block,
+    ) -> Block {
         if then_block.is_empty() {
             if else_block.is_empty() {
                 // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
@@ -2100,8 +2153,7 @@ impl LambdaCompiler {
             // compiles to an exit assignment (`exit$N = N`) that needs an
             // explicit `break;` to leave the switch — otherwise the next
             // case clause falls through and overwrites the exit value.
-            let should_break =
-                !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -2186,12 +2238,9 @@ impl LambdaCompiler {
             // (lam_compile.ml:587-592). Pass `cases` here, not the filtered
             // list, so `[(case, body)] + Default(eq body)` shapes derived from
             // a >1-case input keep emitting a switch.
-            if let Some(block) = self.compile_small_string_switch_effect(
-                test.clone(),
-                cases,
-                default,
-                complete,
-            ) {
+            if let Some(block) =
+                self.compile_small_string_switch_effect(test.clone(), cases, default, complete)
+            {
                 return block;
             }
         }
@@ -2220,12 +2269,6 @@ impl LambdaCompiler {
         let default_block = default
             .map(|fallback| self.compile_effect_block(fallback))
             .filter(|body| !body.is_empty());
-        let has_effectful_case = clauses.iter().any(|clause| !clause.clause.body.is_empty())
-            || default_block.as_ref().is_some_and(|body| !body.is_empty());
-        if !has_effectful_case {
-            return vec![];
-        }
-
         vec![Statement::new(StatementDesc::StringSwitch(
             test,
             clauses,
