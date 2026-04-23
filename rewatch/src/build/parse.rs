@@ -825,7 +825,6 @@ fn generate_ast_with_rust_parser(
             .map_err(|e| anyhow!(e))?;
 
         let (structure, deps) = if in_process {
-            let structure = ppx::expand_extensions(&structure, parser.arena_mut());
             let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
                 .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
             let structure =

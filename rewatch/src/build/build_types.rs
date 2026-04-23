@@ -4,7 +4,7 @@ use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
 use rescript_compiler::binary_ast::Dependencies;
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::cmi::persistent_env::{CmjExportConstant, ModuleRegistry};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
@@ -437,12 +437,14 @@ impl BuildCommandState {
         pers_struct: PortablePersStruct,
         source_path: std::path::PathBuf,
         is_pure: bool,
+        cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
         new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path,
             is_pure,
+            cmj_export_constants,
             is_runtime,
         };
         self.module_registry

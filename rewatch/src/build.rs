@@ -50,6 +50,21 @@ fn is_dirty(module: &Module) -> bool {
     }
 }
 
+fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
+    for module in build_state.modules.values_mut() {
+        module.compile_dirty = true;
+        match &mut module.source_type {
+            SourceType::SourceFile(source_file) => {
+                source_file.implementation.parse_dirty = true;
+                if let Some(interface) = &mut source_file.interface {
+                    interface.parse_dirty = true;
+                }
+            }
+            SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct CompilerArgs {
     pub compiler_args: Vec<String>,
@@ -302,18 +317,21 @@ pub fn incremental_build(
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
     if build_state.dump_typed_sexp() {
-        for module in build_state.modules.values_mut() {
-            module.compile_dirty = true;
-            match &mut module.source_type {
-                crate::build::build_types::SourceType::SourceFile(sf) => {
-                    sf.implementation.parse_dirty = true;
-                    if let Some(ref mut iface) = sf.interface {
-                        iface.parse_dirty = true;
-                    }
-                }
-                crate::build::build_types::SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
-            }
-        }
+        mark_all_modules_dirty(build_state);
+    }
+
+    // A fresh --in-process build has no disk-backed .cmi cache to consult.
+    // Seed the in-memory registry by parsing and compiling every module once;
+    // watch-mode rebuilds can then keep using the retained registry.
+    let needs_in_process_seed = build_state.build_mode().is_in_process()
+        && build_state
+            .module_registry
+            .lock()
+            .unwrap()
+            .cached_modules
+            .is_empty();
+    if needs_in_process_seed {
+        mark_all_modules_dirty(build_state);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;

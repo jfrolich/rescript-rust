@@ -8601,6 +8601,22 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
 // Structure Type Checking
 // ============================================================================
 
+fn rescript_hide_attributes(attrs: &Attributes, arena: &ParseArena) -> bool {
+    attrs
+        .as_slice()
+        .iter()
+        .any(|(name, _)| arena.get_string(name.txt) == "internal.local")
+}
+
+fn rescript_hide_structure_item(desc: &StructureItemDesc, arena: &ParseArena) -> bool {
+    match desc {
+        StructureItemDesc::Tstr_module(mb) => {
+            rescript_hide_attributes(&mb.mb_attributes, arena)
+        }
+        _ => false,
+    }
+}
+
 /// Type check a structure (module body).
 pub fn type_structure<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -8623,7 +8639,9 @@ pub fn type_structure<'a>(
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
-        sig_items.extend(item_sig);
+        if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
+            sig_items.extend(item_sig);
+        }
         typed_items.push(typed_item);
         current_env = new_env;
 
@@ -8889,7 +8907,9 @@ fn type_structure_no_export<'a>(
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
-        sig_items.extend(item_sig);
+        if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
+            sig_items.extend(item_sig);
+        }
         typed_items.push(typed_item);
         current_env = new_env;
     }

@@ -403,6 +403,29 @@ impl<'a> TypeContext<'a> {
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
+    /// Snapshot synthetic CMI longident component names so portable signatures
+    /// can move across TypeContexts without losing the side table.
+    pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
+        self.cmi_longident_names
+            .borrow()
+            .iter()
+            .map(|(raw, name)| (*raw, name.clone()))
+            .collect()
+    }
+
+    /// Import synthetic CMI longident names from a portable signature.
+    pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
+        let mut table = self.cmi_longident_names.borrow_mut();
+        let mut next = self.next_cmi_longident_idx.get();
+        for (raw, name) in names {
+            table.insert(*raw, name.clone());
+            if *raw >= next {
+                next = raw.wrapping_add(1);
+            }
+        }
+        self.next_cmi_longident_idx.set(next);
+    }
+
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
     pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {

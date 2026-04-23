@@ -576,7 +576,7 @@ pub fn hash_variant(s: &str) -> i32 {
     accu &= (1 << 31) - 1;
     // Make it signed for 64-bit architectures
     if accu > 0x3FFFFFFF {
-        (accu as i32) - (1 << 31)
+        (accu as i64 - (1_i64 << 31)) as i32
     } else {
         accu as i32
     }

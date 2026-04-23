@@ -7,7 +7,9 @@ use super::logs;
 use super::packages;
 use crate::config;
 use crate::config::Config;
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::cmi::persistent_env::{
+    InMemoryModuleInfo, ModuleRegistry, PersistentEnv, read_cmj_module_metadata,
+};
 use crate::helpers;
 use crate::helpers::StrippedVerbatimPath;
 use crate::project_context::ProjectContext;
@@ -346,21 +348,28 @@ pub fn compile(
         // Pre-compile all @rescript/runtime modules into the registry.
         // In in-process mode, the registry is the sole source of truth —
         // no CMI fallback. Every dependency must be in the registry.
-        let pre_compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rayon::scope(|s| {
-                s.spawn(|_| {
+        let pre_compile_result = std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("rewatch-runtime-precompile".to_string())
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || {
                     pre_compile_runtime_modules(build_state);
                 });
-            });
-        }));
-        if let Err(e) = pre_compile_result {
-            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown".to_string()
-            };
+
+            match handle {
+                Ok(handle) => handle.join().map_err(|panic| {
+                    if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                }),
+                Err(err) => Err(format!("failed to spawn runtime pre-compilation thread: {err}")),
+            }
+        });
+        if let Err(msg) = pre_compile_result {
             eprintln!("Warning: runtime pre-compilation panicked: {}", msg);
         }
         // Clear source-fallback paths after pre-compilation.
@@ -1089,12 +1098,17 @@ fn build_compiler_options(
 
     // Output path for JS import resolution
     let output_path = root_config.get_package_specs().first().map(|spec| {
+        let suffix = root_config.get_suffix(spec);
         if spec.in_source {
-            PathBuf::from(source_file_path.parent().unwrap_or(Path::new(".")))
+            let source_abs = Path::new(&package.path).join(source_file_path);
+            helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
         } else {
-            Path::new("lib")
+            let js_relative =
+                helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
+            Path::new(&package.path)
+                .join("lib")
                 .join(spec.get_out_of_source_dir())
-                .join(source_file_path.parent().unwrap_or(Path::new(".")))
+                .join(js_relative)
         }
     });
 
@@ -1231,7 +1245,12 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
     // resolved via RESCRIPT_RUNTIME. In file-based mode, runtime modules
     // are loaded from .cmi files on the load path. In --in-process mode,
     // we need source fallback paths so they can be type-checked on demand.
-    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+    let runtime_path = build_state
+        .build_state
+        .compiler_info
+        .runtime_path
+        .join("lib")
+        .join("ocaml");
     if let Ok(entries) = std::fs::read_dir(runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1329,133 +1348,63 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
         a_priority.cmp(&b_priority).then_with(|| a.0.cmp(&b.0))
     });
 
-    let root_config = build_state.get_root_config();
-    let runtime_path_for_opts = runtime_root.clone();
-    let jsx_version = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.version)
-        .filter(|&v| v == 4);
-
     let module_count = runtime_modules.len();
+    let source_paths: AHashMap<String, PathBuf> = runtime_modules
+        .iter()
+        .map(|(module_name, res_path, _)| (module_name.clone(), res_path.clone()))
+        .collect();
 
-    // Compile sequentially. After each module compiles, its result is in
-    // the registry, so subsequent modules find deps directly without
-    // deep source-fallback chains. Pervasives compiles first (sorted above)
-    // so all other runtime modules find it immediately.
-    let mut compiled = 0;
-    for (module_name, res_path, resi_path) in &runtime_modules {
-        let options = rescript_compiler::driver::CompilerOptions {
-            include_paths: vec![runtime_path.clone()],
-            nopervasives: true,
-            open_modules: vec!["Pervasives".to_string()],
-            module_name: Some(module_name.clone()),
-            runtime_path: Some(runtime_path_for_opts.clone()),
-            jsx_version,
-            source_filename: Some(res_path.to_string_lossy().to_string()),
-            ..Default::default()
-        };
+    rescript_compiler::ident::Ident::set_current_time(999);
+    let id_gen = rescript_compiler::context::IdGenerator::with_start_stamp(999);
+    let _predef_stamp = id_gen.next_stamp();
+    let type_ctx = rescript_compiler::types::TypeContext::new(&id_gen);
+    type_ctx.set_load_paths(vec![runtime_path.clone()]);
 
-        let registry = build_state.snapshot_module_registry();
+    let mut pers_env = PersistentEnv::new();
+    pers_env.set_load_path(vec![runtime_path.clone()]);
 
-        // Register this module's metadata in the registry before compilation
-        // so the compiler can find its own source info
-        {
-            let mut reg = build_state.module_registry.lock().unwrap();
-            reg.module_info.insert(
-                module_name.clone(),
-                rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
-                    source_path: res_path.clone(),
-                    is_pure: true,
-                    is_runtime: true,
-                },
-            );
-        }
-
-        // Step 1: If .resi exists, typecheck the interface first
-        let mut local_registry = registry.clone();
-        if let Some(resi) = resi_path {
-            if let Ok(intf_source) = std::fs::read_to_string(resi) {
-                let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
-                    &intf_source,
-                    &resi.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                );
-                match intf_result {
-                    Ok(result) => {
-                        if let Some(ps) = result.pers_struct {
-                            local_registry
-                                .cached_modules
-                                .insert(module_name.clone(), Arc::new(ps.clone()));
-                            build_state.update_module_registry(
-                                module_name,
-                                ps,
-                                res_path.clone(),
-                                true,
-                                true,
-                                result.new_alias_rewrites,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Runtime interface typecheck failed for {}: {}", module_name, e);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Step 2: Type-check the implementation (no lambda/JS — we only need the interface)
-        let has_interface = resi_path.is_some();
-        if let Ok(impl_source) = std::fs::read_to_string(res_path) {
-            let typecheck_result = rescript_compiler::driver::typecheck_implementation_in_process(
-                &impl_source,
-                &res_path.to_string_lossy(),
-                module_name,
-                &options,
-                &local_registry,
-                has_interface,
-            );
-
-            match typecheck_result {
-                Ok(result) => {
-                    let rt_fingerprint = result
-                        .pers_struct
-                        .as_ref()
-                        .map(|ps| ps.fingerprint)
-                        .unwrap_or(0);
-                    if let Some(ps) = result.pers_struct {
-                        build_state.update_module_registry(
-                            module_name,
-                            ps,
-                            res_path.clone(),
-                            true,
-                            true,
-                            result.new_alias_rewrites,
-                        );
-                    }
-                    if !has_interface {
-                        build_state.register_in_memory_interface(
-                            module_name.clone(),
-                            result.signature,
-                            rt_fingerprint,
-                            true,
-                        );
-                    }
-                    compiled += 1;
-                }
-                Err(e) => {
-                    debug!("Runtime typecheck failed for {}: {}", module_name, e);
-                }
-            }
+    let mut loaded = 0;
+    for (module_name, _, _) in &runtime_modules {
+        if pers_env.find_pers_struct(module_name, &type_ctx).is_some() {
+            loaded += 1;
+        } else {
+            debug!("Runtime CMI load failed for {}", module_name);
         }
     }
 
+    let (mut portables, alias_rewrites) = pers_env.extract_all_cached_modules(&type_ctx);
+    let mut registry = build_state.module_registry.lock().unwrap();
+    registry.alias_rewrites.extend(alias_rewrites);
+
+    let mut registered = 0;
+    for (module_name, portable) in portables.drain() {
+        let source_path = source_paths
+            .get(&module_name)
+            .cloned()
+            .unwrap_or_else(|| runtime_path.join(format!("{module_name}.res")));
+        let cmj_metadata = read_cmj_module_metadata(&runtime_path.join(format!("{module_name}.cmj")));
+        registry.register_module(
+            &module_name,
+            portable,
+            InMemoryModuleInfo {
+                source_path,
+                is_pure: cmj_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.is_pure)
+                    .unwrap_or(true),
+                cmj_export_constants: cmj_metadata
+                    .map(|metadata| metadata.export_constants)
+                    .unwrap_or_default(),
+                is_runtime: true,
+            },
+            AHashMap::new(),
+        );
+        registered += 1;
+    }
+
     debug!(
-        "Pre-compiled {}/{} runtime modules into registry",
-        compiled, module_count
+        "Pre-loaded {}/{} runtime CMIs into registry ({} cached modules)",
+        loaded, module_count, registered
     );
 }
 
@@ -1498,7 +1447,7 @@ fn compile_module_in_process(
 
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
-    let is_pure = true;
+    let provisional_is_pure = true;
 
     // For .resi + .res, we need the .resi to be in the registry before compiling .res.
     // Build a local registry that includes the .resi result (if any).
@@ -1509,7 +1458,8 @@ fn compile_module_in_process(
         module_name.to_string(),
         rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path: source_abs.clone(),
-            is_pure,
+            is_pure: provisional_is_pure,
+            cmj_export_constants: AHashMap::new(),
             is_runtime,
         },
     );
@@ -1574,7 +1524,8 @@ fn compile_module_in_process(
                 module_name,
                 ps,
                 source_abs.clone(),
-                is_pure,
+                provisional_is_pure,
+                AHashMap::new(),
                 is_runtime,
                 intf_result.new_alias_rewrites,
             );
@@ -1585,7 +1536,7 @@ fn compile_module_in_process(
             module_name.to_string(),
             intf_result.signature,
             intf_fingerprint,
-            is_pure,
+            provisional_is_pure,
         );
     }
 
@@ -1655,12 +1606,15 @@ fn compile_module_in_process(
         .as_ref()
         .map(|ps| ps.fingerprint)
         .unwrap_or(0);
+    let is_pure = compile_result.is_pure;
+    let cmj_export_constants = compile_result.cmj_export_constants.clone();
     if let Some(ps) = compile_result.pers_struct {
         build_command_state.update_module_registry(
             module_name,
             ps,
             source_abs.clone(),
             is_pure,
+            cmj_export_constants,
             is_runtime,
             compile_result.new_alias_rewrites,
         );

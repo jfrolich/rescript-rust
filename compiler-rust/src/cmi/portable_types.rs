@@ -120,6 +120,8 @@ pub struct PortablePersStruct {
     pub ps_filename: String,
     /// Signature with TypeExprRef values being indices into `type_graph.entries`.
     pub ps_sig: Signature,
+    /// Synthetic longident component names created while reading CMI files.
+    pub cmi_longident_names: Vec<(u32, String)>,
     /// Self-contained type graph.
     pub type_graph: PortableTypeGraph,
     /// Stamp-independent structural fingerprint of the type graph.
@@ -341,13 +343,14 @@ pub fn serialize_pers_struct(ps: &PersStruct, ctx: &TypeContext<'_>) -> Portable
     ser.remap_signature(&mut sig);
     let entries = ser.entries;
     let fingerprint = compute_type_graph_fingerprint(&entries, &sig);
-    PortablePersStruct {
-        ps_name: ps.ps_name.clone(),
-        ps_filename: ps.ps_filename.clone(),
-        ps_sig: sig,
-        type_graph: PortableTypeGraph { entries },
-        fingerprint,
-    }
+        PortablePersStruct {
+            ps_name: ps.ps_name.clone(),
+            ps_filename: ps.ps_filename.clone(),
+            ps_sig: sig,
+            cmi_longident_names: ctx.snapshot_cmi_longident_names(),
+            type_graph: PortableTypeGraph { entries },
+            fingerprint,
+        }
 }
 
 struct TypeGraphSerializer<'a, 'b> {
@@ -607,6 +610,8 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
 /// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
 /// with valid TypeExprRefs.
 pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext<'_>) -> PersStruct {
+    ctx.import_cmi_longident_names(&pps.cmi_longident_names);
+
     let graph = &pps.type_graph;
 
     // Phase 1: allocate placeholder TypeExprRefs for all entries.

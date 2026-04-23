@@ -40,6 +40,26 @@ use super::cmi_format;
 use super::portable_types::{self, PortablePersStruct};
 use super::sig_reader::SigReadContext;
 
+fn first_char_case_variant(name: &str) -> Option<String> {
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    let rest = chars.as_str();
+    if first.is_ascii_uppercase() {
+        Some(format!("{}{}", first.to_ascii_lowercase(), rest))
+    } else if first.is_ascii_lowercase() {
+        Some(format!("{}{}", first.to_ascii_uppercase(), rest))
+    } else {
+        None
+    }
+}
+
+fn resolve_first_char_case_key<V>(map: &HashMap<String, V>, name: &str) -> Option<String> {
+    if map.contains_key(name) {
+        return Some(name.to_string());
+    }
+    first_char_case_variant(name).filter(|variant| map.contains_key(variant))
+}
+
 /// A cached persistent module structure.
 #[derive(Debug, Clone)]
 pub struct PersStruct {
@@ -58,6 +78,12 @@ pub enum CmjExportConstant {
     Undefined { is_unit: bool },
 }
 
+#[derive(Debug, Clone)]
+pub struct CmjModuleMetadata {
+    pub is_pure: bool,
+    pub export_constants: HashMap<String, CmjExportConstant>,
+}
+
 /// In-memory module metadata for the `--in-process` build mode.
 ///
 /// When a module is registered in the in-memory registry, these fields
@@ -69,6 +95,8 @@ pub struct InMemoryModuleInfo {
     pub source_path: PathBuf,
     /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
     pub is_pure: bool,
+    /// Closed constant exports (replaces `.cmj` constant lookup)
+    pub cmj_export_constants: HashMap<String, CmjExportConstant>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
 }
@@ -138,6 +166,7 @@ impl ModuleRegistry {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_sig: sig_items,
+            cmi_longident_names: Vec::new(),
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
             },
@@ -374,8 +403,8 @@ impl PersistentEnv {
         ctx: &'a TypeContext<'a>,
     ) -> Option<&PersStruct> {
         // Check cache first (already internalized)
-        if self.cache.contains_key(name) {
-            return self.cache.get(name).and_then(|opt| opt.as_ref());
+        if let Some(cache_key) = resolve_first_char_case_key(&self.cache, name) {
+            return self.cache.get(&cache_key).and_then(|opt| opt.as_ref());
         }
 
         // Check portable cache (from ModuleRegistry, needs internalization).
@@ -384,12 +413,13 @@ impl PersistentEnv {
         // 1. Internalize types into the current TypeContext
         // 2. Collect alias rewrites
         // 3. Register types by stamp (without cascading alias resolution)
-        if let Some(portable) = self.portable_cache.remove(name) {
+        if let Some(portable_key) = resolve_first_char_case_key(&self.portable_cache, name) {
+            let portable = self.portable_cache.remove(&portable_key)?;
             let ps = portable_types::internalize_pers_struct(&portable, ctx);
-            let module_path = Path::Pident(Ident::create_persistent(name));
+            let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .alias_prefix_rewrites
-                .get(name)
+                .get(&portable_key)
                 .cloned()
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
@@ -401,18 +431,20 @@ impl PersistentEnv {
                 &ModuleType::MtySignature(ps.ps_sig.clone()),
                 ctx,
             );
-            self.cache.insert(name.to_string(), Some(ps));
-            return self.cache.get(name).and_then(|opt| opt.as_ref());
+            self.cache.insert(portable_key.clone(), Some(ps));
+            return self.cache.get(&portable_key).and_then(|opt| opt.as_ref());
         }
 
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
-        self.cache.insert(name.to_string(), None);
+        let load_name = resolve_first_char_case_key(&self.source_fallback_paths, name)
+            .unwrap_or_else(|| name.to_string());
+        self.cache.insert(load_name.clone(), None);
 
         // Try to load from disk
-        let result = self.load_module(name, ctx);
-        self.cache.insert(name.to_string(), result);
-        self.cache.get(name).and_then(|opt| opt.as_ref())
+        let result = self.load_module(&load_name, ctx);
+        self.cache.insert(load_name.clone(), result);
+        self.cache.get(&load_name).and_then(|opt| opt.as_ref())
     }
 
     fn finalize_loaded_signature<'a>(
@@ -491,7 +523,9 @@ impl PersistentEnv {
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_modules.get(name) {
+        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
+            && let Some(info) = self.in_memory_modules.get(&info_key)
+        {
             return Some(info.source_path.clone());
         }
 
@@ -531,7 +565,9 @@ impl PersistentEnv {
     /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_modules.get(name) {
+        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
+            && let Some(info) = self.in_memory_modules.get(&info_key)
+        {
             return Some(info.is_pure);
         }
 
@@ -550,7 +586,22 @@ impl PersistentEnv {
     /// default `cross_module_inline = false` mode, where only
     /// `null`/`undefined`/`true`/`false` closed lambdas are kept for
     /// cross-module inlining.
-    pub fn module_cmj_export_constants(&self, name: &str) -> Option<HashMap<String, CmjExportConstant>> {
+    pub fn module_cmj_export_constants(
+        &self,
+        name: &str,
+    ) -> Option<HashMap<String, CmjExportConstant>> {
+        // Check in-memory registry first (--in-process mode)
+        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
+            && let Some(info) = self.in_memory_modules.get(&info_key)
+        {
+            return Some(info.cmj_export_constants.clone());
+        }
+
+        // In in-process mode, the registry is authoritative — no disk fallback.
+        if self.in_process_mode {
+            return None;
+        }
+
         let path = self.resolve_module_cmj_path(name)?;
         read_cmj_export_constants(&path)
     }
@@ -672,7 +723,6 @@ impl PersistentEnv {
         } else {
             structure
         };
-        let structure = crate::binary_ast::ppx::expand_extensions(&structure, parser.arena_mut());
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
 
@@ -757,8 +807,8 @@ impl PersistentEnv {
             // from source (used by the playground to compile stdlib on demand).
             // Otherwise, the registry is the sole source of truth — missing
             // dependencies indicate a dependency-graph bug in the build system.
-            if self.source_fallback_paths.contains_key(name) {
-                return self.load_module_from_source_path_fallback(name, ctx);
+            if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name) {
+                return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
             eprintln!("ERROR: in-process module '{}' not found in registry — dependency graph bug", name);
             eprintln!("  alias rewrites has '{}': {:?}", name, self.alias_prefix_rewrites.get(name));
@@ -1195,14 +1245,30 @@ fn read_marshaled_cmj(path: &FsPath) -> Option<OcamlValue> {
     reader.read_from_bytes(marshaled).ok()
 }
 
+pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
+    let value = read_marshaled_cmj(path)?;
+    Some(CmjModuleMetadata {
+        is_pure: decode_cmj_pure(&value)?,
+        export_constants: decode_cmj_export_constants(&value)?,
+    })
+}
+
 fn read_cmj_pure(path: &FsPath) -> Option<bool> {
     let value = read_marshaled_cmj(path)?;
+    decode_cmj_pure(&value)
+}
+
+fn decode_cmj_pure(value: &OcamlValue) -> Option<bool> {
     let (_, fields) = value.as_block_opt()?;
     fields.get(1).map(|field| field.as_bool())
 }
 
 fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
     let value = read_marshaled_cmj(path)?;
+    decode_cmj_export_constants(&value)
+}
+
+fn decode_cmj_export_constants(value: &OcamlValue) -> Option<HashMap<String, CmjExportConstant>> {
     let (_, fields) = value.as_block_opt()?;
     let values_field = fields.first()?;
     let (_, values) = values_field.as_block_opt()?;

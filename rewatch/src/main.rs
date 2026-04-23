@@ -57,6 +57,7 @@ fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             };
+            configure_rayon_for_in_process(build_mode);
             match build::build(
                 &build_args.filter,
                 Path::new(&build_args.folder as &str),
@@ -97,6 +98,7 @@ fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             };
+            configure_rayon_for_in_process(build_mode);
             match watcher::start(
                 &watch_args.filter,
                 show_progress,
@@ -127,6 +129,18 @@ fn main() -> Result<()> {
             result
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+    }
+}
+
+fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
+    if build_mode.is_in_process() {
+        match rayon::ThreadPoolBuilder::new()
+            .stack_size(64 * 1024 * 1024)
+            .build_global()
+        {
+            Ok(()) => {}
+            Err(_) => {}
+        }
     }
 }
 

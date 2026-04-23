@@ -10446,7 +10446,12 @@ fn try_rewrite_signature_items(
         let expanded_items =
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)?;
         for expanded in expanded_items {
-            rewritten.push(rewrite_signature_item_no_spice(&expanded, arena));
+            let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
+            rewritten.extend(expand_signature_deriving_items(
+                &expanded,
+                rewritten_item,
+                arena,
+            ));
         }
     }
     Ok(rewritten)
@@ -10456,9 +10461,40 @@ fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> V
     try_rewrite_signature_items(items, arena).unwrap_or_else(|_| {
         items
             .iter()
-            .map(|item| rewrite_signature_item_no_spice(item, arena))
+            .flat_map(|item| {
+                let rewritten_item = rewrite_signature_item_no_spice(item, arena);
+                expand_signature_deriving_items(item, rewritten_item, arena)
+            })
             .collect()
     })
+}
+
+fn expand_signature_deriving_items(
+    original: &SignatureItem,
+    rewritten: SignatureItem,
+    arena: &mut ParseArena,
+) -> Vec<SignatureItem> {
+    let SignatureItemDesc::Psig_type(inner) = &*original.psig_desc else {
+        return vec![rewritten];
+    };
+    let (_rec_flag, tdcls) = &**inner;
+    let Some(last_tdcl) = tdcls.last() else {
+        return vec![rewritten];
+    };
+    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if !actions.iter().any(|action| matches!(action, DeriveAction::Accessors)) {
+        return vec![rewritten];
+    }
+
+    let mut items = vec![rewritten];
+    for tdcl in tdcls.iter() {
+        if let Some((_structure_items, signature_items)) =
+            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
+        {
+            items.extend(signature_items);
+        }
+    }
+    items
 }
 
 fn try_rewrite_structure_item(

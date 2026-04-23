@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result, anyhow};
 
 use crate::binary_ast::ppx;
-use crate::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
+use crate::cmi::persistent_env::{CmjExportConstant, ModuleRegistry, PersistentEnv};
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
 use crate::js_ir::{Kind, ModulePathResolver, print_deps_program_with_directives};
@@ -2955,6 +2955,8 @@ pub struct InProcessCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    pub is_pure: bool,
+    pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -2991,7 +2993,6 @@ pub fn compile_source_in_process(
     } else {
         structure
     };
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
     let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
     let structure =
@@ -3019,6 +3020,8 @@ pub fn compile_preprocessed_structure_in_process(
 ) -> Result<InProcessCompileResult> {
     let original_alias_count = registry.alias_rewrites.len();
     let file_directives = extract_file_directives_from_structure(structure, arena)?;
+    let debug = debug_for_structure(structure, options, arena);
+    let jsx_preserve = jsx_preserve_for_structure(structure, options, arena);
 
     log::debug!("[compile_source_in_process] {} type-check start", module_name);
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -3154,12 +3157,17 @@ pub fn compile_preprocessed_structure_in_process(
             }
         }
     }
-    let mut compiler =
-        LambdaCompiler::with_module_path_resolver(Some(module_path_resolver.clone()));
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
+        Some(module_path_resolver.clone()),
+        jsx_preserve,
+        options.check_div_by_zero,
+    );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
     );
+    let is_pure = program.side_effect.is_none();
+    let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
     let jsir_ms = phase_elapsed_ms(t_jsir);
 
     let t_js = phase_now();
@@ -3167,8 +3175,8 @@ pub fn compile_preprocessed_structure_in_process(
         &program,
         Some(&module_path_resolver),
         &file_directives,
-        options.debug,
-        options.jsx_preserve,
+        debug,
+        jsx_preserve,
     );
     let js_ms = phase_elapsed_ms(t_js);
 
@@ -3200,10 +3208,61 @@ pub fn compile_preprocessed_structure_in_process(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        is_pure,
+        cmj_export_constants,
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
     })
+}
+
+fn collect_in_process_cmj_export_constants(
+    program: &crate::js_ir::Program,
+) -> ahash::AHashMap<String, CmjExportConstant> {
+    let mut constants = ahash::AHashMap::new();
+    for export in &program.exports {
+        let Some(expr) = find_export_binding_expr(&program.block, export) else {
+            continue;
+        };
+        let Some(constant) = cmj_export_constant_from_expr(expr) else {
+            continue;
+        };
+        constants.insert(export.name().to_string(), constant);
+    }
+    constants
+}
+
+fn find_export_binding_expr<'a>(
+    block: &'a crate::js_ir::Block,
+    export: &crate::ident::Ident,
+) -> Option<&'a crate::js_ir::Expression> {
+    for statement in block {
+        match &statement.desc {
+            crate::js_ir::StatementDesc::Variable(decl) if decl.ident.same(export) => {
+                return decl.value.as_ref();
+            }
+            crate::js_ir::StatementDesc::Block(inner) => {
+                if let Some(expr) = find_export_binding_expr(inner, export) {
+                    return Some(expr);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn cmj_export_constant_from_expr(
+    expr: &crate::js_ir::Expression,
+) -> Option<CmjExportConstant> {
+    match &expr.desc {
+        crate::js_ir::ExpressionDesc::Bool(value) => Some(CmjExportConstant::Bool(*value)),
+        crate::js_ir::ExpressionDesc::Null => Some(CmjExportConstant::Null),
+        crate::js_ir::ExpressionDesc::Undefined { is_unit } => {
+            Some(CmjExportConstant::Undefined { is_unit: *is_unit })
+        }
+        _ => None,
+    }
 }
 
 pub fn typecheck_interface_in_process(
@@ -3270,10 +3329,12 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let typed_signature = transl_signature(&mut tctx, &env, arena, signature)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let decl_signature =
+        crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
-        mty_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+        mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
         mty_env: crate::types::typedtree::EnvRef(0),
         mty_loc: crate::parse_arena::LocIdx(0),
         mty_attributes: crate::parser::ast::Attributes::new(),
