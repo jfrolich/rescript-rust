@@ -24,8 +24,8 @@ use crate::ident::Ident;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration,
-    ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
+    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -959,7 +959,8 @@ impl PersistentEnv {
         }
 
         let ps_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
-        let renamed = rename_bound_idents_in_sig(&ps_sig, ctx);
+        let module_path = Path::Pident(Ident::create_persistent(name));
+        let renamed = rename_bound_idents_in_sig(&ps_sig, ctx, Some(&module_path));
         self.renamed_sig_cache
             .insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
@@ -1115,29 +1116,151 @@ impl PersistentEnv {
 /// Rename all bound idents in a signature, matching OCaml's
 /// `Subst.signature Subst.identity` which calls `rename_bound_idents`.
 /// This gives each signature item a fresh stamp even with identity substitution.
-fn rename_bound_idents_in_sig<'a>(sig_items: &Signature, ctx: &'a TypeContext<'a>) -> Signature {
+fn rename_bound_idents_in_sig<'a>(
+    sig_items: &Signature,
+    ctx: &'a TypeContext<'a>,
+    signature_path: Option<&Path>,
+) -> Signature {
+    rename_package_manifest_modtypes(sig_items, ctx, signature_path);
+
     sig_items
         .iter()
         .map(|item| match item {
-            SignatureItem::SigValue(id, desc) => {
-                SignatureItem::SigValue(ctx.rename_ident(id), desc.clone())
+            SignatureItem::SigValue(id, _)
+            | SignatureItem::SigType(id, _, _)
+            | SignatureItem::SigTypext(id, _, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigModtype(id, _) => Some(ctx.rename_ident(id)),
+            SignatureItem::SigClass | SignatureItem::SigClassType => None,
+        })
+        .zip(sig_items.iter())
+        .map(|(renamed_id, item)| match item {
+            SignatureItem::SigValue(_, desc) => {
+                SignatureItem::SigValue(renamed_id.expect("value id"), desc.clone())
             }
-            SignatureItem::SigType(id, decl, rec_status) => {
-                SignatureItem::SigType(ctx.rename_ident(id), decl.clone(), *rec_status)
+            SignatureItem::SigType(_, decl, rec_status) => {
+                SignatureItem::SigType(renamed_id.expect("type id"), decl.clone(), *rec_status)
             }
-            SignatureItem::SigTypext(id, ext, ext_status) => {
-                SignatureItem::SigTypext(ctx.rename_ident(id), ext.clone(), *ext_status)
-            }
+            SignatureItem::SigTypext(_, ext, ext_status) => SignatureItem::SigTypext(
+                renamed_id.expect("type extension id"),
+                ext.clone(),
+                *ext_status,
+            ),
             SignatureItem::SigModule(id, md, rec_status) => {
-                SignatureItem::SigModule(ctx.rename_ident(id), md.clone(), *rec_status)
+                let nested_path = signature_path.map(|path| Path::pdot(path.clone(), id.name()));
+                SignatureItem::SigModule(
+                    renamed_id.expect("module id"),
+                    rename_bound_idents_in_module_declaration(md, ctx, nested_path.as_ref()),
+                    *rec_status,
+                )
             }
             SignatureItem::SigModtype(id, mtd) => {
-                SignatureItem::SigModtype(ctx.rename_ident(id), mtd.clone())
+                let nested_path = signature_path.map(|path| Path::pdot(path.clone(), id.name()));
+                SignatureItem::SigModtype(
+                    renamed_id.expect("module type id"),
+                    rename_bound_idents_in_modtype_declaration(mtd, ctx, nested_path.as_ref()),
+                )
             }
             SignatureItem::SigClass => SignatureItem::SigClass,
             SignatureItem::SigClassType => SignatureItem::SigClassType,
         })
         .collect()
+}
+
+fn rename_bound_idents_in_module_declaration<'a>(
+    md: &ModuleDeclaration,
+    ctx: &'a TypeContext<'a>,
+    module_path: Option<&Path>,
+) -> ModuleDeclaration {
+    ModuleDeclaration {
+        md_type: rename_bound_idents_in_module_type(&md.md_type, ctx, module_path),
+        md_attributes: md.md_attributes.clone(),
+        md_loc: md.md_loc,
+        md_path: md.md_path.clone(),
+    }
+}
+
+fn rename_bound_idents_in_modtype_declaration<'a>(
+    mtd: &ModtypeDeclaration,
+    ctx: &'a TypeContext<'a>,
+    modtype_path: Option<&Path>,
+) -> ModtypeDeclaration {
+    ModtypeDeclaration {
+        mtd_type: mtd
+            .mtd_type
+            .as_ref()
+            .map(|mty| rename_bound_idents_in_module_type(mty, ctx, modtype_path)),
+        mtd_attributes: mtd.mtd_attributes.clone(),
+        mtd_loc: mtd.mtd_loc,
+    }
+}
+
+fn rename_bound_idents_in_module_type<'a>(
+    mty: &ModuleType,
+    ctx: &'a TypeContext<'a>,
+    module_path: Option<&Path>,
+) -> ModuleType {
+    match mty {
+        ModuleType::MtyIdent(path) => ModuleType::MtyIdent(path.clone()),
+        ModuleType::MtySignature(sig) => {
+            ModuleType::MtySignature(rename_bound_idents_in_sig(sig, ctx, module_path))
+        }
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => ModuleType::MtyFunctor {
+            param: ctx.rename_ident(param),
+            param_type: param_type
+                .as_ref()
+                .map(|mty| Box::new(rename_bound_idents_in_module_type(mty, ctx, None))),
+            result: Box::new(rename_bound_idents_in_module_type(result, ctx, None)),
+        },
+        ModuleType::MtyAlias(alias, path) => ModuleType::MtyAlias(*alias, path.clone()),
+    }
+}
+
+fn rename_package_manifest_modtypes<'a>(
+    sig_items: &Signature,
+    ctx: &'a TypeContext<'a>,
+    signature_path: Option<&Path>,
+) {
+    for item in sig_items {
+        let SignatureItem::SigType(_, decl, _) = item else {
+            continue;
+        };
+        let Some(manifest) = decl.type_manifest else {
+            continue;
+        };
+        let manifest = ctx.repr(manifest);
+        let desc = ctx.get_desc(manifest);
+        let TypeDesc::Tpackage { path, .. } = &*desc else {
+            continue;
+        };
+        let Some(modtype_name) = package_modtype_name_in_signature(path, signature_path) else {
+            continue;
+        };
+        if let Some(mtd) = sig_items.iter().find_map(|item| match item {
+            SignatureItem::SigModtype(id, mtd) if id.name() == modtype_name => Some(mtd),
+            _ => None,
+        }) {
+            let nested_path = signature_path.map(|path| Path::pdot(path.clone(), modtype_name));
+            let _ = rename_bound_idents_in_modtype_declaration(mtd, ctx, nested_path.as_ref());
+        }
+    }
+}
+
+fn package_modtype_name_in_signature<'a>(
+    path: &'a Path,
+    signature_path: Option<&Path>,
+) -> Option<&'a str> {
+    match (path, signature_path) {
+        (Path::Pident(id), _) => Some(id.name()),
+        (Path::Pdot(parent, name, _), Some(signature_path)) if parent.same(signature_path) => {
+            Some(name)
+        }
+        _ => None,
+    }
 }
 
 /// `module_path` is the path to the module containing this signature

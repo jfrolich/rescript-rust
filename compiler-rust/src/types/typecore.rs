@@ -6568,15 +6568,6 @@ fn translate_unified_ops(
         None => return None,
     };
 
-    // OCaml's unified operator path goes through the persistent Pervasives
-    // module during operator specialization, forcing `ps_sig` and allocating
-    // fresh signature identifiers before the operator arguments are typed.
-    if path_name.starts_with("Pervasives.") {
-        if let Some(pers) = tctx.persistent_env.as_mut() {
-            pers.force_lazy_signature_rename("Pervasives", tctx.type_ctx);
-        }
-    }
-
     let ctx = tctx.type_ctx;
 
     match form {
@@ -11360,6 +11351,12 @@ fn type_for(
     context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
+    // OCaml's for-loop bound typing goes through Predef.type_int, which forces
+    // the persistent Pervasives signature before the loop index is allocated.
+    if let Some(pers) = tctx.persistent_env.as_mut() {
+        pers.force_lazy_signature_rename("Pervasives", tctx.type_ctx);
+    }
+
     let ctx = tctx.type_ctx;
     // OCaml passes Predef.type_int (generic singleton) to type_expect for each bound.
     // Inside type_expect, `rue` calls instance(ty_expected) — creating a FRESH copy
