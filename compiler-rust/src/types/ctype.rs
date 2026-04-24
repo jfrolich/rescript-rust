@@ -31,8 +31,8 @@ use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
 };
 use super::variance::{Variance, VarianceFlag};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -156,7 +156,11 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
-        if self.env.as_ref().is_some_and(|current| current.id() == env.id()) {
+        if self
+            .env
+            .as_ref()
+            .is_some_and(|current| current.id() == env.id())
+        {
             return;
         }
         self.env = Some(env.clone_preserve_id());
@@ -710,8 +714,7 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // eagerly, destroying the path form. Skipping here lets the
                 // general Tconstr/Tconstr expansion path handle it correctly
                 // through unify_after_expansion's relink logic.
-                let is_firstclass_module_pdot =
-                    matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
+                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
                     && env.lookup_type(&path).ok().is_some_and(|decl| {
                         decl.type_manifest.is_some_and(|manifest| {
                             let m = ctx.repr(manifest);
@@ -995,15 +998,13 @@ pub fn resolve_type_through_modules<'a>(
             if id.stamp() != 0 {
                 let should_register = {
                     let existing = ctx.find_type_decl_by_stamp(id.stamp());
-                    existing
-                        .as_ref()
-                        .is_none_or(|d| d.type_path.is_none() && path_root_is_persistent(module_path))
+                    existing.as_ref().is_none_or(|d| {
+                        d.type_path.is_none() && path_root_is_persistent(module_path)
+                    })
                 };
                 if should_register {
                     let mut decl_for_stamp = decl.clone();
-                    if decl_for_stamp.type_path.is_none()
-                        && path_root_is_persistent(module_path)
-                    {
+                    if decl_for_stamp.type_path.is_none() && path_root_is_persistent(module_path) {
                         decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                     }
                     ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
@@ -1545,9 +1546,7 @@ pub(crate) fn resolved_type_items_share_identity(
         && decl1.type_params.len() == arity
         && decl2.type_params.len() == arity
         || match (path1, path2) {
-            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _))
-                if name1 == name2 =>
-            {
+            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _)) if name1 == name2 => {
                 let raw_parent1 = {
                     let mut no_persistent_env = None;
                     crate::types::typecore::module_alias_target_for_path(
@@ -1687,15 +1686,12 @@ fn normalize_path_full_inner<'a>(
             .is_some_and(|(origin_id, md, is_local)| {
                 let target_is_local = match &md.md_type {
                     super::decl::ModuleType::MtyAlias(_, target)
-                    | super::decl::ModuleType::MtyIdent(target) => {
-                        path_root_ident(target).is_some_and(|head| {
+                    | super::decl::ModuleType::MtyIdent(target) => path_root_ident(target)
+                        .is_some_and(|head| {
                             env.find_module_with_origin(head.name()).ok().is_some_and(
-                                |(target_id, _, target_local)| {
-                                    target_local && target_id.same(head)
-                                },
+                                |(target_id, _, target_local)| target_local && target_id.same(head),
                             )
-                        })
-                    }
+                        }),
                     _ => false,
                 };
                 is_local
@@ -1781,6 +1777,45 @@ fn proper_abbrevs(
     } else {
         ctx.simple_abbrevs_memo()
     }
+}
+
+fn module_path_signature_contains_type(env: &Env, module_path: &Path, type_name: &str) -> bool {
+    fn module_type_contains_type(
+        env: &Env,
+        mty: &super::decl::ModuleType,
+        type_name: &str,
+        visiting: &mut HashSet<Path>,
+    ) -> bool {
+        match mty {
+            super::decl::ModuleType::MtySignature(sig) => sig.iter().any(|item| {
+                matches!(
+                    item,
+                    super::decl::SignatureItem::SigType(id, _, _) if id.name() == type_name
+                )
+            }),
+            super::decl::ModuleType::MtyIdent(path)
+            | super::decl::ModuleType::MtyAlias(_, path) => {
+                if !visiting.insert(path.clone()) {
+                    return false;
+                }
+                if let Ok(mtd) = env.lookup_modtype(path)
+                    && let Some(resolved) = &mtd.mtd_type
+                    && module_type_contains_type(env, resolved, type_name, visiting)
+                {
+                    return true;
+                }
+                env.lookup_module(path).ok().is_some_and(|md| {
+                    module_type_contains_type(env, &md.md_type, type_name, visiting)
+                })
+            }
+            super::decl::ModuleType::MtyFunctor { .. } => false,
+        }
+    }
+
+    env.lookup_module(module_path).ok().is_some_and(|md| {
+        let mut visiting = HashSet::new();
+        module_type_contains_type(env, &md.md_type, type_name, &mut visiting)
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1880,9 +1915,13 @@ fn try_expand_head_with_mode<'a>(
             if let Ok(env_decl) = env.lookup_type(&path) {
                 let exact_lookup = match &path {
                     Path::Pident(_) => true,
-                    _ => env_decl.type_path.as_ref().is_some_and(|decl_path| {
-                        decl_path.same(&path) || decl_path.name() == path_name
-                    }),
+                    Path::Pdot(parent, type_name, _) => {
+                        module_path_signature_contains_type(env, parent, type_name)
+                            || env_decl.type_path.as_ref().is_some_and(|decl_path| {
+                                decl_path.same(&path) || decl_path.name() == path_name
+                            })
+                    }
+                    Path::Papply(_, _) => false,
                 };
                 if exact_lookup {
                     let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
@@ -2694,11 +2733,24 @@ fn unify_after_expansion<'a>(
             if args1.is_empty() && args2.is_empty() && path1.name() == path2.name() {
                 drop(lhs_desc);
                 drop(rhs_desc);
+                let keep_expanded_repr = state.mode != crate::types::UnifyMode::Pattern
+                    && state.env().is_some_and(|env| {
+                        should_keep_expanded_manifest_alias_repr(
+                            ctx,
+                            env,
+                            lhs,
+                            rhs,
+                            relink_target,
+                            swap,
+                        )
+                    });
                 link_type(ctx, lhs, rhs);
                 if state.mode != crate::types::UnifyMode::Pattern {
-                    let to_ty = ctx.repr(relink_target);
-                    if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
-                        ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
+                    if !keep_expanded_repr {
+                        let to_ty = ctx.repr(relink_target);
+                        if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
+                            ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
+                        }
                     }
                 }
                 return Ok(());
@@ -2761,6 +2813,19 @@ fn should_keep_expanded_manifest_alias_repr(
             _ => return false,
         }
     };
+    fn has_temporary_package_head(path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => id.name() == "%M" && !id.is_persistent(),
+            Path::Pdot(parent, _, _) => has_temporary_package_head(parent),
+            Path::Papply(_, _) => false,
+        }
+    }
+    let same_family = |left: &Path, right: &Path| {
+        left.same(right) || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
+    };
+    if has_temporary_package_head(&relink_path) && same_family(&lhs_path, &rhs_path) {
+        return true;
+    }
     let lhs_has_nested_parent =
         matches!(&lhs_path, Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pdot(..)));
     let expected_alias_name = if swap { "t" } else { "cmp" };
@@ -2780,10 +2845,6 @@ fn should_keep_expanded_manifest_alias_repr(
             TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
             _ => return false,
         }
-    };
-
-    let same_family = |left: &Path, right: &Path| {
-        left.same(right) || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
     };
 
     same_family(&manifest_path, &lhs_path)
@@ -3062,11 +3123,7 @@ fn unify_types<'a>(
                         let p2_changed = !norm2.same(path2);
                         let p1_persistent = path_root_is_persistent(path1);
                         let p2_persistent = path_root_is_persistent(path2);
-                        if p1_changed
-                            && !p2_changed
-                            && p1_persistent
-                            && p2_persistent
-                        {
+                        if p1_changed && !p2_changed && p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t2, t1);
@@ -3074,11 +3131,7 @@ fn unify_types<'a>(
                                 unify(ctx, state, a, b)?;
                             }
                             return Ok(());
-                        } else if p2_changed
-                            && !p1_changed
-                            && p1_persistent
-                            && p2_persistent
-                        {
+                        } else if p2_changed && !p1_changed && p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t1, t2);
@@ -3930,9 +3983,10 @@ fn unify_rows<'a>(
             filtered
         };
     let empty = |fields: &[RowFieldEntryRef<'_>]| {
-        fields.iter().copied().all(|(_, f)| {
-            matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent)
-        })
+        fields
+            .iter()
+            .copied()
+            .all(|(_, f)| matches!(super::btype::row_field_repr(ctx, f), RowField::Rabsent))
     };
 
     if closed {
@@ -7623,16 +7677,11 @@ fn nondep_type_rec<'a>(
                 // Expand the abbreviation — this is the key operation.
                 // OCaml: expand_abbrev env (newty2 ty.level ty.desc)
                 //
-                // First try the general expand_head machinery, which handles
-                // most cases (env-registered types, CMI types, etc.).
-                let temp = ctx.new_generic_type(desc.clone());
-                let expanded = try_expand_head(ctx, env, temp).or_else(|| {
-                    // Fallback: direct env lookup for types through the module.
-                    // OCaml's expand_abbrev uses Env.find_type which resolves
-                    // Pdot paths by looking up the parent module's components.
-                    // The Rust try_expand_head may not find locally-added modules
-                    // (e.g. functor param added for nondep_supertype), so do a
-                    // direct lookup here.
+                let expanded = {
+                    // Prefer direct env lookup for types through the functor
+                    // parameter. OCaml's expand_abbrev uses Env.find_type here;
+                    // using the generic abbreviation cache first can preserve a
+                    // stale self-manifest and fail to eliminate the dependency.
                     let decl = env.lookup_type(path).ok()?;
                     if let Some(manifest) = decl.type_manifest {
                         let params = &decl.type_params;
@@ -7654,6 +7703,13 @@ fn nondep_type_rec<'a>(
                     } else {
                         None
                     }
+                }
+                .or_else(|| {
+                    // Fall back to the general expand_head machinery for
+                    // aliases that are not directly represented in the local
+                    // module signature.
+                    let temp = ctx.new_generic_type(desc.clone());
+                    try_expand_head(ctx, env, temp)
                 });
                 match expanded {
                     Some(expanded) => {
@@ -7753,9 +7809,7 @@ fn nondep_type_rec<'a>(
                                 link: super::type_expr::RowFieldRef::null(),
                             }
                         }
-                        super::type_expr::RowField::Rabsent => {
-                            super::type_expr::RowField::Rabsent
-                        }
+                        super::type_expr::RowField::Rabsent => super::type_expr::RowField::Rabsent,
                     };
                     Some((label.clone(), new_field))
                 })
@@ -7841,6 +7895,38 @@ fn nondep_type_rec<'a>(
 
 /// Eliminate dependencies on functor parameter `mid` from a type declaration.
 /// OCaml: Ctype.nondep_type_decl
+fn unroll_abbrev<'a>(
+    ctx: &'a TypeContext<'a>,
+    id: &Ident,
+    params: &[TypeExprRef],
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+    {
+        let desc = ctx.get_desc(ty);
+        if matches!(&*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_))
+            || params.iter().any(|param| deep_occur(ctx, ty, *param))
+            || matches!(&*desc, TypeDesc::Tconstr { path, .. } if path.head_name().starts_with('#'))
+        {
+            return ty;
+        }
+    }
+
+    let level = ctx.get_level(ty);
+    let desc = ctx.get_desc(ty).clone();
+    let unrolled = ctx.new_type(desc);
+    ctx.set_level(unrolled, level);
+
+    let constr = ctx.new_type(TypeDesc::Tconstr {
+        path: Path::pident(id.clone()),
+        args: params.to_vec(),
+        abbrev: AbbrevMemoRef::nil(),
+    });
+    ctx.set_level(constr, level);
+    link_type(ctx, ty, constr);
+    unrolled
+}
+
 pub fn nondep_type_decl<'a>(
     ctx: &'a TypeContext<'a>,
     env: &Env,
@@ -7864,7 +7950,7 @@ pub fn nondep_type_decl<'a>(
 
     let type_manifest = match decl.type_manifest {
         Some(ty) => match nondep_type(ctx, env, mid, ty) {
-            Some(ty) => Some(ty),
+            Some(ty) => Some(unroll_abbrev(ctx, _id, &params, ty)),
             None if is_covariant => None,
             None => return None,
         },
@@ -7958,7 +8044,9 @@ mod tests {
     use crate::context::IdGenerator;
     use crate::ident::Ident;
     use crate::types::asttypes::PrivateFlag;
-    use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind};
+    use crate::types::decl::{
+        ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
+    };
 
     #[test]
     fn test_unify_same_type() {
@@ -8109,7 +8197,9 @@ mod tests {
             type_arity: 0,
             type_kind: TypeKind::TypeAbstract,
             type_private: PrivateFlag::Public,
-            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![])),
+            type_manifest: Some(
+                ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![]),
+            ),
             type_variance: vec![],
             type_newtype_level: None,
             type_loc: crate::location::Location::none(),
@@ -8133,10 +8223,8 @@ mod tests {
             },
         );
 
-        let queried_path = crate::types::Path::pdot(
-            crate::types::Path::pident(module_id),
-            "t".to_string(),
-        );
+        let queried_path =
+            crate::types::Path::pdot(crate::types::Path::pident(module_id), "t".to_string());
         let (_, resolved_decl) =
             resolve_type_item_through_env(&ctx, &env, &queried_path, true).expect("resolve M.t");
 

@@ -28,7 +28,10 @@ use crate::lambda::SwitchCaseTag;
 use crate::lambda::lam_tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
 pub use printer::{JsPrinter, print_block, print_expression};
-pub use program_printer::{print_deps_program, print_deps_program_with_directives, print_program};
+pub use program_printer::{
+    print_deps_program, print_deps_program_with_directives,
+    print_deps_program_with_directives_and_options, print_program,
+};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,11 +69,13 @@ impl ModulePathResolver {
     pub fn from_compile_options(
         source_filename: Option<&str>,
         output_path: Option<&FsPath>,
+        output_module_format: Option<ModuleFormat>,
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
     ) -> Self {
         Self {
-            format: module_format_from_output_path(output_path),
+            format: output_module_format
+                .unwrap_or_else(|| module_format_from_output_path(output_path)),
             output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
@@ -83,6 +88,11 @@ impl ModulePathResolver {
     /// Override a module's emitted JS import path.
     pub fn set_module_path_override(&mut self, module_name: &str, path: String) {
         self.path_overrides.insert(module_name.to_string(), path);
+    }
+
+    /// Module format for the current output target.
+    pub fn module_format(&self) -> ModuleFormat {
+        self.format
     }
 
     /// Resolve a same-directory source fallback path for an ML module.
@@ -150,6 +160,15 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
+        if let Some(env) = &self.persistent_env {
+            if env.module_is_runtime(module_name) {
+                return true;
+            }
+            if env.is_in_process_mode() {
+                return false;
+            }
+        }
+
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };
@@ -1012,7 +1031,11 @@ fn rewrite_length_bin_comparison(
 
     match op {
         BinOp::Ge if expression_has_no_side_effects(target) => Some(Expression::bool(true)),
-        BinOp::Gt => Some(raw_bin_expression(BinOp::NotEqEq, left.clone(), right.clone())),
+        BinOp::Gt => Some(raw_bin_expression(
+            BinOp::NotEqEq,
+            left.clone(),
+            right.clone(),
+        )),
         _ => None,
     }
 }
@@ -2141,10 +2164,12 @@ fn last_statement(block: &Block) -> Option<&Statement> {
 /// blocks ending in a `Block` are NOT peeled — that matches OCaml exactly.
 pub fn unnest_block(block: Block) -> Block {
     match block.as_slice() {
-        [Statement {
-            desc: StatementDesc::Block(_),
-            ..
-        }] => {
+        [
+            Statement {
+                desc: StatementDesc::Block(_),
+                ..
+            },
+        ] => {
             let mut block = block;
             let stmt = block.pop().expect("non-empty single-element block");
             match stmt.desc {
@@ -3087,7 +3112,10 @@ mod tests {
     fn test_length_ge_zero_folds_pure_targets_to_true_like_ocaml() {
         let expr = Expression::bin(
             BinOp::Ge,
-            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::length(
+                Expression::var(Ident::create_local("xs")),
+                LengthObject::Array,
+            ),
             Expression::number(Number::int(0)),
         );
 
@@ -3119,7 +3147,10 @@ mod tests {
     fn test_length_gt_zero_rewrites_to_not_eq_zero_like_ocaml() {
         let expr = Expression::bin(
             BinOp::Gt,
-            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::length(
+                Expression::var(Ident::create_local("xs")),
+                LengthObject::Array,
+            ),
             Expression::number(Number::int(0)),
         );
 
@@ -3424,6 +3455,7 @@ mod tests {
         let resolver = ModulePathResolver::from_compile_options(
             Some(current_source.to_str().expect("utf8 current source")),
             Some(source_dir.join("include_side_effect.mjs").as_path()),
+            None,
             None,
             None,
         );
@@ -4205,7 +4237,11 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_strict_null_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
-        let cond = Expression::bin(BinOp::EqEqEq, Expression::var(value.clone()), Expression::null());
+        let cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
@@ -4356,7 +4392,9 @@ mod tests {
         let stmt = Statement::if_(cond, then_block, else_block);
 
         let StatementDesc::Block(block) = &stmt.desc else {
-            panic!("expected strict undefined success tail to become a fallthrough guard: {stmt:#?}");
+            panic!(
+                "expected strict undefined success tail to become a fallthrough guard: {stmt:#?}"
+            );
         };
         let [guard, tmp_decl, nested_if, final_return] = block.as_slice() else {
             panic!("expected guard + bound temp + nested if + trailing fallback: {stmt:#?}");

@@ -160,8 +160,7 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint =
-            portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
+        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
@@ -184,8 +183,7 @@ impl ModuleRegistry {
         self.module_info.remove(name);
         self.source_fallback_paths.remove(name);
         // Remove alias rewrites that point to this module
-        self.alias_rewrites
-            .retain(|key, _| key != name);
+        self.alias_rewrites.retain(|key, _| key != name);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata.
@@ -427,10 +425,7 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.alias_prefix_rewrites,
             );
-            register_types_by_stamp_recursive(
-                &ModuleType::MtySignature(ps.ps_sig.clone()),
-                ctx,
-            );
+            register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
             self.cache.insert(portable_key.clone(), Some(ps));
             return self.cache.get(&portable_key).and_then(|opt| opt.as_ref());
         }
@@ -690,8 +685,10 @@ impl PersistentEnv {
             let typed_signature =
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
-            let decl_signature =
-                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, parser.arena());
+            let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+                &typed_signature,
+                parser.arena(),
+            );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
                 mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
@@ -797,17 +794,12 @@ impl PersistentEnv {
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
     fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
-        // In in-process mode, the registry is the sole source of truth.
-        // No CMI files, no source fallback. If a dependency isn't in the
-        // registry, it means the build graph is wrong.
-        // Exception: nopervasives modules (runtime bootstrap) may load from
-        // CMI since they're being pre-compiled into the registry.
-        if self.in_process_mode && !self.nopervasives {
-            // When a source fallback path is registered, allow lazy loading
-            // from source (used by the playground to compile stdlib on demand).
-            // Otherwise, the registry is the sole source of truth — missing
-            // dependencies indicate a dependency-graph bug in the build system.
-            if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name) {
+        // In in-process mode, never fall through to .cmi loading. The registry
+        // is authoritative for normal project modules. Runtime/bootstrap code
+        // may register source fallback paths, which are also source-only.
+        if self.in_process_mode {
+            if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name)
+            {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
             log::debug!(
@@ -856,8 +848,7 @@ impl PersistentEnv {
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers) =
-            self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
         self.alias_prefix_rewrites
@@ -1087,6 +1078,13 @@ impl PersistentEnv {
     pub fn is_in_process_mode(&self) -> bool {
         self.in_process_mode
     }
+
+    pub fn module_is_runtime(&self, name: &str) -> bool {
+        resolve_first_char_case_key(&self.in_memory_modules, name)
+            .and_then(|key| self.in_memory_modules.get(&key))
+            .map(|info| info.is_runtime)
+            .unwrap_or(false)
+    }
 }
 
 /// Recursively register all type declarations from a signature
@@ -1311,11 +1309,11 @@ fn decode_cmj_constant(value: &OcamlValue) -> Option<CmjExportConstant> {
         OcamlValue::Int(0) => Some(CmjExportConstant::Null),
         OcamlValue::Int(1) => Some(CmjExportConstant::Bool(true)),
         OcamlValue::Int(2) => Some(CmjExportConstant::Bool(false)),
-        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => Some(
-            CmjExportConstant::Undefined {
+        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => {
+            Some(CmjExportConstant::Undefined {
                 is_unit: fields[0].as_bool(),
-            },
-        ),
+            })
+        }
         _ => None,
     }
 }

@@ -13,7 +13,10 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{CmjExportConstant, ModuleRegistry, PersistentEnv};
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
-use crate::js_ir::{Kind, ModulePathResolver, print_deps_program_with_directives};
+use crate::js_ir::{
+    DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolver,
+    print_deps_program_with_directives_and_options,
+};
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -37,9 +40,13 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 #[inline]
 fn phase_now() -> Option<std::time::Instant> {
     #[cfg(not(target_arch = "wasm32"))]
-    { Some(std::time::Instant::now()) }
+    {
+        Some(std::time::Instant::now())
+    }
     #[cfg(target_arch = "wasm32")]
-    { None }
+    {
+        None
+    }
 }
 
 #[inline]
@@ -1121,6 +1128,19 @@ fn structure_needs_jsx_rewrite(
     })
 }
 
+/// A concrete JavaScript output target for one compile.
+#[derive(Clone)]
+pub struct JsOutputTarget {
+    pub path: PathBuf,
+    pub module_format: ModuleFormat,
+}
+
+/// Rendered JavaScript for one concrete output path.
+pub struct JsOutput {
+    pub path: PathBuf,
+    pub code: String,
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -1147,12 +1167,20 @@ pub struct CompilerOptions {
     pub source_filename: Option<String>,
     /// Output path used for module-format and relative-import resolution.
     pub output_path: Option<PathBuf>,
+    /// Output module format from the build config. When absent, legacy callers
+    /// infer it from `output_path`.
+    pub output_module_format: Option<crate::js_ir::ModuleFormat>,
+    /// Extra concrete JS outputs for in-process callers that need the same
+    /// typed/lambda result rendered for multiple package specs.
+    pub js_output_targets: Vec<JsOutputTarget>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
     /// Preserve transformed JSX syntax in the final JS dumper.
     pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
     pub debug: bool,
+    /// Suppress the generated version/header comment (`-bs-no-version-header`).
+    pub no_version_header: bool,
     /// Mirror `Js_config.check_div_by_zero` for checked integer/bigint lowering.
     pub check_div_by_zero: bool,
     /// When true, do not implicitly open Pervasives and Stdlib.
@@ -1177,9 +1205,12 @@ impl Default for CompilerOptions {
             open_modules: Vec::new(),
             source_filename: None,
             output_path: None,
+            output_module_format: None,
+            js_output_targets: Vec::new(),
             jsx_version: None,
             jsx_preserve: false,
             debug: false,
+            no_version_header: false,
             check_div_by_zero: true,
             nopervasives: false,
             module_name: None,
@@ -1271,7 +1302,14 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
@@ -1415,6 +1453,7 @@ pub fn compile_source_to_js_with_options(
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
+        options.output_module_format,
         options.runtime_path.as_deref(),
         tctx.persistent_env.clone(),
     );
@@ -1438,12 +1477,13 @@ pub fn compile_source_to_js_with_options(
     );
 
     // JS IR -> JS source
-    let js = print_deps_program_with_directives(
+    let js = print_deps_program_with_directives_and_options(
         &program,
         Some(&module_path_resolver),
         &file_directives,
         debug,
         jsx_preserve,
+        !options.no_version_header,
     );
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
@@ -1642,7 +1682,14 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
 
     tctx.set_persistent_env(pers_env);
 
@@ -1882,7 +1929,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            options.module_name.as_deref(),
+        );
         tctx.set_persistent_env(pers_env);
 
         let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
@@ -1925,7 +1979,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            options.module_name.as_deref(),
+        );
         tctx.set_persistent_env(pers_env);
 
         let (typed_structure, _final_env) =
@@ -2673,7 +2734,14 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
@@ -2707,7 +2775,14 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
     tctx.set_persistent_env(pers_env);
 
     let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)
@@ -2952,6 +3027,7 @@ fn prepare_inferred_signature_for_saving(
 /// Result of an in-process `.res` compilation.
 pub struct InProcessCompileResult {
     pub js_output: String,
+    pub js_outputs: Vec<JsOutput>,
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
@@ -3009,6 +3085,69 @@ pub fn compile_source_in_process(
     )
 }
 
+fn module_format_for_output_path(path: &FsPath) -> ModuleFormat {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) if name.ends_with(".mjs") => ModuleFormat::EsModule,
+        _ => ModuleFormat::CommonJs,
+    }
+}
+
+fn effective_js_output_targets(options: &CompilerOptions) -> Vec<JsOutputTarget> {
+    if !options.js_output_targets.is_empty() {
+        return options.js_output_targets.clone();
+    }
+
+    options
+        .output_path
+        .as_ref()
+        .map(|path| JsOutputTarget {
+            path: path.clone(),
+            module_format: options
+                .output_module_format
+                .unwrap_or_else(|| module_format_for_output_path(path)),
+        })
+        .into_iter()
+        .collect()
+}
+
+fn compile_js_program_for_output(
+    lowered_lambda: &crate::lambda::Lambda,
+    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    output_module_format: Option<ModuleFormat>,
+    persistent_env: Option<PersistentEnv>,
+    jsx_preserve: bool,
+) -> (DepsProgram, ModulePathResolver) {
+    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+        options.source_filename.as_deref(),
+        output_path,
+        output_module_format,
+        options.runtime_path.as_deref(),
+        persistent_env,
+    );
+    for module in possible_required_modules {
+        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
+            if let Some(path) =
+                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
+            {
+                module_path_resolver.set_module_path_override(module.id.name(), path);
+            }
+        }
+    }
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
+        Some(module_path_resolver.clone()),
+        jsx_preserve,
+        options.check_div_by_zero,
+    );
+    let program = compiler.compile_deps_program_with_possible_required_modules(
+        lowered_lambda,
+        possible_required_modules,
+    );
+
+    (program, module_path_resolver)
+}
+
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -3023,7 +3162,10 @@ pub fn compile_preprocessed_structure_in_process(
     let debug = debug_for_structure(structure, options, arena);
     let jsx_preserve = jsx_preserve_for_structure(structure, options, arena);
 
-    log::debug!("[compile_source_in_process] {} type-check start", module_name);
+    log::debug!(
+        "[compile_source_in_process] {} type-check start",
+        module_name
+    );
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -3142,42 +3284,76 @@ pub fn compile_preprocessed_structure_in_process(
     };
 
     let t_jsir = phase_now();
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
-        options.source_filename.as_deref(),
-        options.output_path.as_deref(),
-        options.runtime_path.as_deref(),
-        tctx.persistent_env.clone(),
-    );
-    for module in &possible_required_modules {
-        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
-            if let Some(path) =
-                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
-            {
-                module_path_resolver.set_module_path_override(module.id.name(), path);
-            }
-        }
-    }
-    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver.clone()),
-        jsx_preserve,
-        options.check_div_by_zero,
-    );
-    let program = compiler.compile_deps_program_with_possible_required_modules(
+    let persistent_env_for_js = tctx.persistent_env.clone();
+    let js_targets = effective_js_output_targets(options);
+    let primary_target = js_targets.first();
+    let primary_output_path = primary_target
+        .map(|target| target.path.as_path())
+        .or(options.output_path.as_deref());
+    let primary_output_module_format = primary_target
+        .map(|target| target.module_format)
+        .or(options.output_module_format);
+    let (program, module_path_resolver) = compile_js_program_for_output(
         &lowered_lambda,
         &possible_required_modules,
+        options,
+        primary_output_path,
+        primary_output_module_format,
+        persistent_env_for_js.clone(),
+        jsx_preserve,
     );
     let is_pure = program.side_effect.is_none();
     let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
+    let mut rendered_programs = vec![(
+        primary_target.map(|target| target.path.clone()),
+        program,
+        module_path_resolver,
+    )];
+    for target in js_targets.iter().skip(1) {
+        let (program, module_path_resolver) = compile_js_program_for_output(
+            &lowered_lambda,
+            &possible_required_modules,
+            options,
+            Some(&target.path),
+            Some(target.module_format),
+            persistent_env_for_js.clone(),
+            jsx_preserve,
+        );
+        rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
+    }
     let jsir_ms = phase_elapsed_ms(t_jsir);
 
     let t_js = phase_now();
-    let js = print_deps_program_with_directives(
-        &program,
-        Some(&module_path_resolver),
+    let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
+    let js = print_deps_program_with_directives_and_options(
+        &primary_program,
+        Some(&primary_resolver),
         &file_directives,
         debug,
         jsx_preserve,
+        !options.no_version_header,
     );
+    let mut js_outputs = Vec::new();
+    if let Some(path) = primary_path {
+        js_outputs.push(JsOutput {
+            path,
+            code: js.clone(),
+        });
+    }
+    for (path, program, module_path_resolver) in rendered_programs {
+        let Some(path) = path else {
+            continue;
+        };
+        let code = print_deps_program_with_directives_and_options(
+            &program,
+            Some(&module_path_resolver),
+            &file_directives,
+            debug,
+            jsx_preserve,
+            !options.no_version_header,
+        );
+        js_outputs.push(JsOutput { path, code });
+    }
     let js_ms = phase_elapsed_ms(t_js);
 
     let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
@@ -3205,6 +3381,7 @@ pub fn compile_preprocessed_structure_in_process(
 
     Ok(InProcessCompileResult {
         js_output: js,
+        js_outputs,
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
@@ -3252,9 +3429,7 @@ fn find_export_binding_expr<'a>(
     None
 }
 
-fn cmj_export_constant_from_expr(
-    expr: &crate::js_ir::Expression,
-) -> Option<CmjExportConstant> {
+fn cmj_export_constant_from_expr(expr: &crate::js_ir::Expression) -> Option<CmjExportConstant> {
     match &expr.desc {
         crate::js_ir::ExpressionDesc::Bool(value) => Some(CmjExportConstant::Bool(*value)),
         crate::js_ir::ExpressionDesc::Null => Some(CmjExportConstant::Null),
@@ -3345,7 +3520,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             _ => {
                 return Err(anyhow!(
                     "Failed to extract interface signature from typed tree"
-                ))
+                ));
             }
         };
 
@@ -3421,9 +3596,8 @@ pub fn typecheck_implementation_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _final_env) =
-        type_structure(&mut tctx, &env, parser.arena(), &structure)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
     let _ = has_interface; // post-typecheck constraint pass not ported here
 
     let published_signature =

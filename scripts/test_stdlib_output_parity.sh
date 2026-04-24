@@ -229,7 +229,7 @@ PY
             printf 'missing output: %s\n' "$actual_cjs" >> "$diff_file"
             file_failed=true
         elif ! diff -q "$expected_cjs" "$actual_cjs" >/dev/null 2>&1; then
-            printf '--- CommonJS: %s ---\n' "$module_name" >> "$diff_file"
+            printf '%s\n' "--- CommonJS: $module_name ---" >> "$diff_file"
             diff -u "$expected_cjs" "$actual_cjs" >> "$diff_file" 2>&1 || true
             file_failed=true
         fi
@@ -242,7 +242,7 @@ PY
             printf 'missing output: %s\n' "$actual_mjs" >> "$diff_file"
             file_failed=true
         elif ! diff -q "$expected_mjs" "$actual_mjs" >/dev/null 2>&1; then
-            printf '--- ESM: %s ---\n' "$module_name" >> "$diff_file"
+            printf '%s\n' "--- ESM: $module_name ---" >> "$diff_file"
             diff -u "$expected_mjs" "$actual_mjs" >> "$diff_file" 2>&1 || true
             file_failed=true
         fi

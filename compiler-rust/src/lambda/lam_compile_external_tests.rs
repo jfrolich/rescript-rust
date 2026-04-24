@@ -3,9 +3,8 @@ use super::*;
 #[test]
 fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_pipeline() {
     let lam = import_attributes_lowered_lambda();
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(
-        &lam, false,
-    );
+    let simplified =
+        crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&simplified);
     let mut block = compiled.prelude;
@@ -1921,6 +1920,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
     let resolver = ModulePathResolver::from_compile_options(
         Some(source.to_str().expect("utf8 source path")),
         Some(output.as_path()),
+        None,
         Some(runtime.path()),
         None,
     );
@@ -1978,6 +1978,7 @@ fn resolves_local_module_paths_from_ast_metadata() {
     let resolver = ModulePathResolver::from_compile_options(
         Some(current_source.to_str().expect("utf8 current source path")),
         Some(source_dir.join("Current.mjs").as_path()),
+        None,
         None,
         Some(pers),
     );

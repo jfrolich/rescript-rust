@@ -16,6 +16,7 @@ use rescript_compiler::driver::{
     CompilerOptions, compile_file_to_js_with_options, enable_cli_cleanup_skip,
     typecheck_interface_file,
 };
+use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::parser::{Parser, module, sexp_locs};
 use std::env;
 use std::fs;
@@ -90,6 +91,18 @@ struct Options {
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
     jsx_preserve: bool,
+    nopervasives: bool,
+    no_version_header: bool,
+}
+
+impl Options {
+    fn has_dump_output(&self) -> bool {
+        self.dump_lambda
+            || self.dump_typed_sexp
+            || self.dump_typed_sexp_locs
+            || self.dump_lambda_sexp
+            || self.dump_lambda_sexp_locs
+    }
 }
 
 fn main() {
@@ -181,6 +194,7 @@ fn run() -> Result<()> {
                     }
                 }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
+                "-bs-no-version-header" => opts.no_version_header = true,
                 "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
                 | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
@@ -196,6 +210,7 @@ fn run() -> Result<()> {
                 | "-bs-no-check-cmi" => {
                     // Boolean flags - no argument to consume
                 }
+                "-nopervasives" => opts.nopervasives = true,
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
                 }
@@ -240,11 +255,14 @@ fn run() -> Result<()> {
         open_modules: opts.open_modules.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
+        output_module_format: None,
+        js_output_targets: Vec::new(),
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
+        no_version_header: opts.no_version_header,
         check_div_by_zero: true,
-        nopervasives: false,
+        nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         capture_intermediates: false,
     };
@@ -254,8 +272,7 @@ fn run() -> Result<()> {
         typecheck_interface_file(&source_path, &compiler_opts)?;
         Ok(())
     } else {
-        let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
-        write_outputs(&source_path, &js, &opts)
+        write_outputs(&source_path, &compiler_opts, &opts)
     }
 }
 
@@ -388,7 +405,63 @@ fn read_ast_source_path(ast_path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path_str.into_owned()))
 }
 
-fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
+fn write_outputs(
+    source_path: &Path,
+    compiler_opts: &CompilerOptions,
+    opts: &Options,
+) -> Result<()> {
+    if opts.has_dump_output() {
+        let js = compile_file_to_js_with_options(source_path, compiler_opts)?;
+        return write_precompiled_outputs(source_path, &js, opts);
+    }
+
+    if let Some(out) = &opts.output {
+        let mut output_opts = compiler_opts.clone();
+        output_opts.output_path = Some(out.clone());
+        output_opts.output_module_format = None;
+        let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out, js)?;
+        return Ok(());
+    }
+
+    if !opts.package_outputs.is_empty() {
+        for spec in &opts.package_outputs {
+            if let Some((format, dir, suffix)) = parse_package_output(spec) {
+                let module_name = module_name_for_file(
+                    source_path,
+                    opts.namespace.as_deref(),
+                    opts.module_name.as_deref(),
+                );
+                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
+                let mut output_opts = compiler_opts.clone();
+                output_opts.output_path = Some(out_path.clone());
+                output_opts.output_module_format = Some(format);
+                let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(out_path, js)?;
+            }
+        }
+        return Ok(());
+    }
+
+    let out = source_path.with_extension("js");
+    let mut output_opts = compiler_opts.clone();
+    output_opts.output_path = Some(out.clone());
+    output_opts.output_module_format = None;
+    let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, js)?;
+    Ok(())
+}
+
+fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     if let Some(out) = &opts.output {
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
@@ -399,7 +472,7 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
 
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
-            if let Some((dir, suffix)) = parse_package_output(spec) {
+            if let Some((_format, dir, suffix)) = parse_package_output(spec) {
                 let module_name = module_name_for_file(
                     source_path,
                     opts.namespace.as_deref(),
@@ -423,12 +496,17 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     Ok(())
 }
 
-fn parse_package_output(spec: &str) -> Option<(String, String)> {
+fn parse_package_output(spec: &str) -> Option<(ModuleFormat, String, String)> {
     let mut parts = spec.splitn(3, ':');
-    let _module = parts.next()?;
+    let module = parts.next()?;
     let dir = parts.next()?.to_string();
     let suffix = parts.next()?.to_string();
-    Some((dir, suffix))
+    let format = match module {
+        "commonjs" => ModuleFormat::CommonJs,
+        "esmodule" => ModuleFormat::EsModule,
+        _ => return None,
+    };
+    Some((format, dir, suffix))
 }
 
 fn module_name_for_file(path: &Path, ns: Option<&str>, override_name: Option<&str>) -> String {
