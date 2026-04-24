@@ -935,15 +935,37 @@ impl PersistentEnv {
         if let Some(cached) = self.renamed_sig_cache.get(name) {
             return Some(cached.clone());
         }
-        // Do the rename
-        let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
+        self.force_lazy_signature_rename(name, ctx)?;
+        ctx.renamed_module_sigs
+            .borrow()
+            .get(name)
+            .cloned()
+            .or_else(|| self.renamed_sig_cache.get(name).cloned())
+    }
+
+    /// Force the lazy `Subst.signature Subst.identity` side effect for a
+    /// persistent module without requiring the caller to use the renamed
+    /// signature. OCaml allocates fresh identifiers the first time `ps_sig` is
+    /// forced; in-process type lookups still often need the raw signature shape.
+    pub(crate) fn force_lazy_signature_rename<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext<'a>,
+    ) -> Option<()> {
+        if ctx.renamed_module_sigs.borrow().contains_key(name)
+            || self.renamed_sig_cache.contains_key(name)
+        {
+            return Some(());
+        }
+
+        let ps_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
+        let renamed = rename_bound_idents_in_sig(&ps_sig, ctx);
         self.renamed_sig_cache
             .insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
             .insert(name.to_string(), renamed.clone());
-        Some(renamed)
+        Some(())
     }
 
     pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext<'a>) -> bool {

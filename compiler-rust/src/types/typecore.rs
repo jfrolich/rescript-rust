@@ -719,6 +719,9 @@ pub struct TypeCheckContext<'a> {
     pub type_variables: HashMap<String, TypeExprRef>,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
+    /// Scoped counter for OCaml's persistent-signature forcing side effect while
+    /// translating type aliases.
+    pub(crate) persistent_manifest_type_lookup_depth: usize,
     /// Recursion depth for currently-typed `let rec` groups.
     /// Used for recursive polymorphic-variant payload fallback.
     pub recursive_let_depth: usize,
@@ -775,6 +778,7 @@ impl<'a> TypeCheckContext<'a> {
             recursive_let_depth: 0,
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
+            persistent_manifest_type_lookup_depth: 0,
             force_fresh_local_float: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
@@ -1210,6 +1214,17 @@ fn resolve_type_constructor_path(
                         .unwrap_or_else(|| Path::pident(Ident::create_persistent(type_name)));
                     let predef_decl = env.lookup_type(&predef_path).ok().cloned();
                     return (predef_path, predef_decl);
+                }
+            }
+
+            if tctx.persistent_manifest_type_lookup_depth > 0 {
+                if let Longident::Lident(prefix_idx) = prefix.as_ref() {
+                    let module_name = tctx.arena.get_string(*prefix_idx);
+                    if env.find_module_with_origin(module_name).is_err() {
+                        if let Some(pers) = tctx.persistent_env.as_mut() {
+                            pers.force_lazy_signature_rename(module_name, tctx.type_ctx);
+                        }
+                    }
                 }
             }
 

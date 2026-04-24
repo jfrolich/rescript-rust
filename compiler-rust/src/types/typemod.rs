@@ -9718,7 +9718,10 @@ fn type_structure_item<'a>(
                 let (mut typ_manifest, mut manifest_type_ref) = match &decl.ptype_manifest {
                     Some(manifest) => {
                         let manifest_ct = arena.get_core_type(*manifest);
-                        let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, manifest_ct)?;
+                        tctx.persistent_manifest_type_lookup_depth += 1;
+                        let manifest_result = transl_type(tctx, &temp_env, manifest_ct);
+                        tctx.persistent_manifest_type_lookup_depth -= 1;
+                        let (typed_manifest, type_ref) = manifest_result?;
                         (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
@@ -12430,8 +12433,10 @@ fn transl_sig_type_declarations_with_ids<'a>(
             // Convert manifest type (type alias)
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
-                    let (typed_manifest, manifest_ref) =
-                        transl_type(tctx, env, arena.get_core_type(*manifest))?;
+                    tctx.persistent_manifest_type_lookup_depth += 1;
+                    let manifest_result = transl_type(tctx, env, arena.get_core_type(*manifest));
+                    tctx.persistent_manifest_type_lookup_depth -= 1;
+                    let (typed_manifest, manifest_ref) = manifest_result?;
                     (Some(typed_manifest), Some(manifest_ref))
                 }
                 None => (None, None),
