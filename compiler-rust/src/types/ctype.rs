@@ -3651,6 +3651,12 @@ fn unify_types<'a>(
                 ..
             },
         ) => {
+            // OCaml's `unify_package` calls `complete_type_list` for both
+            // package sides before comparing paths. Each call enters a fresh
+            // temporary module named `Pkg`, so preserve the same stamp flow
+            // even when both package paths and constraint lists already match.
+            ctx.create_ident("Pkg");
+            ctx.create_ident("Pkg");
             if !path1.same(path2) && path1.name() != path2.name() {
                 drop(desc1);
                 drop(desc2);
