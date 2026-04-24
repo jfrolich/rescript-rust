@@ -13447,10 +13447,9 @@ fn type_pack(
     _context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Match OCaml typecore/typemod type_package flow:
-    // - the expected type must be a package
-    // - type the packed module expression
-    // - wrap it in an implicit module-type constraint
+    // Matches OCaml `Pexp_pack` in compiler/ml/typecore.ml:3518-3525:
+    // instance the expected type, expand it to a package, then call
+    // Typemod.type_package for the module expression and package arguments.
     let ctx = tctx.type_ctx;
     let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
     let expanded = crate::types::ctype::expand_head(ctx, env, expected_inst);
@@ -13489,14 +13488,25 @@ fn type_pack(
             ));
         }
     };
-    let typed_module = crate::types::typemod::type_module_expr_with_alias_mode(
+    // Matches compiler/ml/typemod.ml:1676-1685: type_package uses
+    // Pexp_letmodule-style scoping, sets the ident clock to the saved type
+    // level, types the module, then reinitializes from Ident.current_time().
+    let package_level = ctx.current_level();
+    ctx.begin_def();
+    ctx.set_current_time(package_level);
+    let typed_module_result = crate::types::typemod::type_module_expr_with_alias_mode(
         tctx,
         env,
         tctx.arena,
         module_expr,
         false,
     )
-    .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")))?;
+    .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")));
+    if typed_module_result.is_err() {
+        ctx.end_def();
+    }
+    let typed_module = typed_module_result?;
+    ctx.init_def(ctx.current_stamp());
 
     fn mkpath_from_pack_lid(
         base: &Path,
@@ -13523,25 +13533,42 @@ fn type_pack(
     fn packed_module_path_from_expr(expr: &crate::types::typedtree::ModuleExpr) -> Option<Path> {
         match &expr.mod_desc {
             crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
+            // Matches compiler/ml/typemod.ml:1687-1691 exactly: OCaml accepts
+            // one implicit constraint only when it wraps a direct Tmod_ident.
             crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
                 inner,
                 _,
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
                 _,
-            ) => packed_module_path_from_expr(inner),
+            ) => match &inner.mod_desc {
+                crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => Some(path.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
 
-    // Match OCaml typemod.ml type_package:
-    // - use the packed module path directly for Tmod_ident / implicit
-    //   Tmod_constraint-over-ident
-    // - otherwise allocate a fresh temporary `%M` module ident before building
-    //   package args, even when the package has no constrained items
+    // Matches compiler/ml/typemod.ml:1686-1694: use a direct module path for
+    // identifiers and implicit constraints over identifiers; otherwise enter a
+    // fresh `%M` module before building constrained package paths.
     let packed_module_path = packed_module_path_from_expr(&typed_module);
-    let pack_arg_base_path = packed_module_path
-        .clone()
-        .or_else(|| Some(Path::pident(ctx.create_ident("%M"))));
+    let (pack_arg_base_path, package_env) = match packed_module_path.clone() {
+        Some(path) => (Some(path), env.clone()),
+        None => {
+            let temp_id = ctx.create_ident("%M");
+            let mut package_env = env.clone();
+            package_env.add_module(
+                temp_id.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: typed_module.mod_type.clone(),
+                    md_attributes: vec![],
+                    md_loc: crate::location::Location::none(),
+                    md_path: None,
+                },
+            );
+            (Some(Path::pident(temp_id)), package_env)
+        }
+    };
     let mut pack_args_rebuilt_from_path = false;
     let pack_args = if let Some(pack_module_path) = pack_arg_base_path.as_ref() {
         let mut rebuilt_args = Vec::with_capacity(pack_lids.len());
@@ -13564,17 +13591,36 @@ fn type_pack(
     } else {
         expected_pack_args.clone()
     };
+    // Matches compiler/ml/typemod.ml:1701-1709: build `tl'` while still inside
+    // the package definition scope, then return to the original level before
+    // computing the module-type constraint.
+    ctx.end_def();
     let typed_module_loc = typed_module.mod_loc;
-    let decl_package_mty = crate::types::typemod::modtype_of_package(
-        env,
-        &pack_path,
-        &pack_lids,
-        &pack_args,
-        tctx.arena,
-        &mut tctx.persistent_env,
-        ctx,
-    )
-    .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
+    // Matches compiler/ml/typemod.ml:1710-1719: unconstrained packages use
+    // `Mty_ident p`; constrained packages call modtype_of_package and then
+    // wrap the module in an implicit module-type constraint.
+    let decl_package_mty = if pack_lids.is_empty() {
+        crate::types::decl::ModuleType::MtyIdent(pack_path.clone())
+    } else {
+        let package_mty = crate::types::typemod::modtype_of_package(
+            &package_env,
+            &pack_path,
+            &pack_lids,
+            &pack_args,
+            tctx.arena,
+            &mut tctx.persistent_env,
+            ctx,
+        )
+        .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
+        // Matches compiler/ml/typemod.ml:1713-1718: after constructing the
+        // constrained module type, each package argument is unified with a
+        // fresh variable to enforce the same scoping check and type mutation.
+        for package_arg in &pack_args {
+            crate::types::unify(ctx, &mut tctx.unify_state, *package_arg, ctx.new_var(None))
+                .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        }
+        package_mty
+    };
     let constraint_arg_mty =
         crate::types::typemod::decl_module_type_from_typed_module_expr_for_constraint_arg(
             &typed_module,
@@ -13584,7 +13630,7 @@ fn type_pack(
         .or_else(|| {
             crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
                 &typed_module,
-                Some(env),
+                Some(&package_env),
                 ctx,
             )
         })
@@ -13593,7 +13639,7 @@ fn type_pack(
         packed_module_path
             .as_ref()
             .map(|packed_module_path| PackageCoercionCacheKey {
-                env_id: env.id(),
+                env_id: package_env.id(),
                 packed_module_path: packed_module_path.clone(),
                 package_path: pack_path.clone(),
                 package_lids: pack_lids.clone(),
@@ -13607,8 +13653,9 @@ fn type_pack(
     let coercion = if let Some(cached) = cached_coercion {
         cached
     } else {
-        let coercion = crate::types::includemod::modtypes(ctx, env, &arg_mty, &decl_package_mty)
-            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        let coercion =
+            crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
+                .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
         if let Some(key) = package_coercion_key {
             tctx.package_coercions.insert(key, coercion.clone());
         }
