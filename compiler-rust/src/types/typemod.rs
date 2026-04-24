@@ -5529,9 +5529,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 match &*sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
-                        let val_id = match typed_sig_item.map(|item| &item.sig_desc) {
-                            Some(TypedSigDesc::Tsig_value(typed_vd)) => typed_vd.val_id.clone(),
-                            _ => tctx.type_ctx.create_ident(val_name),
+                        let typed_val_id = match typed_sig_item.map(|item| &item.sig_desc) {
+                            Some(TypedSigDesc::Tsig_value(typed_vd)) => {
+                                Some(typed_vd.val_id.clone())
+                            }
+                            _ => None,
                         };
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
                         // OCaml: reset_type_variables() for each val declaration
@@ -5547,6 +5549,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         // expanding the generalized head seeds simple abbreviations so later
                         // instance() calls preserve physical sharing on nullary aliases.
                         crate::types::ctype::expand_head(ctx, &sig_env, val_type);
+                        let val_id = typed_val_id.unwrap_or_else(|| ctx.create_ident(val_name));
                         items.push(SigItem::SigValue(
                             val_id,
                             ValueDescription {
@@ -5976,13 +5979,16 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     ),
                 };
             let param_decl = match param_type {
-                Some(pt_idx) => Some(Box::new(translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    env,
-                    arena,
-                    arena.get_mod_type(*pt_idx),
-                    typed_param_mty,
-                )?)),
+                Some(pt_idx) => Some(Box::new(match typed_param_mty {
+                    Some(param) => param.mty_type.clone(),
+                    None => translate_module_type_to_decl_with_typed_hint(
+                        tctx,
+                        env,
+                        arena,
+                        arena.get_mod_type(*pt_idx),
+                        None,
+                    )?,
+                })),
                 None => None,
             };
             let mut result_env = env.clone();
@@ -5998,13 +6004,16 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     md_path: None,
                 },
             );
-            let result_decl = translate_module_type_to_decl_with_typed_hint(
-                tctx,
-                &result_env,
-                arena,
-                arena.get_mod_type(*result_type_idx),
-                typed_result_mty,
-            )?;
+            let result_decl = match typed_result_mty {
+                Some(result) => result.mty_type.clone(),
+                None => translate_module_type_to_decl_with_typed_hint(
+                    tctx,
+                    &result_env,
+                    arena,
+                    arena.get_mod_type(*result_type_idx),
+                    None,
+                )?,
+            };
             Ok(DeclMty::MtyFunctor {
                 param: param_id,
                 param_type: param_decl,
@@ -6026,11 +6035,19 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             )?;
             let type_constraints =
                 collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
-            if type_constraints.is_empty() {
-                Ok(base_mty)
+            let mut constrained_mty = if type_constraints.is_empty() {
+                match resolve_mod_type_to_sig(
+                    &base_mty,
+                    Some(env),
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    Some(sig) => DeclMty::MtySignature(sig),
+                    None => base_mty,
+                }
             } else {
                 let parent_path = parent_path_for_module_type(&base_mty);
-                Ok(apply_package_constraints_to_module_type(
+                apply_package_constraints_to_module_type(
                     env,
                     &base_mty,
                     &type_constraints,
@@ -6038,8 +6055,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or(base_mty))
+                .unwrap_or(base_mty)
+            };
+            if let DeclMty::MtySignature(sig) = &mut constrained_mty {
+                crate::cmi::persistent_env::freshen_signature_bound_idents(sig, tctx.type_ctx);
             }
+            Ok(constrained_mty)
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
@@ -8291,13 +8312,16 @@ fn transl_modtype<'a>(
                 None => None,
             };
             let param_decl = match param_type {
-                Some(pt) => Some(translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    env,
-                    arena,
-                    arena.get_mod_type(*pt),
-                    typed_param.as_deref(),
-                )?),
+                Some(pt) => Some(match typed_param.as_deref() {
+                    Some(param) => param.mty_type.clone(),
+                    None => translate_module_type_to_decl_with_typed_hint(
+                        tctx,
+                        env,
+                        arena,
+                        arena.get_mod_type(*pt),
+                        None,
+                    )?,
+                }),
                 None => None,
             };
             let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
@@ -8391,7 +8415,6 @@ pub fn transl_signature<'a>(
         let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
-                let id = ctx.create_ident(&name_str);
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
                 tctx.type_variables.clear();
@@ -8404,6 +8427,7 @@ pub fn transl_signature<'a>(
                 // Keep signature value declaration abbreviation memo side effects
                 // aligned with OCaml transl_value_decl.
                 crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
+                let id = ctx.create_ident(&name_str);
                 // For primitives, we need the pval_prim as Vec<String> for the typed tree
                 let val_prim: Vec<String> = vd
                     .pval_prim
@@ -8440,13 +8464,7 @@ pub fn transl_signature<'a>(
                     transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                 // Add module to sig_env so subsequent items (Psig_open etc.) can find it.
                 // This matches OCaml's transl_sig: `let newenv = Env.enter_module_declaration id md env`.
-                let decl_mty = translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    &sig_env,
-                    arena,
-                    arena.get_mod_type(md.pmd_type),
-                    Some(&typed_mty),
-                )?;
+                let decl_mty = typed_mty.mty_type.clone();
                 sig_env.add_module(
                     id.clone(),
                     crate::types::decl::ModuleDeclaration {
@@ -8479,16 +8497,7 @@ pub fn transl_signature<'a>(
                     None => None,
                 };
                 let decl_mtd = crate::types::ModtypeDeclaration {
-                    mtd_type: match &mtd.pmtd_type {
-                        Some(mt) => Some(translate_module_type_to_decl_with_typed_hint(
-                            tctx,
-                            &sig_env,
-                            arena,
-                            arena.get_mod_type(*mt),
-                            typed_mty.as_ref(),
-                        )?),
-                        None => None,
-                    },
+                    mtd_type: typed_mty.as_ref().map(|mty| mty.mty_type.clone()),
                     mtd_attributes: vec![],
                     mtd_loc: crate::location::Location::none(),
                 };
