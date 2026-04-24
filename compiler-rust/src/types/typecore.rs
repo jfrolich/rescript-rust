@@ -9356,12 +9356,19 @@ fn pressure_variant_rows_in_let_pattern(
                 if !row.row_closed && !row.row_fixed {
                     // Match OCaml's close_variant (parmatch.ml:808-832):
                     // Set unmatched Reither(_, _, false, _) fields to Rabsent
+                    let absent_links = row
+                        .row_fields
+                        .iter()
+                        .filter_map(|(_tag, field)| {
+                            crate::types::btype::row_field_unmatched_reither_link(ctx, field)
+                        })
+                        .collect::<Vec<_>>();
+                    for link in absent_links {
+                        ctx.set_row_field(link, crate::types::type_expr::RowField::Rabsent);
+                    }
                     for (_tag, field) in row.row_fields.iter_mut() {
                         let field_repr = crate::types::btype::row_field_repr(ctx, field);
-                        if let crate::types::type_expr::RowField::Reither {
-                            matched: false, ..
-                        } = field_repr
-                        {
+                        if matches!(field_repr, crate::types::type_expr::RowField::Rabsent) {
                             *field = crate::types::type_expr::RowField::Rabsent;
                         }
                     }
@@ -9951,50 +9958,46 @@ fn finalize_variant_rpresent_only(tctx: &mut TypeCheckContext<'_>, env: &Env, pa
             let expanded = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
             let repr = ctx.repr(expanded);
             let desc = ctx.get_desc(repr);
-            if let TypeDesc::Tvariant(row) = &*desc {
-                let mut row = crate::types::btype::row_repr(ctx, row);
-                if let Some(field_index) = row.row_fields.iter().position(|(label, _)| label == tag)
-                {
-                    let field = row.row_fields[field_index].1.clone();
-                    let field_repr = crate::types::btype::row_field_repr(ctx, &field);
-                    let mut replacement: Option<crate::types::type_expr::RowField> = None;
-                    match field_repr {
-                        crate::types::type_expr::RowField::Rabsent => {}
-                        crate::types::type_expr::RowField::Reither {
-                            constant: true,
+            let action = if let TypeDesc::Tvariant(row) = &*desc {
+                let row = crate::types::btype::row_repr(ctx, row);
+                let field_repr = crate::types::btype::row_field(ctx, tag, &row);
+                match field_repr {
+                    crate::types::type_expr::RowField::Reither {
+                        constant: true,
+                        types,
+                        link,
+                        ..
+                    } if !row.row_closed && types.is_empty() => Some((
+                        link,
+                        crate::types::type_expr::RowField::Rpresent(None),
+                        vec![],
+                    )),
+                    crate::types::type_expr::RowField::Reither {
+                        constant: false,
+                        types,
+                        link,
+                        ..
+                    } if !row.row_closed && !types.is_empty() => {
+                        let head = types[0];
+                        Some((
+                            link,
+                            crate::types::type_expr::RowField::Rpresent(Some(head)),
                             types,
-                            ..
-                        } if !row.row_closed && types.is_empty() => {
-                            replacement = Some(crate::types::type_expr::RowField::Rpresent(None));
-                        }
-                        crate::types::type_expr::RowField::Reither {
-                            constant: false,
-                            types,
-                            ..
-                        } if !row.row_closed && !types.is_empty() => {
-                            let head = types[0];
-                            replacement =
-                                Some(crate::types::type_expr::RowField::Rpresent(Some(head)));
-                            if let Some(arg_pat) = arg.as_ref() {
-                                for ty in types {
-                                    let _ = unify_pattern_types(
-                                        tctx,
-                                        arg_pat.pat_loc,
-                                        arg_pat.pat_type,
-                                        ty,
-                                    );
-                                }
-                            }
-                        }
-                        // Skip case 3 (types-clearing) — OCaml uses mutable ref links
-                        // for this case, preserving the original field structure visible
-                        // to other references through row_field_repr.
-                        _ => {}
+                        ))
                     }
-                    if let Some(new_field) = replacement {
-                        drop(desc);
-                        row.row_fields[field_index].1 = new_field;
-                        ctx.set_desc(repr, TypeDesc::Tvariant(row));
+                    // Skip case 3 (types-clearing) — this helper is intentionally
+                    // limited to Reither→Rpresent.
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            drop(desc);
+            if let Some((link, replacement, payload_types)) = action {
+                ctx.set_row_field(link, replacement);
+                if let Some(arg_pat) = arg.as_ref() {
+                    for ty in payload_types {
+                        let _ = unify_pattern_types(tctx, arg_pat.pat_loc, arg_pat.pat_type, ty);
                     }
                 }
             }
@@ -10039,41 +10042,50 @@ fn finalize_variant_rpresent_only(tctx: &mut TypeCheckContext<'_>, env: &Env, pa
 /// Returns true if any conversion was made.
 fn finalize_variant_row_rpresent(ctx: &TypeContext<'_>, variant_repr: TypeExprRef) -> bool {
     let desc = ctx.get_desc(variant_repr);
-    if let TypeDesc::Tvariant(row) = &*desc {
+    let updates = if let TypeDesc::Tvariant(row) = &*desc {
         let mut row = crate::types::btype::row_repr(ctx, row);
         if !row.row_closed {
-            let mut changed = false;
-            for (_tag, field) in row.row_fields.iter_mut() {
-                let field_repr = crate::types::btype::row_field_repr(ctx, field);
-                match field_repr {
-                    crate::types::type_expr::RowField::Reither {
-                        constant: true,
-                        types,
-                        ..
-                    } if types.is_empty() => {
-                        *field = crate::types::type_expr::RowField::Rpresent(None);
-                        changed = true;
+            row.row_fields
+                .iter_mut()
+                .filter_map(|(_tag, field)| {
+                    let field_repr = crate::types::btype::row_field_repr(ctx, field);
+                    match field_repr {
+                        crate::types::type_expr::RowField::Reither {
+                            constant: true,
+                            types,
+                            link,
+                            ..
+                        } if types.is_empty() => {
+                            Some((link, crate::types::type_expr::RowField::Rpresent(None)))
+                        }
+                        crate::types::type_expr::RowField::Reither {
+                            constant: false,
+                            types,
+                            link,
+                            ..
+                        } if !types.is_empty() => {
+                            let head = types[0];
+                            Some((
+                                link,
+                                crate::types::type_expr::RowField::Rpresent(Some(head)),
+                            ))
+                        }
+                        _ => None,
                     }
-                    crate::types::type_expr::RowField::Reither {
-                        constant: false,
-                        types,
-                        ..
-                    } if !types.is_empty() => {
-                        let head = types[0];
-                        *field = crate::types::type_expr::RowField::Rpresent(Some(head));
-                        changed = true;
-                    }
-                    _ => {}
-                }
-            }
-            drop(desc);
-            if changed {
-                ctx.set_desc(variant_repr, TypeDesc::Tvariant(row));
-            }
-            return changed;
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
         }
+    } else {
+        Vec::new()
+    };
+    drop(desc);
+    let changed = !updates.is_empty();
+    for (link, replacement) in updates {
+        ctx.set_row_field(link, replacement);
     }
-    false
+    changed
 }
 
 /// Finalize variant rows in ty_arg after case pattern finalization.
