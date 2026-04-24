@@ -7978,14 +7978,13 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
     };
     drop(desc);
 
+    if crate::types::btype::row_fixed(ctx, &row) {
+        return;
+    }
+
     let mut row_name = row.row_name.clone();
     for (_, field) in &row.row_fields {
-        if let crate::types::type_expr::RowField::Reither {
-            matched: false,
-            link,
-            ..
-        } = crate::types::btype::row_field_repr(ctx, field)
-        {
+        if let Some(link) = crate::types::btype::row_field_unmatched_reither_link(ctx, field) {
             ctx.set_row_field(link, crate::types::type_expr::RowField::Rabsent);
             row_name = None;
         }
@@ -9347,36 +9346,7 @@ fn pressure_variant_rows_in_let_pattern(
 ) {
     match &pat.pat_desc {
         PatternDesc::Tpat_variant(_, _, _) => {
-            let ctx = tctx.type_ctx;
-            let expanded = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
-            let repr = ctx.repr(expanded);
-            let desc = ctx.get_desc(repr);
-            if let TypeDesc::Tvariant(row) = &*desc {
-                let mut row = crate::types::btype::row_repr(ctx, row);
-                if !row.row_closed && !row.row_fixed {
-                    // Match OCaml's close_variant (parmatch.ml:808-832):
-                    // Set unmatched Reither(_, _, false, _) fields to Rabsent
-                    let absent_links = row
-                        .row_fields
-                        .iter()
-                        .filter_map(|(_tag, field)| {
-                            crate::types::btype::row_field_unmatched_reither_link(ctx, field)
-                        })
-                        .collect::<Vec<_>>();
-                    for link in absent_links {
-                        ctx.set_row_field(link, crate::types::type_expr::RowField::Rabsent);
-                    }
-                    for (_tag, field) in row.row_fields.iter_mut() {
-                        let field_repr = crate::types::btype::row_field_repr(ctx, field);
-                        if matches!(field_repr, crate::types::type_expr::RowField::Rabsent) {
-                            *field = crate::types::type_expr::RowField::Rabsent;
-                        }
-                    }
-                    row.row_closed = true;
-                    drop(desc);
-                    ctx.set_desc(repr, TypeDesc::Tvariant(row));
-                }
-            }
+            pressure_matrix_close_variant_type(tctx, env, pat.pat_type);
         }
         _ => {}
     }
