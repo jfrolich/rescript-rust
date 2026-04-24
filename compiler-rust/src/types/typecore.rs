@@ -6568,6 +6568,15 @@ fn translate_unified_ops(
         None => return None,
     };
 
+    // OCaml's unified operator path goes through the persistent Pervasives
+    // module during operator specialization, forcing `ps_sig` and allocating
+    // fresh signature identifiers before the operator arguments are typed.
+    if path_name.starts_with("Pervasives.") {
+        if let Some(pers) = tctx.persistent_env.as_mut() {
+            pers.force_lazy_signature_rename("Pervasives", tctx.type_ctx);
+        }
+    }
+
     let ctx = tctx.type_ctx;
 
     match form {
