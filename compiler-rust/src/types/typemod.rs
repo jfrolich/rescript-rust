@@ -3202,6 +3202,39 @@ pub fn resolve_mod_type_to_sig<'b>(
     resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, &mut visiting)
 }
 
+/// Mirror the hidden stamp side effect of OCaml's
+/// `Typetexp.create_package_mty fake=true` followed by `transl_modtype`.
+///
+/// A package type with constraints is translated as nested `with type`
+/// module types. Each `Pmty_with` returns `Mtype.freshen (Mty_signature ...)`,
+/// which allocates fresh identifiers for every bound item in the signature even
+/// though those identifiers are not printed in the package core type. Keeping
+/// this side effect aligned preserves later typedtree identifier stamps.
+pub(crate) fn consume_fake_package_mty_freshening<'b>(
+    env: &Env,
+    package_path: &Path,
+    constraint_count: usize,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) {
+    if constraint_count == 0 {
+        return;
+    }
+
+    let Some(mut sig) = resolve_mod_type_to_sig(
+        &crate::types::decl::ModuleType::MtyIdent(package_path.clone()),
+        Some(env),
+        pers_env,
+        ctx,
+    ) else {
+        return;
+    };
+
+    for _ in 0..constraint_count {
+        crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, ctx);
+    }
+}
+
 fn resolve_mod_type_to_sig_impl<'b>(
     mty: &crate::types::decl::ModuleType,
     env: Option<&Env>,
@@ -7804,9 +7837,9 @@ fn type_module_expr_with_alias<'a>(
             let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
             let param_name = arena.get_string(name.txt).to_string();
-            let param_id = tctx.type_ctx.create_ident(&param_name);
 
-            // Translate parameter type and extend environment with the functor parameter
+            // OCaml translates the parameter module type before allocating the
+            // functor parameter ident (Typemod.type_module/Pmod_functor).
             let typed_param_type = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(
                     tctx,
@@ -7816,23 +7849,30 @@ fn type_module_expr_with_alias<'a>(
                 )?)),
                 None => None,
             };
+            let param_decl_type = match param_type {
+                Some(pt) => Some(translate_module_type_to_decl_with_typed_hint(
+                    tctx,
+                    env,
+                    arena,
+                    arena.get_mod_type(*pt),
+                    typed_param_type.as_deref(),
+                )?),
+                None => None,
+            };
+            let param_id = tctx.type_ctx.create_ident(&param_name);
 
             // Extend environment with the functor parameter module
             let mut functor_env = env.clone();
-            if let Some(pt) = param_type {
-                if let Ok(param_decl_type) =
-                    translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*pt))
-                {
-                    functor_env.add_module(
-                        param_id.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: param_decl_type,
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
-                            md_path: None,
-                        },
-                    );
-                }
+            if let Some(param_decl_type) = param_decl_type {
+                functor_env.add_module(
+                    param_id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: param_decl_type,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                        md_path: None,
+                    },
+                );
             }
 
             // OCaml typemod.ml calls Ctype.init_def(Ident.current_time()) before
@@ -8429,7 +8469,6 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_modtype(mtd) => {
                 let name_str = arena.get_string(mtd.pmtd_name.txt).to_string();
-                let id = ctx.create_ident(&name_str);
                 let typed_mty = match &mtd.pmtd_type {
                     Some(mt) => Some(transl_modtype(
                         tctx,
@@ -8453,6 +8492,7 @@ pub fn transl_signature<'a>(
                     mtd_attributes: vec![],
                     mtd_loc: crate::location::Location::none(),
                 };
+                let id = ctx.create_ident(&name_str);
                 sig_env.add_modtype(id.clone(), decl_mtd);
                 TSigDesc::Tsig_modtype(crate::types::typedtree::ModuleTypeDeclaration {
                     mtd_id: id,
@@ -11849,7 +11889,6 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_modtype(mtd) => {
             // Module type declaration: module type S = MT
             let mtd_name_str = arena.get_string(mtd.pmtd_name.txt);
-            let mtd_id = tctx.type_ctx.create_ident(mtd_name_str);
 
             let typed_mty = match &mtd.pmtd_type {
                 Some(mt) => Some(transl_modtype(tctx, env, arena, arena.get_mod_type(*mt))?),
@@ -11866,6 +11905,7 @@ fn type_structure_item<'a>(
                 )?),
                 None => None,
             };
+            let mtd_id = tctx.type_ctx.create_ident(mtd_name_str);
 
             let desc = StructureItemDesc::Tstr_modtype(ModuleTypeDeclaration {
                 mtd_id: mtd_id.clone(),

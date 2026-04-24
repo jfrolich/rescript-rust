@@ -2025,6 +2025,14 @@ fn transl_type_inner(
                 }
             }
 
+            crate::types::typemod::consume_fake_package_mty_freshening(
+                env,
+                &pack_path,
+                sorted_constraints.len(),
+                &mut tctx.persistent_env,
+                ctx,
+            );
+
             let mut typed_fields = Vec::with_capacity(sorted_constraints.len());
             let mut lids = Vec::with_capacity(sorted_constraints.len());
             let mut args = Vec::with_capacity(sorted_constraints.len());
