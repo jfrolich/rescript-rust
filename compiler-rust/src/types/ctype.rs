@@ -5167,6 +5167,16 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     copy_type_cached(ctx, ty, &mut cache)
 }
 
+/// Create an instance using OCaml `Ctype.instance ~partial`.
+///
+/// With `keep = false`, non-generic subtrees without free universal variables
+/// are forgotten as fresh variables at the current level instead of being
+/// copied structurally. This is used by polymorphic variant pattern typing.
+pub fn instance_partial(ctx: &TypeContext<'_>, ty: TypeExprRef, keep: bool) -> TypeExprRef {
+    let mut cache = CopyCache::new_partial(ctx, ty, keep);
+    copy_type_cached(ctx, ty, &mut cache)
+}
+
 /// Like instance(), but guarantees a fresh top-level node is returned.
 /// Used in try_expand_head to prevent manifest corruption: when instance()
 /// returns identity (same node) for non-generic types, subsequent unification
@@ -6245,6 +6255,14 @@ struct CopyCache {
     /// Mirrors `more.desc <- Tsubst(Ttuple [more'; t])` without mutating
     /// shared type descriptors in-place.
     row_more_markers: HashMap<TypeExprRef, CopyRowMoreMarker>,
+
+    /// Optional OCaml `Ctype.copy ~partial` mode.
+    partial: Option<CopyPartial>,
+}
+
+struct CopyPartial {
+    keep: bool,
+    free_univars: HashMap<TypeExprRef, HashSet<TypeExprRef>>,
 }
 
 impl CopyCache {
@@ -6252,6 +6270,18 @@ impl CopyCache {
         CopyCache {
             nodes: HashMap::new(),
             row_more_markers: HashMap::new(),
+            partial: None,
+        }
+    }
+
+    fn new_partial(ctx: &TypeContext<'_>, ty: TypeExprRef, keep: bool) -> Self {
+        CopyCache {
+            nodes: HashMap::new(),
+            row_more_markers: HashMap::new(),
+            partial: Some(CopyPartial {
+                keep,
+                free_univars: compute_univars_per_node(ctx, ty),
+            }),
         }
     }
 }
@@ -6933,6 +6963,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
             args: Vec<TypeExprRef>,
         },
         Link(TypeExprRef),
+        Forget(i32),
     }
 
     let level = ctx.get_level(ty);
@@ -6940,8 +6971,28 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     // Determine action based on type level and descriptor.
     let action = {
         let desc = ctx.borrow_desc(ty);
+        let partial_forget_level = cache.partial.as_ref().and_then(|partial| {
+            if level == GENERIC_LEVEL {
+                return None;
+            }
+            let has_free_univars = partial
+                .free_univars
+                .get(&ty)
+                .is_some_and(|free_univars| !free_univars.is_empty());
+            if has_free_univars {
+                None
+            } else if partial.keep {
+                Some(level)
+            } else {
+                Some(ctx.current_level())
+            }
+        });
 
-        if level != GENERIC_LEVEL {
+        if let TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) = &*desc {
+            CopyAction::Link(*target)
+        } else if let Some(forget_level) = partial_forget_level {
+            CopyAction::Forget(forget_level)
+        } else if level != GENERIC_LEVEL {
             match &*desc {
                 // OCaml's copy returns identity for all non-generic type nodes.
                 TypeDesc::Tvar(_)
@@ -7018,6 +7069,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
     match action {
         CopyAction::ReturnSelf => ty,
         CopyAction::Link(target) => copy_type_cached(ctx, target, cache),
+        CopyAction::Forget(level) => ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
         CopyAction::NewVar(name) => {
             // OCaml preserves Tvar names in copy: newvar2 ~name:(match ty.desc with Tvar name -> name | _ -> None)
             let fresh = ctx.new_var(name);
@@ -7162,7 +7214,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
-                    let more_copy = match ctx.get_desc(more).clone() {
+                    let mut more_copy = match ctx.get_desc(more).clone() {
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)
                         }
@@ -7193,6 +7245,48 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                         }
                         _ => copy_type_cached(ctx, more, cache),
                     };
+                    let mut opened_row = None;
+                    if cache.partial.as_ref().is_some_and(|partial| !partial.keep) {
+                        let has_reither = row.row_fields.iter().any(|(_, field)| {
+                            matches!(
+                                super::btype::row_field_repr(ctx, field),
+                                crate::types::type_expr::RowField::Reither { .. }
+                            )
+                        });
+                        let variant_has_free_univars = cache
+                            .partial
+                            .as_ref()
+                            .and_then(|partial| partial.free_univars.get(&ty))
+                            .is_some_and(|free_univars| !free_univars.is_empty());
+                        if row.row_closed
+                            && !row.row_fixed
+                            && !variant_has_free_univars
+                            && has_reither
+                        {
+                            if more == ctx.repr(more_copy) {
+                                let fresh = ctx.new_var(None);
+                                let lv = if keep {
+                                    ctx.get_level(more)
+                                } else {
+                                    ctx.current_level()
+                                };
+                                ctx.set_level(fresh, lv);
+                                more_copy = fresh;
+                            }
+                            let mut row_opened = row.clone();
+                            row_opened.row_fields.retain(|(_, field)| {
+                                !matches!(
+                                    super::btype::row_field_repr(ctx, field),
+                                    crate::types::type_expr::RowField::Reither { .. }
+                                )
+                            });
+                            row_opened.row_more = more_copy;
+                            row_opened.row_closed = false;
+                            row_opened.row_fixed = false;
+                            row_opened.row_name = None;
+                            opened_row = Some(row_opened);
+                        }
+                    }
                     let marker_tuple =
                         ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
                     let prev_marker = cache.row_more_markers.insert(
@@ -7202,7 +7296,9 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                             variant: placeholder,
                         },
                     );
-                    let mut row_copy = copy_row_cached(ctx, &row, true, keep, more_copy, cache);
+                    let row_for_copy = opened_row.as_ref().unwrap_or(row);
+                    let mut row_copy =
+                        copy_row_cached(ctx, row_for_copy, true, keep, more_copy, cache);
                     match prev_marker {
                         Some(prev) => {
                             cache.row_more_markers.insert(more, prev);
@@ -7243,7 +7339,8 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                 CopyAction::ReturnSelf
                 | CopyAction::NewVar(_)
                 | CopyAction::NewUnivar(_)
-                | CopyAction::Link(_) => unreachable!(),
+                | CopyAction::Link(_)
+                | CopyAction::Forget(_) => unreachable!(),
             };
             ctx.set_desc(placeholder, copied_desc);
             placeholder

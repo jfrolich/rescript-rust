@@ -9371,7 +9371,7 @@ fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool 
 /// variant row is closed, non-fixed, and still has `Reither` fields, reopen
 /// the row and drop those `Reither` fields.
 fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
-    crate::types::ctype::subst_identity_copy_with_partial(ctx, ty, true)
+    crate::types::ctype::instance_partial(ctx, ty, false)
 }
 
 /// Align erase-either scrutinee rows with OCaml's `type_cases` pre-state.
