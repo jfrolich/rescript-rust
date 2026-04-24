@@ -7817,9 +7817,9 @@ fn type_module_expr_with_alias<'a>(
             let (ref name, ref param_type, ref body_idx) = **inner;
             // Functor: (X: S) => ME
             let param_name = arena.get_string(name.txt).to_string();
-            let param_id = tctx.type_ctx.create_ident(&param_name);
 
-            // Translate parameter type and extend environment with the functor parameter
+            // OCaml translates the parameter module type before creating the
+            // functor parameter ident (Typemod.type_module, Pmod_functor).
             let typed_param_type = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(
                     tctx,
@@ -7829,23 +7829,21 @@ fn type_module_expr_with_alias<'a>(
                 )?)),
                 None => None,
             };
+            let param_decl_type = typed_param_type.as_ref().map(|mty| mty.mty_type.clone());
+            let param_id = tctx.type_ctx.create_ident(&param_name);
 
             // Extend environment with the functor parameter module
             let mut functor_env = env.clone();
-            if let Some(pt) = param_type {
-                if let Ok(param_decl_type) =
-                    translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*pt))
-                {
-                    functor_env.add_module(
-                        param_id.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: param_decl_type,
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
-                            md_path: None,
-                        },
-                    );
-                }
+            if let Some(param_decl_type) = param_decl_type {
+                functor_env.add_module(
+                    param_id.clone(),
+                    crate::types::decl::ModuleDeclaration {
+                        md_type: param_decl_type,
+                        md_attributes: vec![],
+                        md_loc: crate::location::Location::none(),
+                        md_path: None,
+                    },
+                );
             }
 
             // OCaml typemod.ml calls Ctype.init_def(Ident.current_time()) before
@@ -8254,7 +8252,6 @@ fn transl_modtype<'a>(
         }
         PMtyDesc::Pmty_functor(inner) => {
             let (ref name, ref param_type, ref result_type_idx) = **inner;
-            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let typed_param = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(
                     tctx,
@@ -8264,16 +8261,8 @@ fn transl_modtype<'a>(
                 )?)),
                 None => None,
             };
-            let param_decl = match param_type {
-                Some(pt) => Some(translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    env,
-                    arena,
-                    arena.get_mod_type(*pt),
-                    typed_param.as_deref(),
-                )?),
-                None => None,
-            };
+            let param_decl = typed_param.as_ref().map(|mty| mty.mty_type.clone());
+            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let mut result_env = env.clone();
             result_env.add_module(
                 param_id.clone(),
