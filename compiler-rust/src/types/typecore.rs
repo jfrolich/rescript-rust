@@ -1172,6 +1172,72 @@ fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
     }
 }
 
+fn force_module_lookup_signature_side_effect(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    module_lid: &Longident,
+) {
+    fn force_persistent_path(
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        path: &Path,
+    ) {
+        if let Path::Pident(id) = path {
+            if id.is_persistent() || id.stamp() == 0 {
+                if let Some(pers) = pers_env.as_mut() {
+                    pers.force_lazy_signature_rename(id.name(), ctx);
+                }
+            }
+        }
+    }
+
+    match module_lid {
+        Longident::Lident(module_idx) => {
+            let module_name = tctx.arena.get_string(*module_idx);
+            // OCaml burns stamps when resolving a local alias to a persistent
+            // module, but direct persistent lookups like Stdlib_Array.length
+            // keep the persistent module id at /0.
+            if let Ok((_id, md, _is_local)) = env.find_module_with_origin(module_name) {
+                match &md.md_type {
+                    crate::types::decl::ModuleType::MtyAlias(_, target)
+                    | crate::types::decl::ModuleType::MtyIdent(target) => {
+                        force_persistent_path(&mut tctx.persistent_env, tctx.type_ctx, target);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Longident::Ldot(parent, child_idx) => {
+            force_module_lookup_signature_side_effect(tctx, env, parent);
+            let Some(parent_path) = env.resolve_module_access_path_for_lid(
+                parent,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) else {
+                return;
+            };
+            let child_name = tctx.arena.get_string(*child_idx);
+            if let Some((_, _, md)) = lookup_module_in_resolved_path(
+                &parent_path,
+                child_name,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
+                match &md.md_type {
+                    crate::types::decl::ModuleType::MtyAlias(_, target)
+                    | crate::types::decl::ModuleType::MtyIdent(target) => {
+                        force_persistent_path(&mut tctx.persistent_env, tctx.type_ctx, target);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Longident::Lapply(_, _) => {}
+    }
+}
+
 fn resolve_type_constructor_path(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -1216,6 +1282,8 @@ fn resolve_type_constructor_path(
                     return (predef_path, predef_decl);
                 }
             }
+
+            force_module_lookup_signature_side_effect(tctx, env, prefix);
 
             if tctx.persistent_manifest_type_lookup_depth > 0 {
                 if let Longident::Lident(prefix_idx) = prefix.as_ref() {
@@ -4409,6 +4477,9 @@ pub fn type_expect<'a>(
             }
 
             // Normal identifier expression
+            if let Longident::Ldot(prefix, _) = longident {
+                force_module_lookup_signature_side_effect(tctx, env, prefix);
+            }
             let (path, desc) = env.lookup_value_by_lid(
                 longident,
                 tctx.arena,

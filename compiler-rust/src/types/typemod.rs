@@ -9523,7 +9523,6 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
-            let id = tctx.type_ctx.create_ident(&name_str);
 
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration
@@ -9550,6 +9549,11 @@ fn type_structure_item<'a>(
                 .iter()
                 .map(|s| arena.get_string(*s).to_string())
                 .collect();
+
+            // OCaml Typedecl.transl_value_decl enters the value after translating
+            // the type and parsing primitive metadata, so type lookup side effects
+            // consume stamps before the external binding id is allocated.
+            let id = tctx.type_ctx.create_ident(&name_str);
 
             // Add the external value to the environment
             let mut new_env = env.clone();
