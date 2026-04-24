@@ -4186,6 +4186,7 @@ fn transl_with_constraints<'a>(
                         tctx,
                         env,
                         arena,
+                        RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
                     )?;
@@ -4203,6 +4204,7 @@ fn transl_with_constraints<'a>(
                     tctx,
                     env,
                     arena,
+                    RecFlag::Nonrecursive,
                     std::slice::from_ref(decl),
                     None,
                 )?;
@@ -4223,6 +4225,7 @@ fn transl_with_constraints<'a>(
                         tctx,
                         env,
                         arena,
+                        RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
                     )?;
@@ -4240,6 +4243,7 @@ fn transl_with_constraints<'a>(
                     tctx,
                     env,
                     arena,
+                    RecFlag::Nonrecursive,
                     std::slice::from_ref(decl),
                     None,
                 )?;
@@ -8448,7 +8452,8 @@ pub fn transl_signature<'a>(
             }
             PSigDesc::Psig_type(inner) => {
                 let (ref rec_flag, ref decls) = **inner;
-                let typed_decls = transl_sig_type_declarations(tctx, &sig_env, arena, decls)?;
+                let typed_decls =
+                    transl_sig_type_declarations(tctx, &sig_env, arena, *rec_flag, decls)?;
                 // Match OCaml transl_signature/Typedecl.transl_type_decl:
                 // all signature types, including abstract ones, enter the
                 // threaded environment for subsequent signature items.
@@ -12330,15 +12335,17 @@ fn transl_sig_type_declarations<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
+    rec_flag: RecFlag,
     decls: &[crate::parser::ast::TypeDeclaration],
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
-    transl_sig_type_declarations_with_ids(tctx, env, arena, decls, None)
+    transl_sig_type_declarations_with_ids(tctx, env, arena, rec_flag, decls, None)
 }
 
 fn transl_sig_type_declarations_with_ids<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
+    rec_flag: RecFlag,
     decls: &[crate::parser::ast::TypeDeclaration],
     predeclared_type_ids: Option<&[Ident]>,
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
@@ -12360,6 +12367,33 @@ fn transl_sig_type_declarations_with_ids<'a>(
             ids
         }
     };
+    let mut temp_env = env.clone();
+    if matches!(rec_flag, RecFlag::Recursive) {
+        for (type_id, decl) in declared_type_ids.iter().zip(decls.iter()) {
+            let placeholder_decl = crate::types::TypeDeclaration {
+                type_params: vec![],
+                type_arity: decl.ptype_params.len() as i32,
+                type_kind: crate::types::TypeKind::TypeAbstract,
+                type_private: match decl.ptype_private {
+                    crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
+                    crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
+                },
+                type_manifest: None,
+                type_variance: vec![
+                    crate::types::variance::Variance::null();
+                    decl.ptype_params.len()
+                ],
+                type_newtype_level: None,
+                type_loc: arena.to_location(decl.ptype_loc),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_unboxed: crate::types::UnboxedStatus::default(),
+                type_inlined_types: vec![],
+                type_path: Some(Path::pident(type_id.clone())),
+            };
+            temp_env.add_type(type_id.clone(), placeholder_decl);
+        }
+    }
 
     // Match OCaml Typedecl.transl_type_decl flow for signatures:
     // translate inside begin_def/end_def, then generalize declarations.
@@ -12405,7 +12439,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                             type_ref,
                         )
                     }
-                    _ => transl_type(tctx, env, core_type)?,
+                    _ => transl_type(tctx, &temp_env, core_type)?,
                 };
                 internal_type_params.push(type_ref);
                 // Insert type params into type_variables so record field/manifest
@@ -12425,8 +12459,8 @@ fn transl_sig_type_declarations_with_ids<'a>(
             // Convert type constraints
             let mut typ_cstrs: Vec<(TypedCoreType, TypedCoreType, LocIdx)> = Vec::new();
             for (ct1, ct2, cstr_loc) in &decl.ptype_cstrs {
-                let (typed_ct1, _) = transl_type(tctx, env, arena.get_core_type(*ct1))?;
-                let (typed_ct2, _) = transl_type(tctx, env, arena.get_core_type(*ct2))?;
+                let (typed_ct1, _) = transl_type(tctx, &temp_env, arena.get_core_type(*ct1))?;
+                let (typed_ct2, _) = transl_type(tctx, &temp_env, arena.get_core_type(*ct2))?;
                 typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
             }
 
@@ -12434,7 +12468,8 @@ fn transl_sig_type_declarations_with_ids<'a>(
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
                     tctx.persistent_manifest_type_lookup_depth += 1;
-                    let manifest_result = transl_type(tctx, env, arena.get_core_type(*manifest));
+                    let manifest_result =
+                        transl_type(tctx, &temp_env, arena.get_core_type(*manifest));
                     tctx.persistent_manifest_type_lookup_depth -= 1;
                     let (typed_manifest, manifest_ref) = manifest_result?;
                     (Some(typed_manifest), Some(manifest_ref))
@@ -12458,7 +12493,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                     for label in labels {
                         let lbl_name = arena.get_string(label.pld_name.txt);
                         let (typed_label_ty, mut lbl_type) =
-                            transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
+                            transl_type(tctx, &temp_env, arena.get_core_type(label.pld_type))?;
                         if label.pld_optional {
                             let option_path = crate::types::predef::path_option();
                             lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
@@ -12534,7 +12569,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                                 let mut typed_tuple_args = Vec::with_capacity(args.len());
                                 for arg in args {
                                     let (typed_arg, arg_ref) =
-                                        transl_type(tctx, env, arena.get_core_type(*arg))?;
+                                        transl_type(tctx, &temp_env, arena.get_core_type(*arg))?;
                                     internal_tuple_args.push(arg_ref);
                                     typed_tuple_args.push(typed_arg);
                                 }
@@ -12552,7 +12587,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                                     let lbl_name = arena.get_string(label.pld_name.txt);
                                     let (typed_label_ty, mut lbl_type) = transl_type(
                                         tctx,
-                                        env,
+                                        &temp_env,
                                         arena.get_core_type(label.pld_type),
                                     )?;
                                     if label.pld_optional {
@@ -12619,7 +12654,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         let (typed_res, internal_res) = match &cstr.pcd_res {
                             Some(res_type) => {
                                 let (typed, internal) =
-                                    transl_type(tctx, env, arena.get_core_type(*res_type))?;
+                                    transl_type(tctx, &temp_env, arena.get_core_type(*res_type))?;
                                 (Some(typed), Some(internal))
                             }
                             None => (None, None),
