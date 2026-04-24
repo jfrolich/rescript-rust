@@ -8281,7 +8281,6 @@ fn transl_modtype<'a>(
         }
         PMtyDesc::Pmty_functor(inner) => {
             let (ref name, ref param_type, ref result_type_idx) = **inner;
-            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let typed_param = match param_type {
                 Some(pt) => Some(Box::new(transl_modtype(
                     tctx,
@@ -8301,6 +8300,7 @@ fn transl_modtype<'a>(
                 )?),
                 None => None,
             };
+            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let mut result_env = env.clone();
             result_env.add_module(
                 param_id.clone(),
