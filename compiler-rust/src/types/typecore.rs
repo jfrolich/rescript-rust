@@ -8214,10 +8214,6 @@ fn type_match_cases_batch_non_gadt<'a>(
             scope_open = true;
         }
 
-        if erase_either {
-            normalize_erase_either_scrutinee_row(ctx, ty_arg);
-        }
-
         let mut pending_cases: Vec<PendingMatchCase<'a>> = Vec::with_capacity(cases.len());
         for case in cases {
             let case_loc = tctx
@@ -9372,36 +9368,6 @@ fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool 
 /// the row and drop those `Reither` fields.
 fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     crate::types::ctype::instance_partial(ctx, ty, false)
-}
-
-/// Align erase-either scrutinee rows with OCaml's `type_cases` pre-state.
-/// OCaml carries a closed row where unmatched alternatives are marked
-/// `Reither(..., matched=false)` before per-case pattern typing.
-fn normalize_erase_either_scrutinee_row(ctx: &TypeContext<'_>, ty: TypeExprRef) {
-    let repr = ctx.repr(ty);
-    let desc = ctx.get_desc(repr);
-    let mut row = match &*desc {
-        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
-        _ => return,
-    };
-    drop(desc);
-
-    let mut changed = false;
-    if !row.row_closed {
-        row.row_closed = true;
-        changed = true;
-    }
-    for (_, field) in row.row_fields.iter_mut() {
-        if let crate::types::type_expr::RowField::Reither { matched, .. } = field {
-            if *matched {
-                *matched = false;
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        ctx.set_desc(repr, TypeDesc::Tvariant(row));
-    }
 }
 
 fn type_case_impl(
