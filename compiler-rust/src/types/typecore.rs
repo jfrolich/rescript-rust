@@ -3888,25 +3888,58 @@ fn type_pattern_record(
         expected_ty
     };
 
-    // Type check each field pattern
+    struct PatternRecordFieldInfo<'a> {
+        original_index: usize,
+        field: &'a crate::parser::ast::PatternRecordField,
+        field_name: String,
+        disambiguated: Option<crate::types::LabelDescription>,
+    }
+
+    // Match OCaml typecore.ml type_record_elem_list:
+    // 1) disambiguate labels in source order
+    // 2) sort by lbl_pos before typing each field pattern
+    let mut field_infos: Vec<PatternRecordFieldInfo<'_>> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
+            let field_name = tctx.longident_last_name(&resolved_lid);
+            let disambiguated = lookup_label_by_lid(
+                &resolved_lid,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                Some(record_ty),
+            )
+            .or_else(|| {
+                disambiguate_label(&field_name, record_ty, env, &mut tctx.persistent_env, ctx)
+            });
+            PatternRecordFieldInfo {
+                original_index: idx,
+                field,
+                field_name,
+                disambiguated,
+            }
+        })
+        .collect();
+    field_infos.sort_by_key(|field_info| {
+        field_info
+            .disambiguated
+            .as_ref()
+            .map(|label| label.lbl_pos)
+            .unwrap_or(field_info.original_index as i32)
+    });
+
     let mut typed_fields = Vec::new();
-    for (idx, field) in fields.iter().enumerate() {
-        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
-        let field_name = tctx.longident_last_name(&resolved_lid);
+    for field_info in field_infos {
+        let idx = field_info.original_index;
+        let field = field_info.field;
+        let field_name = field_info.field_name;
+        let disambiguated = field_info.disambiguated;
 
         // Create fresh type variable for the field
         let field_ty = ctx.new_var(None);
-
-        // Try to look up the label from the environment for type info
-        let disambiguated = lookup_label_by_lid(
-            &resolved_lid,
-            tctx.arena,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-            Some(record_ty),
-        )
-        .or_else(|| disambiguate_label(&field_name, record_ty, env, &mut tctx.persistent_env, ctx));
 
         let label_desc = if let Some(env_label) = disambiguated {
             let env_label = if has_dict_pattern_attr {
