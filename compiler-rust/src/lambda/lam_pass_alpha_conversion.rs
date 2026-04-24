@@ -75,20 +75,13 @@ impl<'a> Alpha<'a> {
                     // split into nested `Lam.apply` calls. The inner call
                     // gets `App_infer_full`; the outer keeps the original.
                     let split = x as usize;
-                    let first: Vec<Lambda> =
-                        args[..split].iter().map(|a| self.simpl(a)).collect();
-                    let rest: Vec<Lambda> =
-                        args[split..].iter().map(|a| self.simpl(a)).collect();
+                    let first: Vec<Lambda> = args[..split].iter().map(|a| self.simpl(a)).collect();
+                    let rest: Vec<Lambda> = args[split..].iter().map(|a| self.simpl(a)).collect();
                     let infer_full = ApInfo {
                         status: ApplyStatus::InferFull,
                         ..ap_info.clone()
                     };
-                    let inner = Lambda::apply(
-                        self.simpl(fn_),
-                        first,
-                        infer_full,
-                        false,
-                    );
+                    let inner = Lambda::apply(self.simpl(fn_), first, infer_full, false);
                     Lambda::apply(inner, rest, ap_info.clone(), ap_transformed_jsx)
                 }
             }
@@ -121,12 +114,9 @@ impl<'a> Alpha<'a> {
             }
 
             // lam_pass_alpha_conversion.ml:62
-            Lambda::Llet(str, v, l1, l2) => Lambda::let_(
-                *str,
-                v.clone(),
-                self.simpl(l1),
-                self.simpl(l2),
-            ),
+            Lambda::Llet(str, v, l1, l2) => {
+                Lambda::let_(*str, v.clone(), self.simpl(l1), self.simpl(l2))
+            }
 
             // lam_pass_alpha_conversion.ml:63-65
             Lambda::Lletrec(bindings, body) => {
@@ -153,11 +143,7 @@ impl<'a> Alpha<'a> {
                         let arg = self.simpl(arg);
                         unsafe_adjust_to_arity(loc.clone(), *len, Some(x), arg)
                     }
-                    None => Lambda::prim(
-                        primitive.clone(),
-                        vec![self.simpl(arg)],
-                        loc.clone(),
-                    ),
+                    None => Lambda::prim(primitive.clone(), vec![self.simpl(arg)], loc.clone()),
                 }
             }
 
@@ -173,9 +159,7 @@ impl<'a> Alpha<'a> {
                 let arg = &args[0];
                 let new_arg = match arg {
                     Lambda::Lfunction(f)
-                        if f.arity == 1
-                            && f.params.len() == 1
-                            && f.params[0].name() == "param" =>
+                        if f.arity == 1 && f.params.len() == 1 && f.params[0].name() == "param" =>
                     {
                         Lambda::function_(
                             1,
@@ -248,24 +232,17 @@ impl<'a> Alpha<'a> {
             }
 
             // lam_pass_alpha_conversion.ml:115
-            Lambda::LstaticCatch(l1, ids, l2) => Lambda::static_catch(
-                self.simpl(l1),
-                ids.0,
-                ids.1.clone(),
-                self.simpl(l2),
-            ),
-
-            // lam_pass_alpha_conversion.ml:116
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl(l1), v.clone(), self.simpl(l2))
+            Lambda::LstaticCatch(l1, ids, l2) => {
+                Lambda::static_catch(self.simpl(l1), ids.0, ids.1.clone(), self.simpl(l2))
             }
 
+            // lam_pass_alpha_conversion.ml:116
+            Lambda::LtryWith(l1, v, l2) => Lambda::try_(self.simpl(l1), v.clone(), self.simpl(l2)),
+
             // lam_pass_alpha_conversion.ml:117
-            Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
-                self.simpl(l1),
-                self.simpl(l2),
-                self.simpl(l3),
-            ),
+            Lambda::LifThenElse(l1, l2, l3) => {
+                Lambda::if_(self.simpl(l1), self.simpl(l2), self.simpl(l3))
+            }
 
             // lam_pass_alpha_conversion.ml:118
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl(l1), self.simpl(l2)),

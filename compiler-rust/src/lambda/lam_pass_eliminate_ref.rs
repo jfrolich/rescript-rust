@@ -88,11 +88,8 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
         // Lapply (lam_pass_eliminate_ref.ml:55-58).
         Lambda::Lapply(apply) => {
             let new_func = eliminate_ref(id, &apply.ap_func)?;
-            let new_args: Result<Vec<_>, _> = apply
-                .ap_args
-                .iter()
-                .map(|a| eliminate_ref(id, a))
-                .collect();
+            let new_args: Result<Vec<_>, _> =
+                apply.ap_args.iter().map(|a| eliminate_ref(id, a)).collect();
             Ok(Lambda::Lapply(Apply {
                 ap_func: Box::new(new_func),
                 ap_args: new_args?,
@@ -125,7 +122,11 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
         Lambda::Lprim(prim) => {
             let new_args: Result<Vec<_>, _> =
                 prim.args.iter().map(|a| eliminate_ref(id, a)).collect();
-            Ok(Lambda::prim(prim.primitive.clone(), new_args?, prim.loc.clone()))
+            Ok(Lambda::prim(
+                prim.primitive.clone(),
+                new_args?,
+                prim.loc.clone(),
+            ))
         }
 
         // Lswitch (lam_pass_eliminate_ref.ml:68-82).
@@ -178,8 +179,7 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
 
         // Lstaticraise (lam_pass_eliminate_ref.ml:89-90).
         Lambda::LstaticRaise(i, args) => {
-            let new_args: Result<Vec<_>, _> =
-                args.iter().map(|a| eliminate_ref(id, a)).collect();
+            let new_args: Result<Vec<_>, _> = args.iter().map(|a| eliminate_ref(id, a)).collect();
             Ok(Lambda::LstaticRaise(*i, new_args?))
         }
 

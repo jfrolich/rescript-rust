@@ -453,7 +453,8 @@ impl RawLambda {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
-                        return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                        return_wrapper:
+                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },
                     dynamic_import: false,

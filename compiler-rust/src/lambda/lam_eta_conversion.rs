@@ -25,12 +25,7 @@ use crate::location::Location;
 /// Builds an outer `function(extra_params) { ... fn(args ++ extra_params) }`
 /// closure for the `n` missing arguments, factoring out any non-pure args
 /// into outer `let` bindings so they are evaluated exactly once.
-pub fn transform_under_supply(
-    n: i32,
-    ap_info: &ApInfo,
-    fn_: Lambda,
-    args: Vec<Lambda>,
-) -> Lambda {
+pub fn transform_under_supply(n: i32, ap_info: &ApInfo, fn_: Lambda, args: Vec<Lambda>) -> Lambda {
     let extra_args: Vec<Ident> = (0..n).map(|_| Ident::create_local("param")).collect();
     let extra_lambdas: Vec<Lambda> = extra_args.iter().cloned().map(Lambda::var).collect();
 
@@ -58,7 +53,9 @@ pub fn transform_under_supply(
 
     // `acc` is `fn :: args`. Pop the head out as `fn`.
     let mut iter = acc.into_iter();
-    let fn_ = iter.next().expect("transform_under_supply requires at least fn");
+    let fn_ = iter
+        .next()
+        .expect("transform_under_supply requires at least fn");
     let args: Vec<Lambda> = iter.collect();
 
     // lam_eta_conversion.ml:54-66 — `fn :: args, []` pure path: build the
@@ -243,13 +240,11 @@ fn eta_reduce_to(_loc: Location, ap_info: ApInfo, fn_: Lambda, from: i32, to_: i
         return Lambda::function_(arity, outer_params, inner, FunctionAttribute::default());
     }
 
-    let extra_outer_args: Vec<Ident> =
-        (0..to_).map(|_| Ident::create_local("param")).collect();
+    let extra_outer_args: Vec<Ident> = (0..to_).map(|_| Ident::create_local("param")).collect();
     let (wrapper, new_fn) = wrapper_or_inline(&fn_);
 
     let arity = from - to_;
-    let extra_inner_args: Vec<Ident> =
-        (0..arity).map(|_| Ident::create_local("param")).collect();
+    let extra_inner_args: Vec<Ident> = (0..arity).map(|_| Ident::create_local("param")).collect();
 
     let mut combined_args: Vec<Lambda> = Vec::with_capacity((to_ + arity) as usize);
     combined_args.extend(extra_outer_args.iter().cloned().map(Lambda::var));
@@ -261,18 +256,8 @@ fn eta_reduce_to(_loc: Location, ap_info: ApInfo, fn_: Lambda, from: i32, to_: i
     };
 
     let body = Lambda::apply(new_fn, combined_args, infer_full, false);
-    let inner = Lambda::function_(
-        arity,
-        extra_inner_args,
-        body,
-        FunctionAttribute::default(),
-    );
-    let cont = Lambda::function_(
-        to_,
-        extra_outer_args,
-        inner,
-        FunctionAttribute::default(),
-    );
+    let inner = Lambda::function_(arity, extra_inner_args, body, FunctionAttribute::default());
+    let cont = Lambda::function_(to_, extra_outer_args, inner, FunctionAttribute::default());
 
     match wrapper {
         None => cont,

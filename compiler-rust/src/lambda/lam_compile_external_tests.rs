@@ -3,9 +3,8 @@ use super::*;
 #[test]
 fn import_attributes_exact_lowered_lambda_keeps_aliases_before_logs_through_js_pipeline() {
     let lam = import_attributes_lowered_lambda();
-    let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(
-        &lam, false,
-    );
+    let simplified =
+        crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(&lam, false);
     let mut compiler = LambdaCompiler::new();
     let compiled = compiler.compile_expr(&simplified);
     let mut block = compiled.prelude;

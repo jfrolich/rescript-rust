@@ -237,8 +237,7 @@ fn gpr_3770_keeps_all_zero_guard_conjoined_like_ocaml() {
         "unexpected leading negative guard in gpr_3770_test.show:\n{output}"
     );
     assert!(
-        !output.contains("else if (x._1 !== 0) {")
-            && !output.contains("else if (x._2 !== 0) {"),
+        !output.contains("else if (x._1 !== 0) {") && !output.contains("else if (x._2 !== 0) {"),
         "unexpected nested negative guard chain in gpr_3770_test.show:\n{output}"
     );
     assert!(
@@ -434,8 +433,7 @@ fn gpr_2503_test_keeps_obj_external_accumulator_before_optional_value_temp_like_
         "expected gpr_2503_test to keep the simple optional wrapper on the same tmp accumulator naming path, got:\n{output}"
     );
     assert!(
-        !output.contains("let obj = foo > 100 ? undefined")
-            && !output.contains("let obj$1 = {};"),
+        !output.contains("let obj = foo > 100 ? undefined") && !output.contains("let obj$1 = {};"),
         "unexpected Rust-only object-temp ordering remained in gpr_2503_test:\n{output}"
     );
 }
@@ -454,8 +452,8 @@ fn derive_projector_test_collapses_pure_record_projection_like_ocaml() {
 }
 
 #[test]
-fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindings_like_snapshot(
-) {
+fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindings_like_snapshot()
+{
     let output = compile_checked_in_test_file_to_js("DerivingAccessorsCurried");
     assert!(
         output.contains("let _myFieldAlias = myField;")
@@ -480,8 +478,8 @@ fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindi
 }
 
 #[test]
-fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bindings_like_snapshot(
-) {
+fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bindings_like_snapshot()
+ {
     let output = compile_checked_in_test_file_to_js("DerivingAccessorsUncurried");
     assert!(
         output.contains("let _myFieldAlias = myField;")
@@ -579,8 +577,7 @@ fn import_keeps_nested_module_field_alias_binding_materialized_like_snapshot() {
 fn relative_path_keeps_exported_import_alias_chain_materialized_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("relative_path");
     assert!(
-        output.contains("let foo = FileJs.foo;\n")
-            && output.contains("let bar = foo;\n"),
+        output.contains("let foo = FileJs.foo;\n") && output.contains("let bar = foo;\n"),
         "expected relative_path to keep the exported import alias chain materialized, got:\n{output}"
     );
     assert!(
@@ -626,13 +623,25 @@ fn bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot() {
 fn bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section() {
     let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
     assert!(
-        output.find("Mocha.describe(\"Bs_mutable_set_test\"").is_some()
-            && output.find("let empty = Belt_MutableSetInt.make;").is_some()
-            && output.find("let fromArray = Belt_MutableSetInt.fromArray;").is_some()
-            && output.find("Mocha.describe(\"Bs_mutable_set_test\"").unwrap()
+        output
+            .find("Mocha.describe(\"Bs_mutable_set_test\"")
+            .is_some()
+            && output
+                .find("let empty = Belt_MutableSetInt.make;")
+                .is_some()
+            && output
+                .find("let fromArray = Belt_MutableSetInt.fromArray;")
+                .is_some()
+            && output
+                .find("Mocha.describe(\"Bs_mutable_set_test\"")
+                .unwrap()
                 < output.find("let empty = Belt_MutableSetInt.make;").unwrap()
-            && output.find("Mocha.describe(\"Bs_mutable_set_test\"").unwrap()
-                < output.find("let fromArray = Belt_MutableSetInt.fromArray;").unwrap(),
+            && output
+                .find("Mocha.describe(\"Bs_mutable_set_test\"")
+                .unwrap()
+                < output
+                    .find("let fromArray = Belt_MutableSetInt.fromArray;")
+                    .unwrap(),
         "expected bs_mutable_set_test to keep the exported module-field aliases only in the late export section, got:\n{output}"
     );
 }
@@ -684,8 +693,7 @@ fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() 
     assert!(
         output.contains("return Set_gen.empty;")
             && output.contains("return Set_gen.singleton(x0);")
-            && output
-                .contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
+            && output.contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
         "expected string_set to inline exported module-field aliases at ordinary internal call sites like OCaml, got:\n{output}"
     );
     assert!(
@@ -710,16 +718,14 @@ fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() 
 }
 
 #[test]
-fn string_bound_get_test_keeps_direct_literal_export_binding_before_internal_uses_like_snapshot(
-) {
+fn string_bound_get_test_keeps_direct_literal_export_binding_before_internal_uses_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("string_bound_get_test");
     assert!(
         output.contains("let v = \"ghos\";\n\nlet u_a = v[0];")
             && output.contains("function u_b() {\n  return v[-1];\n}")
             && output.find("let v = \"ghos\";").is_some()
             && output.find("let u_a = v[0];").is_some()
-            && output.find("let v = \"ghos\";").unwrap()
-                < output.find("let u_a = v[0];").unwrap(),
+            && output.find("let v = \"ghos\";").unwrap() < output.find("let u_a = v[0];").unwrap(),
         "expected string_bound_get_test to keep the direct literal export binding ahead of later internal uses like OCaml, got:\n{output}"
     );
     assert!(
@@ -732,14 +738,15 @@ fn string_bound_get_test_keeps_direct_literal_export_binding_before_internal_use
 fn external_shadow_keeps_new_wrapper_after_new_module_binding_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("ExternalShadow");
     assert!(
-        output.contains("let New = {};\n\nfunction url(prim) {\n  return new URL(prim);\n}\n\nlet Global = {};"),
+        output.contains(
+            "let New = {};\n\nfunction url(prim) {\n  return new URL(prim);\n}\n\nlet Global = {};"
+        ),
         "expected ExternalShadow to keep the @new wrapper after the New module binding and before Global, got:\n{output}"
     );
     assert!(
         output.find("let X = {};").is_some()
             && output.find("function url(prim) {").is_some()
-            && output.find("let X = {};").unwrap()
-                < output.find("function url(prim) {").unwrap(),
+            && output.find("let X = {};").unwrap() < output.find("function url(prim) {").unwrap(),
         "expected ExternalShadow to keep earlier module/value bindings ahead of the @new wrapper, got:\n{output}"
     );
 }
@@ -956,7 +963,9 @@ fn test_while_side_effect_keeps_local_condition_bindings_in_iifes() {
         "expected test_while_side_effect to keep the local binding and side effects inside the predicate IIFE, got:\n{output}"
     );
     assert!(
-        !output.contains("while (x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)"),
+        !output.contains(
+            "while (x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)"
+        ),
         "unexpected flattened predicate sequence lost the local binding scope in test_while_side_effect:\n{output}"
     );
 }

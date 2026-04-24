@@ -31,8 +31,8 @@ use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
 };
 use super::variance::{Variance, VarianceFlag};
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use crate::ident::Ident;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -156,7 +156,11 @@ impl UnifyState {
 
     /// Set the environment snapshot for type alias expansion.
     pub fn set_env(&mut self, env: &Env) {
-        if self.env.as_ref().is_some_and(|current| current.id() == env.id()) {
+        if self
+            .env
+            .as_ref()
+            .is_some_and(|current| current.id() == env.id())
+        {
             return;
         }
         self.env = Some(env.clone_preserve_id());
@@ -710,8 +714,7 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // eagerly, destroying the path form. Skipping here lets the
                 // general Tconstr/Tconstr expansion path handle it correctly
                 // through unify_after_expansion's relink logic.
-                let is_firstclass_module_pdot =
-                    matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
+                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
                     && env.lookup_type(&path).ok().is_some_and(|decl| {
                         decl.type_manifest.is_some_and(|manifest| {
                             let m = ctx.repr(manifest);
@@ -995,15 +998,13 @@ pub fn resolve_type_through_modules<'a>(
             if id.stamp() != 0 {
                 let should_register = {
                     let existing = ctx.find_type_decl_by_stamp(id.stamp());
-                    existing
-                        .as_ref()
-                        .is_none_or(|d| d.type_path.is_none() && path_root_is_persistent(module_path))
+                    existing.as_ref().is_none_or(|d| {
+                        d.type_path.is_none() && path_root_is_persistent(module_path)
+                    })
                 };
                 if should_register {
                     let mut decl_for_stamp = decl.clone();
-                    if decl_for_stamp.type_path.is_none()
-                        && path_root_is_persistent(module_path)
-                    {
+                    if decl_for_stamp.type_path.is_none() && path_root_is_persistent(module_path) {
                         decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                     }
                     ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
@@ -1545,9 +1546,7 @@ pub(crate) fn resolved_type_items_share_identity(
         && decl1.type_params.len() == arity
         && decl2.type_params.len() == arity
         || match (path1, path2) {
-            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _))
-                if name1 == name2 =>
-            {
+            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _)) if name1 == name2 => {
                 let raw_parent1 = {
                     let mut no_persistent_env = None;
                     crate::types::typecore::module_alias_target_for_path(
@@ -1687,15 +1686,12 @@ fn normalize_path_full_inner<'a>(
             .is_some_and(|(origin_id, md, is_local)| {
                 let target_is_local = match &md.md_type {
                     super::decl::ModuleType::MtyAlias(_, target)
-                    | super::decl::ModuleType::MtyIdent(target) => {
-                        path_root_ident(target).is_some_and(|head| {
+                    | super::decl::ModuleType::MtyIdent(target) => path_root_ident(target)
+                        .is_some_and(|head| {
                             env.find_module_with_origin(head.name()).ok().is_some_and(
-                                |(target_id, _, target_local)| {
-                                    target_local && target_id.same(head)
-                                },
+                                |(target_id, _, target_local)| target_local && target_id.same(head),
                             )
-                        })
-                    }
+                        }),
                     _ => false,
                 };
                 is_local
@@ -3062,11 +3058,7 @@ fn unify_types<'a>(
                         let p2_changed = !norm2.same(path2);
                         let p1_persistent = path_root_is_persistent(path1);
                         let p2_persistent = path_root_is_persistent(path2);
-                        if p1_changed
-                            && !p2_changed
-                            && p1_persistent
-                            && p2_persistent
-                        {
+                        if p1_changed && !p2_changed && p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t2, t1);
@@ -3074,11 +3066,7 @@ fn unify_types<'a>(
                                 unify(ctx, state, a, b)?;
                             }
                             return Ok(());
-                        } else if p2_changed
-                            && !p1_changed
-                            && p1_persistent
-                            && p2_persistent
-                        {
+                        } else if p2_changed && !p1_changed && p1_persistent && p2_persistent {
                             drop(desc1);
                             drop(desc2);
                             link_type(ctx, t1, t2);
@@ -3937,8 +3925,7 @@ fn unify_rows<'a>(
 
     if closed {
         let all_absent = pairs.iter().all(|(_, f1, f2)| {
-            super::btype::row_field_is_absent(ctx, f1)
-                || super::btype::row_field_is_absent(ctx, f2)
+            super::btype::row_field_is_absent(ctx, f1) || super::btype::row_field_is_absent(ctx, f2)
         });
         if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) && all_absent {
             return Err(TypeError::Unify(vec![]));
@@ -7748,9 +7735,7 @@ fn nondep_type_rec<'a>(
                                 link: super::type_expr::RowFieldRef::null(),
                             }
                         }
-                        super::type_expr::RowField::Rabsent => {
-                            super::type_expr::RowField::Rabsent
-                        }
+                        super::type_expr::RowField::Rabsent => super::type_expr::RowField::Rabsent,
                     };
                     Some((label.clone(), new_field))
                 })
@@ -7953,7 +7938,9 @@ mod tests {
     use crate::context::IdGenerator;
     use crate::ident::Ident;
     use crate::types::asttypes::PrivateFlag;
-    use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind};
+    use crate::types::decl::{
+        ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
+    };
 
     #[test]
     fn test_unify_same_type() {
@@ -8104,7 +8091,9 @@ mod tests {
             type_arity: 0,
             type_kind: TypeKind::TypeAbstract,
             type_private: PrivateFlag::Public,
-            type_manifest: Some(ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![])),
+            type_manifest: Some(
+                ctx.new_constr(crate::types::Path::pident(sibling_id.clone()), vec![]),
+            ),
             type_variance: vec![],
             type_newtype_level: None,
             type_loc: crate::location::Location::none(),
@@ -8128,10 +8117,8 @@ mod tests {
             },
         );
 
-        let queried_path = crate::types::Path::pdot(
-            crate::types::Path::pident(module_id),
-            "t".to_string(),
-        );
+        let queried_path =
+            crate::types::Path::pdot(crate::types::Path::pident(module_id), "t".to_string());
         let (_, resolved_decl) =
             resolve_type_item_through_env(&ctx, &env, &queried_path, true).expect("resolve M.t");
 

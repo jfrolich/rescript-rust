@@ -1,16 +1,16 @@
 use super::*;
 pub(super) use crate::cmi::persistent_env::PersistentEnv;
 pub(super) use crate::js_ir::{
-    ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives, print_expression,
+    ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
+    print_expression,
 };
 pub(super) use crate::lambda::lam_constant::{
     Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
 };
 pub(super) use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName,
-    ExternalObjLabel, ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo,
-    Primitive,
+    ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
+    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Primitive,
 };
 pub(super) use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchBlock,
@@ -67,7 +67,10 @@ pub(super) fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to compile {module_name}.res: {err:#}"))
 }
 
-pub(super) fn find_variable_initializer<'a>(block: &'a Block, ident: &Ident) -> Option<&'a Expression> {
+pub(super) fn find_variable_initializer<'a>(
+    block: &'a Block,
+    ident: &Ident,
+) -> Option<&'a Expression> {
     block.iter().find_map(|stmt| match &stmt.desc {
         StatementDesc::Variable(VariableDeclaration {
             ident: binding,
@@ -95,7 +98,8 @@ fn external_module_with_attrs(
         bundle: bundle.to_string(),
         module_bind_name: ExternalModuleBindName::HintName(hint.to_string()),
         import_attributes: Some(
-            attrs.iter()
+            attrs
+                .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
         ),
@@ -795,9 +799,11 @@ fn compile_module_primitives_require_primitive_module_runtime_import() {
     );
 
     let deps = compiler.compile_deps_program(&lam);
-    assert!(deps.modules.iter().any(|module| {
-        module.kind == Kind::Runtime && module.id.name() == "Primitive_module"
-    }));
+    assert!(
+        deps.modules.iter().any(|module| {
+            module.kind == Kind::Runtime && module.id.name() == "Primitive_module"
+        })
+    );
 
     let resolver = ModulePathResolver::from_compile_options(
         None,
@@ -1983,9 +1989,7 @@ fn compile_deps_program_rebinds_different_name_exports_after_effects() {
     );
 
     let [debugger, rebound] = deps.program.block.as_slice() else {
-        panic!(
-            "expected the original placeholder to shake away and the rebound export to remain"
-        );
+        panic!("expected the original placeholder to shake away and the rebound export to remain");
     };
     assert!(matches!(debugger.desc, StatementDesc::Debugger));
     match &rebound.desc {
@@ -2563,8 +2567,7 @@ fn trywith_expression_result_temp_uses_tmp_name_like_ocaml() {
     let [declare, try_stmt] = compiled.prelude.as_slice() else {
         panic!("expected a declaration followed by a try statement");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the trywith result temp declaration");
     };
     assert_eq!(result.name(), "tmp");
@@ -2834,8 +2837,7 @@ fn int_switch_expressions_assign_branch_values_into_the_result_temp() {
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
         panic!("expected a declaration and switch statement");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the switch temporary declaration");
     };
     assert_eq!(result.name(), "tmp");
@@ -2881,13 +2883,11 @@ fn string_switch_expressions_assign_branch_values_into_the_result_temp() {
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
         panic!("expected a declaration and string switch statement");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the string switch temporary declaration");
     };
     assert_eq!(result.name(), "tmp");
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
         panic!("expected a string switch with a default block");
     };
     assert!(matches!(
@@ -2939,8 +2939,7 @@ fn int_switch_expressions_group_adjacent_equal_cases_and_drop_default_duplicates
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
         panic!("expected a declaration and switch statement");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the switch temporary declaration");
     };
     let StatementDesc::IntSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
@@ -2992,8 +2991,7 @@ fn int_switch_expressions_group_non_adjacent_equal_cases_like_ocaml_stable_group
     let [declare, switch_stmt] = compiled.prelude.as_slice() else {
         panic!("expected a declaration and switch statement");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the switch temporary declaration");
     };
     let StatementDesc::IntSwitch(_, clauses, None) = &switch_stmt.desc else {
@@ -3138,8 +3136,7 @@ fn string_switch_effects_group_adjacent_equal_cases_and_drop_default_duplicates(
     let [switch_stmt] = block.as_slice() else {
         panic!("expected a single string switch");
     };
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
         panic!("expected a string switch with a default block");
     };
     assert!(matches!(
@@ -3240,8 +3237,7 @@ fn let_bindings_lower_string_switches_directly_into_the_declared_binding() {
     };
     assert!(ident.same(&version));
 
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
         panic!("expected a direct string switch statement");
     };
     assert!(matches!(
@@ -3276,8 +3272,7 @@ fn single_case_string_switches_with_default_lower_to_conditional_assignment() {
     let [declare, assign] = compiled.prelude.as_slice() else {
         panic!("expected a declaration followed by one assignment");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the string switch temporary declaration");
     };
     let StatementDesc::Exp(Expression {
@@ -3302,7 +3297,12 @@ fn single_case_string_switches_with_default_lower_to_conditional_assignment() {
     assert_int_expr(else_expr, 2);
 }
 
-pub(super) fn gpr_1438_switch_cases(b: &Ident, c: &Ident, d: &Ident, e: &Ident) -> Vec<(i32, Lambda)> {
+pub(super) fn gpr_1438_switch_cases(
+    b: &Ident,
+    c: &Ident,
+    d: &Ident,
+    e: &Ident,
+) -> Vec<(i32, Lambda)> {
     vec![
         (98, Lambda::var(c.clone())),
         (99, Lambda::static_raise(1, Vec::new())),
@@ -3418,8 +3418,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         "after compile_expr",
     );
 
-    let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
-    {
+    let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
         if block_terminates(&block) {
             for value in &mut exports.values {
                 *value = Expression::undefined(false);
@@ -3518,8 +3517,7 @@ fn nested_let_values_preserve_declaration_context_for_wrapped_string_switches() 
     };
     assert!(ident.same(&version));
 
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
         panic!("expected the outer declaration context to reach the string switch");
     };
     assert!(matches!(
@@ -3627,13 +3625,10 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
     match body.as_slice() {
         [if_stmt] => {
             let (test, then_block, else_block) = match &if_stmt.desc {
-                StatementDesc::If(test, then_block, else_block) => {
-                    (test, then_block, else_block)
-                }
+                StatementDesc::If(test, then_block, else_block) => (test, then_block, else_block),
                 StatementDesc::Block(inner) => match inner.as_slice() {
                     [inner_if] => {
-                        let StatementDesc::If(test, then_block, else_block) = &inner_if.desc
-                        else {
+                        let StatementDesc::If(test, then_block, else_block) = &inner_if.desc else {
                             panic!("expected the wrapper block to contain an if");
                         };
                         (test, then_block, else_block)
@@ -3741,9 +3736,7 @@ fn function_return_blocks_lower_ifs_without_a_result_temp() {
         }
         [guard_stmt, branch_decl, branch_return] => {
             let (test, then_block, else_block) = match &guard_stmt.desc {
-                StatementDesc::If(test, then_block, else_block) => {
-                    (test, then_block, else_block)
-                }
+                StatementDesc::If(test, then_block, else_block) => (test, then_block, else_block),
                 StatementDesc::Block(inner) => {
                     let [inner_if] = inner.as_slice() else {
                         panic!("expected a single guard if inside the wrapper block");
@@ -4099,10 +4092,7 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
                     Lambda::const_(Constant::int(0)),
                     Lambda::while_(
                         Lambda::var(loop_cond.clone()),
-                        Lambda::Lassign(
-                            seen.clone(),
-                            Box::new(Lambda::const_(Constant::int(1))),
-                        ),
+                        Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
                     ),
                 )),
                 Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
@@ -5147,7 +5137,11 @@ pub(super) fn assert_switch_case_assigns_int_result(block: &Block, result: &Iden
     assert!(matches!(break_stmt.desc, StatementDesc::Break));
 }
 
-pub(super) fn assert_switch_default_assigns_int_result(block: &Block, result: &Ident, expected: i32) {
+pub(super) fn assert_switch_default_assigns_int_result(
+    block: &Block,
+    result: &Ident,
+    expected: i32,
+) {
     let assign = match block.as_slice() {
         [assign] => assign,
         [assign, break_stmt] if matches!(break_stmt.desc, StatementDesc::Break) => assign,
@@ -5283,10 +5277,7 @@ pub(super) fn assert_switch_case_returns_bool_result(block: &Block, expected: bo
     }
 }
 
-fn assert_first_function_body_keeps_fallthrough_return_outside_switch(
-    block: &Block,
-    stage: &str,
-) {
+fn assert_first_function_body_keeps_fallthrough_return_outside_switch(block: &Block, stage: &str) {
     let [function_decl, ..] = block.as_slice() else {
         panic!("{stage}: expected the compiled program to start with the function binding");
     };
@@ -5303,9 +5294,7 @@ fn assert_first_function_body_keeps_fallthrough_return_outside_switch(
     };
 
     let [switch_stmt, handler_return] = body.as_slice() else {
-        panic!(
-            "{stage}: expected the function body to keep the fallthrough tail after the switch"
-        );
+        panic!("{stage}: expected the function body to keep the fallthrough tail after the switch");
     };
     let StatementDesc::IntSwitch(_, _, None) = &switch_stmt.desc else {
         panic!("{stage}: expected the fallthrough default to stay outside the switch");
@@ -5318,9 +5307,7 @@ fn assert_first_function_body_keeps_fallthrough_return_outside_switch(
 
 fn assert_fallthrough_return_outside_switch_body(body: &Block, stage: &str) {
     let [switch_stmt, handler_return] = body.as_slice() else {
-        panic!(
-            "{stage}: expected the function body to keep the fallthrough tail after the switch"
-        );
+        panic!("{stage}: expected the function body to keep the fallthrough tail after the switch");
     };
     let StatementDesc::IntSwitch(_, _, None) = &switch_stmt.desc else {
         panic!("{stage}: expected the fallthrough default to stay outside the switch");
@@ -6558,19 +6545,17 @@ fn js_tailcall_inline_preserves_shadowed_returned_function_params() {
                         Expression::new(ExpressionDesc::Fun {
                             is_method: false,
                             params: vec![outer_param.clone()],
-                            body: vec![Statement::return_(Expression::new(
-                                ExpressionDesc::Fun {
-                                    is_method: false,
-                                    params: vec![inner_param.clone()],
-                                    body: vec![Statement::return_(Expression::var(
-                                        inner_param.clone(),
-                                    ))],
-                                    env: Default::default(),
-                                    return_unit: false,
-                                    async_: false,
-                                    directive: None,
-                                },
-                            ))],
+                            body: vec![Statement::return_(Expression::new(ExpressionDesc::Fun {
+                                is_method: false,
+                                params: vec![inner_param.clone()],
+                                body: vec![Statement::return_(Expression::var(
+                                    inner_param.clone(),
+                                ))],
+                                env: Default::default(),
+                                return_unit: false,
+                                async_: false,
+                                directive: None,
+                            }))],
                             env: Default::default(),
                             return_unit: false,
                             async_: false,
@@ -6898,9 +6883,9 @@ fn js_flatten_and_mark_dead_rewrites_pre_marked_dead_bindings() {
                 } if id.same(&callback)
             ));
         }
-        other => panic!(
-            "expected the dead impure binding to become an effect statement, got {other:?}"
-        ),
+        other => {
+            panic!("expected the dead impure binding to become an effect statement, got {other:?}")
+        }
     }
 }
 
@@ -7025,9 +7010,9 @@ fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
                 }),
             ..
         }) => {}
-        other => panic!(
-            "expected the tuple projection to inline to the selected field, got {other:?}"
-        ),
+        other => {
+            panic!("expected the tuple projection to inline to the selected field, got {other:?}")
+        }
     }
 }
 
@@ -7623,8 +7608,7 @@ fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
 }
 
 #[test]
-fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fields_like_ocaml()
-{
+fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fields_like_ocaml() {
     let record = Ident::create_local("x");
     let deps = apply_js_flatten_and_mark_dead_pass(
         DepsProgram {
@@ -7689,9 +7673,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                         }),
                     ..
                 }) => assert_eq!(ident.name(), "x_name"),
-                other => panic!(
-                    "expected the first hoisted optional binding, got {other:?}"
-                ),
+                other => panic!("expected the first hoisted optional binding, got {other:?}"),
             }
             match &x_stmt.desc {
                 StatementDesc::Variable(VariableDeclaration {
@@ -7703,9 +7685,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                         }),
                     ..
                 }) => assert_eq!(ident.name(), "x_x"),
-                other => panic!(
-                    "expected the second hoisted optional binding, got {other:?}"
-                ),
+                other => panic!("expected the second hoisted optional binding, got {other:?}"),
             }
             match &record_stmt.desc {
                 StatementDesc::Variable(VariableDeclaration {
@@ -7790,10 +7770,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                         MutableFlag::Immutable,
                         Box::new(Expression::number(Number::int(0))),
                         TagInfo::Record {
-                            fields: vec![
-                                ("a".to_string(), false),
-                                ("b".to_string(), false),
-                            ],
+                            fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                         },
                     ))),
@@ -7850,9 +7827,9 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                 )
             ));
         }
-        other => panic!(
-            "expected the alias-bound deep-constant record to stay inline, got {other:?}"
-        ),
+        other => {
+            panic!("expected the alias-bound deep-constant record to stay inline, got {other:?}")
+        }
     }
 }
 
@@ -8703,9 +8680,11 @@ fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block
     );
 
     let deps = compiler.compile_deps_program(&lam);
-    assert!(deps.modules.iter().any(|module| {
-        module.kind == Kind::Runtime && module.id.name() == "Primitive_option"
-    }));
+    assert!(
+        deps.modules.iter().any(|module| {
+            module.kind == Kind::Runtime && module.id.name() == "Primitive_option"
+        })
+    );
 
     let resolver = ModulePathResolver::from_compile_options(
         None,
@@ -8801,9 +8780,9 @@ fn lowers_module_pfield_with_ocaml_identifier_conversion() {
                 } if id.same(&module_value)
             ));
         }
-        other => panic!(
-            "expected module field access to lower to converted static index, got {other:?}"
-        ),
+        other => {
+            panic!("expected module field access to lower to converted static index, got {other:?}")
+        }
     }
 
     assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
@@ -8813,11 +8792,8 @@ fn lowers_module_pfield_with_ocaml_identifier_conversion() {
 fn lowers_extension_pfield_to_named_payload_property_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let exn = Ident::create_local("exn");
-    let expr = compiler.compile_field_access(
-        1,
-        &FieldDbgInfo::Extension,
-        &Expression::var(exn.clone()),
-    );
+    let expr =
+        compiler.compile_field_access(1, &FieldDbgInfo::Extension, &Expression::var(exn.clone()));
 
     match &expr.desc {
         ExpressionDesc::StaticIndex(target, field, Some(index)) => {
@@ -9494,9 +9470,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
     let compiled = compiler.compile_expr(&lam);
     let rendered = print_block(&compiled.prelude);
     let make_decl = compiled.prelude.iter().find_map(|stmt| match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { ident, value, .. })
-            if ident.same(&make) =>
-        {
+        StatementDesc::Variable(VariableDeclaration { ident, value, .. }) if ident.same(&make) => {
             Some(value)
         }
         _ => None,
@@ -10198,7 +10172,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
 }
 
 mod lam_coercion_tests;
-mod lam_compile_switch_tests;
-mod lam_compile_staticcatch_tests;
 mod lam_compile_external_tests;
 mod lam_compile_integration_tests;
+mod lam_compile_staticcatch_tests;
+mod lam_compile_switch_tests;

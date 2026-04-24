@@ -241,7 +241,8 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
     match lam {
         // lam_pass_collect.ml:60
         Lambda::Lconst(v) => {
-            meta.ident_tbl.insert(ident.clone(), IdKind::Constant(v.clone()));
+            meta.ident_tbl
+                .insert(ident.clone(), IdKind::Constant(v.clone()));
         }
         // lam_pass_collect.ml:61-63 — Pmakeblock immutable: ImmutableBlock + recurse.
         Lambda::Lprim(PrimInfo {
@@ -249,7 +250,8 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
             args,
             ..
         }) => {
-            meta.ident_tbl.insert(ident.clone(), kind_of_lambda_block(args));
+            meta.ident_tbl
+                .insert(ident.clone(), kind_of_lambda_block(args));
             for arg in args {
                 collect(meta, arg);
             }

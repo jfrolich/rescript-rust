@@ -3047,9 +3047,14 @@ pub fn lookup_modtype_path_by_lid<'b>(
                 pers_env,
                 ctx,
                 |components| {
-                    components.lookup_qualified_modtype(submodtype_name, ctx).map(|_| {
-                        Path::pdot(components.access_path().clone(), submodtype_name.to_string())
-                    })
+                    components
+                        .lookup_qualified_modtype(submodtype_name, ctx)
+                        .map(|_| {
+                            Path::pdot(
+                                components.access_path().clone(),
+                                submodtype_name.to_string(),
+                            )
+                        })
                 },
             )
             .flatten()
@@ -3308,10 +3313,7 @@ fn resolve_path_to_sig_impl<'b>(
 
             let parent_sig = if let Some(local_env) = env {
                 match crate::types::typecore::resolve_module_signature_for_path(
-                    parent,
-                    local_env,
-                    pers_env,
-                    ctx,
+                    parent, local_env, pers_env, ctx,
                 ) {
                     Some((_, sig)) => sig,
                     None => resolve_path_to_sig_impl(parent, env, pers_env, ctx, visiting)?,
@@ -3771,7 +3773,11 @@ fn apply_package_constraints_to_module_type<'b>(
                     if !nested.is_empty() {
                         nested_modules.push((rewritten_sig.len(), nested));
                     }
-                    rewritten_sig.push(SignatureItem::SigModule(id.clone(), md.clone(), *rec_status));
+                    rewritten_sig.push(SignatureItem::SigModule(
+                        id.clone(),
+                        md.clone(),
+                        *rec_status,
+                    ));
                 }
                 other => rewritten_sig.push(other.clone()),
             }
@@ -3791,8 +3797,14 @@ fn apply_package_constraints_to_module_type<'b>(
             let Some(SignatureItem::SigModule(_, md, _)) = rewritten_sig.get_mut(idx) else {
                 continue;
             };
-            md.md_type =
-                apply_package_constraints_to_module_type(env, &md.md_type, &nested, None, pers_env, ctx)?;
+            md.md_type = apply_package_constraints_to_module_type(
+                env,
+                &md.md_type,
+                &nested,
+                None,
+                pers_env,
+                ctx,
+            )?;
         }
 
         Some(crate::types::decl::ModuleType::MtySignature(rewritten_sig))
@@ -3842,10 +3854,12 @@ fn apply_package_constraints_to_module_type<'b>(
                         env,
                         pers_env,
                         ctx,
-                        |components| rewrite_package_constraints_over_sig(
-                            components.signature(),
-                            constraints,
-                        ),
+                        |components| {
+                            rewrite_package_constraints_over_sig(
+                                components.signature(),
+                                constraints,
+                            )
+                        },
                     )
                     .and_then(|(rewritten_sig, nested_modules)| {
                         finish_rewritten_package_sig(
@@ -3865,23 +3879,24 @@ fn apply_package_constraints_to_module_type<'b>(
                         env,
                         pers_env,
                         ctx,
-                        |components| rewrite_package_constraints_over_sig(components.signature(), constraints),
+                        |components| {
+                            rewrite_package_constraints_over_sig(
+                                components.signature(),
+                                constraints,
+                            )
+                        },
                     )
                 {
-                    finish_rewritten_package_sig(
+                    finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
+                } else if let Some((_, mtd)) =
+                    crate::types::typecore::lookup_modtype_in_resolved_path(
+                        parent,
+                        name.as_str(),
                         env,
-                        rewritten_sig,
-                        nested_modules,
                         pers_env,
                         ctx,
                     )
-                } else if let Some((_, mtd)) = crate::types::typecore::lookup_modtype_in_resolved_path(
-                    parent,
-                    name.as_str(),
-                    env,
-                    pers_env,
-                    ctx,
-                ) {
+                {
                     if let Some(mty) = mtd.mtd_type.as_ref() {
                         apply_package_constraints_impl(
                             env,
@@ -3898,13 +3913,7 @@ fn apply_package_constraints_to_module_type<'b>(
                     let sig = resolve_path_to_sig_impl(path, Some(env), pers_env, ctx, visiting)?;
                     let (rewritten_sig, nested_modules) =
                         rewrite_package_constraints_over_sig(&sig, constraints);
-                    finish_rewritten_package_sig(
-                        env,
-                        rewritten_sig,
-                        nested_modules,
-                        pers_env,
-                        ctx,
-                    )
+                    finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
                 }
             }
             Path::Papply(_, _) => None,
@@ -3928,13 +3937,7 @@ fn apply_package_constraints_to_module_type<'b>(
             DeclMty::MtySignature(sig) => {
                 let (rewritten_sig, nested_modules) =
                     rewrite_package_constraints_over_sig(sig, constraints);
-                finish_rewritten_package_sig(
-                    env,
-                    rewritten_sig,
-                    nested_modules,
-                    pers_env,
-                    ctx,
-                )
+                finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
             }
             DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
                 resolve_path_package_constraints(env, path, constraints, pers_env, ctx, visiting)
@@ -3981,15 +3984,17 @@ pub fn modtype_of_package<'b>(
 
     let base_mty = match package_path {
         Path::Pident(_) => env.lookup_modtype(package_path).ok()?.mtd_type.clone()?,
-        Path::Pdot(parent, modtype_name, _) => crate::types::typecore::lookup_modtype_in_resolved_path(
-            parent,
-            modtype_name,
-            env,
-            pers_env,
-            ctx,
-        )
-        .and_then(|(_, mtd)| mtd.mtd_type)
-        .or_else(|| env.lookup_modtype(package_path).ok()?.mtd_type.clone())?,
+        Path::Pdot(parent, modtype_name, _) => {
+            crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                modtype_name,
+                env,
+                pers_env,
+                ctx,
+            )
+            .and_then(|(_, mtd)| mtd.mtd_type)
+            .or_else(|| env.lookup_modtype(package_path).ok()?.mtd_type.clone())?
+        }
         Path::Papply(_, _) => return None,
     };
     let package_parent_path = parent_path_for_module_type(&base_mty);
@@ -4960,12 +4965,7 @@ fn scrape_alias_module_type<'b>(
                         pers_env,
                         ctx,
                     )
-                    .map(|(_, sig)| {
-                        anchored(
-                            &persistent_path,
-                            &DeclMty::MtySignature(sig),
-                        )
-                    })
+                    .map(|(_, sig)| anchored(&persistent_path, &DeclMty::MtySignature(sig)))
                 }
             }
             Path::Pdot(parent, submod, _) => {
@@ -5399,9 +5399,9 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
     }
 
     let result = match &*mod_expr.pmod_desc {
-        ParsedModuleExprDesc::Pmod_ident(lid) => semantic_module_type_for_ident_expr(
-            tctx, env, arena, lid,
-        ),
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            semantic_module_type_for_ident_expr(tctx, env, arena, lid)
+        }
         ParsedModuleExprDesc::Pmod_apply(functor_idx, arg_idx) => {
             let functor_expr = arena.get_mod_expr(*functor_idx);
             let arg_expr = arena.get_mod_expr(*arg_idx);
@@ -7598,18 +7598,12 @@ where
                     decl_module_type_from_typed_module_type(mty)
                 }
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
-                    Some(constrained_mty.clone()).or_else(
-                        || match &inner.mod_desc {
-                            ModuleExprDesc::Tmod_structure(structure) => {
-                                Some(DeclMty::MtySignature(
-                                    crate::types::includemod::simplify_signature(
-                                        &structure.str_type,
-                                    ),
-                                ))
-                            }
-                            _ => None,
-                        },
-                    )
+                    Some(constrained_mty.clone()).or_else(|| match &inner.mod_desc {
+                        ModuleExprDesc::Tmod_structure(structure) => Some(DeclMty::MtySignature(
+                            crate::types::includemod::simplify_signature(&structure.str_type),
+                        )),
+                        _ => None,
+                    })
                 }
             };
             constrained.or_else(|| {
@@ -7777,15 +7771,12 @@ fn type_module_expr_with_alias<'a>(
             };
 
             if needs_constraint {
-                let simplified =
-                    crate::types::decl::ModuleType::MtySignature(
-                        match &md.mod_type {
-                            crate::types::decl::ModuleType::MtySignature(sig) => {
-                                crate::types::includemod::simplify_signature(sig)
-                            }
-                            _ => unreachable!("structure modules always produce signatures"),
-                        },
-                    );
+                let simplified = crate::types::decl::ModuleType::MtySignature(match &md.mod_type {
+                    crate::types::decl::ModuleType::MtySignature(sig) => {
+                        crate::types::includemod::simplify_signature(sig)
+                    }
+                    _ => unreachable!("structure modules always produce signatures"),
+                });
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(md),
@@ -8005,8 +7996,8 @@ fn type_module_expr_with_alias<'a>(
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
                 crate::types::type_expr::TypeDesc::Tpackage { path, lids, args } => {
-                    module_type_from_typed_unpack_expr(tctx, env, arena, &typed_expr).unwrap_or_else(
-                        || {
+                    module_type_from_typed_unpack_expr(tctx, env, arena, &typed_expr)
+                        .unwrap_or_else(|| {
                             modtype_of_package(
                                 env,
                                 path,
@@ -8016,9 +8007,10 @@ fn type_module_expr_with_alias<'a>(
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
                             )
-                            .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(path.clone()))
-                        },
-                    )
+                            .unwrap_or_else(|| {
+                                crate::types::decl::ModuleType::MtyIdent(path.clone())
+                            })
+                        })
                 }
                 crate::types::type_expr::TypeDesc::Tvar(_)
                 | crate::types::type_expr::TypeDesc::Tunivar(_) => {
@@ -8329,14 +8321,9 @@ fn transl_modtype<'a>(
         mty_loc: loc,
         mty_attributes: attrs,
     };
-    typed.mty_type = translate_module_type_to_decl_with_typed_hint(
-        tctx,
-        env,
-        arena,
-        smty,
-        Some(&typed),
-    )
-    .unwrap_or_else(|_| crate::types::decl::ModuleType::MtySignature(vec![]));
+    typed.mty_type =
+        translate_module_type_to_decl_with_typed_hint(tctx, env, arena, smty, Some(&typed))
+            .unwrap_or_else(|_| crate::types::decl::ModuleType::MtySignature(vec![]));
     Ok(typed)
 }
 
@@ -8723,8 +8710,13 @@ pub fn type_structure<'a>(
                 for cname in &ctor_names {
                     typed_cds.push(crate::types::typedtree::TypedConstructorDeclaration {
                         cd_id: ctx.create_ident(cname),
-                        cd_name: crate::parse_arena::Located { txt: cname.clone(), loc: LocIdx(0) },
-                        cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(vec![]),
+                        cd_name: crate::parse_arena::Located {
+                            txt: cname.clone(),
+                            loc: LocIdx(0),
+                        },
+                        cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
+                            vec![],
+                        ),
                         cd_res: None,
                         cd_loc: LocIdx(0),
                         cd_attributes: crate::parser::ast::Attributes::new(),
@@ -8733,7 +8725,10 @@ pub fn type_structure<'a>(
 
                 let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
                     typ_id: type_id.clone(),
-                    typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                    typ_name: crate::parse_arena::Located {
+                        txt: name.clone(),
+                        loc: LocIdx(0),
+                    },
                     typ_params: vec![],
                     typ_cstrs: vec![],
                     typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(typed_cds),
@@ -8785,7 +8780,10 @@ pub fn type_structure<'a>(
         let pat = crate::types::typedtree::Pattern {
             pat_desc: crate::types::typedtree::PatternDesc::Tpat_var(
                 gen_fn.ident.clone(),
-                crate::parse_arena::Located { txt: gen_fn.name.clone(), loc: LocIdx(0) },
+                crate::parse_arena::Located {
+                    txt: gen_fn.name.clone(),
+                    loc: LocIdx(0),
+                },
             ),
             pat_loc: LocIdx(0),
             pat_extra: vec![],
@@ -8799,7 +8797,10 @@ pub fn type_structure<'a>(
         let param_pat = crate::types::typedtree::Pattern {
             pat_desc: crate::types::typedtree::PatternDesc::Tpat_var(
                 param_ident.clone(),
-                crate::parse_arena::Located { txt: gen_fn.param_name.clone(), loc: LocIdx(0) },
+                crate::parse_arena::Located {
+                    txt: gen_fn.param_name.clone(),
+                    loc: LocIdx(0),
+                },
             ),
             pat_loc: LocIdx(0),
             pat_extra: vec![],
@@ -8839,7 +8840,11 @@ pub fn type_structure<'a>(
             vb_loc: LocIdx(0),
         };
 
-        let rec_flag = if gen_fn.recursive { RecFlag::Recursive } else { RecFlag::Nonrecursive };
+        let rec_flag = if gen_fn.recursive {
+            RecFlag::Recursive
+        } else {
+            RecFlag::Nonrecursive
+        };
 
         // Add to signature
         sig_items.push(crate::types::decl::SignatureItem::SigValue(
@@ -8903,7 +8908,8 @@ fn type_structure_no_export<'a>(
     // Like OCaml: if simplify_signature would shrink the signature
     // (duplicate value names), wrap in Tmod_constraint implicit first
     let needs_implicit_constraint = simplified_structure_signature(&inner_structure).is_some();
-    let structure_mty = crate::types::decl::ModuleType::MtySignature(inner_structure.str_type.clone());
+    let structure_mty =
+        crate::types::decl::ModuleType::MtySignature(inner_structure.str_type.clone());
 
     let mod_structure = ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_structure(inner_structure),
@@ -9015,22 +9021,28 @@ fn type_structure_item<'a>(
             // wrapped in switch/match), evaluate the body NOW and return a
             // Tstr_type item instead of going through normal let-binding.
             for vb in bindings {
-                let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
-                    arena.get_string(name.txt) == "comptime"
-                });
-                if !is_comptime { continue; }
+                let is_comptime = vb
+                    .pvb_attributes
+                    .iter()
+                    .any(|(name, _)| arena.get_string(name.txt) == "comptime");
+                if !is_comptime {
+                    continue;
+                }
                 let body_expr = arena.get_expr(vb.pvb_expr);
                 if !crate::types::typecore::contains_build_variant_with_registry(
-                    body_expr, arena, Some(&tctx.comptime_functions),
+                    body_expr,
+                    arena,
+                    Some(&tctx.comptime_functions),
                 ) {
                     continue;
                 }
                 let pat = arena.get_pat(vb.pvb_pat);
-                let name = if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
-                    arena.get_string(name_loc.txt).to_string()
-                } else {
-                    continue;
-                };
+                let name =
+                    if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
+                        arena.get_string(name_loc.txt).to_string()
+                    } else {
+                        continue;
+                    };
 
                 // Evaluate the body to produce a TypeBuilderResult
                 let body_clone = body_expr.clone();
@@ -9046,7 +9058,9 @@ fn type_structure_item<'a>(
                             let cid = ctx.create_ident(cname);
                             constructors.push(crate::types::decl::ConstructorDeclaration {
                                 cd_id: cid,
-                                cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![]),
+                                cd_args: crate::types::decl::ConstructorArguments::CstrTuple(
+                                    vec![],
+                                ),
                                 cd_res: None,
                                 cd_loc: crate::location::Location::none(),
                                 cd_attributes: vec![],
@@ -9084,7 +9098,9 @@ fn type_structure_item<'a>(
                                 cstr_existentials: vec![],
                                 cstr_args: vec![],
                                 cstr_arity: 0,
-                                cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(i as i32),
+                                cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(
+                                    i as i32,
+                                ),
                                 cstr_consts: num_consts,
                                 cstr_nonconsts: 0,
                                 cstr_generalized: false,
@@ -9101,8 +9117,14 @@ fn type_structure_item<'a>(
                         for cname in &ctor_names {
                             typed_cds.push(crate::types::typedtree::TypedConstructorDeclaration {
                                 cd_id: ctx.create_ident(cname),
-                                cd_name: crate::parse_arena::Located { txt: cname.clone(), loc: LocIdx(0) },
-                                cd_args: crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(vec![]),
+                                cd_name: crate::parse_arena::Located {
+                                    txt: cname.clone(),
+                                    loc: LocIdx(0),
+                                },
+                                cd_args:
+                                    crate::types::typedtree::TypedConstructorArguments::Cstr_tuple(
+                                        vec![],
+                                    ),
                                 cd_res: None,
                                 cd_loc: LocIdx(0),
                                 cd_attributes: crate::parser::ast::Attributes::new(),
@@ -9111,10 +9133,15 @@ fn type_structure_item<'a>(
 
                         let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
                             typ_id: type_id.clone(),
-                            typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                            typ_name: crate::parse_arena::Located {
+                                txt: name.clone(),
+                                loc: LocIdx(0),
+                            },
                             typ_params: vec![],
                             typ_cstrs: vec![],
-                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(typed_cds),
+                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_variant(
+                                typed_cds,
+                            ),
                             typ_private: crate::parser::ast::PrivateFlag::Public,
                             typ_manifest: None,
                             typ_loc: LocIdx(0),
@@ -9130,7 +9157,10 @@ fn type_structure_item<'a>(
 
                         return Ok((
                             StructureItem {
-                                str_desc: StructureItemDesc::Tstr_type(RecFlag::Nonrecursive, vec![typed_decl]),
+                                str_desc: StructureItemDesc::Tstr_type(
+                                    RecFlag::Nonrecursive,
+                                    vec![typed_decl],
+                                ),
                                 str_loc: loc,
                                 str_env: EnvRef(0),
                             },
@@ -9143,10 +9173,16 @@ fn type_structure_item<'a>(
                         let mut labels = Vec::new();
                         for fs in &field_specs {
                             // Build a real TypeExprRef from the field's TypeInfo
-                            let field_ty = crate::types::comptime::type_info_to_type_expr(ctx, env, &fs.typ)
-                                .ok_or_else(|| TypeModError::CoreError(crate::types::TypeCoreError::Other(
-                                    format!("@recordField: could not resolve type for '{}'", fs.name)
-                                )))?;
+                            let field_ty =
+                                crate::types::comptime::type_info_to_type_expr(ctx, env, &fs.typ)
+                                    .ok_or_else(|| {
+                                    TypeModError::CoreError(crate::types::TypeCoreError::Other(
+                                        format!(
+                                            "@recordField: could not resolve type for '{}'",
+                                            fs.name
+                                        ),
+                                    ))
+                                })?;
                             labels.push(crate::types::decl::LabelDeclaration {
                                 ld_id: ctx.create_ident(&fs.name),
                                 ld_mutable: if fs.mutable_ {
@@ -9211,16 +9247,25 @@ fn type_structure_item<'a>(
                         let mut typed_labels = Vec::new();
                         for label in &labels {
                             let parser_mutable = match &label.ld_mutable {
-                                crate::types::MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
-                                crate::types::MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
+                                crate::types::MutableFlag::Mutable => {
+                                    crate::parser::ast::MutableFlag::Mutable
+                                }
+                                crate::types::MutableFlag::Immutable => {
+                                    crate::parser::ast::MutableFlag::Immutable
+                                }
                             };
                             typed_labels.push(crate::types::typedtree::TypedLabelDeclaration {
                                 ld_id: label.ld_id.clone(),
-                                ld_name: crate::parse_arena::Located { txt: label.ld_id.name().to_string(), loc: LocIdx(0) },
+                                ld_name: crate::parse_arena::Located {
+                                    txt: label.ld_id.name().to_string(),
+                                    loc: LocIdx(0),
+                                },
                                 ld_mutable: parser_mutable,
                                 ld_optional: label.ld_optional,
                                 ld_type: crate::types::typedtree::TypedCoreType {
-                                    ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
+                                    ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(
+                                        None,
+                                    ),
                                     ctyp_loc: LocIdx(0),
                                     ctyp_type: label.ld_type,
                                     ctyp_env: crate::types::typedtree::EnvRef(0),
@@ -9233,10 +9278,15 @@ fn type_structure_item<'a>(
 
                         let typed_decl = crate::types::typedtree::TypedTypeDeclaration {
                             typ_id: type_id.clone(),
-                            typ_name: crate::parse_arena::Located { txt: name.clone(), loc: LocIdx(0) },
+                            typ_name: crate::parse_arena::Located {
+                                txt: name.clone(),
+                                loc: LocIdx(0),
+                            },
                             typ_params: vec![],
                             typ_cstrs: vec![],
-                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_record(typed_labels),
+                            typ_kind: crate::types::typedtree::TypedTypeKind::Ttype_record(
+                                typed_labels,
+                            ),
                             typ_private: crate::parser::ast::PrivateFlag::Public,
                             typ_manifest: None,
                             typ_loc: LocIdx(0),
@@ -9252,7 +9302,10 @@ fn type_structure_item<'a>(
 
                         return Ok((
                             StructureItem {
-                                str_desc: StructureItemDesc::Tstr_type(RecFlag::Nonrecursive, vec![typed_decl]),
+                                str_desc: StructureItemDesc::Tstr_type(
+                                    RecFlag::Nonrecursive,
+                                    vec![typed_decl],
+                                ),
                                 str_loc: loc,
                                 str_env: EnvRef(0),
                             },
@@ -9272,11 +9325,14 @@ fn type_structure_item<'a>(
             for vb in bindings {
                 let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
                     let attr_name = arena.get_string(name.txt);
-                    attr_name == "comptime" || attr_name == "comptime.derive" || attr_name == "comptime.inline"
+                    attr_name == "comptime"
+                        || attr_name == "comptime.derive"
+                        || attr_name == "comptime.inline"
                 });
-                let is_inline = vb.pvb_attributes.iter().any(|(name, _)| {
-                    arena.get_string(name.txt) == "comptime.inline"
-                });
+                let is_inline = vb
+                    .pvb_attributes
+                    .iter()
+                    .any(|(name, _)| arena.get_string(name.txt) == "comptime.inline");
                 if is_comptime {
                     has_comptime = true;
                     let pat = arena.get_pat(vb.pvb_pat);
@@ -9314,7 +9370,8 @@ fn type_structure_item<'a>(
                         };
 
                         // Register under the function name (for @comptime calls)
-                        tctx.comptime_functions.insert(name.clone(), comptime_fn.clone());
+                        tctx.comptime_functions
+                            .insert(name.clone(), comptime_fn.clone());
 
                         // Also register under the derive name if it's a @comptime.derive
                         if let Some(derive_name) = derive_name {
@@ -9326,11 +9383,15 @@ fn type_structure_item<'a>(
 
             // Skip comptime-only bindings in normal type checking
             let bindings_to_check: Vec<_> = if has_comptime {
-                bindings.iter().filter(|vb| {
-                    !vb.pvb_attributes.iter().any(|(name, _)| {
-                        arena.get_string(name.txt) == "comptime"
+                bindings
+                    .iter()
+                    .filter(|vb| {
+                        !vb.pvb_attributes
+                            .iter()
+                            .any(|(name, _)| arena.get_string(name.txt) == "comptime")
                     })
-                }).cloned().collect()
+                    .cloned()
+                    .collect()
             } else {
                 bindings.to_vec()
             };
@@ -9346,12 +9407,14 @@ fn type_structure_item<'a>(
             // Add comptime functions to the environment so call sites can find them
             if has_comptime {
                 for vb in bindings {
-                    let is_comptime = vb.pvb_attributes.iter().any(|(name, _)| {
-                        arena.get_string(name.txt) == "comptime"
-                    });
+                    let is_comptime = vb
+                        .pvb_attributes
+                        .iter()
+                        .any(|(name, _)| arena.get_string(name.txt) == "comptime");
                     if is_comptime {
                         let pat = arena.get_pat(vb.pvb_pat);
-                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc {
+                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*pat.ppat_desc
+                        {
                             let name = arena.get_string(name_loc.txt).to_string();
                             let fn_id = tctx.type_ctx.create_ident(&name);
                             let fn_ty = tctx.type_ctx.new_var(None);
@@ -10923,16 +10986,14 @@ fn type_structure_item<'a>(
                                         let label_name =
                                             arena.get_string(label.pld_name.txt).to_string();
                                         let lbl_type = arena.get_core_type(label.pld_type);
-                                        let (typed_ct, ty_ref) =
-                                            transl_type(tctx, env, lbl_type)?;
+                                        let (typed_ct, ty_ref) = transl_type(tctx, env, lbl_type)?;
                                         // Upstream #8319: extension constructor (exception) record
                                         // fields get the same optional → option wrapping as regular
                                         // record fields.
                                         let (typed_ct, ty_ref) = if label.pld_optional {
-                                            let option_path =
-                                                crate::types::predef::path_option();
-                                            let option_type_ref = ctx
-                                                .new_constr(option_path.clone(), vec![ty_ref]);
+                                            let option_path = crate::types::predef::path_option();
+                                            let option_type_ref =
+                                                ctx.new_constr(option_path.clone(), vec![ty_ref]);
                                             let option_lid = crate::parse_arena::Located {
                                                 txt: arena.placeholder_lid(),
                                                 loc: lbl_type.ptyp_loc,
@@ -11228,10 +11289,9 @@ fn type_structure_item<'a>(
                                     // the same optional → option wrapping as regular record
                                     // fields and type-extension (Pext_decl) constructors.
                                     let (typed_ct, ty_ref) = if label.pld_optional {
-                                        let option_path =
-                                            crate::types::predef::path_option();
-                                        let option_type_ref = ctx
-                                            .new_constr(option_path.clone(), vec![ty_ref]);
+                                        let option_path = crate::types::predef::path_option();
+                                        let option_type_ref =
+                                            ctx.new_constr(option_path.clone(), vec![ty_ref]);
                                         let option_lid = crate::parse_arena::Located {
                                             txt: arena.placeholder_lid(),
                                             loc: lbl_type.ptyp_loc,
@@ -11478,10 +11538,8 @@ fn type_structure_item<'a>(
                     ParsedModuleExprDesc::Pmod_structure(_)
                 );
                 if should_substitute_sig_paths {
-                    let sig = crate::types::typecore::copy_lookup_signature_for_subst(
-                        sig,
-                        tctx.type_ctx,
-                    );
+                    let sig =
+                        crate::types::typecore::copy_lookup_signature_for_subst(sig, tctx.type_ctx);
                     crate::cmi::persistent_env::substitute_type_paths_in_sig(
                         &sig,
                         &Path::pident(mod_id.clone()),
@@ -11503,11 +11561,10 @@ fn type_structure_item<'a>(
                         if !structure_has_dotted_alias_child_modules(structure) {
                             decl_mod_type.clone()
                         } else {
-                            let mut sig =
-                                crate::types::typecore::copy_lookup_signature_for_subst(
-                                    sig,
-                                    tctx.type_ctx,
-                                );
+                            let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
+                                sig,
+                                tctx.type_ctx,
+                            );
                             localize_alias_child_module_sig_paths_in_structure_sig(
                                 &mut sig,
                                 structure,
@@ -11623,15 +11680,14 @@ fn type_structure_item<'a>(
                         // Compute coercion between implementation and constraint
                         let coercion = {
                             // Try mod_type first, then try extracting from the typed module expr
-                            let impl_mty_opt = Some(typed_inner.mod_type.clone())
-                                .or_else(|| {
-                                    extract_module_type_from_mod_expr_with_resolver(
-                                        &typed_inner,
-                                        Some(&rec_env),
-                                        Some(tctx.type_ctx),
-                                        &mut |_, _| None,
-                                    )
-                                });
+                            let impl_mty_opt = Some(typed_inner.mod_type.clone()).or_else(|| {
+                                extract_module_type_from_mod_expr_with_resolver(
+                                    &typed_inner,
+                                    Some(&rec_env),
+                                    Some(tctx.type_ctx),
+                                    &mut |_, _| None,
+                                )
+                            });
                             let sig_mty_opt = decl_module_type_from_typed(&typed_mty);
                             match (impl_mty_opt, sig_mty_opt) {
                                 (Some(impl_mty), Some(sig_mty)) => {

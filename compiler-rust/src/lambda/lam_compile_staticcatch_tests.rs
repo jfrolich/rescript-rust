@@ -905,8 +905,7 @@ fn staticcatch_wrapped_string_return_switches_keep_single_handlers_as_default_ar
     let [switch_stmt] = block.as_slice() else {
         panic!("expected a single string switch statement");
     };
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
         panic!("expected the single handler to stay as the string-switch default arm");
     };
     assert!(matches!(
@@ -1359,9 +1358,7 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                 panic!("expected the staticcatch wrapper block to contain a single if");
             };
             let StatementDesc::If(cond, then_block, else_block) = &inner_if.desc else {
-                panic!(
-                    "expected the single-case staticcatch switch to lower to if/fallthrough"
-                );
+                panic!("expected the single-case staticcatch switch to lower to if/fallthrough");
             };
             (cond, then_block, else_block)
         }
@@ -1536,10 +1533,7 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
                     sw_blocks_full: false,
                     sw_blocks: vec![(
                         0,
-                        Lambda::Lassign(
-                            seen.clone(),
-                            Box::new(Lambda::const_(Constant::int(1))),
-                        ),
+                        Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
                     )],
                     sw_failaction: Some(Box::new(Lambda::static_raise(9, Vec::new()))),
                     sw_names: Some(SwitchNames {
@@ -1571,9 +1565,8 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
 
     let rendered = print_block(&block);
     assert!(
-        rendered.contains(
-            "if (typeof json !== \"object\" || json === null || Array.isArray(json)) {"
-        ),
+        rendered
+            .contains("if (typeof json !== \"object\" || json === null || Array.isArray(json)) {"),
         "expected the unit handler to stay as the negative guard default:\n{rendered}"
     );
     assert!(
@@ -1882,11 +1875,8 @@ fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arm
             "expected a single switch with the plain handler kept as the default arm:\n{rendered}"
         );
     };
-    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc
-    else {
-        panic!(
-            "expected the innermost plain handler to stay in the switch default:\n{rendered}"
-        );
+    let StatementDesc::StringSwitch(test, clauses, Some(default_block)) = &switch_stmt.desc else {
+        panic!("expected the innermost plain handler to stay in the switch default:\n{rendered}");
     };
     assert!(matches!(
         test,

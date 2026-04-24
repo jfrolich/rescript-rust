@@ -130,8 +130,7 @@ impl ModuleRegistry {
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
-        let fingerprint =
-            portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
+        let fingerprint = portable_types::compute_type_graph_fingerprint_pub(&[], &sig_items);
         let portable = PortablePersStruct {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
@@ -153,8 +152,7 @@ impl ModuleRegistry {
         self.module_info.remove(name);
         self.source_fallback_paths.remove(name);
         // Remove alias rewrites that point to this module
-        self.alias_rewrites
-            .retain(|key, _| key != name);
+        self.alias_rewrites.retain(|key, _| key != name);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata.
@@ -394,10 +392,7 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.alias_prefix_rewrites,
             );
-            register_types_by_stamp_recursive(
-                &ModuleType::MtySignature(ps.ps_sig.clone()),
-                ctx,
-            );
+            register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
             self.cache.insert(name.to_string(), Some(ps));
             return self.cache.get(name).and_then(|opt| opt.as_ref());
         }
@@ -547,7 +542,10 @@ impl PersistentEnv {
     /// default `cross_module_inline = false` mode, where only
     /// `null`/`undefined`/`true`/`false` closed lambdas are kept for
     /// cross-module inlining.
-    pub fn module_cmj_export_constants(&self, name: &str) -> Option<HashMap<String, CmjExportConstant>> {
+    pub fn module_cmj_export_constants(
+        &self,
+        name: &str,
+    ) -> Option<HashMap<String, CmjExportConstant>> {
         let path = self.resolve_module_cmj_path(name)?;
         read_cmj_export_constants(&path)
     }
@@ -636,8 +634,10 @@ impl PersistentEnv {
             let typed_signature =
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
-            let decl_signature =
-                crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, parser.arena());
+            let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
+                &typed_signature,
+                parser.arena(),
+            );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
                 mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
@@ -757,8 +757,15 @@ impl PersistentEnv {
             if self.source_fallback_paths.contains_key(name) {
                 return self.load_module_from_source_path_fallback(name, ctx);
             }
-            eprintln!("ERROR: in-process module '{}' not found in registry — dependency graph bug", name);
-            eprintln!("  alias rewrites has '{}': {:?}", name, self.alias_prefix_rewrites.get(name));
+            eprintln!(
+                "ERROR: in-process module '{}' not found in registry — dependency graph bug",
+                name
+            );
+            eprintln!(
+                "  alias rewrites has '{}': {:?}",
+                name,
+                self.alias_prefix_rewrites.get(name)
+            );
             return None;
         }
 
@@ -800,8 +807,7 @@ impl PersistentEnv {
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
         // registering the paths.
-        let (signature, fallback_pers) =
-            self.typecheck_source_signature(&source_path, ctx)?;
+        let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
         self.alias_prefix_rewrites
@@ -1239,11 +1245,11 @@ fn decode_cmj_constant(value: &OcamlValue) -> Option<CmjExportConstant> {
         OcamlValue::Int(0) => Some(CmjExportConstant::Null),
         OcamlValue::Int(1) => Some(CmjExportConstant::Bool(true)),
         OcamlValue::Int(2) => Some(CmjExportConstant::Bool(false)),
-        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => Some(
-            CmjExportConstant::Undefined {
+        OcamlValue::Block(tag, fields) if *tag == 0 && fields.len() == 1 => {
+            Some(CmjExportConstant::Undefined {
                 is_unit: fields[0].as_bool(),
-            },
-        ),
+            })
+        }
         _ => None,
     }
 }

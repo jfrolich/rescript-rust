@@ -1383,9 +1383,9 @@ fn transl_type_inner(
                 if let Some(crate::types::comptime::ComptimeValue::Type(ti)) =
                     tctx.comptime_bindings.get(name).cloned()
                 {
-                    if let Some(ty) = crate::types::comptime::type_info_to_type_expr(
-                        tctx.type_ctx, env, &ti,
-                    ) {
+                    if let Some(ty) =
+                        crate::types::comptime::type_info_to_type_expr(tctx.type_ctx, env, &ti)
+                    {
                         let typed = crate::types::typedtree::TypedCoreType {
                             ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_var(None),
                             ctyp_type: ty,
@@ -1811,14 +1811,17 @@ fn transl_type_inner(
             // Polymorphic variant type: [> `A | `B of int ]
             let mut typed_rows = Vec::new();
             let mut row_name: Option<(Path, Vec<TypeExprRef>)> = None;
-            let mut row_field_map:
-                HashMap<crate::types::asttypes::Label, crate::types::type_expr::RowField> =
-                HashMap::new();
+            let mut row_field_map: HashMap<
+                crate::types::asttypes::Label,
+                crate::types::type_expr::RowField,
+            > = HashMap::new();
             let mut row_field_insertions: Vec<crate::types::asttypes::Label> = Vec::new();
 
             fn add_row_field(
-                row_field_map:
-                    &mut HashMap<crate::types::asttypes::Label, crate::types::type_expr::RowField>,
+                row_field_map: &mut HashMap<
+                    crate::types::asttypes::Label,
+                    crate::types::type_expr::RowField,
+                >,
                 row_field_insertions: &mut Vec<crate::types::asttypes::Label>,
                 label: crate::types::asttypes::Label,
                 field: crate::types::type_expr::RowField,
@@ -4329,10 +4332,22 @@ pub fn type_expect<'a>(
                 let name = tctx.arena.get_string(longident.last_idx());
                 if let Some(cv) = tctx.comptime_bindings.get(name).cloned() {
                     // Substitute with the comptime value
-                    if let Some(typed_expr) = comptime_value_to_typed_expr(&cv, tctx.type_ctx, env, loc) {
+                    if let Some(typed_expr) =
+                        comptime_value_to_typed_expr(&cv, tctx.type_ctx, env, loc)
+                    {
                         let expr_ty = typed_expr.exp_type;
-                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, expr_ty, expected_ty)
-                            .map_err(|e| super::TypeCoreError::Other(format!("comptime binding type mismatch: {:?}", e)))?;
+                        crate::types::ctype::unify(
+                            ctx,
+                            &mut tctx.unify_state,
+                            expr_ty,
+                            expected_ty,
+                        )
+                        .map_err(|e| {
+                            super::TypeCoreError::Other(format!(
+                                "comptime binding type mismatch: {:?}",
+                                e
+                            ))
+                        })?;
                         return Ok(typed_expr);
                     }
                 }
@@ -4633,7 +4648,9 @@ pub fn type_expect<'a>(
             let funct_expr = tctx.arena.get_expr(*funct);
 
             // Check for comptime function call
-            if let Some(result) = try_comptime_application(tctx, env, loc, funct_expr, args, expected_ty) {
+            if let Some(result) =
+                try_comptime_application(tctx, env, loc, funct_expr, args, expected_ty)
+            {
                 return result;
             }
 
@@ -4653,7 +4670,9 @@ pub fn type_expect<'a>(
                 if is_comptime {
                     // Build an Expression that looks like Pexp_inline_for and recurse
                     let synthetic = ParsedExpression {
-                        pexp_desc: Box::new(ED::Pexp_inline_for(Box::new((pat_idx, coll_idx, body_idx)))),
+                        pexp_desc: Box::new(ED::Pexp_inline_for(Box::new((
+                            pat_idx, coll_idx, body_idx,
+                        )))),
                         pexp_loc: expr.pexp_loc,
                         pexp_attributes: crate::parser::ast::Attributes::new(),
                     };
@@ -4685,7 +4704,15 @@ pub fn type_expect<'a>(
 
             // Check if the scrutinee is @typeInfo(...) — if so, resolve it
             // and only type-check the matching branch
-            if let Some(result) = try_comptime_match(tctx, env, loc, scrutinee, cases, expected_ty, &expr.pexp_attributes) {
+            if let Some(result) = try_comptime_match(
+                tctx,
+                env,
+                loc,
+                scrutinee,
+                cases,
+                expected_ty,
+                &expr.pexp_attributes,
+            ) {
                 return result;
             }
 
@@ -5025,20 +5052,36 @@ pub fn type_expect<'a>(
         ED::Pexp_field(record_expr_idx, field_lid) => {
             // Check for comptime field access: field.name where field is comptime-known
             let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc {
+            if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*record_expr.pexp_desc
+            {
                 let longident = tctx.arena.get_longident(rec_lid.txt);
                 if longident.is_simple() {
                     let var_name = tctx.arena.get_string(longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(var_name).cloned() {
+                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
+                        tctx.comptime_bindings.get(var_name).cloned()
+                    {
                         let field_name = {
                             let fl = tctx.arena.get_longident(field_lid.txt);
                             tctx.arena.get_string(fl.last_idx()).to_string()
                         };
-                        if let Some((_, field_val)) = entries.iter().find(|(k, _)| k == &field_name) {
-                            if let Some(typed_expr) = comptime_value_to_typed_expr(field_val, ctx, env, loc) {
+                        if let Some((_, field_val)) = entries.iter().find(|(k, _)| k == &field_name)
+                        {
+                            if let Some(typed_expr) =
+                                comptime_value_to_typed_expr(field_val, ctx, env, loc)
+                            {
                                 let expr_ty = typed_expr.exp_type;
-                                crate::types::ctype::unify(ctx, &mut tctx.unify_state, expr_ty, expected_ty)
-                                    .map_err(|e| super::TypeCoreError::Other(format!("comptime field access type mismatch: {:?}", e)))?;
+                                crate::types::ctype::unify(
+                                    ctx,
+                                    &mut tctx.unify_state,
+                                    expr_ty,
+                                    expected_ty,
+                                )
+                                .map_err(|e| {
+                                    super::TypeCoreError::Other(format!(
+                                        "comptime field access type mismatch: {:?}",
+                                        e
+                                    ))
+                                })?;
                                 return Ok(typed_expr);
                             }
                         }
@@ -5261,11 +5304,15 @@ pub fn type_expect<'a>(
                             }
                             _ => None,
                         }
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
                     let rec_expr = tctx.arena.get_expr(*rec_idx);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
+                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) =
+                        &*rec_expr.pexp_desc
+                    {
                         let rec_longident = tctx.arena.get_longident(rec_lid.txt);
                         if rec_longident.is_simple() {
                             let rec_name = tctx.arena.get_string(rec_longident.last_idx());
@@ -5276,15 +5323,25 @@ pub fn type_expect<'a>(
                                     let fl = tctx.arena.get_longident(field_lid.txt);
                                     tctx.arena.get_string(fl.last_idx()).to_string()
                                 };
-                                match entries.iter().find(|(k, _)| k == &field_name).map(|(_, v)| v) {
-                                    Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
-                                        Some(elements.clone())
-                                    }
+                                match entries
+                                    .iter()
+                                    .find(|(k, _)| k == &field_name)
+                                    .map(|(_, v)| v)
+                                {
+                                    Some(crate::types::comptime::ComptimeValue::Array(
+                                        elements,
+                                    )) => Some(elements.clone()),
                                     _ => None,
                                 }
-                            } else { None }
-                        } else { None }
-                    } else { None }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
@@ -5306,7 +5363,8 @@ pub fn type_expect<'a>(
 
                     for element in &elements {
                         let prev_binding = tctx.comptime_bindings.get(&var_name).cloned();
-                        tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+                        tctx.comptime_bindings
+                            .insert(var_name.clone(), element.clone());
 
                         let mut iter_env = env.clone();
                         let elem_ty = ctx.new_var(None);
@@ -5325,16 +5383,24 @@ pub fn type_expect<'a>(
                             Ok(typed_body) => typed_iterations.push(typed_body),
                             Err(e) => {
                                 match prev_binding {
-                                    Some(v) => { tctx.comptime_bindings.insert(var_name.clone(), v); }
-                                    None => { tctx.comptime_bindings.remove(&var_name); }
+                                    Some(v) => {
+                                        tctx.comptime_bindings.insert(var_name.clone(), v);
+                                    }
+                                    None => {
+                                        tctx.comptime_bindings.remove(&var_name);
+                                    }
                                 }
                                 return Err(e);
                             }
                         }
 
                         match prev_binding {
-                            Some(v) => { tctx.comptime_bindings.insert(var_name.clone(), v); }
-                            None => { tctx.comptime_bindings.remove(&var_name); }
+                            Some(v) => {
+                                tctx.comptime_bindings.insert(var_name.clone(), v);
+                            }
+                            None => {
+                                tctx.comptime_bindings.remove(&var_name);
+                            }
                         }
                     }
 
@@ -5349,9 +5415,15 @@ pub fn type_expect<'a>(
                     );
 
                     let array_ty = if is_array_context {
-                        let arr = ctx.new_constr(crate::types::predef::path_array(), vec![elem_result_ty]);
+                        let arr = ctx
+                            .new_constr(crate::types::predef::path_array(), vec![elem_result_ty]);
                         crate::types::ctype::unify(ctx, &mut tctx.unify_state, arr, expected_ty)
-                            .map_err(|e| super::TypeCoreError::Other(format!("inline for array type: {:?}", e)))?;
+                            .map_err(|e| {
+                                super::TypeCoreError::Other(format!(
+                                    "inline for array type: {:?}",
+                                    e
+                                ))
+                            })?;
                         arr
                     } else {
                         ctx.new_var(None)
@@ -5371,15 +5443,23 @@ pub fn type_expect<'a>(
                             Ok(typed_iterations.into_iter().next().unwrap())
                         } else if typed_iterations.is_empty() {
                             let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
-                            let void_cstr = env.find_constructor("()").map_err(|_| {
-                                super::TypeCoreError::Other("cannot find ()".into())
-                            })?.clone();
+                            let void_cstr = env
+                                .find_constructor("()")
+                                .map_err(|_| super::TypeCoreError::Other("cannot find ()".into()))?
+                                .clone();
                             Ok(Expression::new(
                                 ExpressionDesc::Texp_construct(
-                                    crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
-                                    void_cstr, vec![],
+                                    crate::parse_arena::Located {
+                                        txt: crate::parse_arena::LidentIdx(0),
+                                        loc: crate::parse_arena::LocIdx::none(),
+                                    },
+                                    void_cstr,
+                                    vec![],
                                 ),
-                                loc, unit_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                                loc,
+                                unit_ty,
+                                ctx.store_typed_env(env),
+                                crate::parser::ast::Attributes::new(),
                             ))
                         } else {
                             let mut result = typed_iterations.pop().unwrap();
@@ -5387,7 +5467,10 @@ pub fn type_expect<'a>(
                                 let result_ty = result.exp_type;
                                 result = Expression::new(
                                     ExpressionDesc::Texp_sequence(Box::new(prev), Box::new(result)),
-                                    loc, result_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                                    loc,
+                                    result_ty,
+                                    ctx.store_typed_env(env),
+                                    crate::parser::ast::Attributes::new(),
                                 );
                             }
                             Ok(result)
@@ -5408,32 +5491,48 @@ pub fn type_expect<'a>(
                     );
                     if is_array_context {
                         let elem_ty = ctx.new_var(None);
-                        let array_ty = ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty]);
-                        crate::types::ctype::unify(ctx, &mut tctx.unify_state, array_ty, expected_ty)
-                            .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
+                        let array_ty =
+                            ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty]);
+                        crate::types::ctype::unify(
+                            ctx,
+                            &mut tctx.unify_state,
+                            array_ty,
+                            expected_ty,
+                        )
+                        .map_err(|e| super::TypeCoreError::Other(format!("{:?}", e)))?;
                         Ok(Expression::new(
                             ExpressionDesc::Texp_array(vec![]),
-                            loc, array_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                            loc,
+                            array_ty,
+                            ctx.store_typed_env(env),
+                            crate::parser::ast::Attributes::new(),
                         ))
                     } else {
                         let unit_ty = ctx.new_constr(crate::types::predef::path_unit(), vec![]);
-                        let void_cstr = env.find_constructor("()").map_err(|_| {
-                            super::TypeCoreError::Other("cannot find ()".into())
-                        })?.clone();
+                        let void_cstr = env
+                            .find_constructor("()")
+                            .map_err(|_| super::TypeCoreError::Other("cannot find ()".into()))?
+                            .clone();
                         Ok(Expression::new(
                             ExpressionDesc::Texp_construct(
-                                crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
-                                void_cstr, vec![],
+                                crate::parse_arena::Located {
+                                    txt: crate::parse_arena::LidentIdx(0),
+                                    loc: crate::parse_arena::LocIdx::none(),
+                                },
+                                void_cstr,
+                                vec![],
                             ),
-                            loc, unit_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                            loc,
+                            unit_ty,
+                            ctx.store_typed_env(env),
+                            crate::parser::ast::Attributes::new(),
                         ))
                     }
                 }
-                None => {
-                    Err(super::TypeCoreError::Other(
-                        "inline for requires a comptime-known array (e.g., from @typeInfo fields)".to_string(),
-                    ))
-                }
+                None => Err(super::TypeCoreError::Other(
+                    "inline for requires a comptime-known array (e.g., from @typeInfo fields)"
+                        .to_string(),
+                )),
             }
         }
         ED::Pexp_comptime_typeinfo(ct_idx) => {
@@ -5455,13 +5554,25 @@ pub fn type_expect<'a>(
                     match crate::types::comptime::type_info_to_typed_expr(&ti, ctx, env, loc) {
                         Some(typed_expr) => {
                             let type_info_ty = typed_expr.exp_type;
-                            crate::types::ctype::unify(ctx, &mut tctx.unify_state, type_info_ty, expected_ty)
-                                .map_err(|e| super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e)))?;
+                            crate::types::ctype::unify(
+                                ctx,
+                                &mut tctx.unify_state,
+                                type_info_ty,
+                                expected_ty,
+                            )
+                            .map_err(|e| {
+                                super::TypeCoreError::Other(format!(
+                                    "typeInfo type mismatch: {:?}",
+                                    e
+                                ))
+                            })?;
                             return Ok(typed_expr);
                         }
-                        None => return Err(super::TypeCoreError::Other(
-                            "Failed to construct typeInfo value for type parameter".to_string(),
-                        )),
+                        None => {
+                            return Err(super::TypeCoreError::Other(
+                                "Failed to construct typeInfo value for type parameter".to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -5489,9 +5600,11 @@ pub fn type_expect<'a>(
                     };
                     match var_ty {
                         Some(ty) => ty,
-                        None => return Err(super::TypeCoreError::Other(
-                            "@typeInfo: could not resolve type or variable".to_string(),
-                        )),
+                        None => {
+                            return Err(super::TypeCoreError::Other(
+                                "@typeInfo: could not resolve type or variable".to_string(),
+                            ));
+                        }
                     }
                 }
             };
@@ -5499,8 +5612,12 @@ pub fn type_expect<'a>(
             // Also check: if the resolved type is External (unknown type name),
             // try as a variable name
             let mut visited_check = Vec::new();
-            let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-            let resolved_ty = if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+            let check_info =
+                crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
+            let resolved_ty = if matches!(
+                check_info,
+                crate::types::comptime::TypeInfo::External { .. }
+            ) {
                 // Might be a variable name, not a type
                 let var_ty = match &*core_type.ptyp_desc {
                     crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) => {
@@ -5527,15 +5644,23 @@ pub fn type_expect<'a>(
 
             // Build TypeInfo from the resolved type
             let mut visited = Vec::new();
-            let type_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
+            let type_info =
+                crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited);
 
             // Construct a literal typeInfo value
             match crate::types::comptime::type_info_to_typed_expr(&type_info, ctx, env, loc) {
                 Some(typed_expr) => {
                     // Unify the typeInfo type with expected type
                     let type_info_ty = typed_expr.exp_type;
-                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, type_info_ty, expected_ty)
-                        .map_err(|e| super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e)))?;
+                    crate::types::ctype::unify(
+                        ctx,
+                        &mut tctx.unify_state,
+                        type_info_ty,
+                        expected_ty,
+                    )
+                    .map_err(|e| {
+                        super::TypeCoreError::Other(format!("typeInfo type mismatch: {:?}", e))
+                    })?;
                     Ok(typed_expr)
                 }
                 None => Err(super::TypeCoreError::Other(
@@ -5551,48 +5676,68 @@ pub fn type_expect<'a>(
             // The name must be a comptime-known string
             let field_name = match &*name_expr.pexp_desc {
                 // Direct string literal
-                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
-                    match &**c {
-                        crate::parser::ast::Constant::String(s, _) => Some(s.to_string()),
-                        _ => None,
-                    }
-                }
+                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
+                    crate::parser::ast::Constant::String(s, _) => Some(s.to_string()),
+                    _ => None,
+                },
                 // Comptime-known variable (e.g., field.name from inline for)
                 crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
                     let longident = tctx.arena.get_longident(lid.txt);
                     if longident.is_simple() {
                         let var_name = tctx.arena.get_string(longident.last_idx());
                         match tctx.comptime_bindings.get(var_name) {
-                            Some(crate::types::comptime::ComptimeValue::String(s)) => Some(s.clone()),
+                            Some(crate::types::comptime::ComptimeValue::String(s)) => {
+                                Some(s.clone())
+                            }
                             _ => None,
                         }
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 // Comptime field access (e.g., field.name)
                 crate::parser::ast::ExpressionDesc::Pexp_field(rec_idx, field_lid) => {
                     let rec_expr = tctx.arena.get_expr(*rec_idx);
-                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) = &*rec_expr.pexp_desc {
+                    if let crate::parser::ast::ExpressionDesc::Pexp_ident(rec_lid) =
+                        &*rec_expr.pexp_desc
+                    {
                         let longident = tctx.arena.get_longident(rec_lid.txt);
                         if longident.is_simple() {
                             let var_name = tctx.arena.get_string(longident.last_idx());
-                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(var_name) {
+                            if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
+                                tctx.comptime_bindings.get(var_name)
+                            {
                                 let fl = tctx.arena.get_longident(field_lid.txt);
                                 let fname = tctx.arena.get_string(fl.last_idx()).to_string();
-                                entries.iter().find(|(k, _)| k == &fname).and_then(|(_, v)| {
-                                    match v { crate::types::comptime::ComptimeValue::String(s) => Some(s.clone()), _ => None }
-                                })
-                            } else { None }
-                        } else { None }
-                    } else { None }
+                                entries
+                                    .iter()
+                                    .find(|(k, _)| k == &fname)
+                                    .and_then(|(_, v)| match v {
+                                        crate::types::comptime::ComptimeValue::String(s) => {
+                                            Some(s.clone())
+                                        }
+                                        _ => None,
+                                    })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
 
             let field_name = match field_name {
                 Some(name) => name,
-                None => return Err(super::TypeCoreError::Other(
-                    "@field requires a comptime-known string as the field name".to_string(),
-                )),
+                None => {
+                    return Err(super::TypeCoreError::Other(
+                        "@field requires a comptime-known string as the field name".to_string(),
+                    ));
+                }
             };
 
             // Type-check the value expression to get its type
@@ -5605,44 +5750,50 @@ pub fn type_expect<'a>(
                 Ok(label_desc) => {
                     let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
                     crate::types::ctype::unify(ctx, &mut tctx.unify_state, field_ty, expected_ty)
-                        .map_err(|e| super::TypeCoreError::Other(format!("@field type mismatch: {:?}", e)))?;
+                        .map_err(|e| {
+                        super::TypeCoreError::Other(format!("@field type mismatch: {:?}", e))
+                    })?;
 
                     let lid_loc = crate::parse_arena::Located {
                         txt: crate::parse_arena::LidentIdx(0),
                         loc: crate::parse_arena::LocIdx::none(),
                     };
                     Ok(Expression::new(
-                        ExpressionDesc::Texp_field(Box::new(typed_value), lid_loc, label_desc.clone()),
+                        ExpressionDesc::Texp_field(
+                            Box::new(typed_value),
+                            lid_loc,
+                            label_desc.clone(),
+                        ),
                         loc,
                         field_ty,
                         ctx.store_typed_env(env),
                         crate::parser::ast::Attributes::new(),
                     ))
                 }
-                Err(_) => Err(super::TypeCoreError::Other(
-                    format!("@field: field '{}' not found on the value's type", field_name),
-                )),
+                Err(_) => Err(super::TypeCoreError::Other(format!(
+                    "@field: field '{}' not found on the value's type",
+                    field_name
+                ))),
             }
         }
         ED::Pexp_comptime_compile_error(msg_idx) => {
             // Extract the error message
             let msg_expr = tctx.arena.get_expr(*msg_idx);
             let msg = match &*msg_expr.pexp_desc {
-                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => {
-                    match &**c {
-                        crate::parser::ast::Constant::String(s, _) => s.to_string(),
-                        _ => "compile error".to_string(),
-                    }
-                }
+                crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &**c {
+                    crate::parser::ast::Constant::String(s, _) => s.to_string(),
+                    _ => "compile error".to_string(),
+                },
                 _ => "compile error".to_string(),
             };
-            Err(super::TypeCoreError::Other(format!("@compileError: {}", msg)))
+            Err(super::TypeCoreError::Other(format!(
+                "@compileError: {}",
+                msg
+            )))
         }
-        ED::Pexp_comptime_typename(_) => {
-            Err(super::TypeCoreError::Other(
-                "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
-            ))
-        }
+        ED::Pexp_comptime_typename(_) => Err(super::TypeCoreError::Other(
+            "comptime builtin @typeName can only be used inside @comptime functions".to_string(),
+        )),
         ED::Pexp_comptime_variant(inner) => {
             let (ref ct_idx, ref ctor_name_idx, ref payload_idx) = **inner;
             let core_type = tctx.arena.get_core_type(*ct_idx);
@@ -5652,7 +5803,9 @@ pub fn type_expect<'a>(
             // t, ...)`), resolve it via the binding's TypeInfo — otherwise
             // transl_type would treat `t` as an undefined type name.
             let comptime_type: Option<crate::types::comptime::TypeInfo> =
-                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner_ct) = &*core_type.ptyp_desc {
+                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner_ct) =
+                    &*core_type.ptyp_desc
+                {
                     let (ref lid, _) = **inner_ct;
                     let longident = tctx.arena.get_longident(lid.txt);
                     let name = tctx.arena.get_string(longident.last_idx());
@@ -5660,14 +5813,25 @@ pub fn type_expect<'a>(
                         tctx.comptime_bindings.get(name).cloned()
                     {
                         Some(ti)
-                    } else { None }
-                } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
-            let resolved_ty = if let Some(crate::types::comptime::TypeInfo::Variant { name, .. }) = &comptime_type {
+            let resolved_ty = if let Some(crate::types::comptime::TypeInfo::Variant {
+                name, ..
+            }) = &comptime_type
+            {
                 match env.find_type_with_id(name) {
                     Ok((id, _)) => ctx.new_constr(crate::types::Path::Pident(id.clone()), vec![]),
-                    Err(_) => return Err(super::TypeCoreError::Other(format!(
-                        "@variant: comptime type '{}' not found in env", name))),
+                    Err(_) => {
+                        return Err(super::TypeCoreError::Other(format!(
+                            "@variant: comptime type '{}' not found in env",
+                            name
+                        )));
+                    }
                 }
             } else {
                 match transl_type(tctx, env, core_type) {
@@ -5676,13 +5840,21 @@ pub fn type_expect<'a>(
                 }
             };
             let ctor_name_expr = tctx.arena.get_expr(*ctor_name_idx);
-            let ctor_name = evaluate_comptime_string(tctx, ctor_name_expr)
-                .map_err(|e| super::TypeCoreError::Other(format!(
-                    "@variant ctor name must resolve to a comptime-known string: {:?}", e
-                )))?;
-            let cstr_desc = env.find_constructor(&ctor_name).map_err(|_| {
-                super::TypeCoreError::Other(format!("@variant: constructor '{}' not found", ctor_name))
-            })?.clone();
+            let ctor_name = evaluate_comptime_string(tctx, ctor_name_expr).map_err(|e| {
+                super::TypeCoreError::Other(format!(
+                    "@variant ctor name must resolve to a comptime-known string: {:?}",
+                    e
+                ))
+            })?;
+            let cstr_desc = env
+                .find_constructor(&ctor_name)
+                .map_err(|_| {
+                    super::TypeCoreError::Other(format!(
+                        "@variant: constructor '{}' not found",
+                        ctor_name
+                    ))
+                })?
+                .clone();
 
             // Use the constructor's result type for the expression type.
             // Instance it to get fresh type variables that can unify with the expected type.
@@ -5703,12 +5875,20 @@ pub fn type_expect<'a>(
 
             // Unify the constructor's result type with expected type
             crate::types::ctype::unify(ctx, &mut tctx.unify_state, result_ty, expected_ty)
-                .map_err(|e| super::TypeCoreError::Other(format!("@variant type mismatch: {:?}", e)))?;
+                .map_err(|e| {
+                    super::TypeCoreError::Other(format!("@variant type mismatch: {:?}", e))
+                })?;
 
-            let lid_loc = crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() };
+            let lid_loc = crate::parse_arena::Located {
+                txt: crate::parse_arena::LidentIdx(0),
+                loc: crate::parse_arena::LocIdx::none(),
+            };
             Ok(Expression::new(
                 ExpressionDesc::Texp_construct(lid_loc, cstr_desc, typed_args),
-                loc, result_ty, ctx.store_typed_env(env), crate::parser::ast::Attributes::new(),
+                loc,
+                result_ty,
+                ctx.store_typed_env(env),
+                crate::parser::ast::Attributes::new(),
             ))
         }
         ED::Pexp_comptime_record(inner) => {
@@ -5722,7 +5902,8 @@ pub fn type_expect<'a>(
             // (from `(type t, ...)` — `@record(t, ...)`). If so, resolve it
             // via the type binding's TypeInfo.
             let comptime_type: Option<crate::types::comptime::TypeInfo> =
-                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+                if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc
+                {
                     let (ref lid, _) = **inner;
                     let longident = tctx.arena.get_longident(lid.txt);
                     let name = tctx.arena.get_string(longident.last_idx());
@@ -5738,26 +5919,35 @@ pub fn type_expect<'a>(
                 };
 
             ctx.begin_def();
-            let resolved_ty = if let Some(crate::types::comptime::TypeInfo::Record { name, .. }) = &comptime_type {
-                // Look up the record type by name
-                match env.find_type_with_id(name) {
-                    Ok((id, _)) => {
-                        ctx.end_def();
-                        ctx.new_constr(crate::types::Path::Pident(id.clone()), vec![])
+            let resolved_ty =
+                if let Some(crate::types::comptime::TypeInfo::Record { name, .. }) = &comptime_type
+                {
+                    // Look up the record type by name
+                    match env.find_type_with_id(name) {
+                        Ok((id, _)) => {
+                            ctx.end_def();
+                            ctx.new_constr(crate::types::Path::Pident(id.clone()), vec![])
+                        }
+                        Err(_) => {
+                            ctx.end_def();
+                            return Err(super::TypeCoreError::Other(format!(
+                                "@record: comptime type '{}' not found in env",
+                                name
+                            )));
+                        }
                     }
-                    Err(_) => {
-                        ctx.end_def();
-                        return Err(super::TypeCoreError::Other(format!(
-                            "@record: comptime type '{}' not found in env", name
-                        )));
+                } else {
+                    match transl_type(tctx, env, core_type) {
+                        Ok((_, ty)) => {
+                            ctx.end_def();
+                            ty
+                        }
+                        Err(e) => {
+                            ctx.end_def();
+                            return Err(e);
+                        }
                     }
-                }
-            } else {
-                match transl_type(tctx, env, core_type) {
-                    Ok((_, ty)) => { ctx.end_def(); ty }
-                    Err(e) => { ctx.end_def(); return Err(e); }
-                }
-            };
+                };
 
             // The fields expression must be an inline for (or Array.map)
             // that produces record fields. @record unrolls it directly
@@ -5765,7 +5955,9 @@ pub fn type_expect<'a>(
             let fields_expr = tctx.arena.get_expr(*fields_expr_idx);
             let mut typed_fields = Vec::new();
 
-            if let Some((pat_idx, collection_idx, body_idx)) = as_comptime_loop(fields_expr, tctx.arena) {
+            if let Some((pat_idx, collection_idx, body_idx)) =
+                as_comptime_loop(fields_expr, tctx.arena)
+            {
                 let coll_expr = tctx.arena.get_expr(collection_idx);
                 let comptime_array = match &*coll_expr.pexp_desc {
                     crate::parser::ast::ExpressionDesc::Pexp_ident(lid) => {
@@ -5773,19 +5965,28 @@ pub fn type_expect<'a>(
                         if longident.is_simple() {
                             let vname = tctx.arena.get_string(longident.last_idx());
                             match tctx.comptime_bindings.get(vname) {
-                                Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                                Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
+                                    Some(elements.clone())
+                                }
                                 _ => None,
                             }
-                        } else { None }
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
-                }.ok_or_else(|| super::TypeCoreError::Other(
-                    "@record: loop collection must be comptime-known".into(),
-                ))?;
+                }
+                .ok_or_else(|| {
+                    super::TypeCoreError::Other(
+                        "@record: loop collection must be comptime-known".into(),
+                    )
+                })?;
 
                 let pat = tctx.arena.get_pat(pat_idx);
                 let var_name = match &*pat.ppat_desc {
-                    crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+                    crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                        tctx.arena.get_string(name_loc.txt).to_string()
+                    }
                     _ => "__field".to_string(),
                 };
 
@@ -5793,7 +5994,8 @@ pub fn type_expect<'a>(
                 let saved_bindings = tctx.comptime_bindings.clone();
 
                 for element in &comptime_array {
-                    tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+                    tctx.comptime_bindings
+                        .insert(var_name.clone(), element.clone());
 
                     let mut iter_env = env.clone();
                     let elem_ty = ctx.new_var(None);
@@ -5808,27 +6010,51 @@ pub fn type_expect<'a>(
                     iter_env.add_value(id, vd);
 
                     // Extract field name from comptime element's "name" property
-                    let field_name = if let crate::types::comptime::ComptimeValue::Record(entries) = element {
-                        entries.iter().find(|(k, _)| k == "name").and_then(|(_, v)| {
-                            if let crate::types::comptime::ComptimeValue::String(s) = v { Some(s.clone()) } else { None }
-                        })
-                    } else { None }
-                    .ok_or_else(|| super::TypeCoreError::Other("@record: element must have 'name'".into()))?;
+                    let field_name =
+                        if let crate::types::comptime::ComptimeValue::Record(entries) = element {
+                            entries
+                                .iter()
+                                .find(|(k, _)| k == "name")
+                                .and_then(|(_, v)| {
+                                    if let crate::types::comptime::ComptimeValue::String(s) = v {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        } else {
+                            None
+                        }
+                        .ok_or_else(|| {
+                            super::TypeCoreError::Other("@record: element must have 'name'".into())
+                        })?;
 
-                    let label_desc = env.find_label(&field_name).map_err(|_| {
-                        super::TypeCoreError::Other(format!("@record: field '{}' not found", field_name))
-                    })?.clone();
+                    let label_desc = env
+                        .find_label(&field_name)
+                        .map_err(|_| {
+                            super::TypeCoreError::Other(format!(
+                                "@record: field '{}' not found",
+                                field_name
+                            ))
+                        })?
+                        .clone();
 
                     // Type-check body with the field's expected type
                     let field_ty = crate::types::instance(ctx, label_desc.lbl_arg);
                     let typed_value = type_expect(tctx, &iter_env, body_expr, field_ty, None)?;
 
-                    let lid_loc = crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() };
+                    let lid_loc = crate::parse_arena::Located {
+                        txt: crate::parse_arena::LidentIdx(0),
+                        loc: crate::parse_arena::LocIdx::none(),
+                    };
                     typed_fields.push((
                         lid_loc,
                         label_desc,
                         super::typedtree::RecordLabelDefinition::Overridden(
-                            crate::parse_arena::Located { txt: crate::parse_arena::LidentIdx(0), loc: crate::parse_arena::LocIdx::none() },
+                            crate::parse_arena::Located {
+                                txt: crate::parse_arena::LidentIdx(0),
+                                loc: crate::parse_arena::LocIdx::none(),
+                            },
                             typed_value,
                         ),
                         false,
@@ -5843,7 +6069,9 @@ pub fn type_expect<'a>(
 
             // Unify the record type with expected type
             crate::types::ctype::unify(ctx, &mut tctx.unify_state, resolved_ty, expected_ty)
-                .map_err(|e| super::TypeCoreError::Other(format!("@record type mismatch: {:?}", e)))?;
+                .map_err(|e| {
+                    super::TypeCoreError::Other(format!("@record type mismatch: {:?}", e))
+                })?;
 
             Ok(Expression::new(
                 ExpressionDesc::Texp_record {
@@ -5864,7 +6092,8 @@ pub fn type_expect<'a>(
             // by evaluate_type_builder — they should not appear in normal
             // expression context.
             Err(super::TypeCoreError::Other(
-                "@buildVariant / @variantCase may only appear in @comptime type declarations".into(),
+                "@buildVariant / @variantCase may only appear in @comptime type declarations"
+                    .into(),
             ))
         }
     }
@@ -6657,15 +6886,10 @@ fn type_application(
     // application during parsing/PPX. Thread the expected result type into
     // the application before typing its arguments so element/value types
     // can be inferred from the surrounding context.
-    if should_unify_expected_result_before_typing_lowered_apply(
-        tctx, &typed_funct, args,
-    ) {
-        if let Some((_arg_ty, ty_res)) = filter_arrow_for_lowered_apply(
-            tctx,
-            env,
-            typed_funct.exp_type,
-            args.len(),
-        ) {
+    if should_unify_expected_result_before_typing_lowered_apply(tctx, &typed_funct, args) {
+        if let Some((_arg_ty, ty_res)) =
+            filter_arrow_for_lowered_apply(tctx, env, typed_funct.exp_type, args.len())
+        {
             let expected_inst = crate::types::instance(ctx, expected_ty);
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
@@ -8897,7 +9121,10 @@ fn reorder_variant_row_for_pat_type(
         .into_iter()
         .enumerate()
         .map(|(original_index, (label, field))| {
-            let label_order = order_index.get(label.as_str()).copied().unwrap_or(usize::MAX);
+            let label_order = order_index
+                .get(label.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
             (label_order, original_index, (label, field))
         })
         .collect::<Vec<_>>();
@@ -9250,7 +9477,10 @@ fn merge_variant_row_fields_single(
     let mut merged_fields = variant_row_data.row_fields.clone();
 
     let mut push_missing_field =
-        |fields: &mut Vec<(crate::types::asttypes::Label, crate::types::type_expr::RowField)>,
+        |fields: &mut Vec<(
+            crate::types::asttypes::Label,
+            crate::types::type_expr::RowField,
+        )>,
          tag: &crate::types::asttypes::Label,
          field: &crate::types::type_expr::RowField| {
             if fields.iter().all(|(existing, _)| existing != tag) {
@@ -9940,11 +10170,8 @@ fn normalize_wildcard_coverage_by_labels(
         let ty = TypeExprRef(wildcard_key);
         let desc = ctx.get_desc(ty);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let mut labels: Vec<String> = row
-                .row_fields
-                .iter()
-                .map(|(l, _)| l.to_string())
-                .collect();
+            let mut labels: Vec<String> =
+                row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
             labels.sort();
             wildcard_label_sets.push(labels);
         }
@@ -9960,11 +10187,8 @@ fn normalize_wildcard_coverage_by_labels(
         let ty = TypeExprRef(row_key);
         let desc = ctx.get_desc(ty);
         if let TypeDesc::Tvariant(row) = &*desc {
-            let mut labels: Vec<String> = row
-                .row_fields
-                .iter()
-                .map(|(l, _)| l.to_string())
-                .collect();
+            let mut labels: Vec<String> =
+                row.row_fields.iter().map(|(l, _)| l.to_string()).collect();
             labels.sort();
             for wildcard_labels in &wildcard_label_sets {
                 // Use subset matching: a wildcard row from an earlier case
@@ -10385,8 +10609,7 @@ fn collect_lident_idents_in_expression(
             collect_lident_idents_in_expression(arena, arena.get_expr(*collection), out);
             collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
         }
-        ED::Pexp_comptime_typeinfo(_)
-        | ED::Pexp_comptime_typename(_) => {
+        ED::Pexp_comptime_typeinfo(_) | ED::Pexp_comptime_typename(_) => {
             // No expression sub-terms to collect idents from
         }
         ED::Pexp_comptime_field(inner) => {
@@ -11244,8 +11467,7 @@ fn type_for_of(
         let typed = type_exp(tctx, env, iterable_expr, None)?;
         let iterable_ty = env.type_iterable(ctx, ty_elem);
         // Try iterable first.
-        match crate::types::ctype::unify(ctx, &mut tctx.unify_state, typed.exp_type, iterable_ty)
-        {
+        match crate::types::ctype::unify(ctx, &mut tctx.unify_state, typed.exp_type, iterable_ty) {
             Ok(()) => typed,
             Err(_) => {
                 // Fall back to array<'a> (matches OCaml's convenience path).
@@ -11253,8 +11475,7 @@ fn type_for_of(
                 // the head and decide based on its constructor — if it's
                 // `array`, use array; otherwise re-raise the iterable error.
                 let array_ty = env.type_array(ctx, ty_elem);
-                let head =
-                    crate::types::ctype::expand_head(ctx, env, typed.exp_type);
+                let head = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
                 let is_array = match &*ctx.get_desc(head) {
                     crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
                         path.same(&crate::types::predef::path_array())
@@ -11268,10 +11489,12 @@ fn type_for_of(
                         typed.exp_type,
                         array_ty,
                     )
-                    .map_err(|e| TypeCoreError::Other(format!(
-                        "for-of array fallback unification failed: {:?}",
-                        e
-                    )))?;
+                    .map_err(|e| {
+                        TypeCoreError::Other(format!(
+                            "for-of array fallback unification failed: {:?}",
+                            e
+                        ))
+                    })?;
                     typed
                 } else {
                     return Err(TypeCoreError::Other(format!(
@@ -11284,8 +11507,7 @@ fn type_for_of(
 
     // Bind the loop variable (if any) into the body environment.
     let mut state = PatternState::new();
-    let _typed_pat =
-        type_pattern(tctx, env, pat, ty_elem, PatternMode::Normal, &mut state)?;
+    let _typed_pat = type_pattern(tctx, env, pat, ty_elem, PatternMode::Normal, &mut state)?;
     let loop_var_id = match &*pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any => {
             if !state.pattern_variables.is_empty() {
@@ -11961,18 +12183,15 @@ fn type_record(
             .map(|expr| expr.exp_type)
             .unwrap_or(record_ty)
     });
-    let disambiguation_labels_by_name = build_record_label_descriptions(
-        disambiguation_ty,
-        env,
-        &mut tctx.persistent_env,
-        ctx,
-    )
-    .map(|labels| {
-        labels
-            .into_iter()
-            .map(|label| (label.lbl_name.clone(), label))
-            .collect::<HashMap<_, _>>()
-    });
+    let disambiguation_labels_by_name =
+        build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx).map(
+            |labels| {
+                labels
+                    .into_iter()
+                    .map(|label| (label.lbl_name.clone(), label))
+                    .collect::<HashMap<_, _>>()
+            },
+        );
     let expected_labels_by_name =
         build_record_label_descriptions(expected_ty, env, &mut tctx.persistent_env, ctx).map(
             |labels| {
@@ -12080,37 +12299,37 @@ fn type_record(
                 .as_ref()
                 .and_then(|labels| labels.get(&field_name).cloned());
             let env_label = expected_label
-            .or_else(|| {
-                lookup_label_by_expected_type(
-                    &field_name,
-                    expected_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
-            })
-            .filter(|expected_label| {
-                if prefer_expected_closed_record_label
-                    && should_force_expected_closed_record_label(
+                .or_else(|| {
+                    lookup_label_by_expected_type(
+                        &field_name,
                         expected_ty,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    )
+                })
+                .filter(|expected_label| {
+                    if prefer_expected_closed_record_label
+                        && should_force_expected_closed_record_label(
+                            expected_ty,
+                            expected_label,
+                            &env_label,
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                        )
+                    {
+                        return true;
+                    }
+                    should_prefer_expected_record_label(
                         expected_label,
                         &env_label,
                         env,
                         &mut tctx.persistent_env,
                         ctx,
                     )
-                {
-                    return true;
-                }
-                should_prefer_expected_record_label(
-                    expected_label,
-                    &env_label,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
-            })
-            .unwrap_or(env_label);
+                })
+                .unwrap_or(env_label);
             let (poly_vars, ty_arg0, ty_res0) =
                 crate::types::ctype::instance_label(ctx, true, &env_label);
             // Match OCaml typecore.ml type_label_exp:
@@ -12260,7 +12479,14 @@ fn type_record(
         None
     } else {
         build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
-            || build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx),
+            || {
+                build_record_label_descriptions(
+                    disambiguation_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            },
         )
     };
     if all_label_descriptions.is_none() {
@@ -12275,12 +12501,8 @@ fn type_record(
     }
     if all_label_descriptions.is_none() {
         if let Some(lbl) = first_disambiguated_label.as_ref() {
-            all_label_descriptions = build_record_label_descriptions(
-                lbl.lbl_res,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            );
+            all_label_descriptions =
+                build_record_label_descriptions(lbl.lbl_res, env, &mut tctx.persistent_env, ctx);
         }
     }
     if all_label_descriptions
@@ -12806,10 +13028,7 @@ fn inline_record_decl_from_variant_type<'a>(
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
-                type_kind: crate::types::TypeKind::TypeRecord(
-                    labels.clone(),
-                    inline_repr,
-                ),
+                type_kind: crate::types::TypeKind::TypeRecord(labels.clone(), inline_repr),
                 type_private: type_decl.type_private,
                 type_manifest: None,
                 type_variance: inline_params
@@ -14860,8 +15079,7 @@ fn type_pack(
         crate::types::typemod::decl_module_type_from_typed_module_expr_for_constraint_arg(
             &typed_module,
         );
-    let arg_mty =
-        constraint_arg_mty
+    let arg_mty = constraint_arg_mty
         .clone()
         .or_else(|| {
             crate::types::typemod::extract_module_type_from_mod_expr_with_ctx(
@@ -14870,14 +15088,16 @@ fn type_pack(
                 ctx,
             )
         })
-    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
     let package_coercion_key = if pack_args_rebuilt_from_path {
-        packed_module_path.as_ref().map(|packed_module_path| PackageCoercionCacheKey {
-            env_id: env.id(),
-            packed_module_path: packed_module_path.clone(),
-            package_path: pack_path.clone(),
-            package_lids: pack_lids.clone(),
-        })
+        packed_module_path
+            .as_ref()
+            .map(|packed_module_path| PackageCoercionCacheKey {
+                env_id: env.id(),
+                packed_module_path: packed_module_path.clone(),
+                package_path: pack_path.clone(),
+                package_lids: pack_lids.clone(),
+            })
     } else {
         None
     };
@@ -16411,7 +16631,12 @@ impl Env {
                 let lid_str = Self::longident_to_string(lid, arena);
 
                 if let Some(Some(result)) = with_resolved_module_components_for_lid(
-                    prefix, arena, self, pers_env, ctx, |components| {
+                    prefix,
+                    arena,
+                    self,
+                    pers_env,
+                    ctx,
+                    |components| {
                         let module_path = components.access_path().clone();
                         if let Some(cached) =
                             ctx.find_resolved_module_value(&module_path, value_name)
@@ -16440,9 +16665,7 @@ impl Env {
                 if let Some(module_path) =
                     self.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)
                 {
-                    if let Some(cached) =
-                        ctx.find_resolved_module_value(&module_path, value_name)
-                    {
+                    if let Some(cached) = ctx.find_resolved_module_value(&module_path, value_name) {
                         return Ok(cached);
                     }
                     if let Some(Some((mod_path, pos, vd))) =
@@ -16600,11 +16823,14 @@ impl Env {
                 {
                     return Some(cached);
                 }
-                if let Some(result) =
-                    with_resolved_module_components_for_lid(lid, arena, self, pers_env, ctx, |components| {
-                        components.access_path().clone()
-                    })
-                {
+                if let Some(result) = with_resolved_module_components_for_lid(
+                    lid,
+                    arena,
+                    self,
+                    pers_env,
+                    ctx,
+                    |components| components.access_path().clone(),
+                ) {
                     ctx.register_resolved_child_module_path(
                         &parent_path,
                         submod_name,
@@ -16618,31 +16844,24 @@ impl Env {
                     pers_env,
                     ctx,
                     |components| {
-                        components
-                            .lookup_module(submod_name)
-                            .map(|(pos, _, md)| {
-                                if parent_path.head().is_persistent()
-                                    || parent_path.head().stamp() == 0
-                                {
-                                    md.md_path.clone().unwrap_or_else(|| {
-                                        Path::pdot(parent_path.clone(), submod_name.to_string())
-                                    })
-                                } else {
-                                    Path::Pdot(
-                                        Box::new(parent_path.clone()),
-                                        submod_name.to_string(),
-                                        pos as i32,
-                                    )
-                                }
-                            })
+                        components.lookup_module(submod_name).map(|(pos, _, md)| {
+                            if parent_path.head().is_persistent() || parent_path.head().stamp() == 0
+                            {
+                                md.md_path.clone().unwrap_or_else(|| {
+                                    Path::pdot(parent_path.clone(), submod_name.to_string())
+                                })
+                            } else {
+                                Path::Pdot(
+                                    Box::new(parent_path.clone()),
+                                    submod_name.to_string(),
+                                    pos as i32,
+                                )
+                            }
+                        })
                     },
                 )
                 .flatten()?;
-                ctx.register_resolved_child_module_path(
-                    &parent_path,
-                    submod_name,
-                    result.clone(),
-                );
+                ctx.register_resolved_child_module_path(&parent_path, submod_name, result.clone());
                 Some(result)
             }
             Longident::Lapply(_, _) => None,
@@ -17250,18 +17469,14 @@ impl Env {
                     }
                 }
                 Path::Pdot(parent, modtype_name, _) => {
-                    let (_, parent_sig) = match resolve_module_signature_for_path(
-                        parent,
-                        env,
-                        pers_env,
-                        ctx,
-                    ) {
-                        Some(x) => x,
-                        None => {
-                            visiting.remove(path);
-                            return None;
-                        }
-                    };
+                    let (_, parent_sig) =
+                        match resolve_module_signature_for_path(parent, env, pers_env, ctx) {
+                            Some(x) => x,
+                            None => {
+                                visiting.remove(path);
+                                return None;
+                            }
+                        };
                     parent_sig.iter().find_map(|sig_item| {
                         if let SignatureItem::SigModtype(id, mtd) = sig_item {
                             if id.name() == modtype_name.as_str() {
@@ -17293,13 +17508,9 @@ impl Env {
             }
 
             if let Path::Pdot(parent, submod_name, _) = path {
-                if let Some((_, access_path, sub_md)) = lookup_module_in_resolved_path(
-                    parent,
-                    submod_name.as_str(),
-                    env,
-                    pers_env,
-                    ctx,
-                ) {
+                if let Some((_, access_path, sub_md)) =
+                    lookup_module_in_resolved_path(parent, submod_name.as_str(), env, pers_env, ctx)
+                {
                     let result =
                         resolve_module_type_inner(env, &sub_md.md_type, pers_env, ctx, visiting);
                     let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
@@ -17340,12 +17551,9 @@ impl Env {
                     // source of truth as the other hot callers instead of reading
                     // raw ps_sig directly.
                     let persistent_path = Path::pident(Ident::create_persistent(mod_name));
-                    if let Some((_, sig)) = resolve_module_signature_for_path(
-                        &persistent_path,
-                        env,
-                        pers_env,
-                        ctx,
-                    ) {
+                    if let Some((_, sig)) =
+                        resolve_module_signature_for_path(&persistent_path, env, pers_env, ctx)
+                    {
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
@@ -17354,18 +17562,14 @@ impl Env {
                     None
                 }
                 Path::Pdot(parent, submod_name, _) => {
-                    let (_, parent_sig) = match resolve_module_signature_for_path(
-                        parent,
-                        env,
-                        pers_env,
-                        ctx,
-                    ) {
-                        Some(x) => x,
-                        None => {
-                            visiting.remove(path);
-                            return None;
-                        }
-                    };
+                    let (_, parent_sig) =
+                        match resolve_module_signature_for_path(parent, env, pers_env, ctx) {
+                            Some(x) => x,
+                            None => {
+                                visiting.remove(path);
+                                return None;
+                            }
+                        };
                     for sig_item in &parent_sig {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {
@@ -18018,20 +18222,17 @@ fn resolve_type_item_identity<'a>(
             };
             Some((id.stamp(), arity))
         }
-        Path::Pdot(parent, type_name, _) => lookup_type_in_resolved_path(
-            parent,
-            type_name.as_str(),
-            env,
-            pers_env,
-            ctx,
-        )
-        .and_then(|(_, id, decl)| {
-            if id.stamp() == 0 {
-                None
-            } else {
-                Some((id.stamp(), decl.type_params.len()))
-            }
-        }),
+        Path::Pdot(parent, type_name, _) => {
+            lookup_type_in_resolved_path(parent, type_name.as_str(), env, pers_env, ctx).and_then(
+                |(_, id, decl)| {
+                    if id.stamp() == 0 {
+                        None
+                    } else {
+                        Some((id.stamp(), decl.type_params.len()))
+                    }
+                },
+            )
+        }
         Path::Papply(_, _) => None,
     }
 }
@@ -18853,13 +19054,7 @@ fn lookup_label_by_expected_type<'a>(
         };
 
         if label_path.same(&visible_path)
-            || compare_type_paths_for_disambiguation(
-                &label_path,
-                &visible_path,
-                env,
-                pers_env,
-                ctx,
-            )
+            || compare_type_paths_for_disambiguation(&label_path, &visible_path, env, pers_env, ctx)
         {
             let mut selected = (*env_label).clone();
             if !label_path.same(&visible_path) {
@@ -20130,10 +20325,12 @@ fn module_components_cache_key(
     if matches!(module_path, Path::Papply(_, _)) {
         return None;
     }
-    Some(crate::types::context::QualifiedModuleComponentsCacheKey::new(
-        module_path.clone(),
-        module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
-    ))
+    Some(
+        crate::types::context::QualifiedModuleComponentsCacheKey::new(
+            module_path.clone(),
+            module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
+        ),
+    )
 }
 
 fn with_resolved_child_module_components<'a, R>(
@@ -20150,7 +20347,11 @@ fn with_resolved_child_module_components<'a, R>(
         runtime_pos,
         &md,
     );
-    ctx.register_resolved_child_module_path(parent_components.access_path(), child_name, access_path.clone());
+    ctx.register_resolved_child_module_path(
+        parent_components.access_path(),
+        child_name,
+        access_path.clone(),
+    );
 
     let module_key = module_components_cache_key(&access_path, env);
     let mut f = Some(f);
@@ -20189,31 +20390,33 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     match lid {
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
-            let module_path = if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
-                if is_local {
-                    Path::pident(mod_id.clone())
+            let module_path =
+                if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
+                    if is_local {
+                        Path::pident(mod_id.clone())
+                    } else {
+                        md.md_path
+                            .clone()
+                            .unwrap_or_else(|| Path::pident(mod_id.clone()))
+                    }
                 } else {
-                    md.md_path
-                        .clone()
-                        .unwrap_or_else(|| Path::pident(mod_id.clone()))
-                }
-            } else {
-                Path::pident(Ident::create_persistent(mod_name))
-            };
+                    Path::pident(Ident::create_persistent(mod_name))
+                };
             with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, f).flatten()
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
-            let mut continue_with_child = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
-                with_resolved_child_module_components(
-                    components,
-                    child_name.as_str(),
-                    env,
-                    ctx,
-                    |child| f(child),
-                )
-                .flatten()
-            };
+            let mut continue_with_child =
+                |components: &crate::types::env_lazy::QualifiedModuleComponents| {
+                    with_resolved_child_module_components(
+                        components,
+                        child_name.as_str(),
+                        env,
+                        ctx,
+                        |child| f(child),
+                    )
+                    .flatten()
+                };
             with_resolved_module_components_for_lid_inner(
                 prefix,
                 arena,
@@ -20237,10 +20440,9 @@ pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
 ) -> Option<R> {
     let mut f = Some(f);
     let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
-        Some(
-            (f.take()
-                .expect("qualified module components by lid callback reused"))(components),
-        )
+        Some((f.take().expect(
+            "qualified module components by lid callback reused",
+        ))(components))
     };
     with_resolved_module_components_for_lid_inner(lid, arena, env, pers_env, ctx, &mut wrapper)
 }
@@ -20295,7 +20497,9 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
         .with_local_module_components(module_path, |stored| {
             stored.with_components(pers_env, ctx, |components| {
                 (f.take()
-                    .expect("qualified module components callback reused"))(components)
+                    .expect("qualified module components callback reused"))(
+                    components
+                )
             })
         })
         .flatten()
@@ -20427,19 +20631,17 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     }
 
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components
-            .lookup_type(type_name)
-            .map(|(id, decl)| {
-                let result = (components.access_path().clone(), id.clone(), decl.clone());
-                ctx.register_resolved_module_type(
-                    parent_module_path,
-                    type_name,
-                    result.0.clone(),
-                    result.1.clone(),
-                    result.2.clone(),
-                );
-                result
-            })
+        components.lookup_type(type_name).map(|(id, decl)| {
+            let result = (components.access_path().clone(), id.clone(), decl.clone());
+            ctx.register_resolved_module_type(
+                parent_module_path,
+                type_name,
+                result.0.clone(),
+                result.1.clone(),
+                result.2.clone(),
+            );
+            result
+        })
     })
     .flatten()
 }
@@ -20453,9 +20655,7 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     let child_names = sig
         .iter()
         .filter_map(|item| match item {
-            crate::types::decl::SignatureItem::SigModule(id, _, _) => {
-                Some(id.name().to_string())
-            }
+            crate::types::decl::SignatureItem::SigModule(id, _, _) => Some(id.name().to_string()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -20463,11 +20663,7 @@ fn rewrite_alias_pident_child_prefixes<'a>(
         let old_prefix = Path::pdot(target.clone(), child_name.clone());
         let new_prefix = Path::pdot(access_path.clone(), child_name);
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(sig, &old_prefix, &new_prefix, ctx);
-        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-            sig,
-            &old_prefix,
-            &new_prefix,
-        );
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(sig, &old_prefix, &new_prefix);
     }
 }
 
@@ -20486,9 +20682,9 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         && !matches!(mty, crate::types::decl::ModuleType::MtyAlias(..))
         && !should_rebind_direct_type_family
         && !Env::signature_has_package_self_manifests(resolved_sig, ctx)
-        && resolved_sig.iter().all(|item| {
-            matches!(item, crate::types::decl::SignatureItem::SigValue(_, _))
-        });
+        && resolved_sig
+            .iter()
+            .all(|item| matches!(item, crate::types::decl::SignatureItem::SigValue(_, _)));
     if qualification_is_identity {
         return resolved_sig.clone();
     }
@@ -20507,12 +20703,7 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         );
     }
     if let Some(old_name) = resolved_name {
-        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
-            &sig,
-            old_name,
-            access_path,
-            ctx,
-        );
+        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(&sig, old_name, access_path, ctx);
         crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
             &mut sig,
             old_name,
@@ -20648,8 +20839,13 @@ fn build_module_signature_for_path<'a>(
                         .clone()
                         .unwrap_or_else(|| Path::pident(id.clone())),
                 };
-                let sig =
-                    build_qualified_signature_for_access_path(env, &access_path, &md.md_type, pers_env, ctx)?;
+                let sig = build_qualified_signature_for_access_path(
+                    env,
+                    &access_path,
+                    &md.md_type,
+                    pers_env,
+                    ctx,
+                )?;
                 Some((access_path, sig))
             } else if let Some(pers) = pers_env.as_mut() {
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
@@ -20780,22 +20976,29 @@ fn build_module_signature_for_path<'a>(
                 .map(|pers| pers.flattened_alias_heads_for_path(&resolved_parent_path))
                 .unwrap_or_default();
             if !flattened_heads.is_empty() {
-                with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                    let parent_sig = components.signature();
-                    for flat_head in &flattened_heads {
-                        let flattened_parent = Path::pident(Ident::create_persistent(flat_head));
-                        if !flattened_parent.same(&resolved_parent_path) {
-                            rewrite_child_module_prefixes_from_sig(
-                                &sig,
-                                parent_sig,
-                                &resolved_parent_path,
-                                &flattened_parent,
-                                Some(submodule_name.as_str()),
-                                ctx,
-                            );
+                with_resolved_module_components_for_path(
+                    parent,
+                    env,
+                    pers_env,
+                    ctx,
+                    |components| {
+                        let parent_sig = components.signature();
+                        for flat_head in &flattened_heads {
+                            let flattened_parent =
+                                Path::pident(Ident::create_persistent(flat_head));
+                            if !flattened_parent.same(&resolved_parent_path) {
+                                rewrite_child_module_prefixes_from_sig(
+                                    &sig,
+                                    parent_sig,
+                                    &resolved_parent_path,
+                                    &flattened_parent,
+                                    Some(submodule_name.as_str()),
+                                    ctx,
+                                );
+                            }
                         }
-                    }
-                })?;
+                    },
+                )?;
             }
             Some((access_path, sig))
         }
@@ -21303,8 +21506,12 @@ fn try_comptime_match(
 
         // If type resolves to External (unknown type name), try as variable
         let mut visited_check = Vec::new();
-        let check_info = crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
-        if matches!(check_info, crate::types::comptime::TypeInfo::External { .. }) {
+        let check_info =
+            crate::types::comptime::build_type_info(ctx, env, resolved_ty, &mut visited_check);
+        if matches!(
+            check_info,
+            crate::types::comptime::TypeInfo::External { .. }
+        ) {
             if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
                 let (ref lid, _) = **inner;
                 let longident = tctx.arena.get_longident(lid.txt);
@@ -21357,7 +21564,9 @@ fn try_comptime_match(
             // Extract destructuring bindings from the pattern and extend env
             let mut body_env = env.clone();
             let pat = tctx.arena.get_pat(case.pc_lhs);
-            if let crate::parser::ast::PatternDesc::Ppat_construct(_, Some(arg_pat_idx)) = &*pat.ppat_desc {
+            if let crate::parser::ast::PatternDesc::Ppat_construct(_, Some(arg_pat_idx)) =
+                &*pat.ppat_desc
+            {
                 let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
                 // Record({fields, name, ...}) — the arg is a record pattern
                 if let crate::parser::ast::PatternDesc::Ppat_record(inner) = &*arg_pat.ppat_desc {
@@ -21396,18 +21605,14 @@ fn comptime_value_to_typed_expr<'a>(
         ComptimeValue::String(s) => {
             Some(crate::types::comptime::make_string_expr(s, ctx, env, loc))
         }
-        ComptimeValue::Int(n) => {
-            Some(Expression::new(
-                ExpressionDesc::Texp_constant(super::typedtree::Constant::Int(*n)),
-                loc,
-                ctx.new_constr(crate::types::predef::path_int(), vec![]),
-                env_ref,
-                crate::parser::ast::Attributes::new(),
-            ))
-        }
-        ComptimeValue::Bool(b) => {
-            Some(crate::types::comptime::make_bool_expr(*b, ctx, env, loc))
-        }
+        ComptimeValue::Int(n) => Some(Expression::new(
+            ExpressionDesc::Texp_constant(super::typedtree::Constant::Int(*n)),
+            loc,
+            ctx.new_constr(crate::types::predef::path_int(), vec![]),
+            env_ref,
+            crate::parser::ast::Attributes::new(),
+        )),
+        ComptimeValue::Bool(b) => Some(crate::types::comptime::make_bool_expr(*b, ctx, env, loc)),
         ComptimeValue::Type(type_info) => {
             crate::types::comptime::type_info_to_typed_expr(type_info, ctx, env, loc)
         }
@@ -21531,15 +21736,33 @@ fn bind_comptime_record_fields(
                 Some(crate::types::comptime::ComptimeValue::String(name.clone()))
             }
             (TypeInfo::Record { fields, .. }, "fields") => {
-                let field_values: Vec<_> = fields.iter().map(|f| {
-                    crate::types::comptime::ComptimeValue::Record(vec![
-                        ("name".to_string(), crate::types::comptime::ComptimeValue::String(f.name.clone())),
-                        ("type".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
-                        ("typ".to_string(), crate::types::comptime::ComptimeValue::Type(f.typ.clone())),
-                        ("optional".to_string(), crate::types::comptime::ComptimeValue::Bool(f.optional)),
-                        ("mutable_".to_string(), crate::types::comptime::ComptimeValue::Bool(f.mutable)),
-                    ])
-                }).collect();
+                let field_values: Vec<_> = fields
+                    .iter()
+                    .map(|f| {
+                        crate::types::comptime::ComptimeValue::Record(vec![
+                            (
+                                "name".to_string(),
+                                crate::types::comptime::ComptimeValue::String(f.name.clone()),
+                            ),
+                            (
+                                "type".to_string(),
+                                crate::types::comptime::ComptimeValue::Type(f.typ.clone()),
+                            ),
+                            (
+                                "typ".to_string(),
+                                crate::types::comptime::ComptimeValue::Type(f.typ.clone()),
+                            ),
+                            (
+                                "optional".to_string(),
+                                crate::types::comptime::ComptimeValue::Bool(f.optional),
+                            ),
+                            (
+                                "mutable_".to_string(),
+                                crate::types::comptime::ComptimeValue::Bool(f.mutable),
+                            ),
+                        ])
+                    })
+                    .collect();
                 Some(crate::types::comptime::ComptimeValue::Array(field_values))
             }
             (TypeInfo::Record { unboxed, .. }, "unboxed") => {
@@ -21549,23 +21772,34 @@ fn bind_comptime_record_fields(
                 Some(crate::types::comptime::ComptimeValue::String(name.clone()))
             }
             (TypeInfo::Variant { constructors, .. }, "constructors") => {
-                let ctor_values: Vec<_> = constructors.iter().map(|c| {
-                    let arg_types: Vec<_> = c.args.iter()
-                        .map(|t| crate::types::comptime::ComptimeValue::Type(t.clone()))
-                        .collect();
-                    crate::types::comptime::ComptimeValue::Record(vec![
-                        ("name".to_string(), crate::types::comptime::ComptimeValue::String(c.name.clone())),
-                        ("args".to_string(), crate::types::comptime::ComptimeValue::Array(arg_types)),
-                    ])
-                }).collect();
+                let ctor_values: Vec<_> = constructors
+                    .iter()
+                    .map(|c| {
+                        let arg_types: Vec<_> = c
+                            .args
+                            .iter()
+                            .map(|t| crate::types::comptime::ComptimeValue::Type(t.clone()))
+                            .collect();
+                        crate::types::comptime::ComptimeValue::Record(vec![
+                            (
+                                "name".to_string(),
+                                crate::types::comptime::ComptimeValue::String(c.name.clone()),
+                            ),
+                            (
+                                "args".to_string(),
+                                crate::types::comptime::ComptimeValue::Array(arg_types),
+                            ),
+                        ])
+                    })
+                    .collect();
                 Some(crate::types::comptime::ComptimeValue::Array(ctor_values))
             }
             (TypeInfo::Variant { unboxed, .. }, "unboxed") => {
                 Some(crate::types::comptime::ComptimeValue::Bool(*unboxed))
             }
-            (TypeInfo::Array { element }, "element") => {
-                Some(crate::types::comptime::ComptimeValue::Type(*element.clone()))
-            }
+            (TypeInfo::Array { element }, "element") => Some(
+                crate::types::comptime::ComptimeValue::Type(*element.clone()),
+            ),
             (TypeInfo::Option { inner }, "inner") => {
                 Some(crate::types::comptime::ComptimeValue::Type(*inner.clone()))
             }
@@ -21668,7 +21902,10 @@ fn try_comptime_application(
                     if first_value_type.is_none() {
                         // Use the first value's type for the implicit type key
                         first_value_type = Some(crate::types::comptime::build_type_info(
-                            ctx, env, typed_arg.exp_type, &mut vec![],
+                            ctx,
+                            env,
+                            typed_arg.exp_type,
+                            &mut vec![],
                         ));
                     }
                     typed_args.push((param_name, typed_arg, false));
@@ -21691,7 +21928,9 @@ fn try_comptime_application(
         } else if explicit_type_keys.is_empty() {
             crate::types::comptime::TypeInfo::Unit
         } else {
-            crate::types::comptime::TypeInfo::Tuple { elements: explicit_type_keys }
+            crate::types::comptime::TypeInfo::Tuple {
+                elements: explicit_type_keys,
+            }
         }
     } else {
         first_value_type.unwrap_or(crate::types::comptime::TypeInfo::Unit)
@@ -21700,7 +21939,8 @@ fn try_comptime_application(
     let gen_name = crate::types::comptime::make_monomorph_name(&func_name, &type_key);
 
     // Collect the runtime args (non-type args) for the call site
-    let runtime_args: Vec<_> = typed_args.iter()
+    let runtime_args: Vec<_> = typed_args
+        .iter()
         .filter(|(_, _, is_type)| !is_type)
         .map(|(_, arg, _)| arg.clone())
         .collect();
@@ -21711,14 +21951,24 @@ fn try_comptime_application(
     if tctx.monomorph_cache.lookup(&func_name, &type_key).is_some() {
         tctx.comptime_bindings = saved_bindings;
         COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+        return Some(Ok(make_comptime_call(
+            tctx,
+            &gen_name,
+            &runtime_args,
+            expected_ty,
+        )));
     }
 
     // Recursive: in-progress for the same type? Emit forward reference.
     if tctx.monomorph_cache.is_in_progress(&func_name, &type_key) {
         tctx.comptime_bindings = saved_bindings;
         COMPTIME_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)));
+        return Some(Ok(make_comptime_call(
+            tctx,
+            &gen_name,
+            &runtime_args,
+            expected_ty,
+        )));
     }
 
     // ── Phase 3: Specialize — produce a named monomorphized function ──
@@ -21766,7 +22016,8 @@ fn try_comptime_application(
             let recursive = contains_ident_reference(&typed_body, &gen_name);
             let gen_ident = ctx.create_ident(&gen_name);
 
-            let param_ident = runtime_param_ident.unwrap_or_else(|| ctx.create_ident(&runtime_param_name));
+            let param_ident =
+                runtime_param_ident.unwrap_or_else(|| ctx.create_ident(&runtime_param_name));
             tctx.monomorph_cache.complete(
                 &func_name,
                 &type_key,
@@ -21783,7 +22034,12 @@ fn try_comptime_application(
                 },
             );
 
-            Some(Ok(make_comptime_call(tctx, &gen_name, &runtime_args, expected_ty)))
+            Some(Ok(make_comptime_call(
+                tctx,
+                &gen_name,
+                &runtime_args,
+                expected_ty,
+            )))
         }
         Err(_) => None,
     }
@@ -21867,12 +22123,14 @@ fn resolve_comptime_type_arg(
 
             // Try as a type in the environment
             if let Ok((id, _decl)) = env.find_type_with_id(name) {
-                let ty = tctx.type_ctx.new_constr(
-                    crate::types::Path::Pident(id.clone()),
-                    vec![],
-                );
+                let ty = tctx
+                    .type_ctx
+                    .new_constr(crate::types::Path::Pident(id.clone()), vec![]);
                 return Some(crate::types::comptime::build_type_info(
-                    tctx.type_ctx, env, ty, &mut vec![],
+                    tctx.type_ctx,
+                    env,
+                    ty,
+                    &mut vec![],
                 ));
             }
             // Try as a primitive type name
@@ -21893,7 +22151,9 @@ fn resolve_comptime_type_arg(
                 let rec_longident = tctx.arena.get_longident(rec_lid.txt);
                 if rec_longident.is_simple() {
                     let rec_name = tctx.arena.get_string(rec_longident.last_idx());
-                    if let Some(ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(rec_name) {
+                    if let Some(ComptimeValue::Record(entries)) =
+                        tctx.comptime_bindings.get(rec_name)
+                    {
                         let field_name = {
                             let fl = tctx.arena.get_longident(field_lid.txt);
                             tctx.arena.get_string(fl.last_idx()).to_string()
@@ -21957,14 +22217,16 @@ fn contains_build_variant_inside(
         }
         ED::Pexp_match(inner) => {
             let (_, ref cases) = **inner;
-            cases.iter().any(|c| {
-                contains_build_variant_inside(arena.get_expr(c.pc_rhs), arena, registry)
-            })
+            cases
+                .iter()
+                .any(|c| contains_build_variant_inside(arena.get_expr(c.pc_rhs), arena, registry))
         }
         ED::Pexp_ifthenelse(inner) => {
             let (_, then_idx, else_opt) = &**inner;
             contains_build_variant_inside(arena.get_expr(*then_idx), arena, registry)
-                || else_opt.map_or(false, |e| contains_build_variant_inside(arena.get_expr(e), arena, registry))
+                || else_opt.map_or(false, |e| {
+                    contains_build_variant_inside(arena.get_expr(e), arena, registry)
+                })
         }
         ED::Pexp_apply(inner) => {
             if let Some(reg) = registry {
@@ -22018,7 +22280,9 @@ pub fn as_comptime_loop(
                     return None;
                 }
                 // Check that module prefix is "Array" (or no prefix — just `map`)
-                let parts: Vec<String> = longident.flatten_idx().iter()
+                let parts: Vec<String> = longident
+                    .flatten_idx()
+                    .iter()
                     .map(|idx| arena.get_string(*idx).to_string())
                     .collect();
                 parts.len() == 1 || (parts.len() == 2 && parts[0] == "Array")
@@ -22101,11 +22365,22 @@ pub fn evaluate_type_builder(
                         // Bind destructured fields (like Record({fields}))
                         let saved_bindings = tctx.comptime_bindings.clone();
                         let mut branch_env = env.clone();
-                        if let crate::parser::ast::PatternDesc::Ppat_construct(_, Some(arg_pat_idx)) = &*pat.ppat_desc {
+                        if let crate::parser::ast::PatternDesc::Ppat_construct(
+                            _,
+                            Some(arg_pat_idx),
+                        ) = &*pat.ppat_desc
+                        {
                             let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
-                            if let crate::parser::ast::PatternDesc::Ppat_record(rec_inner) = &*arg_pat.ppat_desc {
+                            if let crate::parser::ast::PatternDesc::Ppat_record(rec_inner) =
+                                &*arg_pat.ppat_desc
+                            {
                                 let (ref fields, _) = **rec_inner;
-                                bind_comptime_record_fields(tctx, &mut branch_env, fields, &type_info);
+                                bind_comptime_record_fields(
+                                    tctx,
+                                    &mut branch_env,
+                                    fields,
+                                    &type_info,
+                                );
                             }
                         }
                         let body_expr = tctx.arena.get_expr(case.pc_rhs);
@@ -22138,21 +22413,33 @@ pub fn evaluate_type_builder(
         }
         ED::Pexp_apply(inner) => {
             // Comptime call: keysOf(user) where keysOf is a registered @comptime function
-            let crate::parser::ast::PexpApply { ref funct, ref args, .. } = **inner;
+            let crate::parser::ast::PexpApply {
+                ref funct,
+                ref args,
+                ..
+            } = **inner;
             let funct_expr = tctx.arena.get_expr(*funct);
             let func_name = match &*funct_expr.pexp_desc {
                 ED::Pexp_ident(lid) => {
                     let longident = tctx.arena.get_longident(lid.txt);
                     tctx.arena.get_string(longident.last_idx()).to_string()
                 }
-                _ => return Err(super::TypeCoreError::Other(
-                    "evaluate_type_builder: call target must be a simple identifier".into(),
-                )),
+                _ => {
+                    return Err(super::TypeCoreError::Other(
+                        "evaluate_type_builder: call target must be a simple identifier".into(),
+                    ));
+                }
             };
-            let comptime_fn = tctx.comptime_functions.get(&func_name).cloned()
-                .ok_or_else(|| super::TypeCoreError::Other(format!(
-                    "evaluate_type_builder: '{}' is not a registered @comptime function", func_name
-                )))?;
+            let comptime_fn = tctx
+                .comptime_functions
+                .get(&func_name)
+                .cloned()
+                .ok_or_else(|| {
+                    super::TypeCoreError::Other(format!(
+                        "evaluate_type_builder: '{}' is not a registered @comptime function",
+                        func_name
+                    ))
+                })?;
 
             // Extract the function's parameters and body
             let body_expr_idx = comptime_fn.body_expr_idx;
@@ -22166,10 +22453,13 @@ pub fn evaluate_type_builder(
                 if let Some(p) = param {
                     if p.is_type {
                         let arg_expr = tctx.arena.get_expr(*arg_idx);
-                        let type_info = resolve_comptime_type_arg(tctx, env, arg_expr)
-                            .ok_or_else(|| super::TypeCoreError::Other(format!(
-                                "evaluate_type_builder: could not resolve type arg for '{}'", p.name
-                            )))?;
+                        let type_info =
+                            resolve_comptime_type_arg(tctx, env, arg_expr).ok_or_else(|| {
+                                super::TypeCoreError::Other(format!(
+                                    "evaluate_type_builder: could not resolve type arg for '{}'",
+                                    p.name
+                                ))
+                            })?;
                         tctx.comptime_bindings.insert(
                             p.name.clone(),
                             crate::types::comptime::ComptimeValue::Type(type_info),
@@ -22225,26 +22515,36 @@ fn evaluate_variant_cases(
                 if longident.is_simple() {
                     let vname = tctx.arena.get_string(longident.last_idx());
                     match tctx.comptime_bindings.get(vname) {
-                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
+                            Some(elements.clone())
+                        }
                         _ => None,
                     }
-                } else { None }
+                } else {
+                    None
+                }
             }
             _ => None,
-        }.ok_or_else(|| super::TypeCoreError::Other(
-            "evaluate_variant_cases: loop collection must be comptime-known".into(),
-        ))?;
+        }
+        .ok_or_else(|| {
+            super::TypeCoreError::Other(
+                "evaluate_variant_cases: loop collection must be comptime-known".into(),
+            )
+        })?;
 
         let pat = tctx.arena.get_pat(pat_idx);
         let var_name = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                tctx.arena.get_string(name_loc.txt).to_string()
+            }
             _ => "__case".to_string(),
         };
         let body_expr = tctx.arena.get_expr(body_idx);
         let saved = tctx.comptime_bindings.clone();
         let mut cases = Vec::new();
         for element in &comptime_array {
-            tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+            tctx.comptime_bindings
+                .insert(var_name.clone(), element.clone());
             cases.push(evaluate_single_variant_case(tctx, env, body_expr)?);
         }
         tctx.comptime_bindings = saved;
@@ -22278,9 +22578,11 @@ fn evaluate_single_variant_case(
     // Expected form: @variantCase({name: ..., ...})
     let rec_idx = match &*expr.pexp_desc {
         ED::Pexp_comptime_variant_case(e) => *e,
-        _ => return Err(super::TypeCoreError::Other(
-            "evaluate_variant_cases: expected @variantCase({...})".into(),
-        )),
+        _ => {
+            return Err(super::TypeCoreError::Other(
+                "evaluate_variant_cases: expected @variantCase({...})".into(),
+            ));
+        }
     };
 
     let rec_expr = tctx.arena.get_expr(rec_idx);
@@ -22324,26 +22626,36 @@ fn evaluate_record_fields(
                 if longident.is_simple() {
                     let vname = tctx.arena.get_string(longident.last_idx());
                     match tctx.comptime_bindings.get(vname) {
-                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => Some(elements.clone()),
+                        Some(crate::types::comptime::ComptimeValue::Array(elements)) => {
+                            Some(elements.clone())
+                        }
                         _ => None,
                     }
-                } else { None }
+                } else {
+                    None
+                }
             }
             _ => None,
-        }.ok_or_else(|| super::TypeCoreError::Other(
-            "evaluate_record_fields: loop collection must be comptime-known".into(),
-        ))?;
+        }
+        .ok_or_else(|| {
+            super::TypeCoreError::Other(
+                "evaluate_record_fields: loop collection must be comptime-known".into(),
+            )
+        })?;
 
         let pat = tctx.arena.get_pat(pat_idx);
         let var_name = match &*pat.ppat_desc {
-            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => tctx.arena.get_string(name_loc.txt).to_string(),
+            crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                tctx.arena.get_string(name_loc.txt).to_string()
+            }
             _ => "__field".to_string(),
         };
         let body_expr = tctx.arena.get_expr(body_idx);
         let saved = tctx.comptime_bindings.clone();
         let mut out = Vec::new();
         for element in &comptime_array {
-            tctx.comptime_bindings.insert(var_name.clone(), element.clone());
+            tctx.comptime_bindings
+                .insert(var_name.clone(), element.clone());
             out.push(evaluate_single_record_field(tctx, env, body_expr)?);
         }
         tctx.comptime_bindings = saved;
@@ -22373,9 +22685,11 @@ fn evaluate_single_record_field(
 
     let rec_idx = match &*expr.pexp_desc {
         ED::Pexp_comptime_record_field(e) => *e,
-        _ => return Err(super::TypeCoreError::Other(
-            "evaluate_record_fields: expected @recordField({...})".into(),
-        )),
+        _ => {
+            return Err(super::TypeCoreError::Other(
+                "evaluate_record_fields: expected @recordField({...})".into(),
+            ));
+        }
     };
 
     let rec_expr = tctx.arena.get_expr(rec_idx);
@@ -22403,27 +22717,34 @@ fn evaluate_single_record_field(
                     if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
                         let longident = tctx.arena.get_longident(lid.txt);
                         let n = tctx.arena.get_string(longident.last_idx());
-                        if n == "true" { optional = true; }
+                        if n == "true" {
+                            optional = true;
+                        }
                     }
                 }
                 "mutable_" => {
                     if let ED::Pexp_construct(lid, _) = &*val_expr.pexp_desc {
                         let longident = tctx.arena.get_longident(lid.txt);
                         let n = tctx.arena.get_string(longident.last_idx());
-                        if n == "true" { mutable_ = true; }
+                        if n == "true" {
+                            mutable_ = true;
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        let name = name.ok_or_else(|| super::TypeCoreError::Other(
-            "@recordField: missing required 'name'".into(),
-        ))?;
-        let typ = typ.ok_or_else(|| super::TypeCoreError::Other(
-            "@recordField: missing required 'typ'".into(),
-        ))?;
+        let name = name.ok_or_else(|| {
+            super::TypeCoreError::Other("@recordField: missing required 'name'".into())
+        })?;
+        let typ = typ.ok_or_else(|| {
+            super::TypeCoreError::Other("@recordField: missing required 'typ'".into())
+        })?;
         return Ok(crate::types::comptime::RecordFieldSpec {
-            name, typ, optional, mutable_,
+            name,
+            typ,
+            optional,
+            mutable_,
         });
     }
     Err(super::TypeCoreError::Other(
@@ -22451,11 +22772,14 @@ fn evaluate_comptime_string(
         ED::Pexp_ident(lid) => {
             let longident = tctx.arena.get_longident(lid.txt);
             let name = tctx.arena.get_string(longident.last_idx());
-            if let Some(crate::types::comptime::ComptimeValue::String(s)) = tctx.comptime_bindings.get(name) {
+            if let Some(crate::types::comptime::ComptimeValue::String(s)) =
+                tctx.comptime_bindings.get(name)
+            {
                 Ok(s.clone())
             } else {
                 Err(super::TypeCoreError::Other(format!(
-                    "expected comptime string, got variable '{}'", name
+                    "expected comptime string, got variable '{}'",
+                    name
                 )))
             }
         }
@@ -22466,7 +22790,9 @@ fn evaluate_comptime_string(
                 let rec_longident = tctx.arena.get_longident(rec_lid.txt);
                 if rec_longident.is_simple() {
                     let rec_name = tctx.arena.get_string(rec_longident.last_idx());
-                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) = tctx.comptime_bindings.get(rec_name) {
+                    if let Some(crate::types::comptime::ComptimeValue::Record(entries)) =
+                        tctx.comptime_bindings.get(rec_name)
+                    {
                         let field_name = {
                             let fl = tctx.arena.get_longident(field_lid.txt);
                             tctx.arena.get_string(fl.last_idx()).to_string()
@@ -22479,7 +22805,9 @@ fn evaluate_comptime_string(
                     }
                 }
             }
-            Err(super::TypeCoreError::Other("expected comptime string from field access".into()))
+            Err(super::TypeCoreError::Other(
+                "expected comptime string from field access".into(),
+            ))
         }
         ED::Pexp_apply(inner) => {
             // Call to an @comptime.inline function with comptime-known args:
@@ -22491,22 +22819,32 @@ fn evaluate_comptime_string(
                     let longident = tctx.arena.get_longident(lid.txt);
                     tctx.arena.get_string(longident.last_idx()).to_string()
                 }
-                _ => return Err(super::TypeCoreError::Other(
-                    "expected comptime string — complex calls not supported".into(),
-                )),
+                _ => {
+                    return Err(super::TypeCoreError::Other(
+                        "expected comptime string — complex calls not supported".into(),
+                    ));
+                }
             };
-            let comptime_fn = tctx.comptime_functions.get(&func_name).cloned()
-                .ok_or_else(|| super::TypeCoreError::Other(format!(
-                    "'{}' is not registered as @comptime or @comptime.inline", func_name
-                )))?;
+            let comptime_fn = tctx
+                .comptime_functions
+                .get(&func_name)
+                .cloned()
+                .ok_or_else(|| {
+                    super::TypeCoreError::Other(format!(
+                        "'{}' is not registered as @comptime or @comptime.inline",
+                        func_name
+                    ))
+                })?;
             if !comptime_fn.is_inline {
                 return Err(super::TypeCoreError::Other(format!(
-                    "'{}' is not @comptime.inline — cannot evaluate at compile time", func_name
+                    "'{}' is not @comptime.inline — cannot evaluate at compile time",
+                    func_name
                 )));
             }
 
             // Resolve each argument as a comptime-known string/int/float/bool
-            let arg_js_values: Vec<String> = args.iter()
+            let arg_js_values: Vec<String> = args
+                .iter()
                 .map(|(_label, arg_idx)| -> TypeCoreResult<String> {
                     let arg_expr = tctx.arena.get_expr(*arg_idx);
                     // Try as a string first
@@ -22515,39 +22853,49 @@ fn evaluate_comptime_string(
                     }
                     // Fall back to translating as a simple JS expression
                     crate::types::comptime_inline::translate_simple_expr_to_js(arg_expr, tctx.arena)
-                        .ok_or_else(|| super::TypeCoreError::Other(
-                            "@comptime.inline arg could not be translated to JS".into(),
-                        ))
+                        .ok_or_else(|| {
+                            super::TypeCoreError::Other(
+                                "@comptime.inline arg could not be translated to JS".into(),
+                            )
+                        })
                 })
                 .collect::<Result<_, _>>()?;
 
             // Compile the function body to JS
             let body_expr = tctx.arena.get_expr(comptime_fn.body_expr_idx);
-            let body_js = crate::types::comptime_inline::translate_simple_expr_to_js(body_expr, tctx.arena)
-                .ok_or_else(|| super::TypeCoreError::Other(format!(
-                    "could not translate @comptime.inline body for '{}' to JS", func_name
-                )))?;
+            let body_js =
+                crate::types::comptime_inline::translate_simple_expr_to_js(body_expr, tctx.arena)
+                    .ok_or_else(|| {
+                    super::TypeCoreError::Other(format!(
+                        "could not translate @comptime.inline body for '{}' to JS",
+                        func_name
+                    ))
+                })?;
 
             // Build a JS program: apply the function expression to the args
             let program = format!("({})({})", body_js, arg_js_values.join(", "));
 
             match crate::types::comptime_inline::evaluate_js(&program) {
                 crate::types::comptime_inline::InlineEvalResult::Value(
-                    crate::types::comptime::ComptimeValue::String(s)
+                    crate::types::comptime::ComptimeValue::String(s),
                 ) => Ok(s),
                 crate::types::comptime_inline::InlineEvalResult::Value(other) => {
                     Err(super::TypeCoreError::Other(format!(
-                        "@comptime.inline '{}' returned non-string: {:?}", func_name, other
+                        "@comptime.inline '{}' returned non-string: {:?}",
+                        func_name, other
                     )))
                 }
                 crate::types::comptime_inline::InlineEvalResult::Error(e) => {
                     Err(super::TypeCoreError::Other(format!(
-                        "@comptime.inline '{}' evaluation failed: {}", func_name, e
+                        "@comptime.inline '{}' evaluation failed: {}",
+                        func_name, e
                     )))
                 }
             }
         }
-        _ => Err(super::TypeCoreError::Other("expected comptime-known string".into())),
+        _ => Err(super::TypeCoreError::Other(
+            "expected comptime-known string".into(),
+        )),
     }
 }
 
@@ -22604,11 +22952,20 @@ fn resolve_typeinfo_in_builder(
     let ctx = tctx.type_ctx;
     ctx.begin_def();
     let resolved_ty = match transl_type(tctx, env, core_type) {
-        Ok((_, ty)) => { ctx.end_def(); ty }
-        Err(e) => { ctx.end_def(); return Err(e); }
+        Ok((_, ty)) => {
+            ctx.end_def();
+            ty
+        }
+        Err(e) => {
+            ctx.end_def();
+            return Err(e);
+        }
     };
     Ok(crate::types::comptime::build_type_info(
-        ctx, env, resolved_ty, &mut vec![],
+        ctx,
+        env,
+        resolved_ty,
+        &mut vec![],
     ))
 }
 
@@ -22627,7 +22984,9 @@ fn make_comptime_call(
     let func_type = if runtime_args.is_empty() {
         expected_ty
     } else {
-        let arg_ty = runtime_args.first().map_or(ctx.new_var(None), |a| a.exp_type);
+        let arg_ty = runtime_args
+            .first()
+            .map_or(ctx.new_var(None), |a| a.exp_type);
         ctx.new_arrow_simple(arg_ty, expected_ty)
     };
 
@@ -22640,7 +22999,10 @@ fn make_comptime_call(
     };
 
     // Texp_ident needs a Loc<LidentIdx> — use a zero index as placeholder
-    let lid_loc = Located { txt: LidentIdx(0), loc: LocIdx(0) };
+    let lid_loc = Located {
+        txt: LidentIdx(0),
+        loc: LocIdx(0),
+    };
 
     let func_expr = Expression::new(
         ExpressionDesc::Texp_ident(func_path, lid_loc, func_vd),
@@ -22653,12 +23015,13 @@ fn make_comptime_call(
     if runtime_args.is_empty() {
         func_expr
     } else {
-        let apply_args: Vec<_> = runtime_args.iter().map(|arg| {
-            crate::types::typedtree::ApplyArg {
+        let apply_args: Vec<_> = runtime_args
+            .iter()
+            .map(|arg| crate::types::typedtree::ApplyArg {
                 label: crate::types::asttypes::ArgLabel::Nolabel,
                 expression: Some(arg.clone()),
-            }
-        }).collect();
+            })
+            .collect();
         Expression::new(
             ExpressionDesc::Texp_apply {
                 funct: Box::new(func_expr),
@@ -22682,10 +23045,16 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             contains_ident_reference(funct, name)
-                || args.iter().any(|a| a.expression.as_ref().map_or(false, |e| contains_ident_reference(e, name)))
+                || args.iter().any(|a| {
+                    a.expression
+                        .as_ref()
+                        .map_or(false, |e| contains_ident_reference(e, name))
+                })
         }
         ExpressionDesc::Texp_let(_, bindings, body) => {
-            bindings.iter().any(|vb| contains_ident_reference(&vb.vb_expr, name))
+            bindings
+                .iter()
+                .any(|vb| contains_ident_reference(&vb.vb_expr, name))
                 || contains_ident_reference(body, name)
         }
         ExpressionDesc::Texp_sequence(a, b) => {
@@ -22698,11 +23067,7 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
 /// Substitute all occurrences of a named identifier in a typed expression
 /// with a replacement expression. Used to replace @comptime function
 /// parameters with their actual arguments after type-checking.
-fn substitute_ident(
-    expr: &mut Expression,
-    name: &str,
-    replacement: &Expression,
-) {
+fn substitute_ident(expr: &mut Expression, name: &str, replacement: &Expression) {
     match &mut expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => {
             if path.name() == name {
@@ -22752,7 +23117,10 @@ fn substitute_ident(
                 substitute_ident(e, name, replacement);
             }
         }
-        ExpressionDesc::Texp_record { fields, extended_expression } => {
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        } => {
             for (_, _, def, _) in fields {
                 if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {
                     substitute_ident(e, name, replacement);
@@ -22796,7 +23164,9 @@ fn extract_function_params_and_body<'a>(
                     crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
                         let (inner_pat_idx, _) = &**inner_box;
                         let inner_pat = arena.get_pat(*inner_pat_idx);
-                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) = &*inner_pat.ppat_desc {
+                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) =
+                            &*inner_pat.ppat_desc
+                        {
                             Some(arena.get_string(name_loc.txt).to_string())
                         } else {
                             None

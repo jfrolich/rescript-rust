@@ -3,35 +3,29 @@
 //! Port of `lam_compile_primitive.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use crate::ident::Ident;
-use crate::js_ir::op::{Number, MutableFlag, LengthObject, PropertyName};
-use crate::js_ir::{
-    BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement, StatementDesc,
-    VIdent, VariableDeclaration,
+use super::js_exp_make::{
+    bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
+    both_string_literals, compare_bigint_literals, compare_bool_literals, compare_int_literals,
+    compare_string_literals, comparison_to_binop, comparison_to_runtime_member,
+    compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
+    int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
+    int32_minus, int32_mul, int32_offset, int32_pow, is_nullish_literal, is_optional_block,
+    is_out_expr, is_type_number_expr, is_type_object_expr, is_zero_int, js_expr_no_side_effects,
+    js_seq, ocaml_typeof_expr, poly_var_tag_access, poly_var_value_access, range_exclusion_or,
+    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int, to_int32,
 };
-use crate::lambda::lam_compat::{Comparison, LetKind, FieldDbgInfo, SetFieldDbgInfo};
+use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
+use crate::ident::Ident;
+use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
+use crate::js_ir::{
+    BinOp, Block, CallInfo, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
+    VariableDeclaration,
+};
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{ExternalSpec, Mutable, Primitive};
-use crate::lambda::{
-    Lambda, TagInfo,
-};
+use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
-use super::js_exp_make::{
-    bool_literal, both_bigint_literals, both_bool_literals, both_float_literals,
-    both_int_literals, both_string_literals, compare_bigint_literals, compare_bool_literals,
-    compare_int_literals, compare_string_literals, comparison_to_binop,
-    comparison_to_runtime_member, compile_int_equality, compile_nullish_strict_comparison,
-    compile_raw_comparison, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl,
-    int32_lsr, int32_minus, int32_mul, int32_offset, int32_pow, int_bnot, int_expr,
-    int_literal, is_nullish_literal, is_optional_block, is_out_expr, is_type_number_expr,
-    is_type_object_expr, is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr,
-    poly_var_tag_access, poly_var_value_access, range_exclusion_or,
-    runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int,
-    to_int32,
-};
-use super::lam_compile::{
-    Compiled, LambdaCompiler, call_info_of_apply_status,
-};
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
@@ -571,7 +565,6 @@ impl LambdaCompiler {
         Compiled { prelude, expr }
     }
 
-
     fn compile_object_comparison(
         &self,
         cmp: Comparison,
@@ -700,12 +693,21 @@ impl LambdaCompiler {
                 // Fold literal string!==string, mirroring OCaml's
                 // `string_comp Cneq` at `js_exp_make.ml:1355-1362`.
                 if let (
-                    ExpressionDesc::Str { txt: left_txt, delim: left_delim },
-                    ExpressionDesc::Str { txt: right_txt, delim: right_delim },
+                    ExpressionDesc::Str {
+                        txt: left_txt,
+                        delim: left_delim,
+                    },
+                    ExpressionDesc::Str {
+                        txt: right_txt,
+                        delim: right_delim,
+                    },
                 ) = (&left.desc, &right.desc)
                 {
                     if let Some(equal) = crate::js_ir::fold_strict_string_equality_pub(
-                        left_txt, left_delim, right_txt, right_delim,
+                        left_txt,
+                        left_delim,
+                        right_txt,
+                        right_delim,
                     ) {
                         return Expression::bool(!equal);
                     }
@@ -780,5 +782,4 @@ impl LambdaCompiler {
             self.runtime_call_expr(module_name, member, vec![left, right])
         }
     }
-
 }

@@ -1012,7 +1012,11 @@ fn rewrite_length_bin_comparison(
 
     match op {
         BinOp::Ge if expression_has_no_side_effects(target) => Some(Expression::bool(true)),
-        BinOp::Gt => Some(raw_bin_expression(BinOp::NotEqEq, left.clone(), right.clone())),
+        BinOp::Gt => Some(raw_bin_expression(
+            BinOp::NotEqEq,
+            left.clone(),
+            right.clone(),
+        )),
         _ => None,
     }
 }
@@ -2141,10 +2145,12 @@ fn last_statement(block: &Block) -> Option<&Statement> {
 /// blocks ending in a `Block` are NOT peeled — that matches OCaml exactly.
 pub fn unnest_block(block: Block) -> Block {
     match block.as_slice() {
-        [Statement {
-            desc: StatementDesc::Block(_),
-            ..
-        }] => {
+        [
+            Statement {
+                desc: StatementDesc::Block(_),
+                ..
+            },
+        ] => {
             let mut block = block;
             let stmt = block.pop().expect("non-empty single-element block");
             match stmt.desc {
@@ -3087,7 +3093,10 @@ mod tests {
     fn test_length_ge_zero_folds_pure_targets_to_true_like_ocaml() {
         let expr = Expression::bin(
             BinOp::Ge,
-            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::length(
+                Expression::var(Ident::create_local("xs")),
+                LengthObject::Array,
+            ),
             Expression::number(Number::int(0)),
         );
 
@@ -3119,7 +3128,10 @@ mod tests {
     fn test_length_gt_zero_rewrites_to_not_eq_zero_like_ocaml() {
         let expr = Expression::bin(
             BinOp::Gt,
-            Expression::length(Expression::var(Ident::create_local("xs")), LengthObject::Array),
+            Expression::length(
+                Expression::var(Ident::create_local("xs")),
+                LengthObject::Array,
+            ),
             Expression::number(Number::int(0)),
         );
 
@@ -4205,7 +4217,11 @@ mod tests {
     #[test]
     fn test_if_statement_rewrites_strict_null_unit_success_tail_like_ocaml() {
         let value = Ident::create_local("value");
-        let cond = Expression::bin(BinOp::EqEqEq, Expression::var(value.clone()), Expression::null());
+        let cond = Expression::bin(
+            BinOp::EqEqEq,
+            Expression::var(value.clone()),
+            Expression::null(),
+        );
         let then_block = vec![
             Statement::exp(Expression::call(
                 Expression::var(Ident::create_local("seen")),
@@ -4356,7 +4372,9 @@ mod tests {
         let stmt = Statement::if_(cond, then_block, else_block);
 
         let StatementDesc::Block(block) = &stmt.desc else {
-            panic!("expected strict undefined success tail to become a fallthrough guard: {stmt:#?}");
+            panic!(
+                "expected strict undefined success tail to become a fallthrough guard: {stmt:#?}"
+            );
         };
         let [guard, tmp_decl, nested_if, final_return] = block.as_slice() else {
             panic!("expected guard + bound temp + nested if + trailing fallback: {stmt:#?}");

@@ -5,10 +5,9 @@
 
 use super::op::{BinOp, Kind, Number, PropertyName, UsedStats};
 use super::{
-    Block, CallArity, CallInfo, CallKind, CaseClause, Delim, Expression,
-    ExpressionDesc, ForDirection, JsRawInfo, ModulePathResolver, Statement,
-    StatementDesc, StringClause, VIdent, VariableDeclaration, ocaml_eq_block,
-    ocaml_eq_expression,
+    Block, CallArity, CallInfo, CallKind, CaseClause, Delim, Expression, ExpressionDesc,
+    ForDirection, JsRawInfo, ModulePathResolver, Statement, StatementDesc, StringClause, VIdent,
+    VariableDeclaration, ocaml_eq_block, ocaml_eq_expression,
 };
 use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
@@ -2429,13 +2428,15 @@ impl JsPrinter {
             return;
         }
 
-        if let Some(rewritten) = try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts)
+        if let Some(rewritten) =
+            try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts)
         {
             self.print_function_body(&rewritten, return_unit);
             return;
         }
 
-        if let Some(rewritten) = try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts)
+        if let Some(rewritten) =
+            try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts)
         {
             self.print_function_body(&rewritten, return_unit);
             return;
@@ -3180,7 +3181,10 @@ fn try_function_body_guard_return_fallthrough_else_merge(stmts: &Block) -> Optio
         return None;
     }
 
-    if !matches!(unwrap_single_block_stmt(success_stmt).desc, StatementDesc::Return(_)) {
+    if !matches!(
+        unwrap_single_block_stmt(success_stmt).desc,
+        StatementDesc::Return(_)
+    ) {
         return None;
     }
 
@@ -3249,7 +3253,8 @@ fn try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts: &Block
 
     for start in 0..stmts.len() - 1 {
         let suffix = stmts[start..].to_vec();
-        if let Some(rewritten_stmt) = try_function_body_positive_strict_undefined_tail_if_rewrite(&suffix)
+        if let Some(rewritten_stmt) =
+            try_function_body_positive_strict_undefined_tail_if_rewrite(&suffix)
         {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(rewritten_stmt);
@@ -3329,7 +3334,9 @@ fn all_zero_equality_guard(cond: &Expression) -> bool {
     )
 }
 
-fn try_function_body_shared_success_disjunction_fallthrough_rewrite(stmts: &Block) -> Option<Block> {
+fn try_function_body_shared_success_disjunction_fallthrough_rewrite(
+    stmts: &Block,
+) -> Option<Block> {
     let (last, prefix) = stmts.split_last()?;
     let stmt = unwrap_single_block_stmt(last);
     let StatementDesc::If(cond, then_, else_) = &stmt.desc else {
@@ -3361,7 +3368,9 @@ fn shared_success_else_if_chain(stmt: &Statement) -> Option<(Expression, Express
         return None;
     }
 
-    let mut positive_guards = guards.into_iter().map(|guard| negate_tail_merge_condition(&guard));
+    let mut positive_guards = guards
+        .into_iter()
+        .map(|guard| negate_tail_merge_condition(&guard));
     let cond = positive_guards.next()?;
     let cond = positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
 
@@ -3375,7 +3384,9 @@ fn positive_conjunction_from_disjunction_chain(cond: &Expression) -> Option<Expr
         return None;
     }
 
-    let mut positive_guards = guards.into_iter().map(|guard| negate_tail_merge_condition(&guard));
+    let mut positive_guards = guards
+        .into_iter()
+        .map(|guard| negate_tail_merge_condition(&guard));
     let cond = positive_guards.next()?;
     Some(positive_guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard)))
 }
@@ -3475,10 +3486,12 @@ fn collect_function_tail_negative_guard_chain_block(
 
 fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> Option<Block> {
     match stmts.as_slice() {
-        [Statement {
-            desc: StatementDesc::Block(inner),
-            ..
-        }] => {
+        [
+            Statement {
+                desc: StatementDesc::Block(inner),
+                ..
+            },
+        ] => {
             return try_function_body_drop_dead_undefined_binding_guard_prefix(inner);
         }
         [
@@ -3510,7 +3523,8 @@ fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> 
         return None;
     }
 
-    let StatementDesc::If(cond, then_block, else_block) = &unwrap_single_block_stmt(if_stmt).desc else {
+    let StatementDesc::If(cond, then_block, else_block) = &unwrap_single_block_stmt(if_stmt).desc
+    else {
         return None;
     };
 
@@ -3524,7 +3538,10 @@ fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> 
                 else_block.clone(),
                 vec![],
             ),
-            comment: decl_stmt.comment.clone().or_else(|| if_stmt.comment.clone()),
+            comment: decl_stmt
+                .comment
+                .clone()
+                .or_else(|| if_stmt.comment.clone()),
         });
         rewritten.extend(rest.iter().cloned());
         return Some(rewritten);
@@ -3536,7 +3553,10 @@ fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> 
         let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
         rewritten.push(Statement {
             desc: StatementDesc::If(cond.clone(), then_block.clone(), vec![]),
-            comment: decl_stmt.comment.clone().or_else(|| if_stmt.comment.clone()),
+            comment: decl_stmt
+                .comment
+                .clone()
+                .or_else(|| if_stmt.comment.clone()),
         });
         rewritten.extend(rest.iter().cloned());
         return Some(rewritten);
@@ -3592,7 +3612,9 @@ fn statement_terminates(stmt: &Statement) -> bool {
 }
 
 fn block_mentions_ident(block: &[Statement], ident: &Ident) -> bool {
-    block.iter().any(|stmt| statement_mentions_ident(stmt, ident))
+    block
+        .iter()
+        .any(|stmt| statement_mentions_ident(stmt, ident))
 }
 
 fn statement_mentions_ident(stmt: &Statement, ident: &Ident) -> bool {
@@ -3703,9 +3725,7 @@ fn expression_mentions_ident(expr: &Expression, ident: &Ident) -> bool {
         | ExpressionDesc::New(func, Some(args))
         | ExpressionDesc::TaggedTemplate(func, _, args) => {
             expression_mentions_ident(func, ident)
-                || args
-                    .iter()
-                    .any(|arg| expression_mentions_ident(arg, ident))
+                || args.iter().any(|arg| expression_mentions_ident(arg, ident))
         }
         ExpressionDesc::Fun { params, body, .. } => {
             params.iter().any(|param| param.same(ident)) || block_mentions_ident(body, ident)
@@ -3857,16 +3877,19 @@ fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionSta
     match &expr.desc {
         ExpressionDesc::Var(_) | ExpressionDesc::Str { .. } => RawJsExpressionStatement::Omit,
         ExpressionDesc::RawJsCode(info) if info.is_stmt => {
-            if matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment) {
+            if matches!(
+                classify_js_stmt(&info.code),
+                JsStmtClassification::JsStmtComment
+            ) {
                 RawJsExpressionStatement::Comment(decode_internal_utf8_string(&info.code).into())
             } else {
                 RawJsExpressionStatement::Normal
             }
         }
         ExpressionDesc::RawJsCode(info) => match classify_js_exp(&info.code) {
-            JsExpClassification::JsLiteral { comment: Some(comment) } => {
-                RawJsExpressionStatement::Comment(comment)
-            }
+            JsExpClassification::JsLiteral {
+                comment: Some(comment),
+            } => RawJsExpressionStatement::Comment(comment),
             JsExpClassification::JsLiteral { comment: None } => RawJsExpressionStatement::Omit,
             JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
                 RawJsExpressionStatement::Normal
@@ -3877,7 +3900,10 @@ fn classify_raw_js_expression_statement(expr: &Expression) -> RawJsExpressionSta
 }
 
 fn expression_statement_prints_anything(expr: &Expression) -> bool {
-    !matches!(classify_raw_js_expression_statement(expr), RawJsExpressionStatement::Omit)
+    !matches!(
+        classify_raw_js_expression_statement(expr),
+        RawJsExpressionStatement::Omit
+    )
 }
 
 fn member_target_needs_extra_group_indent(expr: &Expression) -> bool {
@@ -4069,29 +4095,37 @@ fn supported_single_negative_guard_condition(cond: &Expression) -> Option<Expres
 fn single_negative_guard_subject_expr_supported(expr: &Expression) -> bool {
     match &expr.desc {
         ExpressionDesc::Var(_) => true,
-        ExpressionDesc::StaticIndex(target, _, _) => single_negative_guard_subject_expr_supported(target),
+        ExpressionDesc::StaticIndex(target, _, _) => {
+            single_negative_guard_subject_expr_supported(target)
+        }
         _ => false,
     }
 }
 
 fn single_negative_guard_tag_expr_supported(expr: &Expression) -> bool {
-    matches!(expr.desc, ExpressionDesc::Str { .. } | ExpressionDesc::Var(_))
+    matches!(
+        expr.desc,
+        ExpressionDesc::Str { .. } | ExpressionDesc::Var(_)
+    )
 }
 
 fn supported_single_negative_guard_body(body: &Block) -> bool {
-    body.iter().all(|stmt| match &unwrap_single_block_stmt(stmt).desc {
-        StatementDesc::Return(Expression {
-            desc: ExpressionDesc::Undefined { .. },
-            ..
-        }) => true,
-        StatementDesc::Exp(expr) => supported_single_negative_guard_effect(expr),
-        _ => false,
-    })
+    body.iter()
+        .all(|stmt| match &unwrap_single_block_stmt(stmt).desc {
+            StatementDesc::Return(Expression {
+                desc: ExpressionDesc::Undefined { .. },
+                ..
+            }) => true,
+            StatementDesc::Exp(expr) => supported_single_negative_guard_effect(expr),
+            _ => false,
+        })
 }
 
 fn supported_single_negative_guard_effect(expr: &Expression) -> bool {
     match &expr.desc {
-        ExpressionDesc::Bin(BinOp::Eq, left, _) => supported_single_negative_guard_assign_target(left),
+        ExpressionDesc::Bin(BinOp::Eq, left, _) => {
+            supported_single_negative_guard_assign_target(left)
+        }
         _ => false,
     }
 }
@@ -5570,7 +5604,7 @@ mod tests {
 
     #[test]
     fn test_print_function_body_rewrites_strict_undefined_guard_return_suffix_into_positive_nested_guards()
-    {
+     {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
         let block = vec![
@@ -6607,7 +6641,10 @@ mod tests {
             ident_info: Default::default(),
         })]);
 
-        assert!(rendered.contains("if (a === 0 && b === 0 && c === 0) {"), "{rendered}");
+        assert!(
+            rendered.contains("if (a === 0 && b === 0 && c === 0) {"),
+            "{rendered}"
+        );
         assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
         assert!(rendered.contains("return result;"), "{rendered}");
         assert!(!rendered.contains("if (a !== 0) {"), "{rendered}");
@@ -6661,10 +6698,16 @@ mod tests {
             ident_info: Default::default(),
         })]);
 
-        assert!(rendered.contains("if (a === 0 && b === 0 && c === 0) {"), "{rendered}");
+        assert!(
+            rendered.contains("if (a === 0 && b === 0 && c === 0) {"),
+            "{rendered}"
+        );
         assert!(rendered.contains("return \"zeroes\";"), "{rendered}");
         assert!(rendered.contains("return result;"), "{rendered}");
-        assert!(!rendered.contains("if (a !== 0 || b !== 0 || c !== 0) {"), "{rendered}");
+        assert!(
+            !rendered.contains("if (a !== 0 || b !== 0 || c !== 0) {"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("} else {"), "{rendered}");
     }
 
@@ -6892,7 +6935,10 @@ mod tests {
         })]);
 
         assert!(rendered.contains("if (len === 0) {"), "{rendered}");
-        assert!(rendered.contains("for (let k = 0; k < 1; ++k) {"), "{rendered}");
+        assert!(
+            rendered.contains("for (let k = 0; k < 1; ++k) {"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("if (len !== 0) {"), "{rendered}");
     }
 
@@ -6944,10 +6990,16 @@ mod tests {
             ident_info: Default::default(),
         })]);
 
-        assert!(rendered.contains("if (typeof obj === \"function\") {"), "{rendered}");
+        assert!(
+            rendered.contains("if (typeof obj === \"function\") {"),
+            "{rendered}"
+        );
         assert!(rendered.contains("let size = obj.length;"), "{rendered}");
         assert!(rendered.contains("log();"), "{rendered}");
-        assert!(!rendered.contains("if (typeof obj !== \"function\") {"), "{rendered}");
+        assert!(
+            !rendered.contains("if (typeof obj !== \"function\") {"),
+            "{rendered}"
+        );
     }
 
     #[test]

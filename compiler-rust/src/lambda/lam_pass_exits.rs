@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::lambda::lam_analysis::{size, EXIT_INLINE_SIZE};
+use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
 use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::subst as lam_subst;
@@ -170,8 +170,7 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
         Lambda::Lassign(_, e) => no_bounded_variables(e),
         // lam_pass_exits.ml:37-38
         Lambda::Lapply(apply) => {
-            no_bounded_variables(&apply.ap_func)
-                && apply.ap_args.iter().all(no_bounded_variables)
+            no_bounded_variables(&apply.ap_func) && apply.ap_args.iter().all(no_bounded_variables)
         }
         // lam_pass_exits.ml:39
         Lambda::LglobalModule(_, _) => true,
@@ -208,9 +207,7 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
             vars.is_empty() && no_bounded_variables(e1) && no_bounded_variables(e2)
         }
         // lam_pass_exits.ml:54
-        Lambda::Lfunction(func) => {
-            func.params.is_empty() && no_bounded_variables(&func.body)
-        }
+        Lambda::Lfunction(func) => func.params.is_empty() && no_bounded_variables(&func.body),
         // lam_pass_exits.ml:55-58
         Lambda::Lfor(_, _, _, _, _) => false,
         // lam_pass_exits.ml after #7887: for_of / for_await_of bind a variable, so false.
@@ -476,11 +473,7 @@ mod tests {
         // catch <body without raise 1> with (1) <handler> => body
         let body = Lambda::unit();
         let handler = Lambda::true_();
-        let lam = Lambda::LstaticCatch(
-            Box::new(body.clone()),
-            (1, vec![]),
-            Box::new(handler),
-        );
+        let lam = Lambda::LstaticCatch(Box::new(body.clone()), (1, vec![]), Box::new(handler));
         let simplified = simplify_exits_standalone(&lam);
         assert_eq!(simplified, body);
     }
@@ -490,11 +483,7 @@ mod tests {
         // catch (raise 1) with (1) Lconst true => Lconst true
         let raise = Lambda::LstaticRaise(1, vec![]);
         let handler = Lambda::true_();
-        let lam = Lambda::LstaticCatch(
-            Box::new(raise),
-            (1, vec![]),
-            Box::new(handler.clone()),
-        );
+        let lam = Lambda::LstaticCatch(Box::new(raise), (1, vec![]), Box::new(handler.clone()));
         let simplified = simplify_exits_standalone(&lam);
         assert_eq!(simplified, handler);
     }
@@ -505,11 +494,7 @@ mod tests {
         let x = Ident::create_local("x");
         let raise = Lambda::LstaticRaise(1, vec![Lambda::Lconst(crate::lambda::Constant::int(7))]);
         let handler = Lambda::Lvar(x.clone());
-        let lam = Lambda::LstaticCatch(
-            Box::new(raise),
-            (1, vec![x.clone()]),
-            Box::new(handler),
-        );
+        let lam = Lambda::LstaticCatch(Box::new(raise), (1, vec![x.clone()]), Box::new(handler));
         let simplified = simplify_exits_standalone(&lam);
         match simplified {
             Lambda::Llet(LetKind::Strict, _, _, body) => {

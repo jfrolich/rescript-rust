@@ -1815,9 +1815,7 @@ pub fn print_expression(
                 Doc::text("}"),
             ])
         }
-        ExpressionDesc::Pexp_comptime_typeinfo(_) => {
-            Doc::text("@typeInfo(...)")
-        }
+        ExpressionDesc::Pexp_comptime_typeinfo(_) => Doc::text("@typeInfo(...)"),
         ExpressionDesc::Pexp_comptime_field(inner) => {
             let (ref value, ref field) = **inner;
             Doc::concat(vec![
@@ -1828,34 +1826,18 @@ pub fn print_expression(
                 Doc::text(")"),
             ])
         }
-        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
-            Doc::concat(vec![
-                Doc::text("@compileError("),
-                print_expression_with_comments(state, arena.get_expr(*expr_idx), cmt_tbl, arena),
-                Doc::text(")"),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_typename(_) => {
-            Doc::text("@typeName(...)")
-        }
-        ExpressionDesc::Pexp_comptime_record(_) => {
-            Doc::text("@record(...)")
-        }
-        ExpressionDesc::Pexp_comptime_variant(_) => {
-            Doc::text("@variant(...)")
-        }
-        ExpressionDesc::Pexp_comptime_build_variant(_) => {
-            Doc::text("@buildVariant(...)")
-        }
-        ExpressionDesc::Pexp_comptime_variant_case(_) => {
-            Doc::text("@variantCase(...)")
-        }
-        ExpressionDesc::Pexp_comptime_build_record(_) => {
-            Doc::text("@buildRecord(...)")
-        }
-        ExpressionDesc::Pexp_comptime_record_field(_) => {
-            Doc::text("@recordField(...)")
-        }
+        ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => Doc::concat(vec![
+            Doc::text("@compileError("),
+            print_expression_with_comments(state, arena.get_expr(*expr_idx), cmt_tbl, arena),
+            Doc::text(")"),
+        ]),
+        ExpressionDesc::Pexp_comptime_typename(_) => Doc::text("@typeName(...)"),
+        ExpressionDesc::Pexp_comptime_record(_) => Doc::text("@record(...)"),
+        ExpressionDesc::Pexp_comptime_variant(_) => Doc::text("@variant(...)"),
+        ExpressionDesc::Pexp_comptime_build_variant(_) => Doc::text("@buildVariant(...)"),
+        ExpressionDesc::Pexp_comptime_variant_case(_) => Doc::text("@variantCase(...)"),
+        ExpressionDesc::Pexp_comptime_build_record(_) => Doc::text("@buildRecord(...)"),
+        ExpressionDesc::Pexp_comptime_record_field(_) => Doc::text("@recordField(...)"),
         // Send (method call): expr#method -> expr["method"]
         ExpressionDesc::Pexp_send(inner) => {
             let (ref parent_expr_idx, ref label) = **inner;

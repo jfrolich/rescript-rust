@@ -770,8 +770,7 @@ impl<'a> Mapper<'a> {
             }
             current::ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (_pat, iterable_idx, _body) = inner.as_ref();
-                let attr =
-                    self.mk_for_of_attr("_res.for_await_of", expr.pexp_loc, *iterable_idx);
+                let attr = self.mk_for_of_attr("_res.for_await_of", expr.pexp_loc, *iterable_idx);
                 attrs.insert(0, attr);
             }
             _ => {}

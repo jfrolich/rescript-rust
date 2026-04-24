@@ -12,8 +12,8 @@ use crate::js_ir::{
     BinOp, Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Program, Statement,
     StatementDesc, StringClause, VariableDeclaration,
 };
-use crate::lambda::lam_compat::LetKind;
 use crate::lambda::js_pass_external_shadow::is_lexical_binding_kind;
+use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::js_expr_no_side_effects;
 

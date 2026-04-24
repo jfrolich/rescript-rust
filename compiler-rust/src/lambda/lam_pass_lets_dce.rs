@@ -14,11 +14,11 @@ use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};
 use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_util::refine_let;
-use crate::lambda::lam_pass_count::{collect_occurs, dummy_info, OccTbl, UsedInfo};
-use crate::lambda::lam_pass_eliminate_ref::{eliminate_ref, RealReference};
+use crate::lambda::lam_pass_count::{OccTbl, UsedInfo, collect_occurs, dummy_info};
+use crate::lambda::lam_pass_eliminate_ref::{RealReference, eliminate_ref};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::{Apply, Lambda, LambdaSwitch, LFunction, PrimInfo};
+use crate::lambda::lam_util::refine_let;
+use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};
 
 /// State held during the recursive pass: substitution table and an inline
 /// string table for downstream `Pstringadd` constant folding. Both mirror
@@ -57,11 +57,7 @@ impl<'a> LetsState<'a> {
 fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
     match lam {
         // Lvar (lam_pass_lets_dce.ml:20): look up in subst, default to lam.
-        Lambda::Lvar(v) => state
-            .subst
-            .get(v)
-            .cloned()
-            .unwrap_or_else(|| lam.clone()),
+        Lambda::Lvar(v) => state.subst.get(v).cloned().unwrap_or_else(|| lam.clone()),
 
         // `Llet ((Strict | Alias | StrictOpt), v, Lvar w, l2)`
         // (lam_pass_lets_dce.ml:21-23). Always alias-inline the rhs `Lvar w`.
@@ -95,7 +91,11 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             ) =>
         {
             let (primitive, linit, loc) = match value.as_ref() {
-                Lambda::Lprim(prim) => (prim.primitive.clone(), prim.args[0].clone(), prim.loc.clone()),
+                Lambda::Lprim(prim) => (
+                    prim.primitive.clone(),
+                    prim.args[0].clone(),
+                    prim.loc.clone(),
+                ),
                 _ => unreachable!(),
             };
             let slinit = lets_helper(state, &linit);
@@ -129,14 +129,14 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 l1.as_ref(),
                 Lambda::Lconst(
                     Constant::Int { .. }
-                    | Constant::NativeInt { .. }
-                    | Constant::Char(_)
-                    | Constant::Float(_)
-                    | Constant::BigInt { .. }
-                    | Constant::Pointer(_)
-                    | Constant::JsTrue
-                    | Constant::JsFalse
-                    | Constant::JsUndefined { .. }
+                        | Constant::NativeInt { .. }
+                        | Constant::Char(_)
+                        | Constant::Float(_)
+                        | Constant::BigInt { .. }
+                        | Constant::Pointer(_)
+                        | Constant::JsTrue
+                        | Constant::JsFalse
+                        | Constant::JsUndefined { .. }
                 )
             );
             let pfield_from_global = matches!(
@@ -165,12 +165,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             if let Lambda::Lconst(Constant::String { s, delim: None }) = l1.as_ref() {
                 state.string_table.insert(v.clone(), s.clone());
                 let simplified_body = lets_helper(state, l2);
-                return Lambda::let_(
-                    LetKind::Alias,
-                    v.clone(),
-                    (**l1).clone(),
-                    simplified_body,
-                );
+                return Lambda::let_(LetKind::Alias, v.clone(), (**l1).clone(), simplified_body);
             }
 
             // Fall-through: keep the alias binding (lam_pass_lets_dce.ml:71-72).
@@ -196,13 +191,17 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             }) = l1.as_ref()
             {
                 if args.len() == 1 {
-                    let primitive = Primitive::Pmakeblock(0, match l1.as_ref() {
-                        Lambda::Lprim(p) => match &p.primitive {
-                            Primitive::Pmakeblock(_, info, _) => info.clone(),
+                    let primitive = Primitive::Pmakeblock(
+                        0,
+                        match l1.as_ref() {
+                            Lambda::Lprim(p) => match &p.primitive {
+                                Primitive::Pmakeblock(_, info, _) => info.clone(),
+                                _ => unreachable!(),
+                            },
                             _ => unreachable!(),
                         },
-                        _ => unreachable!(),
-                    }, Mutable::Mutable);
+                        Mutable::Mutable,
+                    );
                     let linit = args[0].clone();
                     let loc = loc.clone();
                     let slinit = lets_helper(state, &linit);
@@ -293,7 +292,12 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
         }
 
         // Lfunction (lam_pass_lets_dce.ml:150-151).
-        Lambda::Lfunction(LFunction { arity, params, body, attr }) => {
+        Lambda::Lfunction(LFunction {
+            arity,
+            params,
+            body,
+            attr,
+        }) => {
             let new_body = lets_helper(state, body);
             Lambda::function_(*arity, params.clone(), new_body, attr.clone())
         }
@@ -326,11 +330,9 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 Some(l_s) => {
                     let opt_r = lookup_string(&r_simpl, &state.string_table);
                     match opt_r {
-                        None => Lambda::prim(
-                            Primitive::Pstringadd,
-                            vec![l_simpl, r_simpl],
-                            loc.clone(),
-                        ),
+                        None => {
+                            Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc.clone())
+                        }
                         Some(r_s) => Lambda::Lconst(Constant::String {
                             s: format!("{}{}", l_s, r_s),
                             delim: None,
@@ -386,9 +388,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 .iter()
                 .map(|(s, e)| (s.clone(), lets_helper(state, e)))
                 .collect();
-            let new_default = default
-                .as_deref()
-                .map(|x| Box::new(lets_helper(state, x)));
+            let new_default = default.as_deref().map(|x| Box::new(lets_helper(state, x)));
             Lambda::LstringSwitch(Box::new(new_scrut), new_cases, new_default)
         }
 
@@ -501,10 +501,7 @@ mod tests {
             Lambda::Lvar(x),
         );
         let result = simplify_lets(&lam);
-        assert!(matches!(
-            result,
-            Lambda::Lconst(Constant::Int { i: 1, .. })
-        ));
+        assert!(matches!(result, Lambda::Lconst(Constant::Int { i: 1, .. })));
     }
 
     /// `let x = e in (); x` Alias unused -> drop binding

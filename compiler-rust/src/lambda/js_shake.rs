@@ -67,8 +67,7 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
     );
     let binding_is_local_alias = matches!(&initializer.desc, ExpressionDesc::Var(VIdent::Id(_)));
     let has_later_function_binding = has_later_toplevel_function_binding(remaining);
-    let later_function_mentions_target =
-        later_toplevel_function_mentions_ident(remaining, target);
+    let later_function_mentions_target = later_toplevel_function_mentions_ident(remaining, target);
     let later_initializer_mentions_target =
         later_toplevel_initializer_mentions_ident(remaining, target);
     // A Literal+Alias binding existing in the block means `Lam_pass_lets_dce`
@@ -81,9 +80,8 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
     // fires (the `find_same_name` below would not locate a declaration to
     // move). So any surviving Literal+Alias is a preserved source-order
     // binding and must stay put.
-    let blocked_by_literal_binding =
-        matches!(initializer_kind, TailMoveInitializerKind::Literal)
-            && !matches!(property, LetKind::Alias);
+    let blocked_by_literal_binding = matches!(initializer_kind, TailMoveInitializerKind::Literal)
+        && !matches!(property, LetKind::Alias);
     let blocked_by_literal_alias_preserved_in_block =
         matches!(initializer_kind, TailMoveInitializerKind::Literal)
             && matches!(property, LetKind::Alias);
@@ -96,9 +94,8 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
             && binding_is_local_alias
             && !prefer_materialized_root;
     let blocked_by_later_function_capture = later_function_mentions_target;
-    let blocked_by_qualified_binding_before_later_function =
-        has_later_function_binding
-            && matches!(initializer_kind, TailMoveInitializerKind::Qualified);
+    let blocked_by_qualified_binding_before_later_function = has_later_function_binding
+        && matches!(initializer_kind, TailMoveInitializerKind::Qualified);
     let blocked_by_variable = matches!(property, LetKind::Variable);
     let blocked_by_kind = matches!(initializer_kind, TailMoveInitializerKind::Other);
     let blocked_by_effects = !js_expr_no_side_effects(&replacement);
@@ -111,8 +108,8 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
         .any(|stmt| statement_mentions_ident_anywhere(stmt, target));
     let blocked_by_unsafe_inline = matches!(initializer_kind, TailMoveInitializerKind::Qualified)
         && !qualified_tail_move_uses_are_safe_to_inline(remaining, target, &replacement);
-    let blocked_by_later_initializer =
-        later_initializer_mentions_target && !matches!(initializer_kind, TailMoveInitializerKind::Literal);
+    let blocked_by_later_initializer = later_initializer_mentions_target
+        && !matches!(initializer_kind, TailMoveInitializerKind::Literal);
     let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
         remaining,
         target,
@@ -159,14 +156,11 @@ pub(crate) fn move_reused_same_name_export_binding_to_export_tail(
     else {
         return None;
     };
-    let replacement =
-        resolve_tail_move_replacement_expression(&flattened, value, &reused, false);
+    let replacement = resolve_tail_move_replacement_expression(&flattened, value, &reused, false);
     let initializer_kind = same_name_export_initializer_kind(&flattened, &replacement);
     let remaining = &flattened[index + 1..];
-    let blocked_by_literal_binding =
-        matches!(initializer_kind, TailMoveInitializerKind::Literal)
-            && (!matches!(property, LetKind::Alias)
-                || !has_later_toplevel_function_binding(remaining));
+    let blocked_by_literal_binding = matches!(initializer_kind, TailMoveInitializerKind::Literal)
+        && (!matches!(property, LetKind::Alias) || !has_later_toplevel_function_binding(remaining));
     let blocked_by_later_effect = !later_toplevel_effect_allows_tail_move(
         remaining,
         &reused,
@@ -323,7 +317,10 @@ pub(crate) fn resolve_tail_move_replacement_expression(
     }
 }
 
-pub(crate) fn tail_move_materialized_root_ident(block: &Block, initializer: &Expression) -> Option<Ident> {
+pub(crate) fn tail_move_materialized_root_ident(
+    block: &Block,
+    initializer: &Expression,
+) -> Option<Ident> {
     let ExpressionDesc::Var(VIdent::Id(start)) = &initializer.desc else {
         return None;
     };
@@ -409,7 +406,8 @@ enum TailMoveUseContext {
 }
 
 fn tail_move_uses_are_safe_to_inline(block: &[Statement], target: &Ident) -> bool {
-    block.iter()
+    block
+        .iter()
         .all(|stmt| statement_uses_ident_only_in_tail_move_safe_positions(stmt, target))
 }
 
@@ -556,22 +554,24 @@ fn statement_uses_ident_only_in_tail_move_safe_positions(stmt: &Statement, targe
                 test,
                 target,
                 TailMoveUseContext::Other,
-            ) && clauses.iter().all(|(_, clause)| {
-                tail_move_uses_are_safe_to_inline(&clause.body, target)
-            }) && default
-                .as_ref()
-                .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
+            ) && clauses
+                .iter()
+                .all(|(_, clause)| tail_move_uses_are_safe_to_inline(&clause.body, target))
+                && default
+                    .as_ref()
+                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
         }
         StatementDesc::StringSwitch(test, clauses, default) => {
             expression_uses_ident_only_in_tail_move_safe_positions(
                 test,
                 target,
                 TailMoveUseContext::Other,
-            ) && clauses.iter().all(|clause| {
-                tail_move_uses_are_safe_to_inline(&clause.clause.body, target)
-            }) && default
-                .as_ref()
-                .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
+            ) && clauses
+                .iter()
+                .all(|clause| tail_move_uses_are_safe_to_inline(&clause.clause.body, target))
+                && default
+                    .as_ref()
+                    .is_none_or(|block| tail_move_uses_are_safe_to_inline(block, target))
         }
         StatementDesc::Try(body, catch, finally) => {
             tail_move_uses_are_safe_to_inline(body, target)
@@ -778,10 +778,9 @@ pub(crate) fn keeps_declared_same_name_reusable_export_binding(
     export: &Ident,
     value: &Expression,
 ) -> bool {
-    direct_reused_same_name_export_alias_binding(block, export, value)
-        .is_some_and(|(_, ident, _, property)| {
-            ident.same(export) && !matches!(property, LetKind::Variable)
-        })
+    direct_reused_same_name_export_alias_binding(block, export, value).is_some_and(
+        |(_, ident, _, property)| ident.same(export) && !matches!(property, LetKind::Variable),
+    )
 }
 
 fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
@@ -789,11 +788,10 @@ fn has_later_toplevel_function_binding(block: &[Statement]) -> bool {
         matches!(
             &stmt.desc,
             StatementDesc::Variable(VariableDeclaration {
-                value:
-                    Some(Expression {
-                        desc: ExpressionDesc::Fun { .. },
-                        ..
-                    }),
+                value: Some(Expression {
+                    desc: ExpressionDesc::Fun { .. },
+                    ..
+                }),
                 ..
             })
         )
@@ -839,9 +837,9 @@ fn uses_ident_before_first_toplevel_effect(block: &[Statement], target: &Ident) 
 
 fn statement_has_toplevel_effect(stmt: &Statement) -> bool {
     match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration { value, .. }) => {
-            value.as_ref().is_some_and(|expr| !js_expr_no_side_effects(expr))
-        }
+        StatementDesc::Variable(VariableDeclaration { value, .. }) => value
+            .as_ref()
+            .is_some_and(|expr| !js_expr_no_side_effects(expr)),
         _ => !js_statement_no_side_effects(stmt),
     }
 }

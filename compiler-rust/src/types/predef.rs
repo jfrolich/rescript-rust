@@ -175,36 +175,84 @@ pub fn ident_constructor_info() -> Ident {
 }
 
 // typeInfo constructor idents
-pub fn ident_ti_int() -> Ident { make_ident("Int", STAMP_TI_INT) }
-pub fn ident_ti_float() -> Ident { make_ident("Float", STAMP_TI_FLOAT) }
-pub fn ident_ti_string() -> Ident { make_ident("String", STAMP_TI_STRING) }
-pub fn ident_ti_bool() -> Ident { make_ident("Bool", STAMP_TI_BOOL) }
-pub fn ident_ti_unit() -> Ident { make_ident("Unit", STAMP_TI_UNIT) }
-pub fn ident_ti_char() -> Ident { make_ident("Char", STAMP_TI_CHAR) }
-pub fn ident_ti_bigint() -> Ident { make_ident("Bigint", STAMP_TI_BIGINT) }
-pub fn ident_ti_record() -> Ident { make_ident("Record", STAMP_TI_RECORD) }
-pub fn ident_ti_variant() -> Ident { make_ident("Variant", STAMP_TI_VARIANT) }
-pub fn ident_ti_array() -> Ident { make_ident("Array", STAMP_TI_ARRAY) }
-pub fn ident_ti_option() -> Ident { make_ident("Option", STAMP_TI_OPTION) }
-pub fn ident_ti_function() -> Ident { make_ident("Function", STAMP_TI_FUNCTION) }
-pub fn ident_ti_external() -> Ident { make_ident("External", STAMP_TI_EXTERNAL) }
-pub fn ident_ti_opaque() -> Ident { make_ident("Opaque", STAMP_TI_OPAQUE) }
-pub fn ident_ti_unknown() -> Ident { make_ident("TiUnknown", STAMP_TI_UNKNOWN) }
+pub fn ident_ti_int() -> Ident {
+    make_ident("Int", STAMP_TI_INT)
+}
+pub fn ident_ti_float() -> Ident {
+    make_ident("Float", STAMP_TI_FLOAT)
+}
+pub fn ident_ti_string() -> Ident {
+    make_ident("String", STAMP_TI_STRING)
+}
+pub fn ident_ti_bool() -> Ident {
+    make_ident("Bool", STAMP_TI_BOOL)
+}
+pub fn ident_ti_unit() -> Ident {
+    make_ident("Unit", STAMP_TI_UNIT)
+}
+pub fn ident_ti_char() -> Ident {
+    make_ident("Char", STAMP_TI_CHAR)
+}
+pub fn ident_ti_bigint() -> Ident {
+    make_ident("Bigint", STAMP_TI_BIGINT)
+}
+pub fn ident_ti_record() -> Ident {
+    make_ident("Record", STAMP_TI_RECORD)
+}
+pub fn ident_ti_variant() -> Ident {
+    make_ident("Variant", STAMP_TI_VARIANT)
+}
+pub fn ident_ti_array() -> Ident {
+    make_ident("Array", STAMP_TI_ARRAY)
+}
+pub fn ident_ti_option() -> Ident {
+    make_ident("Option", STAMP_TI_OPTION)
+}
+pub fn ident_ti_function() -> Ident {
+    make_ident("Function", STAMP_TI_FUNCTION)
+}
+pub fn ident_ti_external() -> Ident {
+    make_ident("External", STAMP_TI_EXTERNAL)
+}
+pub fn ident_ti_opaque() -> Ident {
+    make_ident("Opaque", STAMP_TI_OPAQUE)
+}
+pub fn ident_ti_unknown() -> Ident {
+    make_ident("TiUnknown", STAMP_TI_UNKNOWN)
+}
 
 // fieldInfo label idents
-pub fn ident_fi_name() -> Ident { make_ident("name", STAMP_FI_NAME) }
-pub fn ident_fi_typ() -> Ident { make_ident("typ", STAMP_FI_TYP) }
-pub fn ident_fi_optional() -> Ident { make_ident("optional", STAMP_FI_OPTIONAL) }
-pub fn ident_fi_mutable() -> Ident { make_ident("mutable_", STAMP_FI_MUTABLE) }
+pub fn ident_fi_name() -> Ident {
+    make_ident("name", STAMP_FI_NAME)
+}
+pub fn ident_fi_typ() -> Ident {
+    make_ident("typ", STAMP_FI_TYP)
+}
+pub fn ident_fi_optional() -> Ident {
+    make_ident("optional", STAMP_FI_OPTIONAL)
+}
+pub fn ident_fi_mutable() -> Ident {
+    make_ident("mutable_", STAMP_FI_MUTABLE)
+}
 
 // constructorInfo label idents
-pub fn ident_ci_name() -> Ident { make_ident("name", STAMP_CI_NAME) }
-pub fn ident_ci_args() -> Ident { make_ident("args", STAMP_CI_ARGS) }
+pub fn ident_ci_name() -> Ident {
+    make_ident("name", STAMP_CI_NAME)
+}
+pub fn ident_ci_args() -> Ident {
+    make_ident("args", STAMP_CI_ARGS)
+}
 
 // Paths
-pub fn path_type_info() -> Path { Path::pident(ident_type_info()) }
-pub fn path_field_info() -> Path { Path::pident(ident_field_info()) }
-pub fn path_constructor_info() -> Path { Path::pident(ident_constructor_info()) }
+pub fn path_type_info() -> Path {
+    Path::pident(ident_type_info())
+}
+pub fn path_field_info() -> Path {
+    Path::pident(ident_field_info())
+}
+pub fn path_constructor_info() -> Path {
+    Path::pident(ident_constructor_info())
+}
 
 // ============================================================================
 // Predef exception idents

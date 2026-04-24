@@ -3,27 +3,6 @@
 //! Port of `lam_compile_external_call.ml` + `lam_compile_external_obj.ml`.
 //! Extracted from `lam_compile.rs` for organization.
 
-use crate::ident::Ident;
-use crate::js_ir::op::{
-    IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
-};
-use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
-use crate::js_ir::{
-    BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ModuleId,
-    Statement, StatementDesc, VIdent, VariableDeclaration,
-    expression_has_no_side_effects,
-};
-use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
-use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_primitive::{
-    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
-    Mutable, Primitive,
-};
-use crate::lambda::{
-    ApplyStatus, Lambda, TagInfo,
-};
-use crate::location::Location;
 use super::js_exp_make::{
     eta_wrapped_args_match_params, external_polyvar_int_dispatch, external_polyvar_string_dispatch,
     int_expr, is_nullish_literal, is_optional_block, is_pure_subexpression,
@@ -33,6 +12,24 @@ use super::js_exp_make::{
 use super::lam_compile::{
     Compiled, ExternalModuleCacheKey, LambdaCompiler, call_info_of_apply_status,
 };
+use crate::ident::Ident;
+use crate::js_ir::op::{
+    IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
+};
+use crate::js_ir::printer::{convert_ident_name, is_js_keyword_or_global};
+use crate::js_ir::{
+    BinOp, Block, CallInfo, Delim, Expression, ExpressionDesc, ModuleId, Statement, StatementDesc,
+    VIdent, VariableDeclaration, expression_has_no_side_effects,
+};
+use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
+use crate::lambda::lam_constant::Constant;
+use crate::lambda::lam_primitive::{
+    ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
+    ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
+    Mutable, Primitive,
+};
+use crate::lambda::{ApplyStatus, Lambda, TagInfo};
+use crate::location::Location;
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,
@@ -288,7 +285,10 @@ impl LambdaCompiler {
         Some(self.runtime_member_expr(module_name, member))
     }
 
-    pub(crate) fn try_compile_identity_module_return_expr(&mut self, lam: &Lambda) -> Option<Expression> {
+    pub(crate) fn try_compile_identity_module_return_expr(
+        &mut self,
+        lam: &Lambda,
+    ) -> Option<Expression> {
         let mut module_target_var: Option<Ident> = None;
         let mut module_target_global: Option<(Ident, bool)> = None;
         let mut alias_chain = Vec::new();
@@ -412,7 +412,6 @@ impl LambdaCompiler {
             }
         }
     }
-
 
     pub(crate) fn external_module_id(
         &mut self,
@@ -575,7 +574,11 @@ impl LambdaCompiler {
         Some(effects.fold(first, js_seq))
     }
 
-    pub(crate) fn add_external_effect(&self, effect: Option<Expression>, expr: Expression) -> Expression {
+    pub(crate) fn add_external_effect(
+        &self,
+        effect: Option<Expression>,
+        expr: Expression,
+    ) -> Expression {
         match effect {
             Some(effect) => js_seq(effect, expr),
             None => expr,
@@ -1252,7 +1255,10 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn module_of_expression(&self, expr: &Expression) -> Option<(ModuleId, Option<String>)> {
+    pub(crate) fn module_of_expression(
+        &self,
+        expr: &Expression,
+    ) -> Option<(ModuleId, Option<String>)> {
         match &expr.desc {
             ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
                 Some((module.clone(), member.clone()))
@@ -1273,7 +1279,11 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn translate_scoped_global_value(&self, name: &str, scopes: &[String]) -> Expression {
+    pub(crate) fn translate_scoped_global_value(
+        &self,
+        name: &str,
+        scopes: &[String],
+    ) -> Expression {
         let mut expr = match scopes.split_first() {
             Some((head, rest)) => {
                 let mut expr = Expression::var(Ident::create_persistent(head));
@@ -1290,7 +1300,11 @@ impl LambdaCompiler {
         expr
     }
 
-    pub(crate) fn apply_scoped_access(&self, mut expr: Expression, scopes: &[String]) -> Expression {
+    pub(crate) fn apply_scoped_access(
+        &self,
+        mut expr: Expression,
+        scopes: &[String],
+    ) -> Expression {
         for scope in scopes {
             expr = self.static_index(expr, scope);
         }

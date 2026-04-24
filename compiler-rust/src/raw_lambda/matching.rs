@@ -8308,7 +8308,9 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
                 crate::types::decl::AttributePayload::Str(value) => {
                     Some(SwitchCaseTag::String(value.clone()))
                 }
-                crate::types::decl::AttributePayload::Int(value) => Some(SwitchCaseTag::Int(*value)),
+                crate::types::decl::AttributePayload::Int(value) => {
+                    Some(SwitchCaseTag::Int(*value))
+                }
                 crate::types::decl::AttributePayload::Float(value) => {
                     Some(SwitchCaseTag::Float(value.clone()))
                 }

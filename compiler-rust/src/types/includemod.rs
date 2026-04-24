@@ -292,8 +292,7 @@ fn modtypes_inner<'a>(
                         type_ctx, env, &impl_path, expanded,
                     );
                     modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
-                })
-            {
+                }) {
                 coercion?
             } else {
                 let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
@@ -520,8 +519,12 @@ struct PairedSignatureItem<'a> {
 
 fn item_ident_name(item: &SignatureItem) -> (&Ident, &crate::location::Location, FieldDesc) {
     match item {
-        SignatureItem::SigValue(id, desc) => (id, &desc.val_loc, FieldDesc::Value(id.name().into())),
-        SignatureItem::SigType(id, decl, _) => (id, &decl.type_loc, FieldDesc::Type(id.name().into())),
+        SignatureItem::SigValue(id, desc) => {
+            (id, &desc.val_loc, FieldDesc::Value(id.name().into()))
+        }
+        SignatureItem::SigType(id, decl, _) => {
+            (id, &decl.type_loc, FieldDesc::Type(id.name().into()))
+        }
         SignatureItem::SigTypext(id, ext, _) => {
             (id, &ext.ext_loc, FieldDesc::Typext(id.name().into()))
         }
@@ -560,7 +563,10 @@ fn build_component_table<'a>(
 
     for item in sig_impl {
         let (_, _, field_desc) = item_ident_name(item);
-        table.insert(item_field_desc_to_key(&field_desc), ComponentEntry { item, runtime_pos });
+        table.insert(
+            item_field_desc_to_key(&field_desc),
+            ComponentEntry { item, runtime_pos },
+        );
         if is_runtime_component(item) {
             runtime_pos += 1;
         }
@@ -586,7 +592,10 @@ fn register_paired_signature_substitution(
     modtype_subst: &mut HashMap<String, Path>,
 ) {
     match (paired.impl_item, paired.sig_item) {
-        (SignatureItem::SigType(impl_id, impl_type_decl, _), SignatureItem::SigType(sig_id, _, _)) => {
+        (
+            SignatureItem::SigType(impl_id, impl_type_decl, _),
+            SignatureItem::SigType(sig_id, _, _),
+        ) => {
             let subst_path = impl_type_decl
                 .type_path
                 .clone()
@@ -720,8 +729,11 @@ fn check_paired_signature_items<'a>(
                 SignatureItem::SigModtype(impl_id, impl_modtype_decl),
                 SignatureItem::SigModtype(_, sig_modtype_decl),
             ) => {
-                let expected_modtype_decl =
-                    substitute_modtype_declaration_paths(sig_modtype_decl, module_subst, modtype_subst);
+                let expected_modtype_decl = substitute_modtype_declaration_paths(
+                    sig_modtype_decl,
+                    module_subst,
+                    modtype_subst,
+                );
                 modtype_declarations(
                     type_ctx,
                     env,
@@ -1270,10 +1282,10 @@ fn close_matching_variant_rows_from_expected<'a>(
 
                 let mut expected_by_label: HashMap<crate::types::asttypes::Label, RowField> =
                     expected_row
-                    .row_fields
-                    .iter()
-                    .map(|(label, field)| (label.clone(), field.clone()))
-                    .collect();
+                        .row_fields
+                        .iter()
+                        .map(|(label, field)| (label.clone(), field.clone()))
+                        .collect();
                 let mut extra_impl = Vec::new();
                 let mut pairs = Vec::new();
 
@@ -1609,12 +1621,12 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use crate::location::Location;
+    use crate::types::Path;
     use crate::types::decl::{
         ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, UnboxedStatus,
         ValueKind,
     };
     use crate::types::env::initial_env;
-    use crate::types::Path;
 
     fn abstract_type_decl(type_path: Option<Path>) -> TypeDeclaration {
         TypeDeclaration {
@@ -1760,11 +1772,7 @@ mod tests {
                 },
                 RecStatus::TrecNot,
             ),
-            SignatureItem::SigType(
-                sig_type_id,
-                abstract_type_decl(None),
-                RecStatus::TrecNot,
-            ),
+            SignatureItem::SigType(sig_type_id, abstract_type_decl(None), RecStatus::TrecNot),
         ];
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
@@ -1782,8 +1790,10 @@ mod tests {
             SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty)),
             SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty)),
         ];
-        let sig_sig: Signature =
-            vec![SignatureItem::SigValue(Ident::create_local("x"), value_desc(val_ty))];
+        let sig_sig: Signature = vec![SignatureItem::SigValue(
+            Ident::create_local("x"),
+            value_desc(val_ty),
+        )];
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig).unwrap();
         match result {

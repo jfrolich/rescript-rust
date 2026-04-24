@@ -22,7 +22,7 @@ use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
     ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
-    ModuleDeclaration, ModuleType, ModtypeDeclaration, Signature, SignatureItem, TypeDeclaration,
+    ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration,
     TypeKind, ValueDescription,
 };
 use crate::types::path::Path;
@@ -385,10 +385,7 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
             TypeDesc::Tarrow {
-                arg,
-                ret,
-                arity,
-                ..
+                arg, ret, arity, ..
             } => PortableTypeDesc::Tarrow {
                 arg_label: arg.lbl.clone(),
                 arg: self.serialize_type(arg.typ),
@@ -702,7 +699,12 @@ fn internalize_row_desc(
         row_fields: prd
             .row_fields
             .iter()
-            .map(|(label, field)| (label.as_str().into(), internalize_row_field(field, remap, ctx)))
+            .map(|(label, field)| {
+                (
+                    label.as_str().into(),
+                    internalize_row_field(field, remap, ctx),
+                )
+            })
             .collect(),
         row_more: remap[prd.row_more],
         row_closed: prd.row_closed,

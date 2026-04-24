@@ -37,9 +37,13 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 #[inline]
 fn phase_now() -> Option<std::time::Instant> {
     #[cfg(not(target_arch = "wasm32"))]
-    { Some(std::time::Instant::now()) }
+    {
+        Some(std::time::Instant::now())
+    }
     #[cfg(target_arch = "wasm32")]
-    { None }
+    {
+        None
+    }
 }
 
 #[inline]
@@ -1271,7 +1275,14 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
@@ -1642,7 +1653,14 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
 
     tctx.set_persistent_env(pers_env);
 
@@ -1882,7 +1900,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            options.module_name.as_deref(),
+        );
         tctx.set_persistent_env(pers_env);
 
         let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
@@ -1925,7 +1950,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
-        load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+        load_pervasives(
+            &mut pers_env,
+            &mut env,
+            &type_ctx,
+            &options.open_modules,
+            options.nopervasives,
+            options.module_name.as_deref(),
+        );
         tctx.set_persistent_env(pers_env);
 
         let (typed_structure, _final_env) =
@@ -2673,7 +2705,14 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, _final_env) = type_structure(&mut tctx, &env, &arena, &structure)
@@ -2707,7 +2746,14 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
-    load_pervasives(&mut pers_env, &mut env, &type_ctx, &options.open_modules, options.nopervasives, options.module_name.as_deref());
+    load_pervasives(
+        &mut pers_env,
+        &mut env,
+        &type_ctx,
+        &options.open_modules,
+        options.nopervasives,
+        options.module_name.as_deref(),
+    );
     tctx.set_persistent_env(pers_env);
 
     let typed_signature = transl_signature(&mut tctx, &env, &arena, &signature)
@@ -3000,7 +3046,10 @@ pub fn compile_source_in_process(
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
     // Type check
-    log::debug!("[compile_source_in_process] {} type-check start", module_name);
+    log::debug!(
+        "[compile_source_in_process] {} type-check start",
+        module_name
+    );
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -3246,7 +3295,7 @@ pub fn typecheck_interface_in_process(
             _ => {
                 return Err(anyhow!(
                     "Failed to extract interface signature from typed tree"
-                ))
+                ));
             }
         };
 
@@ -3322,9 +3371,8 @@ pub fn typecheck_implementation_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _final_env) =
-        type_structure(&mut tctx, &env, parser.arena(), &structure)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
+        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
     let _ = has_interface; // post-typecheck constraint pass not ported here
 
     let published_signature =

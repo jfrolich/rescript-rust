@@ -198,9 +198,7 @@ fn make_isout(h: RawLambda, arg: RawLambda) -> RawLambda {
     // OCaml: Lprim(Pisout, [h; arg])
     // Rust Pisout(n) bakes the constant in. Extract from h.
     match &h {
-        RawLambda::Lconst(Constant::Int { i, .. }) => {
-            make_prim(Primitive::Pisout(*i), vec![arg])
-        }
+        RawLambda::Lconst(Constant::Int { i, .. }) => make_prim(Primitive::Pisout(*i), vec![arg]),
         _ => {
             // Shouldn't happen - h is always make_const(d)
             make_prim(Primitive::Pisout(0), vec![arg])
@@ -325,7 +323,10 @@ enum TRet {
     No,
 }
 
-fn coupe(cases: &[(i32, i32, usize)], i: usize) -> (i32, Vec<(i32, i32, usize)>, Vec<(i32, i32, usize)>) {
+fn coupe(
+    cases: &[(i32, i32, usize)],
+    i: usize,
+) -> (i32, Vec<(i32, i32, usize)>, Vec<(i32, i32, usize)>) {
     let (l, _, _) = cases[i];
     (l, cases[..i].to_vec(), cases[i..].to_vec())
 }
@@ -426,7 +427,13 @@ fn make_memo_key(cases: &[(i32, i32, usize)]) -> Vec<Kind> {
         r
     }
 
-    fn make_one(l: i32, h: i32, act: usize, seen: &mut Vec<(usize, usize)>, count: &mut usize) -> Kind {
+    fn make_one(
+        l: i32,
+        h: i32,
+        act: usize,
+        seen: &mut Vec<(usize, usize)>,
+        count: &mut usize,
+    ) -> Kind {
         if l == h {
             Kind::Kvalue(got_it(act, seen, count))
         } else {
@@ -707,8 +714,7 @@ impl SwitchCompiler {
         match w {
             TRet::No => actions[cases[0].2].clone(),
             TRet::Inter(i, j) => {
-                let (low, high, inside, outside) =
-                    coupe_inter(i as usize, j as usize, cases);
+                let (low, high, inside, outside) = coupe_inter(i as usize, j as usize, cases);
                 let (_, (cinside, _)) = self.opt_count(&inside);
                 let (_, (coutside, _)) = self.opt_count(&outside);
                 if low == high {
@@ -781,7 +787,13 @@ impl SwitchCompiler {
 
 // ── Comparison helpers ────────────────────────────────────────────────
 
-fn make_if_test(prim: Primitive, arg: &RawLambda, i: i32, ifso: RawLambda, ifnot: RawLambda) -> RawLambda {
+fn make_if_test(
+    prim: Primitive,
+    arg: &RawLambda,
+    i: i32,
+    ifso: RawLambda,
+    ifnot: RawLambda,
+) -> RawLambda {
     make_if(
         make_prim(prim, vec![arg.clone(), make_const(i)]),
         ifso,
@@ -1039,11 +1051,8 @@ fn wrap_handlers(mut result: RawLambda, handlers: Vec<(i32, RawLambda)>) -> RawL
                 continue;
             }
         }
-        result = RawLambda::LstaticCatch(
-            Box::new(result),
-            (exit_id, Vec::new()),
-            Box::new(handler),
-        );
+        result =
+            RawLambda::LstaticCatch(Box::new(result), (exit_id, Vec::new()), Box::new(handler));
     }
     result
 }
@@ -1140,10 +1149,7 @@ pub fn as_interval_canfail(
                 r.extend(fail_rec(cur_high + 1, cur_high + 1, rest, high, store));
                 r
             } else {
-                let mut r = vec![
-                    (cur_low, cur_high, cur_act),
-                    (cur_high + 1, i - 1, 0),
-                ];
+                let mut r = vec![(cur_low, cur_high, cur_act), (cur_high + 1, i - 1, 0)];
                 r.extend(nofail_rec(i, i, act_index, &rest[1..], high, store));
                 r
             }
@@ -1192,9 +1198,7 @@ pub fn as_interval_canfail(
 }
 
 /// Convert sorted (int, action) pairs (no fail) into intervals.
-pub fn as_interval_nofail(
-    sorted: &[(i32, RawLambda)],
-) -> (Vec<(i32, i32, usize)>, ActionStore) {
+pub fn as_interval_nofail(sorted: &[(i32, RawLambda)]) -> (Vec<(i32, i32, usize)>, ActionStore) {
     let mut store = ActionStore::new();
 
     let has_hole = sorted.windows(2).any(|w| w[1].0 > w[0].0 + 1);

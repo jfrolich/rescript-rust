@@ -199,13 +199,12 @@ pub struct TypeContext<'a> {
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
-    qualified_module_components_cache:
-        RefCell<
-            ahash::AHashMap<
-                QualifiedModuleComponentsCacheKey,
-                super::env_lazy::QualifiedModuleComponents,
-            >,
+    qualified_module_components_cache: RefCell<
+        ahash::AHashMap<
+            QualifiedModuleComponentsCacheKey,
+            super::env_lazy::QualifiedModuleComponents,
         >,
+    >,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache:
@@ -537,10 +536,9 @@ impl<'a> TypeContext<'a> {
         path: Path,
         desc: super::decl::ValueDescription,
     ) {
-        self.resolved_module_value_cache.borrow_mut().insert(
-            (module_path.clone(), value_name.to_string()),
-            (path, desc),
-        );
+        self.resolved_module_value_cache
+            .borrow_mut()
+            .insert((module_path.clone(), value_name.to_string()), (path, desc));
     }
 
     /// Look up a cached dotted value lookup for a resolved module access path.

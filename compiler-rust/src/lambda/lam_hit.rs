@@ -9,7 +9,7 @@
 //! Rust-only logic.
 
 use crate::ident::Ident;
-use crate::lambda::{Lambda, LFunction};
+use crate::lambda::{LFunction, Lambda};
 
 /// Direct port of `Lam_hit.hit_variable` (lam_hit.ml:62-94).
 ///
@@ -40,7 +40,9 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
             Lambda::Llet(_, _, arg, body) => hit(fv, arg) || hit(fv, body),
             Lambda::Lletrec(decl, body) => hit(fv, body) || hit_list_snd(fv, decl),
             Lambda::Lfor(_, e1, e2, _, e3) => hit(fv, e1) || hit(fv, e2) || hit(fv, e3),
-            Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => hit(fv, e1) || hit(fv, e2),
+            Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => {
+                hit(fv, e1) || hit(fv, e2)
+            }
             Lambda::Lconst(_) => false,
             Lambda::Lapply(apply) => hit(fv, &apply.ap_func) || hit_list(fv, &apply.ap_args),
             // Global persistent module — play safe (lam_hit.ml:48).
@@ -53,9 +55,7 @@ pub fn hit_variable(fv: &Ident, l: &Lambda) -> bool {
                     || hit_opt(fv, sw.sw_failaction.as_deref())
             }
             Lambda::LstringSwitch(arg, cases, default) => {
-                hit(fv, arg)
-                    || hit_list_snd(fv, cases)
-                    || hit_opt(fv, default.as_deref())
+                hit(fv, arg) || hit_list_snd(fv, cases) || hit_opt(fv, default.as_deref())
             }
             Lambda::LstaticRaise(_, args) => hit_list(fv, args),
             Lambda::LifThenElse(e1, e2, e3) => hit(fv, e1) || hit(fv, e2) || hit(fv, e3),

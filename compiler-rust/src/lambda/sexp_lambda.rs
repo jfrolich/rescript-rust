@@ -750,8 +750,8 @@ fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
 #[cfg(test)]
 mod tests {
     use super::{constant, escape_ocaml_string, switch_names_sexp};
-    use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
     use crate::lambda::lam_constant::{Constant, StringDelim};
+    use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
 
     #[test]
     fn prints_switch_names_consts_and_blocks() {

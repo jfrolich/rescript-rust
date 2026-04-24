@@ -1,7 +1,9 @@
 //! Integration tests for comptime (compile-time metaprogramming).
 
-use rescript_compiler::driver::{compile_source_in_process, typecheck_interface_in_process, CompilerOptions};
-use rescript_compiler::cmi::persistent_env::{ModuleRegistry, InMemoryModuleInfo};
+use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::driver::{
+    CompilerOptions, compile_source_in_process, typecheck_interface_in_process,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -26,7 +28,9 @@ fn stdlib_registry() -> &'static ModuleRegistry {
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
                 if ext == "res" {
-                    registry.source_fallback_paths.insert(name.to_string(), path);
+                    registry
+                        .source_fallback_paths
+                        .insert(name.to_string(), path);
                 }
             }
         }
@@ -36,7 +40,9 @@ fn stdlib_registry() -> &'static ModuleRegistry {
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
                 if ext == "resi" {
-                    registry.source_fallback_paths.insert(name.to_string(), path);
+                    registry
+                        .source_fallback_paths
+                        .insert(name.to_string(), path);
                 }
             }
         }
@@ -73,15 +79,19 @@ fn compile_runtime_module(
             name,
             &options,
             registry,
-        ).map_err(|e| format!("typecheck {name}: {e:?}"))?;
+        )
+        .map_err(|e| format!("typecheck {name}: {e:?}"))?;
 
         if let Some(ps) = result.pers_struct {
             registry.cached_modules.insert(name.to_string(), ps);
-            registry.module_info.insert(name.to_string(), InMemoryModuleInfo {
-                source_path: path.clone(),
-                is_pure: true,
-                is_runtime: is_runtime_module,
-            });
+            registry.module_info.insert(
+                name.to_string(),
+                InMemoryModuleInfo {
+                    source_path: path.clone(),
+                    is_pure: true,
+                    is_runtime: is_runtime_module,
+                },
+            );
             registry.alias_rewrites.extend(result.new_alias_rewrites);
         }
     } else {
@@ -93,15 +103,19 @@ fn compile_runtime_module(
             &options,
             registry,
             false,
-        ).map_err(|e| format!("compile {name}: {e:?}"))?;
+        )
+        .map_err(|e| format!("compile {name}: {e:?}"))?;
 
         if let Some(ps) = result.pers_struct {
             registry.cached_modules.insert(name.to_string(), ps);
-            registry.module_info.insert(name.to_string(), InMemoryModuleInfo {
-                source_path: path.clone(),
-                is_pure: true,
-                is_runtime: is_runtime_module,
-            });
+            registry.module_info.insert(
+                name.to_string(),
+                InMemoryModuleInfo {
+                    source_path: path.clone(),
+                    is_pure: true,
+                    is_runtime: is_runtime_module,
+                },
+            );
             registry.alias_rewrites.extend(result.new_alias_rewrites);
         }
     }
@@ -144,17 +158,35 @@ fn json_codec() {
             eprintln!("=== JSON CODEC JS ===\n{}\n=== END ===", output);
 
             // Encoder should produce Dict operations
-            assert!(output.contains(r#"["name"]"#), "Expected Dict.set for 'name':\n{output}");
-            assert!(output.contains(r#"["age"]"#), "Expected Dict.set for 'age':\n{output}");
-            assert!(output.contains(r#"["street"]"#), "Expected nested 'street':\n{output}");
-            assert!(output.contains(r#"["city"]"#), "Expected nested 'city':\n{output}");
+            assert!(
+                output.contains(r#"["name"]"#),
+                "Expected Dict.set for 'name':\n{output}"
+            );
+            assert!(
+                output.contains(r#"["age"]"#),
+                "Expected Dict.set for 'age':\n{output}"
+            );
+            assert!(
+                output.contains(r#"["street"]"#),
+                "Expected nested 'street':\n{output}"
+            );
+            assert!(
+                output.contains(r#"["city"]"#),
+                "Expected nested 'city':\n{output}"
+            );
 
             // JSON.Encode.* should be identity (values appear directly)
-            assert!(output.contains(r#""Alice""#), "Expected 'Alice' value:\n{output}");
+            assert!(
+                output.contains(r#""Alice""#),
+                "Expected 'Alice' value:\n{output}"
+            );
             assert!(output.contains("30"), "Expected 30 value:\n{output}");
 
             // No comptime artifacts at runtime
-            assert!(!output.contains("typeInfo"), "No runtime typeInfo:\n{output}");
+            assert!(
+                !output.contains("typeInfo"),
+                "No runtime typeInfo:\n{output}"
+            );
         }
         Err(e) => {
             eprintln!("json_codec compilation error (expected — iterating): {e}");
@@ -171,7 +203,10 @@ let y = identity(int, 5)
 "#;
     let mut parser = rescript_compiler::parser::Parser::new("test.res", source);
     let _structure = rescript_compiler::parser::module::parse_structure(&mut parser);
-    assert!(!parser.has_errors(), "Mixed (type t, x) params should parse");
+    assert!(
+        !parser.has_errors(),
+        "Mixed (type t, x) params should parse"
+    );
 }
 
 #[test]
@@ -198,9 +233,15 @@ let p2 = rebuild(point, p)
     match result {
         Ok(output) => {
             eprintln!("=== RECORD TYPE PARAM JS ===\n{}\n=== END ===", output);
-            assert!(output.contains("rebuild$point"), "Expected rebuild$point:\n{output}");
+            assert!(
+                output.contains("rebuild$point"),
+                "Expected rebuild$point:\n{output}"
+            );
             // Should have x: p.x, y: p.y or equivalent
-            assert!(output.contains(".x") || output.contains("1"), "Expected x field:\n{output}");
+            assert!(
+                output.contains(".x") || output.contains("1"),
+                "Expected x field:\n{output}"
+            );
         }
         Err(e) => panic!("@record with type param should compile: {e}"),
     }
@@ -232,8 +273,10 @@ let y = describe(maybeInt, 0)
         Ok(output) => {
             eprintln!("=== OPTION DESTRUCT JS ===\n{}\n=== END ===", output);
             // Should have describe$option_int AND describe$int (recursive)
-            assert!(output.contains("describe$option_int") || output.contains("option"),
-                "Expected option specialization:\n{output}");
+            assert!(
+                output.contains("describe$option_int") || output.contains("option"),
+                "Expected option specialization:\n{output}"
+            );
         }
         Err(e) => panic!("option destructuring should compile: {e}"),
     }
@@ -268,10 +311,14 @@ let y = describe(point, 0)
         Ok(output) => {
             eprintln!("=== FIELD TYPE JS ===\n{}\n=== END ===", output);
             // Should have describe$point AND describe$int (recursive via field.type)
-            assert!(output.contains("describe$point") || output.contains("record"),
-                "Expected point specialization:\n{output}");
-            assert!(output.contains("describe$int") || output.contains("\"int\""),
-                "Expected int specialization from field.type:\n{output}");
+            assert!(
+                output.contains("describe$point") || output.contains("record"),
+                "Expected point specialization:\n{output}"
+            );
+            assert!(
+                output.contains("describe$int") || output.contains("\"int\""),
+                "Expected int specialization from field.type:\n{output}"
+            );
         }
         Err(e) => panic!("field.type should compile: {e}"),
     }
@@ -296,8 +343,14 @@ let y = describe(int, 42)
     match result {
         Ok(output) => {
             eprintln!("=== TYPE PARAM DECODER JS ===\n{}\n=== END ===", output);
-            assert!(output.contains("\"int\""), "Expected 'int' in output:\n{output}");
-            assert!(!output.contains("typeInfo"), "No runtime typeInfo:\n{output}");
+            assert!(
+                output.contains("\"int\""),
+                "Expected 'int' in output:\n{output}"
+            );
+            assert!(
+                !output.contains("typeInfo"),
+                "No runtime typeInfo:\n{output}"
+            );
         }
         Err(e) => panic!("decoder with type param should compile: {e}"),
     }
@@ -336,9 +389,15 @@ let k3: prefixedKeys = User_email
         Ok(output) => {
             eprintln!("=== COMPTIME.INLINE PREFIX JS ===\n{}\n=== END ===", output);
             // The variant constructors should be User_name, User_age, User_email
-            assert!(output.contains("User_name"), "Expected User_name:\n{output}");
+            assert!(
+                output.contains("User_name"),
+                "Expected User_name:\n{output}"
+            );
             assert!(output.contains("User_age"), "Expected User_age:\n{output}");
-            assert!(output.contains("User_email"), "Expected User_email:\n{output}");
+            assert!(
+                output.contains("User_email"),
+                "Expected User_email:\n{output}"
+            );
         }
         Err(e) => panic!("@comptime.inline should compile: {e}"),
     }
@@ -365,7 +424,10 @@ let fieldNames: array<string> = switch @typeInfo(user) {
             assert!(output.contains("\"age\""), "Expected 'age':\n{output}");
             assert!(output.contains("\"email\""), "Expected 'email':\n{output}");
             // Should NOT contain runtime Array.map call
-            assert!(!output.contains(".map("), "Should not have runtime .map:\n{output}");
+            assert!(
+                !output.contains(".map("),
+                "Should not have runtime .map:\n{output}"
+            );
         }
         Err(e) => panic!("Array.map in value context should compile: {e}"),
     }
@@ -465,8 +527,14 @@ let a: adminKey = Role
         Ok(output) => {
             eprintln!("=== GENERIC KEYSOF JS ===\n{}\n=== END ===", output);
             // u should reference a userKey constructor
-            assert!(output.contains("Name"), "Expected Name in output:\n{output}");
-            assert!(output.contains("Role"), "Expected Role in output:\n{output}");
+            assert!(
+                output.contains("Name"),
+                "Expected Name in output:\n{output}"
+            );
+            assert!(
+                output.contains("Role"),
+                "Expected Role in output:\n{output}"
+            );
         }
         Err(e) => panic!("generic keysOf should compile: {e}"),
     }
@@ -496,10 +564,18 @@ let myKey2: userKey = Age
         Ok(output) => {
             eprintln!("=== VARIANT FROM FIELDS JS ===\n{}\n=== END ===", output);
             // Should contain constructor references
-            assert!(output.contains("Name") || output.contains("\"Name\"") || output.contains("/* Name */"),
-                "Expected Name constructor:\n{output}");
-            assert!(output.contains("Age") || output.contains("\"Age\"") || output.contains("/* Age */"),
-                "Expected Age constructor:\n{output}");
+            assert!(
+                output.contains("Name")
+                    || output.contains("\"Name\"")
+                    || output.contains("/* Name */"),
+                "Expected Name constructor:\n{output}"
+            );
+            assert!(
+                output.contains("Age")
+                    || output.contains("\"Age\"")
+                    || output.contains("/* Age */"),
+                "Expected Age constructor:\n{output}"
+            );
         }
         Err(e) => panic!("@comptime type builder should compile: {e}"),
     }
@@ -582,8 +658,14 @@ let t2 = describe(u.name)
 let t3 = describe(u.age)
 "#;
     let output = compile_with_stdlib(source, "describe.res").unwrap();
-    assert!(output.contains("record") && output.contains("user"), "Expected 'record' + 'user':\n{output}");
-    assert!(output.contains(r#""string""#), "Expected 'string':\n{output}");
+    assert!(
+        output.contains("record") && output.contains("user"),
+        "Expected 'record' + 'user':\n{output}"
+    );
+    assert!(
+        output.contains(r#""string""#),
+        "Expected 'string':\n{output}"
+    );
     assert!(output.contains(r#""int""#), "Expected 'int':\n{output}");
 }
 
@@ -621,8 +703,14 @@ let enc = encodeValue(myUser)
     let output = compile_with_stdlib(source, "recursive_encode.res").unwrap();
     // Should have per-field string building, including nested address
     assert!(output.contains("name"), "Expected 'name' field:\n{output}");
-    assert!(output.contains("street"), "Expected nested 'street':\n{output}");
-    assert!(!output.contains("typeInfo"), "No runtime typeInfo:\n{output}");
+    assert!(
+        output.contains("street"),
+        "Expected nested 'street':\n{output}"
+    );
+    assert!(
+        !output.contains("typeInfo"),
+        "No runtime typeInfo:\n{output}"
+    );
 }
 
 // ============================================================================
@@ -665,16 +753,28 @@ let json = encode(myUser)
     eprintln!("=== ENCODER JS ===\n{}\n=== END ===", output);
 
     // Dict operations
-    assert!(output.contains(r#"["name"]"#), "Expected Dict.set for 'name':\n{output}");
-    assert!(output.contains(r#"["age"]"#), "Expected Dict.set for 'age':\n{output}");
-    assert!(output.contains(r#"["street"]"#), "Expected nested 'street':\n{output}");
+    assert!(
+        output.contains(r#"["name"]"#),
+        "Expected Dict.set for 'name':\n{output}"
+    );
+    assert!(
+        output.contains(r#"["age"]"#),
+        "Expected Dict.set for 'age':\n{output}"
+    );
+    assert!(
+        output.contains(r#"["street"]"#),
+        "Expected nested 'street':\n{output}"
+    );
 
     // Identity encoding (values appear directly, not wrapped)
     assert!(output.contains(r#""Alice""#), "Expected 'Alice':\n{output}");
     assert!(output.contains("30"), "Expected 30:\n{output}");
 
     // No comptime leakage
-    assert!(!output.contains("typeInfo"), "No runtime typeInfo:\n{output}");
+    assert!(
+        !output.contains("typeInfo"),
+        "No runtime typeInfo:\n{output}"
+    );
     assert!(!output.contains("undefined"), "No undefined:\n{output}");
 }
 
@@ -709,8 +809,10 @@ let desc = describe(myTree)
         Ok(output) => {
             eprintln!("=== RECURSIVE TYPE JS ===\n{}\n=== END ===", output);
             // Should contain "record" + "tree" (type description)
-            assert!(output.contains("record") || output.contains("tree"),
-                "Expected type description:\n{output}");
+            assert!(
+                output.contains("record") || output.contains("tree"),
+                "Expected type description:\n{output}"
+            );
         }
         Err(e) => {
             eprintln!("Recursive type test error (may be expected): {e}");
@@ -753,7 +855,10 @@ let enc = encodeValue(myTree)
     match result {
         Ok(output) => {
             eprintln!("=== RECURSIVE ENCODER JS ===\n{}\n=== END ===", output);
-            assert!(output.contains("value"), "Expected 'value' field:\n{output}");
+            assert!(
+                output.contains("value"),
+                "Expected 'value' field:\n{output}"
+            );
         }
         Err(e) => {
             eprintln!("Recursive encoder error (may need named fn emission): {e}");
@@ -776,7 +881,10 @@ let x = switch Red {
 }
 "#;
     let output = compile_with_stdlib(source, "fold.res").unwrap();
-    assert!(output.contains("let x = \"red\""), "Expected fold to 'red':\n{output}");
+    assert!(
+        output.contains("let x = \"red\""),
+        "Expected fold to 'red':\n{output}"
+    );
 }
 
 #[test]
@@ -821,12 +929,22 @@ let aliceJson = encode(alice)
         registry.cached_modules.remove(&module_name);
         registry.module_info.remove(&module_name);
 
-        let result = compile_source_in_process(source, "Playground.res", &module_name, &options, &registry, false);
+        let result = compile_source_in_process(
+            source,
+            "Playground.res",
+            &module_name,
+            &options,
+            &registry,
+            false,
+        );
         match result {
             Ok(r) => {
                 eprintln!("=== Iteration {iteration} output ===");
-                assert!(r.js_output.contains("encode$user"),
-                    "Iteration {iteration}: expected encode$user:\n{}", r.js_output);
+                assert!(
+                    r.js_output.contains("encode$user"),
+                    "Iteration {iteration}: expected encode$user:\n{}",
+                    r.js_output
+                );
                 // Save module to registry (mimics playground's extract_all_cached_modules)
                 if let Some(ps) = r.pers_struct {
                     registry.cached_modules.insert(module_name.clone(), ps);
@@ -880,7 +998,10 @@ let j3 = encode(Point)
             eprintln!("HAS_TAG ARG_AT OUTPUT:\n{o}");
             assert!(o.contains("encode$shape"), "Expected encode$shape:\n{o}");
             // Float-specialized encoder should exist since args are typed
-            assert!(o.contains("encode$float"), "Expected encode$float (args recursed):\n{o}");
+            assert!(
+                o.contains("encode$float"),
+                "Expected encode$float (args recursed):\n{o}"
+            );
         }
         Err(e) => panic!("@hasTag + @argAt should compile: {e}"),
     }
@@ -1274,10 +1395,21 @@ let aliceJson = encode(alice)
         ..Default::default()
     };
     let module_name = "Playground".to_string();
-    match compile_source_in_process(source, "Playground.res", &module_name, &options, &registry, false) {
+    match compile_source_in_process(
+        source,
+        "Playground.res",
+        &module_name,
+        &options,
+        &registry,
+        false,
+    ) {
         Ok(r) => {
             eprintln!("PLAYGROUND FLOW OUTPUT:\n{}", r.js_output);
-            assert!(r.js_output.contains("encode$user"), "Expected encode$user:\n{}", r.js_output);
+            assert!(
+                r.js_output.contains("encode$user"),
+                "Expected encode$user:\n{}",
+                r.js_output
+            );
         }
         Err(e) => panic!("playground flow should compile: {e}"),
     }
@@ -1320,7 +1452,10 @@ let aliceJson = encode(alice)
 "#;
     let output = compile_with_stdlib(source, "Playground.res").expect("compile");
     eprintln!("USER CODE OUTPUT:\n{output}");
-    assert!(output.contains("encode$user"), "Expected encode$user in output:\n{output}");
+    assert!(
+        output.contains("encode$user"),
+        "Expected encode$user in output:\n{output}"
+    );
 }
 
 #[test]

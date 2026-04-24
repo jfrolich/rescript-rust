@@ -5,12 +5,12 @@
 //! This corresponds to OCaml's `js_dump_program.ml`.
 
 use super::op::Kind;
-use super::printer::{convert_ident_name, JsPrinter};
+use super::printer::{JsPrinter, convert_ident_name};
 use super::{
     Block, DepsProgram, Expression, ExpressionDesc, ModulePathResolver, Program, Statement,
     StatementDesc,
 };
-use crate::binary_ast::ppx::{classify_js_stmt, JsStmtClassification};
+use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
 use crate::ident::Ident;
 
 impl JsPrinter {
@@ -173,7 +173,11 @@ fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
         ..
     }) = block.get(index)
     {
-        if !info.is_stmt || !matches!(classify_js_stmt(&info.code), JsStmtClassification::JsStmtComment)
+        if !info.is_stmt
+            || !matches!(
+                classify_js_stmt(&info.code),
+                JsStmtClassification::JsStmtComment
+            )
         {
             break;
         }
@@ -216,10 +220,10 @@ pub fn print_deps_program_with_directives(
 mod tests {
     use super::*;
     use crate::js_ir::op::{ImportAttributes, Kind, Number};
+    use crate::js_ir::printer::JsPrinter;
     use crate::js_ir::{
         ExpressionDesc, JsRawInfo, ModuleId, ModulePathResolver, VariableDeclaration,
     };
-    use crate::js_ir::printer::JsPrinter;
     use std::path::Path;
 
     #[test]

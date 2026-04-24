@@ -91,9 +91,7 @@ pub fn row_field_unmatched_reither_link(
     field: &RowField,
 ) -> Option<RowFieldRef> {
     match field {
-        RowField::Reither {
-            matched, link, ..
-        } => match ctx.get_row_field(*link) {
+        RowField::Reither { matched, link, .. } => match ctx.get_row_field(*link) {
             Some(linked) => row_field_unmatched_reither_link(ctx, &linked),
             None if !*matched => Some(*link),
             None => None,

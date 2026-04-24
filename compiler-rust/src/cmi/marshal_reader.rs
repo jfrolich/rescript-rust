@@ -590,11 +590,26 @@ mod tests {
     #[test]
     fn test_read_custom_fixed_int32() {
         let data = [
-            0x84, 0x95, 0xA6, 0xBE, // magic
-            0x00, 0x00, 0x00, 0x08, // data_len = 8
-            0x00, 0x00, 0x00, 0x01, // obj_count = 1
-            0x00, 0x00, 0x00, 0x03, // size_32 = 3 words
-            0x00, 0x00, 0x00, 0x03, // size_64 = 3 words
+            0x84,
+            0x95,
+            0xA6,
+            0xBE, // magic
+            0x00,
+            0x00,
+            0x00,
+            0x08, // data_len = 8
+            0x00,
+            0x00,
+            0x00,
+            0x01, // obj_count = 1
+            0x00,
+            0x00,
+            0x00,
+            0x03, // size_32 = 3 words
+            0x00,
+            0x00,
+            0x00,
+            0x03, // size_64 = 3 words
             CODE_CUSTOM_FIXED,
             b'_',
             b'i',

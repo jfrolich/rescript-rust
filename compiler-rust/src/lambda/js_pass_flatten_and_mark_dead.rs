@@ -13,8 +13,8 @@ use crate::js_ir::{
     BinOp, Block, CaseClause, DepsProgram, Expression, ExpressionDesc, Program, Statement,
     StatementDesc, StringClause, VIdent, VariableDeclaration,
 };
-use crate::lambda::lam_compat::LetKind;
 use crate::lambda::TagInfo;
+use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::{
     direct_projection_from_pure_literal, int_literal, js_expr_no_side_effects,
@@ -26,7 +26,10 @@ pub(crate) fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     deps
 }
 
-pub(crate) fn apply_js_flatten_and_mark_dead_pass(mut deps: DepsProgram, jsx_preserve: bool) -> DepsProgram {
+pub(crate) fn apply_js_flatten_and_mark_dead_pass(
+    mut deps: DepsProgram,
+    jsx_preserve: bool,
+) -> DepsProgram {
     let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_program(&deps.program));
     deps.program = flatten_and_mark_dead_program(deps.program, &id_gen, jsx_preserve);
     deps
@@ -2138,11 +2141,21 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::ForOf(label, ident, iterable, body) => Statement {
-            desc: StatementDesc::ForOf(label, ident, flatten_expression(iterable), flatten_block(body)),
+            desc: StatementDesc::ForOf(
+                label,
+                ident,
+                flatten_expression(iterable),
+                flatten_block(body),
+            ),
             comment,
         },
         StatementDesc::ForAwaitOf(label, ident, iterable, body) => Statement {
-            desc: StatementDesc::ForAwaitOf(label, ident, flatten_expression(iterable), flatten_block(body)),
+            desc: StatementDesc::ForAwaitOf(
+                label,
+                ident,
+                flatten_expression(iterable),
+                flatten_block(body),
+            ),
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
