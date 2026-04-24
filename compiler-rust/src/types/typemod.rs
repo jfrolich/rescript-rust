@@ -61,6 +61,28 @@ pub fn path_from_longident<'a>(
     }
 }
 
+fn open_direct_persistent_module<'a>(
+    env: &mut Env,
+    lid: &Longident,
+    arena: &ParseArena,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path> {
+    let Longident::Lident(module_idx) = lid else {
+        return None;
+    };
+    let module_name = arena.get_string(*module_idx);
+    if env.find_module_with_origin(module_name).is_ok() {
+        return None;
+    }
+    let pers = pers_env.as_mut()?;
+    if pers.open_module(module_name, env, ctx) {
+        Some(Path::pident(Ident::create_persistent(module_name)))
+    } else {
+        None
+    }
+}
+
 /// Wrap a translated label type in Ttyp_poly if not already poly.
 /// Mirrors OCaml `Ast_helper.Typ.force_poly` + `transl_simple_type` flow in `transl_labels`:
 /// if the parsed label type was already `Ptyp_poly`, `transl_type` already produced a
@@ -5931,19 +5953,29 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         // opened module's types, matching transl_signature behavior.
                         let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                         let open_lid = arena.get_longident(od.popen_lid.txt);
-                        if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                        if open_direct_persistent_module(
+                            &mut sig_env,
                             open_lid,
                             arena,
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
-                        ) {
-                            crate::cmi::persistent_env::add_signature_to_env(
-                                &sig_items,
-                                &resolved_path,
-                                &mut sig_env,
+                        )
+                        .is_none()
+                        {
+                            if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                                open_lid,
+                                arena,
+                                &mut tctx.persistent_env,
                                 tctx.type_ctx,
-                                true, // as_opened
-                            );
+                            ) {
+                                crate::cmi::persistent_env::add_signature_to_env(
+                                    &sig_items,
+                                    &resolved_path,
+                                    &mut sig_env,
+                                    tctx.type_ctx,
+                                    true, // as_opened
+                                );
+                            }
                         }
                     }
                     _ => {}
@@ -8524,7 +8556,15 @@ pub fn transl_signature<'a>(
                 let open_lid = arena.get_longident(od.popen_lid.txt);
                 // Resolve the module and extend the environment with opened bindings.
                 // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
-                let path = if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                let path = if let Some(path) = open_direct_persistent_module(
+                    &mut sig_env,
+                    open_lid,
+                    arena,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    path
+                } else if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
                     open_lid,
                     arena,
                     &mut tctx.persistent_env,
@@ -11977,7 +12017,15 @@ fn type_structure_item<'a>(
             // same alias-rewritten module resolution path as value lookup.
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
-            let path = if let Some((resolved_path, sig_items)) =
+            let path = if let Some(path) = open_direct_persistent_module(
+                &mut new_env,
+                open_lid,
+                arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
+                path
+            } else if let Some((resolved_path, sig_items)) =
                 env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
             {
                 crate::cmi::persistent_env::add_signature_to_env(
