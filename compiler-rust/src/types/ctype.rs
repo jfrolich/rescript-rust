@@ -7213,7 +7213,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                     let row = row.as_ref();
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
-                    let keep = super::btype::is_tvar(ctx, more) && more_level != GENERIC_LEVEL;
+                    let keep = more_level != GENERIC_LEVEL;
                     let mut more_copy = match ctx.get_desc(more).clone() {
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)
