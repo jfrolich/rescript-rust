@@ -19,78 +19,74 @@ const STAMP_BOOL: i32 = 4;
 const STAMP_UNIT: i32 = 5;
 const STAMP_EXN: i32 = 6;
 const STAMP_ARRAY: i32 = 7;
-const STAMP_LIST: i32 = 8;
-const STAMP_OPTION: i32 = 9;
-const STAMP_RESULT: i32 = 10;
-const STAMP_DICT: i32 = 11;
-const STAMP_BIGINT: i32 = 12;
-const STAMP_STRING: i32 = 13;
-const STAMP_EXTENSION_CONSTRUCTOR: i32 = 14;
-const STAMP_UNKNOWN: i32 = 15;
-const STAMP_PROMISE: i32 = 16;
+const STAMP_ITERABLE: i32 = 8;
+const STAMP_ASYNC_ITERABLE: i32 = 9;
+const STAMP_LIST: i32 = 10;
+const STAMP_OPTION: i32 = 11;
+const STAMP_RESULT: i32 = 12;
+const STAMP_DICT: i32 = 13;
+const STAMP_BIGINT: i32 = 14;
+const STAMP_STRING: i32 = 15;
+const STAMP_EXTENSION_CONSTRUCTOR: i32 = 16;
+const STAMP_UNKNOWN: i32 = 17;
+const STAMP_PROMISE: i32 = 18;
 
 // Predef exceptions (Ident.create_predef_exn) — same counter, with PREDEF_EXN flag
-const STAMP_MATCH_FAILURE: i32 = 17;
-const STAMP_INVALID_ARGUMENT: i32 = 18;
-const STAMP_FAILURE: i32 = 19;
-const STAMP_OK: i32 = 20;
-const STAMP_ERROR: i32 = 21;
+const STAMP_MATCH_FAILURE: i32 = 19;
+const STAMP_INVALID_ARGUMENT: i32 = 20;
+const STAMP_FAILURE: i32 = 21;
+const STAMP_OK: i32 = 22;
+const STAMP_ERROR: i32 = 23;
 // dict_magic_field_name uses regular ident_create (no predef_exn flag)
-const STAMP_DICT_MAGIC_FIELD: i32 = 22;
-const STAMP_JS_EXN: i32 = 23;
-const STAMP_NOT_FOUND: i32 = 24;
-const STAMP_END_OF_FILE: i32 = 25;
-const STAMP_DIVISION_BY_ZERO: i32 = 26;
-const STAMP_ASSERT_FAILURE: i32 = 27;
-const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 28;
+const STAMP_DICT_MAGIC_FIELD: i32 = 24;
+const STAMP_JS_EXN: i32 = 25;
+const STAMP_NOT_FOUND: i32 = 26;
+const STAMP_END_OF_FILE: i32 = 27;
+const STAMP_DIVISION_BY_ZERO: i32 = 28;
+const STAMP_ASSERT_FAILURE: i32 = 29;
+const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 30;
 
 // Constructor idents (regular Ident.create, in common_initial_env)
-const STAMP_FALSE: i32 = 29;
-const STAMP_TRUE: i32 = 30;
-const STAMP_VOID: i32 = 31; // "()"
-const STAMP_NIL: i32 = 32; // "[]"
-const STAMP_CONS: i32 = 33; // "::"
-const STAMP_NONE: i32 = 34;
-const STAMP_SOME: i32 = 35;
-const STAMP_CTOR_UNKNOWN: i32 = 36;
+const STAMP_FALSE: i32 = 31;
+const STAMP_TRUE: i32 = 32;
+const STAMP_VOID: i32 = 33; // "()"
+const STAMP_NIL: i32 = 34; // "[]"
+const STAMP_CONS: i32 = 35; // "::"
+const STAMP_NONE: i32 = 36;
+const STAMP_SOME: i32 = 37;
+const STAMP_CTOR_UNKNOWN: i32 = 38;
 
-// Comptime type reflection types
-const STAMP_TYPE_INFO: i32 = 37;
-const STAMP_FIELD_INFO: i32 = 38;
-const STAMP_CONSTRUCTOR_INFO: i32 = 39;
+// Rust-only comptime type reflection predefs continue after OCaml predefs.
+const STAMP_TYPE_INFO: i32 = 39;
+const STAMP_FIELD_INFO: i32 = 40;
+const STAMP_CONSTRUCTOR_INFO: i32 = 41;
 
 // typeInfo constructors
-const STAMP_TI_INT: i32 = 40;
-const STAMP_TI_FLOAT: i32 = 41;
-const STAMP_TI_STRING: i32 = 42;
-const STAMP_TI_BOOL: i32 = 43;
-const STAMP_TI_UNIT: i32 = 44;
-const STAMP_TI_CHAR: i32 = 45;
-const STAMP_TI_BIGINT: i32 = 46;
-const STAMP_TI_RECORD: i32 = 47;
-const STAMP_TI_VARIANT: i32 = 48;
-const STAMP_TI_ARRAY: i32 = 49;
-const STAMP_TI_OPTION: i32 = 50;
-const STAMP_TI_FUNCTION: i32 = 51;
-const STAMP_TI_EXTERNAL: i32 = 52;
-const STAMP_TI_OPAQUE: i32 = 53;
-const STAMP_TI_UNKNOWN: i32 = 54;
+const STAMP_TI_INT: i32 = 42;
+const STAMP_TI_FLOAT: i32 = 43;
+const STAMP_TI_STRING: i32 = 44;
+const STAMP_TI_BOOL: i32 = 45;
+const STAMP_TI_UNIT: i32 = 46;
+const STAMP_TI_CHAR: i32 = 47;
+const STAMP_TI_BIGINT: i32 = 48;
+const STAMP_TI_RECORD: i32 = 49;
+const STAMP_TI_VARIANT: i32 = 50;
+const STAMP_TI_ARRAY: i32 = 51;
+const STAMP_TI_OPTION: i32 = 52;
+const STAMP_TI_FUNCTION: i32 = 53;
+const STAMP_TI_EXTERNAL: i32 = 54;
+const STAMP_TI_OPAQUE: i32 = 55;
+const STAMP_TI_UNKNOWN: i32 = 56;
 
 // fieldInfo labels
-const STAMP_FI_NAME: i32 = 55;
-const STAMP_FI_TYP: i32 = 56;
-const STAMP_FI_OPTIONAL: i32 = 57;
-const STAMP_FI_MUTABLE: i32 = 58;
+const STAMP_FI_NAME: i32 = 57;
+const STAMP_FI_TYP: i32 = 58;
+const STAMP_FI_OPTIONAL: i32 = 59;
+const STAMP_FI_MUTABLE: i32 = 60;
 
 // constructorInfo labels
-const STAMP_CI_NAME: i32 = 59;
-const STAMP_CI_ARGS: i32 = 60;
-
-// Upstream #8355: Iterable / AsyncIterable predef types.
-// Placed at the end of the predef stamp range to avoid reshuffling existing
-// stamps. type_is_builtin_path_but_option has an explicit branch below.
-const STAMP_ITERABLE: i32 = 61;
-const STAMP_ASYNC_ITERABLE: i32 = 62;
+const STAMP_CI_NAME: i32 = 61;
+const STAMP_CI_ARGS: i32 = 62;
 
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
@@ -129,6 +125,12 @@ pub fn ident_exn() -> Ident {
 pub fn ident_array() -> Ident {
     make_ident("array", STAMP_ARRAY)
 }
+pub fn ident_iterable() -> Ident {
+    make_ident("iterable", STAMP_ITERABLE)
+}
+pub fn ident_async_iterable() -> Ident {
+    make_ident("asyncIterable", STAMP_ASYNC_ITERABLE)
+}
 pub fn ident_list() -> Ident {
     make_ident("list", STAMP_LIST)
 }
@@ -155,12 +157,6 @@ pub fn ident_unknown() -> Ident {
 }
 pub fn ident_promise() -> Ident {
     make_ident("promise", STAMP_PROMISE)
-}
-pub fn ident_iterable() -> Ident {
-    make_ident("iterable", STAMP_ITERABLE)
-}
-pub fn ident_async_iterable() -> Ident {
-    make_ident("asyncIterable", STAMP_ASYNC_ITERABLE)
 }
 
 // Comptime type reflection idents
@@ -304,6 +300,12 @@ pub fn path_exn() -> Path {
 pub fn path_array() -> Path {
     Path::pident(ident_array())
 }
+pub fn path_iterable() -> Path {
+    Path::pident(ident_iterable())
+}
+pub fn path_async_iterable() -> Path {
+    Path::pident(ident_async_iterable())
+}
 pub fn path_list() -> Path {
     Path::pident(ident_list())
 }
@@ -331,12 +333,6 @@ pub fn path_unknown() -> Path {
 pub fn path_promise() -> Path {
     Path::pident(ident_promise())
 }
-pub fn path_iterable() -> Path {
-    Path::pident(ident_iterable())
-}
-pub fn path_async_iterable() -> Path {
-    Path::pident(ident_async_iterable())
-}
 pub fn path_match_failure() -> Path {
     Path::pident(ident_match_failure())
 }
@@ -357,11 +353,6 @@ pub fn type_is_builtin_path_but_option(p: &Path) -> Option<bool> {
         Path::Pident(id) if id.stamp() == STAMP_OPTION => Some(false),
         Path::Pident(id) if id.stamp() == STAMP_UNIT => Some(false),
         Path::Pident(id) if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_PROMISE => Some(true),
-        // Upstream #8355: iterable / asyncIterable added as predef, but placed
-        // at the end of the stamp range in Rust to avoid reshuffling existing
-        // stamps. Explicitly mark them as builtin.
-        Path::Pident(id) if id.stamp() == STAMP_ITERABLE => Some(true),
-        Path::Pident(id) if id.stamp() == STAMP_ASYNC_ITERABLE => Some(true),
         _ => None,
     }
 }
@@ -377,6 +368,8 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "unit" => Some(ident_unit()),
         "exn" => Some(ident_exn()),
         "array" => Some(ident_array()),
+        "iterable" => Some(ident_iterable()),
+        "asyncIterable" => Some(ident_async_iterable()),
         "list" => Some(ident_list()),
         "option" => Some(ident_option()),
         "result" => Some(ident_result()),
@@ -386,8 +379,6 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
-        "iterable" => Some(ident_iterable()),
-        "asyncIterable" => Some(ident_async_iterable()),
         "typeInfo" => Some(ident_type_info()),
         "fieldInfo" => Some(ident_field_info()),
         "constructorInfo" => Some(ident_constructor_info()),
