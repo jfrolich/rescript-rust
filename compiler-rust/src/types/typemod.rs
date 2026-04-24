@@ -6057,6 +6057,272 @@ fn translate_module_type_to_decl<'a>(
     translate_module_type_to_decl_with_typed_hint(tctx, env, arena, mty, None)
 }
 
+fn empty_module_decl(
+    md_type: crate::types::decl::ModuleType,
+) -> crate::types::decl::ModuleDeclaration {
+    crate::types::decl::ModuleDeclaration {
+        md_type,
+        md_attributes: vec![],
+        md_loc: crate::location::Location::none(),
+        md_path: None,
+    }
+}
+
+fn default_module_type(
+    mty: Option<crate::types::decl::ModuleType>,
+) -> crate::types::decl::ModuleType {
+    mty.unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]))
+}
+
+fn add_decl_signature_item_to_env(item: &crate::types::decl::SignatureItem, env: &mut Env) {
+    match item {
+        crate::types::decl::SignatureItem::SigValue(id, desc) => {
+            env.add_value(id.clone(), desc.clone())
+        }
+        crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+            env.add_type(id.clone(), decl.clone())
+        }
+        crate::types::decl::SignatureItem::SigModule(id, md, _) => {
+            env.add_module(id.clone(), md.clone())
+        }
+        crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+            env.add_modtype(id.clone(), mtd.clone())
+        }
+        _ => {}
+    }
+}
+
+fn approx_abstract_type_decl(
+    ctx: &crate::types::context::TypeContext<'_>,
+    arity: usize,
+) -> crate::types::decl::TypeDeclaration {
+    ctx.begin_def();
+    let params = (0..arity).map(|_| ctx.new_var(None)).collect::<Vec<_>>();
+    ctx.end_def();
+    for &param in &params {
+        crate::types::ctype::generalize(ctx, param);
+    }
+    crate::types::decl::TypeDeclaration {
+        type_params: params,
+        type_arity: arity as i32,
+        type_kind: crate::types::decl::TypeKind::TypeAbstract,
+        type_private: crate::types::PrivateFlag::Public,
+        type_manifest: None,
+        type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
+        type_newtype_level: None,
+        type_loc: crate::location::Location::none(),
+        type_attributes: vec![],
+        type_immediate: false,
+        type_unboxed: crate::types::decl::UnboxedStatus::default(),
+        type_inlined_types: vec![],
+        type_path: None,
+    }
+}
+
+fn approx_type_decls(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    decls: &[crate::parser::ast::TypeDeclaration],
+) -> Vec<(Ident, crate::types::decl::TypeDeclaration)> {
+    decls
+        .iter()
+        .map(|decl| {
+            let id = tctx
+                .type_ctx
+                .create_ident(arena.get_string(decl.ptype_name.txt));
+            let mut approx = approx_abstract_type_decl(tctx.type_ctx, decl.ptype_params.len());
+            approx.type_path = Some(Path::pident(id.clone()));
+            (id, approx)
+        })
+        .collect()
+}
+
+fn approx_modtype<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mty: &crate::parser::ast::ModuleType,
+) -> TypeModResult<crate::types::decl::ModuleType> {
+    use crate::parser::ast::ModuleTypeDesc as PMtyDesc;
+    use crate::types::decl::{AliasPresence, ModuleType as DeclMty};
+
+    fn approx_signature<'a>(
+        tctx: &mut TypeCheckContext<'a>,
+        env: &Env,
+        arena: &'a ParseArena,
+        sig_items: &[crate::parser::ast::SignatureItem],
+    ) -> TypeModResult<crate::types::decl::Signature> {
+        use crate::parser::ast::SignatureItemDesc as PSigDesc;
+        use crate::types::decl::{ModtypeDeclaration, RecStatus, SignatureItem as SigItem};
+
+        let mut items = Vec::new();
+        let mut sig_env = env.clone();
+        for sig_item in sig_items {
+            match &*sig_item.psig_desc {
+                PSigDesc::Psig_type(args) => {
+                    let (rec_flag, decls) = &**args;
+                    for (idx, (id, decl)) in approx_type_decls(tctx, arena, decls)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        items.push(SigItem::SigType(id, decl, sig_rec_status(*rec_flag, idx)));
+                    }
+                }
+                PSigDesc::Psig_module(pmd) => {
+                    let id = tctx
+                        .type_ctx
+                        .create_ident(arena.get_string(pmd.pmd_name.txt));
+                    let md_type =
+                        approx_modtype(tctx, &sig_env, arena, arena.get_mod_type(pmd.pmd_type))?;
+                    let md = empty_module_decl(md_type);
+                    sig_env.add_module(id.clone(), md.clone());
+                    items.push(SigItem::SigModule(id, md, RecStatus::TrecNot));
+                }
+                PSigDesc::Psig_recmodule(sdecls) => {
+                    let mut decls = Vec::with_capacity(sdecls.len());
+                    for pmd in sdecls.iter() {
+                        let id = tctx
+                            .type_ctx
+                            .create_ident(arena.get_string(pmd.pmd_name.txt));
+                        let md_type =
+                            approx_modtype(tctx, env, arena, arena.get_mod_type(pmd.pmd_type))?;
+                        decls.push((id, empty_module_decl(md_type)));
+                    }
+                    for (id, md) in &decls {
+                        sig_env.add_module(id.clone(), md.clone());
+                    }
+                    for (idx, (id, md)) in decls.into_iter().enumerate() {
+                        items.push(SigItem::SigModule(
+                            id,
+                            md,
+                            if idx == 0 {
+                                RecStatus::TrecFirst
+                            } else {
+                                RecStatus::TrecNext
+                            },
+                        ));
+                    }
+                }
+                PSigDesc::Psig_modtype(pmtd) => {
+                    let mtd_type = pmtd
+                        .pmtd_type
+                        .map(|idx| approx_modtype(tctx, &sig_env, arena, arena.get_mod_type(idx)))
+                        .transpose()?;
+                    let id = tctx
+                        .type_ctx
+                        .create_ident(arena.get_string(pmtd.pmtd_name.txt));
+                    let mtd = ModtypeDeclaration {
+                        mtd_type,
+                        mtd_attributes: vec![],
+                        mtd_loc: crate::location::Location::none(),
+                    };
+                    sig_env.add_modtype(id.clone(), mtd.clone());
+                    items.push(SigItem::SigModtype(id, mtd));
+                }
+                PSigDesc::Psig_open(od) => {
+                    let open_lid = arena.get_longident(od.popen_lid.txt);
+                    if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                        open_lid,
+                        arena,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) {
+                        crate::cmi::persistent_env::add_signature_to_env(
+                            &sig_items,
+                            &resolved_path,
+                            &mut sig_env,
+                            tctx.type_ctx,
+                            true,
+                        );
+                    }
+                }
+                PSigDesc::Psig_include(incl) => {
+                    let mty =
+                        approx_modtype(tctx, &sig_env, arena, arena.get_mod_type(incl.pincl_mod))?;
+                    if let Some(sig) = resolve_mod_type_to_sig(
+                        &mty,
+                        Some(&sig_env),
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) {
+                        for item in &sig {
+                            add_decl_signature_item_to_env(item, &mut sig_env);
+                        }
+                        items.extend(sig);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(crate::types::includemod::simplify_signature(&items))
+    }
+
+    match &*mty.pmty_desc {
+        PMtyDesc::Pmty_ident(lid) => {
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_modtype_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            Ok(DeclMty::MtyIdent(path))
+        }
+        PMtyDesc::Pmty_alias(lid) => {
+            let longident = tctx.resolve_lid(lid.txt).clone();
+            let path = lookup_module_path_by_lid(
+                &longident,
+                arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
+        }
+        PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(approx_signature(
+            tctx, env, arena, sig_items,
+        )?)),
+        PMtyDesc::Pmty_functor(args) => {
+            let (name, param_type, result_type_idx) = &**args;
+            let param_decl = param_type
+                .map(|idx| approx_modtype(tctx, env, arena, arena.get_mod_type(idx)))
+                .transpose()?;
+            let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
+            let mut result_env = env.clone();
+            result_env.add_module(
+                param_id.clone(),
+                empty_module_decl(default_module_type(param_decl.clone())),
+            );
+            let result = approx_modtype(
+                tctx,
+                &result_env,
+                arena,
+                arena.get_mod_type(*result_type_idx),
+            )?;
+            Ok(DeclMty::MtyFunctor {
+                param: param_id,
+                param_type: param_decl.map(Box::new),
+                result: Box::new(result),
+            })
+        }
+        PMtyDesc::Pmty_with(args) => {
+            let (body_idx, _constraints) = &**args;
+            approx_modtype(tctx, env, arena, arena.get_mod_type(*body_idx))
+        }
+        PMtyDesc::Pmty_typeof(me_idx) => {
+            let me = arena.get_mod_expr(*me_idx);
+            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me).ok_or(
+                TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)),
+            )
+        }
+        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
+    }
+}
+
 /// Extract a `decl::ModuleType` from a typed module expression (public wrapper).
 pub fn extract_module_type_from_mod_expr_pub(
     mod_expr: &ModuleExpr,
@@ -11620,182 +11886,146 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
-            // Recursive modules: module rec M = ...
+            // Recursive modules: module rec M : S = ...
             let ctx = tctx.type_ctx;
-            ctx.init_def(ctx.current_stamp());
-            // First pass: extract module types from constraints and add to env
-            let mut rec_env = env.clone();
-            let mut mod_ids = Vec::new();
+            let mut rec_bindings = Vec::with_capacity(mbs.len());
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
-                let mod_id = tctx.type_ctx.create_ident(mod_name_str);
-                // Try to extract type from Pmod_constraint (module rec A: SIG = BODY)
-                let init_mod_type = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
-                    ParsedModuleExprDesc::Pmod_constraint(_, mty) => {
-                        translate_module_type_to_decl(tctx, env, arena, arena.get_mod_type(*mty))
-                            .ok()
-                    }
-                    _ => None,
-                }
-                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
-                crate::types::ctype::lower_nongen_module_type(
-                    tctx.type_ctx,
-                    mod_id.binding_time() - 1,
-                    &init_mod_type,
-                );
-                rec_env.add_module(
-                    mod_id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: init_mod_type,
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
-                        md_path: None,
-                    },
-                );
-                mod_ids.push(mod_id);
+                let (inner_expr, mty) = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
+                    ParsedModuleExprDesc::Pmod_constraint(inner_expr, mty) => (*inner_expr, *mty),
+                    _ => return Err(TypeModError::InvalidModuleExpr(arena.to_location(loc))),
+                };
+                rec_bindings.push((
+                    mod_name_str.to_string(),
+                    mb.pmb_name.loc,
+                    inner_expr,
+                    mty,
+                    mb.pmb_attributes.clone(),
+                    mb.pmb_loc,
+                ));
             }
 
-            // Second pass: type-check each module body with the env containing all modules
+            // OCaml transl_recmodule_modtypes creates all recursive module ids
+            // before initializing the definition level or translating any
+            // module-type constraint.
+            let mod_ids = rec_bindings
+                .iter()
+                .map(|(name, _, _, _, _, _)| ctx.create_ident(name))
+                .collect::<Vec<_>>();
+
+            let mut approx_env = env.clone();
+            for id in &mod_ids {
+                let dummy = crate::types::decl::ModuleType::MtyIdent(Path::pident(
+                    ctx.create_ident("#recmod#"),
+                ));
+                approx_env.add_module(id.clone(), empty_module_decl(dummy));
+            }
+
+            ctx.init_def(ctx.current_stamp());
+
+            let mut init_decls = Vec::with_capacity(rec_bindings.len());
+            for ((_, _, _, mty_idx, _, _), id) in rec_bindings.iter().zip(mod_ids.iter()) {
+                let approx =
+                    approx_modtype(tctx, &approx_env, arena, arena.get_mod_type(*mty_idx))?;
+                init_decls.push((id.clone(), approx));
+            }
+
+            let mut env0 = env.clone();
+            for (id, mty) in &init_decls {
+                env0.add_module(id.clone(), empty_module_decl(mty.clone()));
+            }
+
+            let mut dcl1 = Vec::with_capacity(rec_bindings.len());
+            for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
+                rec_bindings.iter().zip(mod_ids.iter())
+            {
+                let typed_mty = transl_modtype(tctx, &env0, arena, arena.get_mod_type(*mty_idx))?;
+                dcl1.push(crate::types::typedtree::TypedModuleDeclaration {
+                    md_id: id.clone(),
+                    md_name: Located {
+                        txt: name.clone(),
+                        loc: *name_loc,
+                    },
+                    md_type: typed_mty,
+                    md_attributes: attrs.clone(),
+                    md_loc: *mb_loc,
+                });
+            }
+
+            let mut env1 = env.clone();
+            for decl in &dcl1 {
+                env1.add_module(
+                    decl.md_id.clone(),
+                    empty_module_decl(decl.md_type.mty_type.clone()),
+                );
+            }
+
+            let mut dcl2 = Vec::with_capacity(rec_bindings.len());
+            for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
+                rec_bindings.iter().zip(mod_ids.iter())
+            {
+                let typed_mty = transl_modtype(tctx, &env1, arena, arena.get_mod_type(*mty_idx))?;
+                dcl2.push(crate::types::typedtree::TypedModuleDeclaration {
+                    md_id: id.clone(),
+                    md_name: Located {
+                        txt: name.clone(),
+                        loc: *name_loc,
+                    },
+                    md_type: typed_mty,
+                    md_attributes: attrs.clone(),
+                    md_loc: *mb_loc,
+                });
+            }
+
+            let mut rec_env = env.clone();
+            for decl in &dcl2 {
+                rec_env.add_module(
+                    decl.md_id.clone(),
+                    empty_module_decl(decl.md_type.mty_type.clone()),
+                );
+            }
+
+            // Type-check each module body with the environment produced by the
+            // second recursive-module-type transition.
             // Match OCaml: for Pmod_constraint(expr, typ), type-check only expr (inner body),
             // then wrap in Tmod_constraint with mod_loc from the inner module (not the
             // constraint wrapper). OCaml does this in check_recmodule_inclusion.
-            let rec_env_ref = tctx.type_ctx.store_typed_env(&rec_env);
             let mut typed_bindings = Vec::new();
-            let mut binding_mod_types = Vec::new();
             let mut new_env = env.clone();
-            for (i, mb) in mbs.iter().enumerate() {
-                let typed_mod = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
-                    ParsedModuleExprDesc::Pmod_constraint(inner_expr, mty) => {
-                        let typed_inner = type_module_expr(
-                            tctx,
-                            &rec_env,
-                            arena,
-                            arena.get_mod_expr(*inner_expr),
-                        )?;
-                        let typed_mty =
-                            transl_modtype(tctx, &rec_env, arena, arena.get_mod_type(*mty))?;
-                        let inner_loc = typed_inner.mod_loc;
-                        // Compute coercion between implementation and constraint
-                        let coercion = {
-                            // Try mod_type first, then try extracting from the typed module expr
-                            let impl_mty_opt = Some(typed_inner.mod_type.clone()).or_else(|| {
-                                extract_module_type_from_mod_expr_with_resolver(
-                                    &typed_inner,
-                                    Some(&rec_env),
-                                    Some(tctx.type_ctx),
-                                    &mut |_, _| None,
-                                )
-                            });
-                            let sig_mty_opt = decl_module_type_from_typed(&typed_mty);
-                            match (impl_mty_opt, sig_mty_opt) {
-                                (Some(impl_mty), Some(sig_mty)) => {
-                                    crate::types::includemod::modtypes(
-                                        tctx.type_ctx,
-                                        &rec_env,
-                                        &impl_mty,
-                                        &sig_mty,
-                                    )
-                                    .unwrap_or(ModuleCoercion::Tcoerce_none)
-                                }
-                                _ => ModuleCoercion::Tcoerce_none,
-                            }
-                        };
-                        ModuleExpr {
-                            mod_desc: ModuleExprDesc::Tmod_constraint(
-                                Box::new(typed_inner),
-                                typed_mty.mty_type.clone(),
-                                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(
-                                    Box::new(typed_mty.clone()),
-                                ),
-                                coercion,
-                            ),
-                            mod_loc: inner_loc,
-                            mod_type: typed_mty.mty_type.clone(),
-                            mod_env: rec_env_ref,
-                            mod_attributes: Attributes::new(),
-                        }
-                    }
-                    _ => type_module_expr(tctx, &rec_env, arena, arena.get_mod_expr(mb.pmb_expr))?,
-                };
-                let mod_id = mod_ids[i].clone();
-                let mod_name_str = arena.get_string(mb.pmb_name.txt);
-
-                // Extract real module type and add to returned environment.
-                // Fall back to the declared recmodule signature when extraction fails,
-                // or when the body is a self-identifier alias (`module rec M = M`) so we
-                // don't lose the explicit signature.
-                let fallback_mod_type = rec_env
-                    .find_module(mod_name_str)
-                    .ok()
-                    .map(|md| md.md_type.clone());
-                let extracted_mod_type = {
-                    let mut resolve_ident_sig =
-                        |lid: &Located<LidentIdx>,
-                         include_env: Option<&Env>|
-                         -> Option<crate::types::decl::Signature> {
-                            let include_env = include_env?;
-                            let longident = arena.get_longident(lid.txt);
-                            let mod_type = lookup_module_type_by_lid(
-                                longident,
-                                arena,
-                                include_env,
-                                &mut tctx.persistent_env,
-                                tctx.type_ctx,
-                            )?;
-                            resolve_mod_type_to_sig(
-                                &mod_type,
-                                Some(include_env),
-                                &mut tctx.persistent_env,
-                                tctx.type_ctx,
-                            )
-                        };
-                    extract_module_type_from_mod_expr_with_resolver(
-                        &typed_mod,
-                        Some(&rec_env),
-                        Some(tctx.type_ctx),
-                        &mut resolve_ident_sig,
-                    )
-                };
-                let mod_type = match extracted_mod_type {
-                    Some(crate::types::decl::ModuleType::MtyIdent(Path::Pident(id)))
-                        if id.name() == mod_name_str =>
-                    {
-                        fallback_mod_type.clone()
-                    }
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id)))
-                        if id.name() == mod_name_str =>
-                    {
-                        fallback_mod_type.clone()
-                    }
-                    Some(mty) => Some(mty),
-                    None => fallback_mod_type.clone(),
-                }
-                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
-                crate::types::ctype::lower_nongen_module_type(
-                    tctx.type_ctx,
-                    mod_id.binding_time() - 1,
-                    &mod_type,
-                );
+            for decl in &dcl2 {
                 new_env.add_module(
-                    mod_id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: mod_type.clone(),
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
-                        md_path: None,
-                    },
+                    decl.md_id.clone(),
+                    empty_module_decl(decl.md_type.mty_type.clone()),
                 );
-                binding_mod_types.push(mod_type.clone());
+            }
 
+            for ((name, name_loc, inner_expr, _, attrs, mb_loc), decl) in
+                rec_bindings.iter().zip(dcl2.iter())
+            {
+                let typed_inner =
+                    type_module_expr(tctx, &rec_env, arena, arena.get_mod_expr(*inner_expr))?;
+                let inner_loc = typed_inner.mod_loc;
+                let typed_mod = wrap_constraint_with_decl_mty(
+                    tctx,
+                    &new_env,
+                    typed_inner,
+                    decl.md_type.clone(),
+                    decl.md_type.mty_type.clone(),
+                    crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
+                        decl.md_type.clone(),
+                    )),
+                    inner_loc,
+                    Attributes::new(),
+                )?;
                 typed_bindings.push(ModuleBinding {
-                    mb_id: mod_id,
+                    mb_id: decl.md_id.clone(),
                     mb_name: Located {
-                        txt: mod_name_str.to_string(),
-                        loc: mb.pmb_name.loc,
+                        txt: name.clone(),
+                        loc: *name_loc,
                     },
                     mb_expr: typed_mod,
-                    mb_attributes: mb.pmb_attributes.clone(),
-                    mb_loc: mb.pmb_loc,
+                    mb_attributes: attrs.clone(),
+                    mb_loc: *mb_loc,
                 });
             }
             let item_sig = typed_bindings
@@ -11804,12 +12034,7 @@ fn type_structure_item<'a>(
                 .map(|(index, mb)| {
                     crate::types::decl::SignatureItem::SigModule(
                         mb.mb_id.clone(),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: binding_mod_types[index].clone(),
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
-                            md_path: None,
-                        },
+                        empty_module_decl(mb.mb_expr.mod_type.clone()),
                         sig_rec_status(RecFlag::Recursive, index),
                     )
                 })
