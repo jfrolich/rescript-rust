@@ -2800,18 +2800,38 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                     }
                     Token::Uident(_) => {
                         // Module-qualified field access: expr.Module.field
-                        // Parse the path (e.g., Lexing.pos_fname) and create Pexp_field
+                        // Parse the path (e.g., Lexing.pos_fname) and create
+                        // Pexp_field or Pexp_setfield.
                         let field_path = parse_value_path_after_dot(p);
-                        let end_idx = p.loc_end_idx(field_path.loc);
-                        let loc = p.mk_loc_idx_full(start_pos_idx, end_idx);
-                        expr = Expression {
-                            pexp_desc: {
-                                let e_idx = p.arena_mut().push_expr(expr);
-                                Box::new(ExpressionDesc::Pexp_field(e_idx, field_path))
-                            },
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        };
+                        if p.token == Token::Equal {
+                            p.leave_breadcrumb(Grammar::ExprSetField);
+                            p.next();
+                            let value = parse_expr(p);
+                            p.eat_breadcrumb();
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                            expr = Expression {
+                                pexp_desc: {
+                                    let e_idx = p.arena_mut().push_expr(expr);
+                                    let v_idx = p.arena_mut().push_expr(value);
+                                    Box::new(ExpressionDesc::Pexp_setfield(Box::new((
+                                        e_idx, field_path, v_idx,
+                                    ))))
+                                },
+                                pexp_loc: loc,
+                                pexp_attributes: Attributes::new(),
+                            };
+                        } else {
+                            let end_idx = p.loc_end_idx(field_path.loc);
+                            let loc = p.mk_loc_idx_full(start_pos_idx, end_idx);
+                            expr = Expression {
+                                pexp_desc: {
+                                    let e_idx = p.arena_mut().push_expr(expr);
+                                    Box::new(ExpressionDesc::Pexp_field(e_idx, field_path))
+                                },
+                                pexp_loc: loc,
+                                pexp_attributes: Attributes::new(),
+                            };
+                        }
                     }
                     _ => break,
                 }
