@@ -1418,12 +1418,15 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
 /// Compile a single module fully in-process using the Rust compiler.
 ///
 /// This replaces the bsc subprocess path for `--in-process` mode:
-/// - Reads source from disk
-/// - If .resi exists, typechecks it first and registers the interface
-/// - Compiles the .res implementation
+/// - Consumes the preprocessed AST already stored by the parse phase
+/// - If .resi exists, typechecks the stored interface AST first and registers it
+/// - Compiles the stored .res implementation AST
 /// - Writes only JS output (no .cmi, .cmj, .cmt, .cmti)
 /// - Returns the finalized PersStruct and signature for the caller to
 ///   update the shared ModuleRegistry.
+///
+/// Missing stored ASTs are an in-process build invariant violation: the parse
+/// phase must have populated them before any module reaches compilation.
 ///
 /// Takes a `&ModuleRegistry` (read-only snapshot from the current wave)
 /// instead of a shared mutable `PersistentEnv`. Each call creates its own
@@ -1486,23 +1489,14 @@ fn compile_module_in_process(
                     &local_registry,
                 )
             }
-            _ => {
-                let intf_source = std::fs::read_to_string(&intf_source_abs).map_err(|e| {
-                    anyhow!(
-                        "Failed to read interface file {}: {}",
-                        intf_source_abs.display(),
-                        e
-                    )
-                })?;
-
-                rescript_compiler::driver::typecheck_interface_in_process(
-                    &intf_source,
-                    &intf_source_abs.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                )
-            }
+            Some(StoredAst::Structure(_)) => panic!(
+                "in-process invariant violated: expected signature AST for {}, found structure AST",
+                intf_source_abs.display()
+            ),
+            None => panic!(
+                "in-process invariant violated: missing stored signature AST for {}",
+                intf_source_abs.display()
+            ),
         }
         .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
 
@@ -1562,23 +1556,14 @@ fn compile_module_in_process(
                     has_interface,
                 )
             }
-            _ => {
-                let impl_source = std::fs::read_to_string(&source_abs).map_err(|e| {
-                    anyhow!(
-                        "Failed to read source file {}: {}",
-                        source_abs.display(),
-                        e
-                    )
-                })?;
-                rescript_compiler::driver::compile_source_in_process(
-                    &impl_source,
-                    &source_abs.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                    has_interface,
-                )
-            }
+            Some(StoredAst::Signature(_)) => panic!(
+                "in-process invariant violated: expected structure AST for {}, found signature AST",
+                source_abs.display()
+            ),
+            None => panic!(
+                "in-process invariant violated: missing stored structure AST for {}",
+                source_abs.display()
+            ),
         }
     }));
 
