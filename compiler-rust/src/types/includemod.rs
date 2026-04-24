@@ -914,16 +914,115 @@ fn value_descriptions<'a>(
         }
     }
 
+    fn expand_expected_manifest_aliases(
+        type_ctx: &TypeContext<'_>,
+        env: &Env,
+        ty: TypeExprRef,
+        seen: &mut HashSet<TypeExprRef>,
+    ) {
+        use crate::types::type_expr::{RowField, TypeDesc};
+
+        let ty = type_ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+
+        let desc = type_ctx.get_desc(ty).clone();
+        match desc {
+            TypeDesc::Tconstr { args, .. } => {
+                for arg in args {
+                    expand_expected_manifest_aliases(type_ctx, env, arg, seen);
+                }
+                if let Some(expanded) = ctype::expand_head_once(type_ctx, env, ty) {
+                    let expanded = type_ctx.repr(expanded);
+                    if expanded != ty {
+                        type_ctx.set_desc(ty, TypeDesc::Tlink(expanded));
+                        expand_expected_manifest_aliases(type_ctx, env, expanded, seen);
+                    }
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                expand_expected_manifest_aliases(type_ctx, env, arg.typ, seen);
+                expand_expected_manifest_aliases(type_ctx, env, ret, seen);
+            }
+            TypeDesc::Ttuple(items) => {
+                for item in items {
+                    expand_expected_manifest_aliases(type_ctx, env, item, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, name } => {
+                expand_expected_manifest_aliases(type_ctx, env, fields, seen);
+                if let Some((_, args)) = name {
+                    for arg in args {
+                        expand_expected_manifest_aliases(type_ctx, env, arg, seen);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                expand_expected_manifest_aliases(type_ctx, env, typ, seen);
+                expand_expected_manifest_aliases(type_ctx, env, rest, seen);
+            }
+            TypeDesc::Tvariant(row0) => {
+                let row = crate::types::btype::row_repr(type_ctx, &row0);
+                expand_expected_manifest_aliases(type_ctx, env, row.row_more, seen);
+                for (_, field) in row.row_fields {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => {
+                            expand_expected_manifest_aliases(type_ctx, env, arg, seen)
+                        }
+                        RowField::Reither { types, .. } => {
+                            for arg in types {
+                                expand_expected_manifest_aliases(type_ctx, env, arg, seen);
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
+                if let Some((_, args)) = row.row_name {
+                    for arg in args {
+                        expand_expected_manifest_aliases(type_ctx, env, arg, seen);
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                expand_expected_manifest_aliases(type_ctx, env, body, seen);
+                for var in vars {
+                    expand_expected_manifest_aliases(type_ctx, env, var, seen);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                for arg in args {
+                    expand_expected_manifest_aliases(type_ctx, env, arg, seen);
+                }
+            }
+            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+                expand_expected_manifest_aliases(type_ctx, env, target, seen);
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     let mut unify_state = UnifyState::default();
     unify_state.set_env(env);
     let expected_ty = substitute_value_type_paths(type_ctx, sig_desc.val_type, type_subst);
 
-    // Match OCaml Includecore.value_descriptions more closely: compare a
-    // fresh instance of the implementation scheme against the expected type.
-    let impl_ty = ctype::instance(type_ctx, impl_desc.val_type);
-    let sig_ty = ctype::instance(type_ctx, expected_ty);
+    // Match OCaml Includecore.value_descriptions/Ctype.moregeneral more
+    // closely: the destructive unification must happen on scratch copies.
+    // A module implementation signature can share type nodes with the typed
+    // tree (for example a functor argument structure inside a first-class
+    // module), and `instance` intentionally returns non-generic nodes
+    // unchanged. Duplicate after instantiation so inclusion checks cannot
+    // rewrite those typedtree-owned nodes through manifest aliases.
+    let impl_ty = ctype::subst_identity_copy(
+        type_ctx,
+        ctype::instance(type_ctx, impl_desc.val_type),
+    );
+    let sig_ty =
+        ctype::subst_identity_copy(type_ctx, ctype::instance(type_ctx, expected_ty));
+    let mut expanded_expected = HashSet::new();
+    expand_expected_manifest_aliases(type_ctx, env, sig_ty, &mut expanded_expected);
 
     // Try to unify (signature type should match implementation type)
     if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
