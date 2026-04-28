@@ -21,7 +21,6 @@ use crate::lambda::{
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
-use crate::raw_lambda::print::RawLambdaPrinter;
 use crate::raw_lambda::typeopt::{
     constructor_has_optional_shape, find_type_decl_pub, has_untagged,
     type_cannot_contain_undefined, type_cannot_contain_undefined_no_env, type_is_builtin_object,
@@ -1981,9 +1980,14 @@ fn tr_raw(act: &RawLambda) -> Option<RawLambda> {
     make_key(act)
 }
 
-/// Convert a normalized RawLambda to a string for comparison.
+/// Convert a normalized RawLambda to a structural key for comparison.
+///
+/// OCaml `same_actions` compares `Lambda.make_key` results structurally
+/// (`compiler/ml/matching.ml:489-500`). Do not use the raw lambda pretty-printer
+/// here: `Printlambda` intentionally renders some constants ambiguously in
+/// `-drawlambda` output, so it is not a safe equality key.
 fn lambda_to_string(lam: &RawLambda) -> String {
-    format!("{}", RawLambdaPrinter::new(lam))
+    format!("{lam:?}")
 }
 
 // ============================================================================
