@@ -8414,23 +8414,40 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
         }
     }
 
-    fn get_block_type(
+    fn extract_concrete_type_decl(
+        ctx_ref: &TypeContext<'_>,
+        env: &Env,
+        ty: TypeExprRef,
+    ) -> Option<crate::types::decl::TypeDeclaration> {
+        let mut current = ctx_ref.repr(ty);
+        for _ in 0..20 {
+            let TypeDesc::Tconstr { path, .. } = &*ctx_ref.get_desc(current) else {
+                return None;
+            };
+            let decl = find_type_decl_pub(ctx_ref, env, path)?;
+            if !matches!(decl.type_kind, TypeKind::TypeAbstract) {
+                return Some(decl);
+            }
+            current = crate::types::ctype::expand_head_once(ctx_ref, env, current)?;
+        }
+        None
+    }
+
+    fn get_untagged_payload_block_type(
         ctx_ref: &TypeContext<'_>,
         env: &Env,
         cstr: &crate::types::decl::ConstructorDeclaration,
     ) -> Option<SwitchBlockType> {
-        if !has_untagged(&cstr.cd_attributes) {
-            return None;
-        }
         match &cstr.cd_args {
             ConstructorArguments::CstrTuple(args) => match args.as_slice() {
                 [arg] => get_block_type_from_typ(ctx_ref, env, *arg).or_else(|| {
-                    let expanded = crate::types::ctype::expand_head(ctx_ref, env, *arg);
-                    let TypeDesc::Tconstr { path, .. } = &*ctx_ref.get_desc(expanded) else {
+                    let Some(decl) = extract_concrete_type_decl(ctx_ref, env, *arg) else {
                         return Some(SwitchBlockType::Unknown);
                     };
-                    let decl = find_type_decl_pub(ctx_ref, env, path)?;
                     match decl.type_kind {
+                        TypeKind::TypeRecord(_, RecordRepresentation::RecordUnboxed(_)) => {
+                            Some(SwitchBlockType::Unknown)
+                        }
                         TypeKind::TypeRecord(_, _) => Some(SwitchBlockType::Object),
                         _ => Some(SwitchBlockType::Unknown),
                     }
@@ -8440,6 +8457,17 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
             },
             ConstructorArguments::CstrRecord(_) => Some(SwitchBlockType::Object),
         }
+    }
+
+    fn get_block_type(
+        ctx_ref: &TypeContext<'_>,
+        env: &Env,
+        cstr: &crate::types::decl::ConstructorDeclaration,
+    ) -> Option<SwitchBlockType> {
+        if !has_untagged(&cstr.cd_attributes) {
+            return None;
+        }
+        get_untagged_payload_block_type(ctx_ref, env, cstr)
     }
 
     fn switch_names_from_variant(
