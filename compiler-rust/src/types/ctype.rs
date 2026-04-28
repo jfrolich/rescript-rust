@@ -2700,17 +2700,8 @@ fn unify_after_expansion<'a>(
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
     if lhs == rhs {
-        if state.mode != crate::types::UnifyMode::Pattern {
-            let keep_expanded_repr = state.env().is_some_and(|env| {
-                should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
-            });
-            if !keep_expanded_repr {
-                let to_ty = ctx.repr(relink_target);
-                if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
-                    ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
-                }
-            }
-        }
+        // OCaml ctype.ml:2348 returns immediately when the expanded heads are
+        // physically equal; the unify3 relink at lines 2393-2397 is not run.
         return Ok(());
     }
 
@@ -2764,6 +2755,55 @@ fn unify_after_expansion<'a>(
         && state.env().is_some_and(|env| {
             should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
         });
+
+    {
+        let lhs_desc = ctx.get_desc(lhs);
+        let rhs_desc = ctx.get_desc(rhs);
+        if let (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) = (&*lhs_desc, &*rhs_desc)
+            && path1.same(path2)
+            && args1.len() == args2.len()
+        {
+            let pairs: Vec<_> = args1
+                .iter()
+                .zip(args2.iter())
+                .map(|(&a, &b)| (a, b))
+                .collect();
+            drop(lhs_desc);
+            drop(rhs_desc);
+
+            if state.mode != crate::types::UnifyMode::Pattern {
+                if keep_expanded_repr {
+                    link_type(ctx, lhs, rhs);
+                } else {
+                    // OCaml ctype.ml:2393-2414 links the selected expanded
+                    // side to the original opposite side before unifying
+                    // constructor arguments, so nested alias spelling follows
+                    // the original argument type.
+                    let to_ty = ctx.repr(relink_target);
+                    if lhs != to_ty && !deep_occur(ctx, lhs, rhs) {
+                        ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
+                    }
+                }
+            }
+
+            for (a, b) in pairs {
+                unify(ctx, state, a, b)?;
+            }
+
+            return Ok(());
+        }
+    }
 
     let unify_result = unify(ctx, state, lhs, rhs);
     unify_result?;
