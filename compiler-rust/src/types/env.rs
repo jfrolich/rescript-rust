@@ -20,9 +20,9 @@ use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
-    LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, PrimitiveDescription,
-    LabelDeclaration, RecordRepresentation,
-    Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription, ValueKind,
+    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
+    PrimitiveDescription, RecordRepresentation, Signature, SignatureItem, TypeDeclaration,
+    TypeKind, ValueDescription, ValueKind,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -379,9 +379,13 @@ impl Clone for Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
+            local_module_aliases_cache: RefCell::new(
+                self.local_module_aliases_cache.borrow().clone(),
+            ),
             module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache.borrow().clone(),
+                self.module_path_requires_env_scoped_cache_cache
+                    .borrow()
+                    .clone(),
             ),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
@@ -439,9 +443,13 @@ impl Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(self.local_module_aliases_cache.borrow().clone()),
+            local_module_aliases_cache: RefCell::new(
+                self.local_module_aliases_cache.borrow().clone(),
+            ),
             module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache.borrow().clone(),
+                self.module_path_requires_env_scoped_cache_cache
+                    .borrow()
+                    .clone(),
             ),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
@@ -848,13 +856,7 @@ impl Env {
         decl: ModuleDeclaration,
         component_path: Path,
     ) {
-        self.add_module_with_component_context(
-            id,
-            decl.clone(),
-            decl,
-            component_path,
-            None,
-        );
+        self.add_module_with_component_context(id, decl.clone(), decl, component_path, None);
     }
 
     pub(crate) fn add_module_with_component_context(
@@ -1542,7 +1544,8 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         let string_ty = ctx.new_generic_constr(predef::path_string(), vec![]);
         let bool_ty = ctx.new_generic_constr(predef::path_bool(), vec![]);
         let array_field_info_ty = ctx.new_generic_constr(predef::path_array(), vec![field_info_ty]);
-        let array_constructor_info_ty = ctx.new_generic_constr(predef::path_array(), vec![constructor_info_ty]);
+        let array_constructor_info_ty =
+            ctx.new_generic_constr(predef::path_array(), vec![constructor_info_ty]);
         let array_type_info_ty = ctx.new_generic_constr(predef::path_array(), vec![type_info_ty]);
 
         // Simple no-arg constructors
@@ -1555,7 +1558,10 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
             predef::ident_ti_char(),
             predef::ident_ti_bigint(),
             predef::ident_ti_unknown(),
-        ].into_iter().map(|id| cstr(id, vec![])).collect();
+        ]
+        .into_iter()
+        .map(|id| cstr(id, vec![]))
+        .collect();
 
         // Record({name: string, fields: array<fieldInfo>, unboxed: bool})
         let record_ctor = ConstructorDeclaration {
@@ -1628,16 +1634,14 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         // Array({element: typeInfo})
         let array_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_array(),
-            cd_args: ConstructorArguments::CstrRecord(vec![
-                LabelDeclaration {
-                    ld_id: Ident::new("element", 900, IdentFlags::NONE),
-                    ld_mutable: MutableFlag::Immutable,
-                    ld_optional: false,
-                    ld_type: type_info_ty,
-                    ld_loc: Location::none(),
-                    ld_attributes: vec![],
-                },
-            ]),
+            cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
+                ld_id: Ident::new("element", 900, IdentFlags::NONE),
+                ld_mutable: MutableFlag::Immutable,
+                ld_optional: false,
+                ld_type: type_info_ty,
+                ld_loc: Location::none(),
+                ld_attributes: vec![],
+            }]),
             cd_res: None,
             cd_loc: Location::none(),
             cd_attributes: vec![],
@@ -1646,16 +1650,14 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         // Option({inner: typeInfo})
         let option_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_option(),
-            cd_args: ConstructorArguments::CstrRecord(vec![
-                LabelDeclaration {
-                    ld_id: Ident::new("inner", 901, IdentFlags::NONE),
-                    ld_mutable: MutableFlag::Immutable,
-                    ld_optional: false,
-                    ld_type: type_info_ty,
-                    ld_loc: Location::none(),
-                    ld_attributes: vec![],
-                },
-            ]),
+            cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
+                ld_id: Ident::new("inner", 901, IdentFlags::NONE),
+                ld_mutable: MutableFlag::Immutable,
+                ld_optional: false,
+                ld_type: type_info_ty,
+                ld_loc: Location::none(),
+                ld_attributes: vec![],
+            }]),
             cd_res: None,
             cd_loc: Location::none(),
             cd_attributes: vec![],
@@ -1690,16 +1692,14 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         // External({name: string}) and Opaque({name: string})
         let external_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_external(),
-            cd_args: ConstructorArguments::CstrRecord(vec![
-                LabelDeclaration {
-                    ld_id: Ident::new("name", 904, IdentFlags::NONE),
-                    ld_mutable: MutableFlag::Immutable,
-                    ld_optional: false,
-                    ld_type: string_ty,
-                    ld_loc: Location::none(),
-                    ld_attributes: vec![],
-                },
-            ]),
+            cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
+                ld_id: Ident::new("name", 904, IdentFlags::NONE),
+                ld_mutable: MutableFlag::Immutable,
+                ld_optional: false,
+                ld_type: string_ty,
+                ld_loc: Location::none(),
+                ld_attributes: vec![],
+            }]),
             cd_res: None,
             cd_loc: Location::none(),
             cd_attributes: vec![],
@@ -1707,16 +1707,14 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 
         let opaque_ctor = ConstructorDeclaration {
             cd_id: predef::ident_ti_opaque(),
-            cd_args: ConstructorArguments::CstrRecord(vec![
-                LabelDeclaration {
-                    ld_id: Ident::new("name", 905, IdentFlags::NONE),
-                    ld_mutable: MutableFlag::Immutable,
-                    ld_optional: false,
-                    ld_type: string_ty,
-                    ld_loc: Location::none(),
-                    ld_attributes: vec![],
-                },
-            ]),
+            cd_args: ConstructorArguments::CstrRecord(vec![LabelDeclaration {
+                ld_id: Ident::new("name", 905, IdentFlags::NONE),
+                ld_mutable: MutableFlag::Immutable,
+                ld_optional: false,
+                ld_type: string_ty,
+                ld_loc: Location::none(),
+                ld_attributes: vec![],
+            }]),
             cd_res: None,
             cd_loc: Location::none(),
             cd_attributes: vec![],

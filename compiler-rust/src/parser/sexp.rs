@@ -995,12 +995,10 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 expression(arena, arena.get_expr(*body)),
             ])
         }
-        ExpressionDesc::Pexp_comptime_typeinfo(ct) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_typeinfo"),
-                core_type(arena, arena.get_core_type(*ct)),
-            ])
-        }
+        ExpressionDesc::Pexp_comptime_typeinfo(ct) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_typeinfo"),
+            core_type(arena, arena.get_core_type(*ct)),
+        ]),
         ExpressionDesc::Pexp_comptime_field(inner) => {
             let (ref value, ref field) = **inner;
             Sexp::list(vec![
@@ -1009,18 +1007,14 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 expression(arena, arena.get_expr(*field)),
             ])
         }
-        ExpressionDesc::Pexp_comptime_compile_error(e) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_compile_error"),
-                expression(arena, arena.get_expr(*e)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_typename(ct) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_typename"),
-                core_type(arena, arena.get_core_type(*ct)),
-            ])
-        }
+        ExpressionDesc::Pexp_comptime_compile_error(e) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_compile_error"),
+            expression(arena, arena.get_expr(*e)),
+        ]),
+        ExpressionDesc::Pexp_comptime_typename(ct) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_typename"),
+            core_type(arena, arena.get_core_type(*ct)),
+        ]),
         ExpressionDesc::Pexp_comptime_record(inner) => {
             let (ref ct, ref fields_expr) = **inner;
             Sexp::list(vec![
@@ -1041,30 +1035,22 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             }
             Sexp::list(items)
         }
-        ExpressionDesc::Pexp_comptime_build_variant(e) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_build_variant"),
-                expression(arena, arena.get_expr(*e)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_variant_case(e) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_variant_case"),
-                expression(arena, arena.get_expr(*e)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_build_record(e) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_build_record"),
-                expression(arena, arena.get_expr(*e)),
-            ])
-        }
-        ExpressionDesc::Pexp_comptime_record_field(e) => {
-            Sexp::list(vec![
-                Sexp::atom("Pexp_comptime_record_field"),
-                expression(arena, arena.get_expr(*e)),
-            ])
-        }
+        ExpressionDesc::Pexp_comptime_build_variant(e) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_build_variant"),
+            expression(arena, arena.get_expr(*e)),
+        ]),
+        ExpressionDesc::Pexp_comptime_variant_case(e) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_variant_case"),
+            expression(arena, arena.get_expr(*e)),
+        ]),
+        ExpressionDesc::Pexp_comptime_build_record(e) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_build_record"),
+            expression(arena, arena.get_expr(*e)),
+        ]),
+        ExpressionDesc::Pexp_comptime_record_field(e) => Sexp::list(vec![
+            Sexp::atom("Pexp_comptime_record_field"),
+            expression(arena, arena.get_expr(*e)),
+        ]),
     };
     Sexp::list(vec![Sexp::atom("expression"), desc])
 }

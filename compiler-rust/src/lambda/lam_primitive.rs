@@ -523,23 +523,108 @@ impl Primitive {
             // lam_primitive.ml:199-232 — the big "rhs = lhs" simple list.
             // Every nullary primitive in OCaml's eq_primitive_approx that
             // matches this arm. Mapped to Rust enum variant names.
-            PwrapExn | Praise | Pobjorder | Pobjmin | Pobjmax | Pobjtag | Pobjsize
-            | Psequand | Psequor | Pnot | Pboolorder | Pboolmin | Pboolmax | Pisint
-            | Pnegint | Paddint | Psubint | Pmulint | Pdivint | Pmodint | Ppowint
-            | Pnotint | Pandint | Porint | Pxorint | Plslint | Plsrint | Pasrint
-            | Pintorder | Pintmin | Pintmax | Pintoffloat | Pfloatofint | Pnegfloat
-            | Paddfloat | Psubfloat | Pmulfloat | Pdivfloat | Pmodfloat | Ppowfloat
-            | Pfloatorder | Pfloatmin | Pfloatmax | Pnegbigint | Paddbigint | Psubbigint
-            | Pmulbigint | Pdivbigint | Pmodbigint | Ppowbigint | Pnotbigint | Pandbigint
-            | Porbigint | Pxorbigint | Plslbigint | Pasrbigint | Pbigintorder | Pbigintmin
-            | Pbigintmax | Pstringlength | Pstringrefu | Pstringrefs | Pstringadd
-            | Pstringorder | Pstringmin | Pstringmax | Pmakelist | Pmakedict | PdictHas
-            | Pawait | PjsApply | PjsRuntimeApply | PvalFromOption | PvalFromOptionNotNest
-            | PnullToOpt | PnullUndefinedToOpt | PisNull | PisNotNone | Psome | PsomeNotNest
-            | PisUndefined | PisNullUndefined | Pimport | Ptypeof | PfnArity | PisPolyVarBlock
-            | Pdebugger | PinitMod | PupdateMod | Pduprecord | Pmakearray | Parraylength
-            | Parrayrefu | Parraysetu | Parrayrefs | Parraysets | PjsFnMakeUnit | PjsFnMethod
-            | Phash | PhashMixstring | PhashMixint | PhashFinalmix => self == other,
+            PwrapExn
+            | Praise
+            | Pobjorder
+            | Pobjmin
+            | Pobjmax
+            | Pobjtag
+            | Pobjsize
+            | Psequand
+            | Psequor
+            | Pnot
+            | Pboolorder
+            | Pboolmin
+            | Pboolmax
+            | Pisint
+            | Pnegint
+            | Paddint
+            | Psubint
+            | Pmulint
+            | Pdivint
+            | Pmodint
+            | Ppowint
+            | Pnotint
+            | Pandint
+            | Porint
+            | Pxorint
+            | Plslint
+            | Plsrint
+            | Pasrint
+            | Pintorder
+            | Pintmin
+            | Pintmax
+            | Pintoffloat
+            | Pfloatofint
+            | Pnegfloat
+            | Paddfloat
+            | Psubfloat
+            | Pmulfloat
+            | Pdivfloat
+            | Pmodfloat
+            | Ppowfloat
+            | Pfloatorder
+            | Pfloatmin
+            | Pfloatmax
+            | Pnegbigint
+            | Paddbigint
+            | Psubbigint
+            | Pmulbigint
+            | Pdivbigint
+            | Pmodbigint
+            | Ppowbigint
+            | Pnotbigint
+            | Pandbigint
+            | Porbigint
+            | Pxorbigint
+            | Plslbigint
+            | Pasrbigint
+            | Pbigintorder
+            | Pbigintmin
+            | Pbigintmax
+            | Pstringlength
+            | Pstringrefu
+            | Pstringrefs
+            | Pstringadd
+            | Pstringorder
+            | Pstringmin
+            | Pstringmax
+            | Pmakelist
+            | Pmakedict
+            | PdictHas
+            | Pawait
+            | PjsApply
+            | PjsRuntimeApply
+            | PvalFromOption
+            | PvalFromOptionNotNest
+            | PnullToOpt
+            | PnullUndefinedToOpt
+            | PisNull
+            | PisNotNone
+            | Psome
+            | PsomeNotNest
+            | PisUndefined
+            | PisNullUndefined
+            | Pimport
+            | Ptypeof
+            | PfnArity
+            | PisPolyVarBlock
+            | Pdebugger
+            | PinitMod
+            | PupdateMod
+            | Pduprecord
+            | Pmakearray
+            | Parraylength
+            | Parrayrefu
+            | Parraysetu
+            | Parrayrefs
+            | Parraysets
+            | PjsFnMakeUnit
+            | PjsFnMethod
+            | Phash
+            | PhashMixstring
+            | PhashMixint
+            | PhashFinalmix => self == other,
 
             // Rust-only nullary primitives that have no OCaml counterpart in
             // the eq_primitive_approx switch. They are still nullary; treat
@@ -649,7 +734,9 @@ mod tests {
         assert!(Primitive::Paddint.eq_approx(&Primitive::Paddint));
         assert!(!Primitive::Paddint.eq_approx(&Primitive::Psubint));
 
-        assert!(Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq)));
+        assert!(
+            Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Eq))
+        );
         assert!(
             !Primitive::Pintcomp(Comparison::Eq).eq_approx(&Primitive::Pintcomp(Comparison::Neq))
         );

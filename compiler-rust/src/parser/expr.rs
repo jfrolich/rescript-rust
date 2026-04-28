@@ -592,7 +592,23 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         let is_comptime_builtin = p.lookahead(|p| {
             p.next(); // skip @
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(
+                    s.as_ref(),
+                    "typeInfo"
+                        | "field"
+                        | "compileError"
+                        | "typeName"
+                        | "record"
+                        | "variant"
+                        | "constructor"
+                        | "variantOf"
+                        | "hasTag"
+                        | "argAt"
+                        | "buildVariant"
+                        | "variantCase"
+                        | "buildRecord"
+                        | "recordField"
+                ),
                 _ => false,
             }
         });
@@ -4368,7 +4384,23 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
         let is_comptime_builtin = p.lookahead(|p| {
             p.next();
             match &p.token {
-                Token::Lident(s) => matches!(s.as_ref(), "typeInfo" | "field" | "compileError" | "typeName" | "record" | "variant" | "constructor" | "variantOf" | "hasTag" | "argAt" | "buildVariant" | "variantCase" | "buildRecord" | "recordField"),
+                Token::Lident(s) => matches!(
+                    s.as_ref(),
+                    "typeInfo"
+                        | "field"
+                        | "compileError"
+                        | "typeName"
+                        | "record"
+                        | "variant"
+                        | "constructor"
+                        | "variantOf"
+                        | "hasTag"
+                        | "argAt"
+                        | "buildVariant"
+                        | "variantCase"
+                        | "buildRecord"
+                        | "recordField"
+                ),
                 _ => false,
             }
         });
@@ -6238,8 +6270,7 @@ fn parse_for_rest(
         Token::In => {
             if await_kw {
                 p.err(DiagnosticCategory::Message(
-                    "A `for await` loop must use `of`, like `for await item of items`."
-                        .to_string(),
+                    "A `for await` loop must use `of`, like `for await item of items`.".to_string(),
                 ));
             }
             p.next();
@@ -6398,9 +6429,10 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::String(std::borrow::Cow::Owned(JS_BODY.to_string()), None),
-                ))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                    std::borrow::Cow::Owned(JS_BODY.to_string()),
+                    None,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6416,9 +6448,14 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let payload = Payload::PStr(Box::new(vec![eval_item]));
 
             let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located { txt: raw_name_idx, loc };
+            let ext_name = Located {
+                txt: raw_name_idx,
+                loc,
+            };
             let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((ext_name, payload)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+                    ext_name, payload,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6442,13 +6479,15 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let value_idx = p.arena_mut().push_expr(value_expr);
             let name_idx = p.arena_mut().push_expr(name_expr);
 
-            const JS_BODY: &str = "function(v, n) { return (typeof v === \"string\" ? v : v.TAG) === n; }";
+            const JS_BODY: &str =
+                "function(v, n) { return (typeof v === \"string\" ? v : v.TAG) === n; }";
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::String(std::borrow::Cow::Owned(JS_BODY.to_string()), None),
-                ))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                    std::borrow::Cow::Owned(JS_BODY.to_string()),
+                    None,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6464,9 +6503,14 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let payload = Payload::PStr(Box::new(vec![eval_item]));
 
             let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located { txt: raw_name_idx, loc };
+            let ext_name = Located {
+                txt: raw_name_idx,
+                loc,
+            };
             let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((ext_name, payload)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+                    ext_name, payload,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6504,9 +6548,10 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let loc = LocIdx::none();
 
             let js_str_expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
-                    Constant::String(std::borrow::Cow::Owned(JS_BODY.to_string()), None),
-                ))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
+                    std::borrow::Cow::Owned(JS_BODY.to_string()),
+                    None,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6522,9 +6567,14 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let payload = Payload::PStr(Box::new(vec![eval_item]));
 
             let raw_name_idx = p.arena_mut().push_string("raw");
-            let ext_name = Located { txt: raw_name_idx, loc };
+            let ext_name = Located {
+                txt: raw_name_idx,
+                loc,
+            };
             let raw_ext = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((ext_name, payload)))),
+                pexp_desc: Box::new(ExpressionDesc::Pexp_extension(Box::new((
+                    ext_name, payload,
+                )))),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             };
@@ -6533,10 +6583,7 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             let apply_expr = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
                     funct: raw_ext_idx,
-                    args: vec![
-                        (ArgLabel::Nolabel, value_idx),
-                        (ArgLabel::Nolabel, i_idx),
-                    ],
+                    args: vec![(ArgLabel::Nolabel, value_idx), (ArgLabel::Nolabel, i_idx)],
                     partial: false,
                     transformed_jsx: false,
                 }))),
@@ -6599,9 +6646,10 @@ fn parse_comptime_builtin_expr(p: &mut Parser<'_>) -> Expression {
             ExpressionDesc::Pexp_comptime_record_field(rec_idx)
         }
         _ => {
-            p.err(super::diagnostics::DiagnosticCategory::Message(
-                format!("Unknown comptime builtin @{}", name),
-            ));
+            p.err(super::diagnostics::DiagnosticCategory::Message(format!(
+                "Unknown comptime builtin @{}",
+                name
+            )));
             p.expect(Token::Rparen);
             ExpressionDesc::Pexp_construct(
                 with_loc(p.push_lident_static("()"), LocIdx::none()),

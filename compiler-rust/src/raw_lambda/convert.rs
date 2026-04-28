@@ -46,9 +46,8 @@ use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc,
-    Partial, Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem,
-    StructureItemDesc, ValueBinding,
+    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
+    PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
@@ -457,7 +456,8 @@ fn constructor_runtime_tag(
 }
 
 fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<TagAttribute> {
-    attrs.iter()
+    attrs
+        .iter()
         .map(|attr| TagAttribute {
             name: attr.attr_name.txt.clone(),
             payload: match &attr.attr_payload {
@@ -465,7 +465,9 @@ fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<Tag
                 crate::types::decl::AttributePayload::Str(value) => {
                     TagAttributePayload::Str(value.clone())
                 }
-                crate::types::decl::AttributePayload::Int(value) => TagAttributePayload::Int(*value),
+                crate::types::decl::AttributePayload::Int(value) => {
+                    TagAttributePayload::Int(*value)
+                }
                 crate::types::decl::AttributePayload::Float(value) => {
                     TagAttributePayload::Float(value.clone())
                 }
@@ -1037,8 +1039,7 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(body, false);
             }
-            RawLambda::Lfor_of(_, iterable, body)
-            | RawLambda::Lfor_await_of(_, iterable, body) => {
+            RawLambda::Lfor_of(_, iterable, body) | RawLambda::Lfor_await_of(_, iterable, body) => {
                 self.note_possible_required_modules_in_raw_lambda_with_dynamic_import(
                     iterable, false,
                 );
@@ -2995,14 +2996,12 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 _ => TagInfo::Some,
             },
-            ConstructorTag::CstrBlock(tag) => {
-                TagInfo::Constructor {
-                    name: cstr.cstr_name.clone(),
-                    num_nonconst: cstr.cstr_nonconsts,
-                    tag: *tag,
-                    attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
-                }
-            }
+            ConstructorTag::CstrBlock(tag) => TagInfo::Constructor {
+                name: cstr.cstr_name.clone(),
+                num_nonconst: cstr.cstr_nonconsts,
+                tag: *tag,
+                attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
+            },
             _ => TagInfo::Constructor {
                 name: cstr.cstr_name.clone(),
                 num_nonconst: cstr.cstr_nonconsts,
@@ -4152,7 +4151,10 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        if matches!(module_expr.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _)) {
+        if matches!(
+            module_expr.mod_type,
+            crate::types::decl::ModuleType::MtyAlias(_, _)
+        ) {
             // OCaml lowers plain module aliases to Const_module_alias here.
             // They stay compile-time-only unless a later dynamic import/pack
             // path reifies the module reference, so static aliases must not
@@ -4309,7 +4311,10 @@ impl<'a> RawLambdaConverter<'a> {
                 // If the composed coercion includes Tcoerce_alias and the inner
                 // module is an alias (Mty_alias), use 0a + Alias to match OCaml.
                 if matches!(composed, ModuleCoercion::Tcoerce_alias(..))
-                    && matches!(inner.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _))
+                    && matches!(
+                        inner.mod_type,
+                        crate::types::decl::ModuleType::MtyAlias(_, _)
+                    )
                 {
                     self.note_possible_required_modules_from_module_expr(inner, dynamic_import);
                     return self.apply_coercion_raw(
@@ -4324,7 +4329,10 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_ident(path, _) => {
                 // Check if this ident is an alias with Tcoerce_alias coercion.
                 if matches!(cc, ModuleCoercion::Tcoerce_alias(..))
-                    && matches!(module_expr.mod_type, crate::types::decl::ModuleType::MtyAlias(_, _))
+                    && matches!(
+                        module_expr.mod_type,
+                        crate::types::decl::ModuleType::MtyAlias(_, _)
+                    )
                 {
                     self.note_possible_required_modules_from_module_expr(
                         module_expr,
@@ -11236,7 +11244,9 @@ external myJson: Js.Json.t = "default"
 
         let spec = converter.ffi_spec_for_primitive(&prim, false, false);
         let module_name = match spec.spec {
-            Some(crate::lambda::lam_primitive::ExternalSpec::JsModuleAsVar(module_name)) => module_name,
+            Some(crate::lambda::lam_primitive::ExternalSpec::JsModuleAsVar(module_name)) => {
+                module_name
+            }
             Some(crate::lambda::lam_primitive::ExternalSpec::JsVar {
                 external_module_name: Some(module_name),
                 ..

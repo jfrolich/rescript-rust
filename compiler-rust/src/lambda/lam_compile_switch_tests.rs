@@ -62,9 +62,8 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
 
     let rendered = print_block(&block);
     assert!(
-        rendered.contains(
-            "if (typeof value !== \"object\" || value === null || Array.isArray(value))"
-        ),
+        rendered
+            .contains("if (typeof value !== \"object\" || value === null || Array.isArray(value))"),
         "expected the outer handler to stay as the literal-side guard:\n{rendered}"
     );
     assert!(
@@ -197,8 +196,7 @@ fn named_variant_effect_switches_keep_payload_cases() {
 
     let rendered = print_block(&block);
     assert!(
-        rendered
-            .contains("if (typeof action === \"object\" && action.TAG === \"WithPayload\") {"),
+        rendered.contains("if (typeof action === \"object\" && action.TAG === \"WithPayload\") {"),
         "expected the payload-effect switch to stay guarded by the object/tag check:\n{rendered}"
     );
     assert!(
@@ -308,8 +306,7 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
 
     let rendered = print_block(&block);
     assert!(
-        rendered
-            .contains("return typeof action !== \"object\" || action.TAG !== \"C\" ? 42 : 7;"),
+        rendered.contains("return typeof action !== \"object\" || action.TAG !== \"C\" ? 42 : 7;"),
         "expected the incomplete payload-only dispatch to keep OCaml's negated default guard:\n{rendered}"
     );
 }
@@ -344,8 +341,7 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
 }
 
 #[test]
-fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test()
- {
+fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_like_typeof_test() {
     let mut compiler = LambdaCompiler::new();
     let action = Ident::create_local("action");
     let block = compiler.compile_named_variant_switch_return_statements(
@@ -831,8 +827,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
     let [declare, dispatch] = compiled.prelude.as_slice() else {
         panic!("expected a result declaration followed by object dispatch");
     };
-    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc
-    else {
+    let StatementDesc::Variable(VariableDeclaration { ident: result, .. }) = &declare.desc else {
         panic!("expected the switch result declaration");
     };
     let StatementDesc::If(cond, then_block, else_block) = &dispatch.desc else {
@@ -1422,9 +1417,8 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
 
     let rendered = print_block(&block);
     assert!(
-        rendered.contains(
-            "value === \"A\" || value === \"D\" || value === \"B\" || value === \"C\""
-        ),
+        rendered
+            .contains("value === \"A\" || value === \"D\" || value === \"B\" || value === \"C\""),
         "expected OCaml-style literal dispatch order across overlapping block kinds:\n{rendered}"
     );
 }
@@ -1550,8 +1544,7 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
 
     let rendered = print_block(&compiled.prelude);
     assert!(
-        rendered
-            .contains("typeof value === \"object\" && value !== null && !Array.isArray(value)"),
+        rendered.contains("typeof value === \"object\" && value !== null && !Array.isArray(value)"),
         "expected the small object switch to keep OCaml's object/null/array runtime guard:\n{rendered}"
     );
 }
@@ -1798,9 +1791,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
                     },
                     crate::lambda::SwitchTag {
                         name: "String".to_string(),
-                        tag_type: Some(crate::lambda::SwitchCaseTag::String(
-                            "string".to_string(),
-                        )),
+                        tag_type: Some(crate::lambda::SwitchCaseTag::String("string".to_string())),
                     },
                 ],
                 blocks: vec![
@@ -1823,9 +1814,8 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
 
     let rendered = print_block(&block);
     assert!(
-        rendered.contains(
-            "if (typeof value !== \"object\" || value === null || Array.isArray(value))"
-        ),
+        rendered
+            .contains("if (typeof value !== \"object\" || value === null || Array.isArray(value))"),
         "expected the literal/default side to stay outside the object chain:\n{rendered}"
     );
     assert!(

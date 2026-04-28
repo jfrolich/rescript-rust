@@ -569,8 +569,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_expr_idx(end);
                 self.add_expr_idx(body);
             }
-            ExpressionDesc::Pexp_for_of(inner)
-            | ExpressionDesc::Pexp_for_await_of(inner) => {
+            ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
                 // Upstream #7887: pattern is `_` or var, contributes no deps.
                 let (ref _pat, ref iterable, ref body) = **inner;
                 let iterable = *iterable;

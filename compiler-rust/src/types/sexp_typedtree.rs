@@ -1271,9 +1271,7 @@ fn sexp_expression_desc(
             sexp_direction_flag(flag),
             sexp_expression(arena, ctx, with_locs, dedup, e3),
         ]),
-        ExpressionDesc::Texp_for_of(_, _, _, _) => {
-            Sexp::list(vec![Sexp::atom("Texp_for_of")])
-        }
+        ExpressionDesc::Texp_for_of(_, _, _, _) => Sexp::list(vec![Sexp::atom("Texp_for_of")]),
         ExpressionDesc::Texp_for_await_of(_, _, _, _) => {
             Sexp::list(vec![Sexp::atom("Texp_for_await_of")])
         }

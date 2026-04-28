@@ -151,9 +151,7 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
             Box::new(subst_aux(s, e3)),
         ),
 
-        Lambda::Lfor_of(v, e1, e2) => {
-            Lambda::for_of(v.clone(), subst_aux(s, e1), subst_aux(s, e2))
-        }
+        Lambda::Lfor_of(v, e1, e2) => Lambda::for_of(v.clone(), subst_aux(s, e1), subst_aux(s, e2)),
         Lambda::Lfor_await_of(v, e1, e2) => {
             Lambda::for_await_of(v.clone(), subst_aux(s, e1), subst_aux(s, e2))
         }

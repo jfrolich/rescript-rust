@@ -230,7 +230,11 @@ pub(crate) fn compile_nullish_strict_comparison(
     crate::js_ir::raw_bin_expression(comparison_to_binop(cmp), left, right)
 }
 
-pub(crate) fn compile_raw_comparison(cmp: Comparison, left: Expression, right: Expression) -> Expression {
+pub(crate) fn compile_raw_comparison(
+    cmp: Comparison,
+    left: Expression,
+    right: Expression,
+) -> Expression {
     Expression::bin(comparison_to_binop(cmp), left, right)
 }
 
@@ -274,11 +278,20 @@ pub(crate) fn compile_int_equality(left: Expression, right: Expression) -> Expre
         // the raw `Bin EqEqEq` shape we want to emit otherwise. Fold Str,Str
         // here to keep the polyvar switch chain collapsing to a single arm.
         (
-            ExpressionDesc::Str { txt: left_txt, delim: left_delim },
-            ExpressionDesc::Str { txt: right_txt, delim: right_delim },
+            ExpressionDesc::Str {
+                txt: left_txt,
+                delim: left_delim,
+            },
+            ExpressionDesc::Str {
+                txt: right_txt,
+                delim: right_delim,
+            },
         ) => {
             match crate::js_ir::fold_strict_string_equality_pub(
-                left_txt, left_delim, right_txt, right_delim,
+                left_txt,
+                left_delim,
+                right_txt,
+                right_delim,
             ) {
                 Some(equal) => Expression::bool(equal),
                 None => crate::js_ir::raw_bin_expression(
@@ -294,11 +307,7 @@ pub(crate) fn compile_int_equality(left: Expression, right: Expression) -> Expre
         // rather than folding to `false` via the nullish-impossible rule in
         // triple_equal. `Expression::bin`'s `fold_strict_comparison` would
         // fold here, so we bypass it with the raw constructor.
-        _ => crate::js_ir::raw_bin_expression(
-            comparison_to_binop(Comparison::Eq),
-            left,
-            right,
-        ),
+        _ => crate::js_ir::raw_bin_expression(comparison_to_binop(Comparison::Eq), left, right),
     }
 }
 
@@ -699,7 +708,10 @@ pub(crate) fn poly_var_value_access(target: &Expression) -> Expression {
     }
 }
 
-pub(crate) fn external_polyvar_string_dispatch(dispatches: &[(String, String)], txt: &str) -> String {
+pub(crate) fn external_polyvar_string_dispatch(
+    dispatches: &[(String, String)],
+    txt: &str,
+) -> String {
     dispatches
         .iter()
         .find(|(source, _)| source == txt)
@@ -715,7 +727,10 @@ pub(crate) fn external_polyvar_int_dispatch(dispatches: &[(String, i64)], txt: &
         .unwrap_or_else(|| panic!("missing polyvariant int dispatch for {txt}"))
 }
 
-pub(crate) fn string_switch_iife(scrutinee: Expression, cases: Vec<(String, Expression)>) -> Expression {
+pub(crate) fn string_switch_iife(
+    scrutinee: Expression,
+    cases: Vec<(String, Expression)>,
+) -> Expression {
     let clauses = cases
         .into_iter()
         .map(|(tag, value)| StringClause {

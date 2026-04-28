@@ -7,11 +7,11 @@
 //! `compiler/core/lam_compile_main.ml`. No Rust-only logic.
 
 use crate::ident::Ident;
-use crate::lambda::lam_pass_collect::collect_info;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
-use crate::lambda::lam_pass_deep_flatten::deep_flatten;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
+use crate::lambda::lam_pass_collect::collect_info;
+use crate::lambda::lam_pass_deep_flatten::deep_flatten;
 use crate::lambda::lam_pass_exits::simplify_exits;
 use crate::lambda::lam_pass_lets_dce::simplify_lets;
 use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx;
@@ -46,7 +46,9 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // (e.g. two `let prim` declarations at module top level in
     // `coercion_module_alias_test`, which is invalid JS).
     meta.id_gen
-        .set_current_stamp(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(lam));
+        .set_current_stamp(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
+            lam,
+        ));
 
     // lam_compile_main.ml:148 — initial deep_flatten.
     let lam = deep_flatten(lam);

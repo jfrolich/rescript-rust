@@ -2503,12 +2503,12 @@ fn walk_expression(
             // Safety: arena is append-only, expression won't be invalidated
             let coll_expr = arena.get_expr(*collection).clone();
             let body_expr = arena.get_expr(*body).clone();
-            let (before_body, rest) = partition_leading_trailing(trailing, coll_expr.pexp_loc, arena);
+            let (before_body, rest) =
+                partition_leading_trailing(trailing, coll_expr.pexp_loc, arena);
             walk_expression(&coll_expr, t, before_body, arena);
             walk_expression(&body_expr, t, rest, arena);
         }
-        ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_typename(_) => {
+        ExpressionDesc::Pexp_comptime_typeinfo(_) | ExpressionDesc::Pexp_comptime_typename(_) => {
             // No sub-expressions with comments to attach
             let (leading, trailing) = partition_leading_trailing(comments, expr.pexp_loc, arena);
             t.attach_leading(expr.pexp_loc, leading, arena);
@@ -2520,7 +2520,8 @@ fn walk_expression(
             t.attach_leading(expr.pexp_loc, leading, arena);
             let val_expr = arena.get_expr(*value).clone();
             let field_expr = arena.get_expr(*field).clone();
-            let (before_field, rest) = partition_leading_trailing(trailing, val_expr.pexp_loc, arena);
+            let (before_field, rest) =
+                partition_leading_trailing(trailing, val_expr.pexp_loc, arena);
             walk_expression(&val_expr, t, before_field, arena);
             walk_expression(&field_expr, t, rest, arena);
         }
@@ -2548,7 +2549,8 @@ fn walk_expression(
             remaining = rest;
             if let Some(opt_idx) = opt_expr_idx {
                 let opt_expr = arena.get_expr(*opt_idx).clone();
-                let (before_opt, rest2) = partition_leading_trailing(remaining, opt_expr.pexp_loc, arena);
+                let (before_opt, rest2) =
+                    partition_leading_trailing(remaining, opt_expr.pexp_loc, arena);
                 walk_expression(&opt_expr, t, before_opt, arena);
                 remaining = rest2;
             }

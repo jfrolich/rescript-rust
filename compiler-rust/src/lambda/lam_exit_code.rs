@@ -52,14 +52,10 @@ where
             }
             Lambda::LstaticCatch(e1, _, e2) => aux(e1, exits) || aux(e2, exits),
             Lambda::LtryWith(e1, _, e2) => aux(e1, exits) || aux(e2, exits),
-            Lambda::LifThenElse(e1, e2, e3) => {
-                aux(e1, exits) || aux(e2, exits) || aux(e3, exits)
-            }
+            Lambda::LifThenElse(e1, e2, e3) => aux(e1, exits) || aux(e2, exits) || aux(e3, exits),
             Lambda::Lsequence(e1, e2) => aux(e1, exits) || aux(e2, exits),
             Lambda::Lwhile(e1, e2) => aux(e1, exits) || aux(e2, exits),
-            Lambda::Lfor(_, e1, e2, _, e3) => {
-                aux(e1, exits) || aux(e2, exits) || aux(e3, exits)
-            }
+            Lambda::Lfor(_, e1, e2, _, e3) => aux(e1, exits) || aux(e2, exits) || aux(e3, exits),
             Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => {
                 aux(e1, exits) || aux(e2, exits)
             }

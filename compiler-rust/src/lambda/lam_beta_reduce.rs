@@ -21,12 +21,12 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::no_side_effects;
 use crate::lambda::lam_closure::StatsMap;
-use crate::lambda::lam_pass_collect::kind_of_lambda_block;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::{IdKind, IdentTable};
-use crate::lambda::lam_util::refine_let;
+use crate::lambda::lam_pass_collect::kind_of_lambda_block;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_subst::Subst;
+use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Apply, Lambda, PrimInfo};
 use crate::location::Location;
 
@@ -892,7 +892,8 @@ mod tests {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
-                        return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                        return_wrapper:
+                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
                     },
                     dynamic_import: false,

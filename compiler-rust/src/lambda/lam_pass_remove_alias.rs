@@ -18,9 +18,9 @@ use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
-use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
+use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 
@@ -188,9 +188,7 @@ impl<'a> Simplifier<'a> {
                         let primitive_clone = primitive.clone();
                         let loc_clone = loc.clone();
                         field_flatten_get(
-                            move || {
-                                Lambda::prim(primitive_clone, vec![l_clone], loc_clone)
-                            },
+                            move || Lambda::prim(primitive_clone, vec![l_clone], loc_clone),
                             v,
                             *i,
                             info,
@@ -254,7 +252,10 @@ impl<'a> Simplifier<'a> {
                     }) if matches!(args.as_slice(), [Lambda::Lvar(_)])
                 ) =>
             {
-                let Lambda::Lprim(PrimInfo { args: cond_args, .. }) = cond.as_ref() else {
+                let Lambda::Lprim(PrimInfo {
+                    args: cond_args, ..
+                }) = cond.as_ref()
+                else {
                     unreachable!()
                 };
                 let Lambda::Lvar(id) = &cond_args[0] else {
@@ -300,11 +301,7 @@ impl<'a> Simplifier<'a> {
                         self.simpl(then_),
                         self.simpl(else_),
                     ),
-                    _ => Lambda::if_(
-                        cond.as_ref().clone(),
-                        self.simpl(then_),
-                        self.simpl(else_),
-                    ),
+                    _ => Lambda::if_(cond.as_ref().clone(), self.simpl(then_), self.simpl(else_)),
                 }
             }
 
@@ -317,11 +314,9 @@ impl<'a> Simplifier<'a> {
                     match outcome {
                         Outcome::EvalTrue => self.simpl(then_),
                         Outcome::EvalFalse => self.simpl(else_),
-                        Outcome::EvalUnknown => Lambda::if_(
-                            self.simpl(cond),
-                            self.simpl(then_),
-                            self.simpl(else_),
-                        ),
+                        Outcome::EvalUnknown => {
+                            Lambda::if_(self.simpl(cond), self.simpl(then_), self.simpl(else_))
+                        }
                     }
                 }
                 _ => Lambda::if_(self.simpl(cond), self.simpl(then_), self.simpl(else_)),
@@ -331,12 +326,9 @@ impl<'a> Simplifier<'a> {
             Lambda::Lconst(_) => lam.clone(),
 
             // lam_pass_remove_alias.ml:119
-            Lambda::Llet(kind, v, l1, l2) => Lambda::let_(
-                *kind,
-                v.clone(),
-                self.simpl(l1),
-                self.simpl(l2),
-            ),
+            Lambda::Llet(kind, v, l1, l2) => {
+                Lambda::let_(*kind, v.clone(), self.simpl(l1), self.simpl(l2))
+            }
 
             // lam_pass_remove_alias.ml:120-122
             Lambda::Lletrec(bindings, body) => {
@@ -358,8 +350,7 @@ impl<'a> Simplifier<'a> {
                 let Lambda::Lvar(v) = apply.ap_func.as_ref() else {
                     unreachable!()
                 };
-                let ap_args: Vec<Lambda> =
-                    apply.ap_args.iter().map(|a| self.simpl(a)).collect();
+                let ap_args: Vec<Lambda> = apply.ap_args.iter().map(|a| self.simpl(a)).collect();
 
                 // Clone the FunctionId payload to release the immutable
                 // borrow on `self.ident_tbl`; the beta-reduction helpers below
@@ -369,9 +360,7 @@ impl<'a> Simplifier<'a> {
                     Some(IdKind::FunctionId {
                         lambda: Some((Lambda::Lfunction(func), rec_flag)),
                         ..
-                    }) if lfunction_can_be_inlined(func)
-                        && ap_args.len() == func.params.len() =>
-                    {
+                    }) if lfunction_can_be_inlined(func) && ap_args.len() == func.params.len() => {
                         Some((func.clone(), *rec_flag))
                     }
                     _ => None,
@@ -403,11 +392,8 @@ impl<'a> Simplifier<'a> {
                     Some((func, rec_flag)) if ok_to_inline_fun_when_app(&func, &ap_args) => {
                         // lam_pass_remove_alias.ml:198-231 —
                         // size-bounded inlining.
-                        let (param_ok, param_map) = is_closed_with_map(
-                            self.export_idents,
-                            &func.params,
-                            &func.body,
-                        );
+                        let (param_ok, param_map) =
+                            is_closed_with_map(self.export_idents, &func.params, &func.body);
                         let is_export_id = self.export_idents.contains(v);
                         let allow = match (is_export_id, param_ok) {
                             (false, _) => true,
@@ -458,9 +444,7 @@ impl<'a> Simplifier<'a> {
             // lam_pass_remove_alias.ml:233-237 — direct
             // `Lapply(Lfunction _, args)` with same-arity, inlinable body:
             // beta-reduce in place.
-            Lambda::Lapply(apply)
-                if matches!(apply.ap_func.as_ref(), Lambda::Lfunction(_)) =>
-            {
+            Lambda::Lapply(apply) if matches!(apply.ap_func.as_ref(), Lambda::Lfunction(_)) => {
                 // Clone the function payload up front: the mutable meta
                 // borrow used by `propagate_beta_reduce_with_meta` is
                 // incompatible with the `apply.ap_func` / `apply.ap_args`
@@ -469,18 +453,16 @@ impl<'a> Simplifier<'a> {
                     Lambda::Lfunction(func) => func.clone(),
                     _ => unreachable!(),
                 };
-                let args: Vec<Lambda> =
-                    apply.ap_args.iter().map(|a| self.simpl(a)).collect();
-                if args.len() == func_clone.params.len()
-                    && lfunction_can_be_inlined(&func_clone)
-                {
-                    let reduced = crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
-                        self.ident_tbl,
-                        self.id_gen,
-                        &func_clone.params,
-                        &func_clone.body,
-                        &args,
-                    );
+                let args: Vec<Lambda> = apply.ap_args.iter().map(|a| self.simpl(a)).collect();
+                if args.len() == func_clone.params.len() && lfunction_can_be_inlined(&func_clone) {
+                    let reduced =
+                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                            self.ident_tbl,
+                            self.id_gen,
+                            &func_clone.params,
+                            &func_clone.body,
+                            &args,
+                        );
                     self.simpl(&reduced)
                 } else {
                     Lambda::apply(
@@ -559,17 +541,12 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:279
-            Lambda::LstaticCatch(l1, ids, l2) => Lambda::static_catch(
-                self.simpl(l1),
-                ids.0,
-                ids.1.clone(),
-                self.simpl(l2),
-            ),
+            Lambda::LstaticCatch(l1, ids, l2) => {
+                Lambda::static_catch(self.simpl(l1), ids.0, ids.1.clone(), self.simpl(l2))
+            }
 
             // lam_pass_remove_alias.ml:280
-            Lambda::LtryWith(l1, v, l2) => {
-                Lambda::try_(self.simpl(l1), v.clone(), self.simpl(l2))
-            }
+            Lambda::LtryWith(l1, v, l2) => Lambda::try_(self.simpl(l1), v.clone(), self.simpl(l2)),
 
             // lam_pass_remove_alias.ml:281
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl(l1), self.simpl(l2)),
@@ -604,4 +581,3 @@ impl<'a> Simplifier<'a> {
         }
     }
 }
-

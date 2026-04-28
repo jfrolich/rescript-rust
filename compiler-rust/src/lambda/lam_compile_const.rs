@@ -5,23 +5,19 @@
 
 use std::collections::HashMap;
 
-use crate::cmi::persistent_env::CmjExportConstant;
-use crate::ident::Ident;
-use crate::js_ir::op::{Kind, Number, MutableFlag};
-use crate::js_ir::printer::convert_ident_name;
-use crate::js_ir::{
-    BinOp, Block, Expression, ExpressionDesc, Delim, ModuleId,
-};
-use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
-use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
-use crate::lambda::lam_primitive::Primitive;
 use super::js_exp_make::{
     int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,
     pure_indexed_block_item,
 };
-use super::lam_compile::{
-    LambdaCompiler, pointer_info_comment_text,
-};
+use super::lam_compile::{LambdaCompiler, pointer_info_comment_text};
+use crate::cmi::persistent_env::CmjExportConstant;
+use crate::ident::Ident;
+use crate::js_ir::op::{Kind, MutableFlag, Number};
+use crate::js_ir::printer::convert_ident_name;
+use crate::js_ir::{BinOp, Block, Delim, Expression, ExpressionDesc, ModuleId};
+use crate::lambda::lam_compat::{FieldDbgInfo, SetFieldDbgInfo};
+use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo, StringDelim};
+use crate::lambda::lam_primitive::Primitive;
 
 impl LambdaCompiler {
     pub(crate) fn some_none_depth(cst: &Constant) -> Option<usize> {
@@ -282,9 +278,13 @@ impl LambdaCompiler {
         let field = match info {
             crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(name)
             | crate::lambda::lam_compat::SetFieldDbgInfo::RecordInlineSet(name)
-            | crate::lambda::lam_compat::SetFieldDbgInfo::RecordExtensionSet(name) => Expression::new(
-                ExpressionDesc::StaticIndex(Box::new(target.clone()), name.clone(), None),
-            ),
+            | crate::lambda::lam_compat::SetFieldDbgInfo::RecordExtensionSet(name) => {
+                Expression::new(ExpressionDesc::StaticIndex(
+                    Box::new(target.clone()),
+                    name.clone(),
+                    None,
+                ))
+            }
         };
         Expression::bin(BinOp::Eq, field, value.clone())
     }

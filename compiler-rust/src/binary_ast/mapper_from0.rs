@@ -1219,24 +1219,18 @@ impl<'a> Mapper<'a> {
                 // `_res.for_await_of` attributes is actually a `for ... of`
                 // / `for await ... of` loop in disguise — recover the proper
                 // variant. Mirrors `compiler/ml/ast_mapper_from0.ml`.
-                if let Some(iterable_expr) =
-                    extract_for_await_of_iterable(&expr.pexp_attributes)
-                {
+                if let Some(iterable_expr) = extract_for_await_of_iterable(&expr.pexp_attributes) {
                     let pat_idx = self.push_pat(pat);
                     let it_idx = self.push_expr(iterable_expr);
                     let body_idx = self.push_expr(e3);
                     current::ExpressionDesc::Pexp_for_await_of(Box::new((
                         pat_idx, it_idx, body_idx,
                     )))
-                } else if let Some(iterable_expr) =
-                    extract_for_of_iterable(&expr.pexp_attributes)
-                {
+                } else if let Some(iterable_expr) = extract_for_of_iterable(&expr.pexp_attributes) {
                     let pat_idx = self.push_pat(pat);
                     let it_idx = self.push_expr(iterable_expr);
                     let body_idx = self.push_expr(e3);
-                    current::ExpressionDesc::Pexp_for_of(Box::new((
-                        pat_idx, it_idx, body_idx,
-                    )))
+                    current::ExpressionDesc::Pexp_for_of(Box::new((pat_idx, it_idx, body_idx)))
                 } else {
                     let e1_idx = self.push_expr(e1);
                     let e2_idx = self.push_expr(e2);

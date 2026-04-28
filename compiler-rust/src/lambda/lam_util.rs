@@ -11,7 +11,7 @@ use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
-use crate::lambda::{lam_analysis, Apply, Lambda, PrimInfo};
+use crate::lambda::{Apply, Lambda, PrimInfo, lam_analysis};
 use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
@@ -31,12 +31,11 @@ fn is_safe_to_alias(lam: &Lambda) -> bool {
             primitive: Primitive::Pfield(_, dbg_info),
             args,
             ..
-        }) if matches!(dbg_info, crate::lambda::lam_compat::FieldDbgInfo::Module { .. })
-            && args.len() == 1
-            && matches!(
-                args[0],
-                Lambda::LglobalModule(_, _) | Lambda::Lvar(_)
-            ) =>
+        }) if matches!(
+            dbg_info,
+            crate::lambda::lam_compat::FieldDbgInfo::Module { .. }
+        ) && args.len() == 1
+            && matches!(args[0], Lambda::LglobalModule(_, _) | Lambda::Lvar(_)) =>
         {
             true
         }
@@ -267,12 +266,8 @@ mod tests {
         // but Strict-pure rewrite may still fire because makeblock has no side
         // effects, which downgrades to StrictOpt — that is what OCaml does.
         match result {
-            Lambda::Llet(LetKind::StrictOpt, _, _, _)
-            | Lambda::Llet(LetKind::Strict, _, _, _) => {}
-            other => panic!(
-                "expected Llet(StrictOpt|Strict, _, _, _), got {:?}",
-                other
-            ),
+            Lambda::Llet(LetKind::StrictOpt, _, _, _) | Lambda::Llet(LetKind::Strict, _, _, _) => {}
+            other => panic!("expected Llet(StrictOpt|Strict, _, _, _), got {:?}", other),
         }
     }
 

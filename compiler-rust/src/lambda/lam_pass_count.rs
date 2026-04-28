@@ -14,7 +14,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
 use crate::lambda::lam_beta_reduce::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::{Lambda, LambdaSwitch, LFunction};
+use crate::lambda::{LFunction, Lambda, LambdaSwitch};
 
 /// Equivalent of OCaml's `Lam_pass_count.used_info` (lam_pass_count.ml:15-23).
 #[derive(Debug, Default, Clone, Copy)]
@@ -319,9 +319,9 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
 mod tests {
     use super::*;
     use crate::ident::{Ident, IdentFlags};
+    use crate::lambda::Lambda;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::Constant;
-    use crate::lambda::Lambda;
 
     fn ident(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -336,7 +336,12 @@ mod tests {
             Box::new(Lambda::Lvar(v.clone())),
             Box::new(Lambda::Lvar(v.clone())),
         );
-        let lam = Lambda::let_(LetKind::Strict, v.clone(), Lambda::Lconst(Constant::int(1)), body);
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            v.clone(),
+            Lambda::Lconst(Constant::int(1)),
+            body,
+        );
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert_eq!(info.times, 2);
@@ -362,7 +367,12 @@ mod tests {
                 one_unit_arg: false,
             },
         );
-        let lam = Lambda::let_(LetKind::Strict, v.clone(), Lambda::Lconst(Constant::int(1)), func);
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            v.clone(),
+            Lambda::Lconst(Constant::int(1)),
+            func,
+        );
         let occ = collect_occurs(&lam);
         let info = lookup(&occ, &v);
         assert!(info.captured);
@@ -382,7 +392,12 @@ mod tests {
             Lambda::Lvar(w.clone()),
             Lambda::Lvar(v.clone()),
         );
-        let lam = Lambda::let_(LetKind::Strict, w.clone(), Lambda::Lconst(Constant::int(0)), inner);
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            w.clone(),
+            Lambda::Lconst(Constant::int(0)),
+            inner,
+        );
         let occ = collect_occurs(&lam);
         let w_info = lookup(&occ, &w);
         // v has 1 use; that use inherits to w. w itself appears 0 times in body

@@ -22,45 +22,45 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
+pub mod js_exp_make;
+pub mod js_pass_external_shadow;
+pub mod js_pass_flatten_and_mark_dead;
+pub mod js_pass_tailcall_inline;
+pub mod js_shake;
+pub mod js_stmt_make;
 pub mod lam_analysis;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
 pub mod lam_closure;
+pub mod lam_coercion;
 pub mod lam_compat;
 pub mod lam_compile;
 pub mod lam_compile_const;
+pub mod lam_compile_context;
 pub mod lam_compile_external;
+pub mod lam_compile_main;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
-pub mod lam_pass_collect;
-pub mod lam_compile_context;
 pub mod lam_constant;
 pub mod lam_convert;
-pub mod lam_pass_deep_flatten;
-pub mod lam_free_variables;
-pub mod js_exp_make;
-pub mod js_pass_external_shadow;
-pub mod js_stmt_make;
-pub mod js_pass_flatten_and_mark_dead;
-pub mod js_pass_tailcall_inline;
-pub mod js_shake;
-pub mod lam_coercion;
-pub mod lam_exit_code;
-pub mod lam_hit;
-pub mod lam_util;
 pub mod lam_eta_conversion;
+pub mod lam_exit_code;
+pub mod lam_free_variables;
+pub mod lam_hit;
 pub mod lam_pass_alpha_conversion;
+pub mod lam_pass_collect;
 pub mod lam_pass_count;
+pub mod lam_pass_deep_flatten;
 pub mod lam_pass_eliminate_ref;
 pub mod lam_pass_exits;
 pub mod lam_pass_lets_dce;
 pub mod lam_pass_remove_alias;
 pub mod lam_primitive;
 pub mod lam_print;
-pub mod sexp_lambda;
-pub mod lam_compile_main;
 pub mod lam_subst;
 pub mod lam_tag_info;
+pub mod lam_util;
+pub mod sexp_lambda;
 
 use crate::ident::Ident;
 use crate::location::Location;
@@ -412,10 +412,9 @@ impl Lambda {
                     Err(_) => default(primitive, args, loc),
                 },
                 // lam.ml:491-492 — Pstringlength on bare string literal.
-                (
-                    Primitive::Pstringlength,
-                    Constant::String { s, delim: None },
-                ) => Lambda::Lconst(Constant::int(s.len() as i32)),
+                (Primitive::Pstringlength, Constant::String { s, delim: None }) => {
+                    Lambda::Lconst(Constant::int(s.len() as i32))
+                }
                 // lam.ml:496-497
                 (Primitive::Pnot, Constant::JsTrue) => Lambda::false_(),
                 (Primitive::Pnot, Constant::JsFalse) => Lambda::true_(),
@@ -524,8 +523,14 @@ impl Lambda {
                 // lam.ml:539-542
                 (
                     Primitive::Pstringadd,
-                    Constant::String { s: a_s, delim: None },
-                    Constant::String { s: b_s, delim: None },
+                    Constant::String {
+                        s: a_s,
+                        delim: None,
+                    },
+                    Constant::String {
+                        s: b_s,
+                        delim: None,
+                    },
                 ) => Lambda::Lconst(Constant::String {
                     s: format!("{}{}", a_s, b_s),
                     delim: None,
@@ -582,7 +587,8 @@ impl Lambda {
         default: Option<Box<Lambda>>,
     ) -> Self {
         let matched = |value: &str| {
-            cases.iter()
+            cases
+                .iter()
                 .find(|(tag, _)| tag == value)
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| default.as_deref().cloned())
@@ -595,21 +601,17 @@ impl Lambda {
                     delim: None | Some(StringDelim::NoQuotes),
                 },
             ) => matched(s).unwrap_or_else(|| {
-                Lambda::LstringSwitch(
-                    Box::new(Lambda::Lconst(constant.clone())),
-                    cases,
-                    default,
-                )
+                Lambda::LstringSwitch(Box::new(Lambda::Lconst(constant.clone())), cases, default)
             }),
-            Lambda::Lconst(ref constant @ Constant::ImmString(ref s)) => matched(s).unwrap_or_else(
-                || {
+            Lambda::Lconst(ref constant @ Constant::ImmString(ref s)) => {
+                matched(s).unwrap_or_else(|| {
                     Lambda::LstringSwitch(
                         Box::new(Lambda::Lconst(constant.clone())),
                         cases,
                         default,
                     )
-                },
-            ),
+                })
+            }
             other => Lambda::LstringSwitch(Box::new(other), cases, default),
         }
     }

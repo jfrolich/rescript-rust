@@ -1150,7 +1150,10 @@ pub fn extract_fundef_params(
                     None => Some(tp),
                 };
             }
-            FundefParameter::ComptimeType { name, start_pos_idx } => {
+            FundefParameter::ComptimeType {
+                name,
+                start_pos_idx,
+            } => {
                 // Comptime type params are treated as type params for now,
                 // with the name added to the type param list.
                 // The comptime semantics are handled during type checking.

@@ -151,15 +151,25 @@ pub fn make_monomorph_name(func_name: &str, type_key: &TypeInfo) -> String {
         TypeInfo::Char => "char".to_string(),
         TypeInfo::Bigint => "bigint".to_string(),
         TypeInfo::Array { element } => {
-            format!("array_{}", make_monomorph_name("", element).trim_start_matches('$'))
+            format!(
+                "array_{}",
+                make_monomorph_name("", element).trim_start_matches('$')
+            )
         }
         TypeInfo::Option { inner } => {
-            format!("option_{}", make_monomorph_name("", inner).trim_start_matches('$'))
+            format!(
+                "option_{}",
+                make_monomorph_name("", inner).trim_start_matches('$')
+            )
         }
         TypeInfo::Tuple { elements } => {
             let parts: Vec<String> = elements
                 .iter()
-                .map(|e| make_monomorph_name("", e).trim_start_matches('$').to_string())
+                .map(|e| {
+                    make_monomorph_name("", e)
+                        .trim_start_matches('$')
+                        .to_string()
+                })
                 .collect();
             format!("tuple_{}", parts.join("_"))
         }
@@ -221,9 +231,15 @@ pub enum TypeInfo {
     Unit,
     Char,
     Bigint,
-    Array { element: Box<TypeInfo> },
-    Option { inner: Box<TypeInfo> },
-    Tuple { elements: Vec<TypeInfo> },
+    Array {
+        element: Box<TypeInfo>,
+    },
+    Option {
+        inner: Box<TypeInfo>,
+    },
+    Tuple {
+        elements: Vec<TypeInfo>,
+    },
     Record {
         name: std::string::String,
         fields: Vec<FieldInfo>,
@@ -238,9 +254,15 @@ pub enum TypeInfo {
         args: Vec<TypeInfo>,
         return_type: Box<TypeInfo>,
     },
-    External { name: std::string::String },
-    Opaque { name: std::string::String },
-    Unknown { description: std::string::String },
+    External {
+        name: std::string::String,
+    },
+    Opaque {
+        name: std::string::String,
+    },
+    Unknown {
+        description: std::string::String,
+    },
 }
 
 /// A record field descriptor.
@@ -378,11 +400,9 @@ pub fn build_type_info<'a>(
         TypeDesc::Tlink(inner) => build_type_info(ctx, env, *inner, visited),
         TypeDesc::Tsubst(inner) => build_type_info(ctx, env, *inner, visited),
 
-        TypeDesc::Tnil | TypeDesc::Tfield { .. } | TypeDesc::Tpackage { .. } => {
-            TypeInfo::Unknown {
-                description: format!("{:?}", &*desc),
-            }
-        }
+        TypeDesc::Tnil | TypeDesc::Tfield { .. } | TypeDesc::Tpackage { .. } => TypeInfo::Unknown {
+            description: format!("{:?}", &*desc),
+        },
     };
 
     visited.pop();
@@ -459,8 +479,7 @@ fn build_type_info_from_constr<'a>(
                     .map(|ld| FieldInfo {
                         name: ld.ld_id.name().to_string(),
                         typ: build_type_info(ctx, env, ld.ld_type, visited),
-                        mutable: ld.ld_mutable
-                            == super::asttypes::MutableFlag::Mutable,
+                        mutable: ld.ld_mutable == super::asttypes::MutableFlag::Mutable,
                         optional: ld.ld_optional,
                         attributes: vec![],
                     })
@@ -560,13 +579,23 @@ pub fn type_info_to_typed_expr<'a>(
     // Build constructor arguments for constructors with payloads
     let args = match info {
         // No-arg constructors
-        TypeInfo::Int | TypeInfo::Float | TypeInfo::String | TypeInfo::Bool
-        | TypeInfo::Unit | TypeInfo::Char | TypeInfo::Bigint
-        | TypeInfo::Tuple { .. } | TypeInfo::Unknown { .. } => {
+        TypeInfo::Int
+        | TypeInfo::Float
+        | TypeInfo::String
+        | TypeInfo::Bool
+        | TypeInfo::Unit
+        | TypeInfo::Char
+        | TypeInfo::Bigint
+        | TypeInfo::Tuple { .. }
+        | TypeInfo::Unknown { .. } => {
             vec![]
         }
         // Record({name, fields, unboxed}) — construct inline record
-        TypeInfo::Record { name, fields, unboxed } => {
+        TypeInfo::Record {
+            name,
+            fields,
+            unboxed,
+        } => {
             // Build field info array
             let field_exprs: Vec<typedtree::Expression> = fields
                 .iter()
@@ -575,7 +604,10 @@ pub fn type_info_to_typed_expr<'a>(
             let fields_arr = typedtree::Expression::new(
                 typedtree::ExpressionDesc::Texp_array(field_exprs),
                 loc,
-                ctx.new_constr(predef::path_array(), vec![ctx.new_constr(predef::path_field_info(), vec![])]),
+                ctx.new_constr(
+                    predef::path_array(),
+                    vec![ctx.new_constr(predef::path_field_info(), vec![])],
+                ),
                 env_ref,
                 crate::parser::ast::Attributes::new(),
             );
@@ -639,7 +671,12 @@ fn build_field_info_expr<'a>(
 
     // Return as a tuple for now (proper record construction needs LabelDescription)
     typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_tuple(vec![name_expr, typ_expr, optional_expr, mutable_expr]),
+        typedtree::ExpressionDesc::Texp_tuple(vec![
+            name_expr,
+            typ_expr,
+            optional_expr,
+            mutable_expr,
+        ]),
         loc,
         ctx.new_constr(predef::path_field_info(), vec![]),
         env_ref,
@@ -675,10 +712,19 @@ pub fn make_bool_expr<'a>(
     let ctor_name = if b { "true" } else { "false" };
     let cstr_desc = match env.find_constructor(ctor_name) {
         Ok(desc) => desc.clone(),
-        Err(_) => return typedtree::Expression::new(
-            typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::Int(if b { 1 } else { 0 })),
-            loc, bool_ty, env_ref, crate::parser::ast::Attributes::new(),
-        ),
+        Err(_) => {
+            return typedtree::Expression::new(
+                typedtree::ExpressionDesc::Texp_constant(typedtree::Constant::Int(if b {
+                    1
+                } else {
+                    0
+                })),
+                loc,
+                bool_ty,
+                env_ref,
+                crate::parser::ast::Attributes::new(),
+            );
+        }
     };
     let lid_loc = crate::parse_arena::Located {
         txt: crate::parse_arena::LidentIdx(0),
@@ -686,7 +732,10 @@ pub fn make_bool_expr<'a>(
     };
     typedtree::Expression::new(
         typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, vec![]),
-        loc, bool_ty, env_ref, crate::parser::ast::Attributes::new(),
+        loc,
+        bool_ty,
+        env_ref,
+        crate::parser::ast::Attributes::new(),
     )
 }
 
@@ -741,31 +790,29 @@ pub fn match_typeinfo_pattern(
         ("Char", TypeInfo::Char) => Some(bindings),
         ("Bigint", TypeInfo::Bigint) => Some(bindings),
         ("Array", TypeInfo::Array { element }) => {
-            bindings.insert(
-                "element".to_string(),
-                ComptimeValue::Type(*element.clone()),
-            );
+            bindings.insert("element".to_string(), ComptimeValue::Type(*element.clone()));
             Some(bindings)
         }
         ("Option", TypeInfo::Option { inner }) => {
             bindings.insert("inner".to_string(), ComptimeValue::Type(*inner.clone()));
             Some(bindings)
         }
-        ("Record", TypeInfo::Record { name, fields, unboxed }) => {
+        (
+            "Record",
+            TypeInfo::Record {
+                name,
+                fields,
+                unboxed,
+            },
+        ) => {
             let field_values: Vec<ComptimeValue> = fields
                 .iter()
                 .map(|f| {
                     ComptimeValue::Record(vec![
                         ("name".to_string(), ComptimeValue::String(f.name.clone())),
                         ("typ".to_string(), ComptimeValue::Type(f.typ.clone())),
-                        (
-                            "mutable".to_string(),
-                            ComptimeValue::Bool(f.mutable),
-                        ),
-                        (
-                            "optional".to_string(),
-                            ComptimeValue::Bool(f.optional),
-                        ),
+                        ("mutable".to_string(), ComptimeValue::Bool(f.mutable)),
+                        ("optional".to_string(), ComptimeValue::Bool(f.optional)),
                     ])
                 })
                 .collect();
@@ -774,7 +821,14 @@ pub fn match_typeinfo_pattern(
             bindings.insert("unboxed".to_string(), ComptimeValue::Bool(*unboxed));
             Some(bindings)
         }
-        ("Variant", TypeInfo::Variant { name, constructors, unboxed }) => {
+        (
+            "Variant",
+            TypeInfo::Variant {
+                name,
+                constructors,
+                unboxed,
+            },
+        ) => {
             let ctor_values: Vec<ComptimeValue> = constructors
                 .iter()
                 .map(|c| {
@@ -831,7 +885,9 @@ impl SpecEnv {
 
     fn step(&mut self) -> Result<(), String> {
         if self.fuel == 0 {
-            return Err("Comptime evaluation exceeded fuel limit (possible infinite loop)".to_string());
+            return Err(
+                "Comptime evaluation exceeded fuel limit (possible infinite loop)".to_string(),
+            );
         }
         self.fuel -= 1;
         Ok(())
@@ -865,11 +921,7 @@ pub fn specialize_expression(
                     Some(constant) => typedtree::ExpressionDesc::Texp_constant(constant),
                     None => {
                         // Can't convert to constant — leave as is
-                        typedtree::ExpressionDesc::Texp_ident(
-                            path.clone(),
-                            lid.clone(),
-                            vd.clone(),
-                        )
+                        typedtree::ExpressionDesc::Texp_ident(path.clone(), lid.clone(), vd.clone())
                     }
                 }
             } else {
@@ -894,11 +946,7 @@ pub fn specialize_expression(
                 })
                 .collect::<Result<_, String>>()?;
             let spec_body = specialize_expression(body, env, ctx, type_env)?;
-            typedtree::ExpressionDesc::Texp_let(
-                *rec_flag,
-                spec_bindings,
-                Box::new(spec_body),
-            )
+            typedtree::ExpressionDesc::Texp_let(*rec_flag, spec_bindings, Box::new(spec_body))
         }
 
         // Application — specialize function and arguments
@@ -938,20 +986,14 @@ pub fn specialize_expression(
             if let Some(cv) = try_eval_to_comptime(&spec_scrutinee, env) {
                 // Try to match against case patterns
                 for case in cases {
-                    if let Some(new_bindings) =
-                        match_case_pattern(&case.c_lhs, &cv)
-                    {
+                    if let Some(new_bindings) = match_case_pattern(&case.c_lhs, &cv) {
                         let mut branch_env = SpecEnv {
                             bindings: env.bindings.clone(),
                             fuel: env.fuel,
                         };
                         branch_env.bindings.extend(new_bindings);
-                        let result = specialize_expression(
-                            &case.c_rhs,
-                            &mut branch_env,
-                            ctx,
-                            type_env,
-                        );
+                        let result =
+                            specialize_expression(&case.c_rhs, &mut branch_env, ctx, type_env);
                         env.fuel = branch_env.fuel;
                         if let Ok(specialized) = result {
                             return Ok(specialized);
@@ -1018,7 +1060,10 @@ pub fn specialize_expression(
         }
 
         // Record — specialize field values
-        typedtree::ExpressionDesc::Texp_record { fields, extended_expression } => {
+        typedtree::ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        } => {
             // Clone and specialize each field expression
             let spec_fields: Vec<_> = fields
                 .iter()
@@ -1027,10 +1072,9 @@ pub fn specialize_expression(
                         typedtree::RecordLabelDefinition::Kept(_) => def.clone(),
                         typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
                             match specialize_expression(field_expr, env, ctx, type_env) {
-                                Ok(spec) => typedtree::RecordLabelDefinition::Overridden(
-                                    lid2.clone(),
-                                    spec,
-                                ),
+                                Ok(spec) => {
+                                    typedtree::RecordLabelDefinition::Overridden(lid2.clone(), spec)
+                                }
                                 Err(_) => def.clone(),
                             }
                         }
@@ -1078,20 +1122,15 @@ pub fn specialize_expression(
 }
 
 /// Try to evaluate a typed expression to a ComptimeValue.
-fn try_eval_to_comptime(
-    expr: &typedtree::Expression,
-    env: &SpecEnv,
-) -> Option<ComptimeValue> {
+fn try_eval_to_comptime(expr: &typedtree::Expression, env: &SpecEnv) -> Option<ComptimeValue> {
     match &expr.exp_desc {
-        typedtree::ExpressionDesc::Texp_constant(c) => {
-            match c {
-                typedtree::Constant::Int(n) => Some(ComptimeValue::Int(*n)),
-                typedtree::Constant::String(s, _) => Some(ComptimeValue::String(s.clone())),
-                typedtree::Constant::Float(s) => s.parse::<f64>().ok().map(ComptimeValue::Float),
-                typedtree::Constant::Char(c) => Some(ComptimeValue::Int(*c as i64)),
-                _ => None,
-            }
-        }
+        typedtree::ExpressionDesc::Texp_constant(c) => match c {
+            typedtree::Constant::Int(n) => Some(ComptimeValue::Int(*n)),
+            typedtree::Constant::String(s, _) => Some(ComptimeValue::String(s.clone())),
+            typedtree::Constant::Float(s) => s.parse::<f64>().ok().map(ComptimeValue::Float),
+            typedtree::Constant::Char(c) => Some(ComptimeValue::Int(*c as i64)),
+            _ => None,
+        },
         typedtree::ExpressionDesc::Texp_construct(_, cstr_desc, args) if args.is_empty() => {
             // Boolean-like constructors
             let name = cstr_desc.cstr_name.clone();
@@ -1139,7 +1178,9 @@ fn match_case_pattern(
                             for (_field_lid, lbl_desc, field_pat, _optional) in fields {
                                 let field_name = &lbl_desc.lbl_name;
                                 if let Some(field_value) = bindings.remove(field_name.as_str()) {
-                                    if let typedtree::PatternDesc::Tpat_var(id, _) = &field_pat.pat_desc {
+                                    if let typedtree::PatternDesc::Tpat_var(id, _) =
+                                        &field_pat.pat_desc
+                                    {
                                         bindings.insert(id.name().to_string(), field_value);
                                     }
                                 }

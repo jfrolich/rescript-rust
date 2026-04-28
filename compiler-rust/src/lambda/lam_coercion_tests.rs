@@ -172,8 +172,8 @@ fn coerce_and_resolve_keep_declared_same_name_export_aliases() {
 }
 
 #[test]
-fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multiple_materialized_roots(
-) {
+fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multiple_materialized_roots()
+ {
     let mut compiler = LambdaCompiler::new();
     let source_level_broken = Ident::create_local("broken");
     let target = Ident::create_local("broken");
@@ -220,7 +220,9 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
 
     assert_eq!(exports, vec![exported.clone()]);
     let [first, second, third] = block.as_slice() else {
-        panic!("expected the earlier same-name binding, async target, and alias bindings to remain");
+        panic!(
+            "expected the earlier same-name binding, async target, and alias bindings to remain"
+        );
     };
     match &first.desc {
         StatementDesc::Variable(VariableDeclaration {
@@ -237,9 +239,7 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
             assert!(alias_target.same(&do_something_async));
             assert_eq!(*property, LetKind::Alias);
         }
-        other => panic!(
-            "expected the earlier source-level same-name binding first, got {other:?}"
-        ),
+        other => panic!("expected the earlier source-level same-name binding first, got {other:?}"),
     };
     match &second.desc {
         StatementDesc::Variable(VariableDeclaration {
@@ -351,8 +351,8 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
 }
 
 #[test]
-fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_effect_when_reused(
-) {
+fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_effect_when_reused()
+{
     let mut compiler = LambdaCompiler::new();
     let target = Ident::create_local("tToJs");
     let declared_alias = Ident::create_local("v");
@@ -456,8 +456,7 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_binding_before_later_e
 }
 
 #[test]
-fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_effect()
-{
+fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_effect() {
     let mut compiler = LambdaCompiler::new();
     let target = Ident::create_local("tToJs");
     let renamed_same_name = Ident::create_local("tToJs");
@@ -567,9 +566,9 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
             };
             match &arg.desc {
                 ExpressionDesc::Str { txt, .. } => assert_eq!(txt, "a"),
-                other => panic!(
-                    "expected the later top-level call arg to stay as \"a\", got {other:?}"
-                ),
+                other => {
+                    panic!("expected the later top-level call arg to stay as \"a\", got {other:?}")
+                }
             }
             match &func.desc {
                 ExpressionDesc::Var(VIdent::Id(ident)) => {
@@ -585,8 +584,8 @@ fn coerce_toplevel_exports_keeps_same_name_function_alias_chain_before_later_eff
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_without_remaining_use(
-) {
+fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_without_remaining_use()
+{
     let mut compiler = LambdaCompiler::new();
     let fib = Ident::create_local("fib");
     let exported = Ident::create_local("b");
@@ -687,13 +686,11 @@ fn later_toplevel_effect_blocks_tail_move_for_non_recursive_function_without_rem
     let target = Ident::create_local("abc_u");
     let replacement = Expression::var(Ident::create_local("abc"));
     let sink = Ident::create_persistent("sink");
-    let remaining = vec![
-        Statement::exp(Expression::call(
-            Expression::var(sink.clone()),
-            vec![],
-            CallInfo::default(),
-        )),
-    ];
+    let remaining = vec![Statement::exp(Expression::call(
+        Expression::var(sink.clone()),
+        vec![],
+        CallInfo::default(),
+    ))];
 
     assert!(!later_toplevel_effect_allows_tail_move(
         &remaining,
@@ -736,8 +733,8 @@ fn resolve_export_aliases_prefers_underlying_declared_same_name_target_over_self
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused(
-) {
+fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to_tail_when_reused()
+{
     let mut compiler = LambdaCompiler::new();
     let set_gen = ModuleId {
         id: Ident::create_persistent("Set_gen"),
@@ -963,14 +960,16 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
             ..
         }) => {
             assert!(ident.same(&concat));
-            let [Statement {
-                desc:
-                    StatementDesc::Return(Expression {
-                        desc: ExpressionDesc::Var(VIdent::Id(target)),
-                        ..
-                    }),
-                ..
-            }] = body.as_slice()
+            let [
+                Statement {
+                    desc:
+                        StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Var(VIdent::Id(target)),
+                            ..
+                        }),
+                    ..
+                },
+            ] = body.as_slice()
             else {
                 panic!("expected the later function body to return the shared binding");
             };
@@ -981,8 +980,7 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_initializer_use()
- {
+fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_initializer_use() {
     let mut compiler = LambdaCompiler::new();
     let exported = Ident::create_local("a15");
     let derived = Ident::create_local("a20");
@@ -1086,8 +1084,8 @@ fn coerce_toplevel_exports_moves_same_name_literal_binding_to_tail_across_later_
 }
 
 #[test]
-fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root_for_same_name_literal_alias_chain(
-) {
+fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root_for_same_name_literal_alias_chain()
+ {
     let mut compiler = LambdaCompiler::new();
     let root = Ident::create_local("a10");
     let exported = Ident::create_local("a15");
@@ -1142,7 +1140,9 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
 
     assert_eq!(exports, vec![exported.clone()]);
     let [first, second, third, fourth] = block.as_slice() else {
-        panic!("expected the root binding, rewritten initializer, function binding, and late export");
+        panic!(
+            "expected the root binding, rewritten initializer, function binding, and late export"
+        );
     };
     match &first.desc {
         StatementDesc::Variable(VariableDeclaration {
@@ -1210,7 +1210,9 @@ fn coerce_toplevel_exports_rewrites_later_initializers_through_materialized_root
             assert!(target.same(&root));
             assert_eq!(*property, LetKind::Alias);
         }
-        other => panic!("expected the late export binding to reuse the materialized root, got {other:?}"),
+        other => {
+            panic!("expected the late export binding to reuse the materialized root, got {other:?}")
+        }
     }
 }
 
@@ -1307,10 +1309,7 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
     let mut block = vec![
         Statement::variable(VariableDeclaration {
             ident: declared.clone(),
-            value: Some(Expression::qualified(
-                set_gen,
-                Some("empty".to_string()),
-            )),
+            value: Some(Expression::qualified(set_gen, Some("empty".to_string()))),
             property: LetKind::Strict,
             ident_info: IdentInfo::default(),
         }),
@@ -1369,8 +1368,7 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
 }
 
 #[test]
-fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unused_later_effect(
-) {
+fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unused_later_effect() {
     let mut compiler = LambdaCompiler::new();
     let belt_mutable_set_int = ModuleId {
         id: Ident::create_persistent("Belt_MutableSetInt"),
@@ -1460,10 +1458,7 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
     let mut block = vec![
         Statement::variable(VariableDeclaration {
             ident: foo.clone(),
-            value: Some(Expression::qualified(
-                file_js,
-                Some("foo".to_string()),
-            )),
+            value: Some(Expression::qualified(file_js, Some("foo".to_string()))),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -1680,8 +1675,7 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effect_only_calls_it()
-{
+fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effect_only_calls_it() {
     let mut compiler = LambdaCompiler::new();
     let converter = Ident::create_local("tToJs");
     let exported = Ident::create_local("v");
@@ -1757,14 +1751,16 @@ fn coerce_toplevel_exports_moves_function_alias_binding_to_tail_when_later_effec
             };
             match &effect_closure.desc {
                 ExpressionDesc::Fun { body, .. } => {
-                    let [Statement {
-                        desc:
-                            StatementDesc::Return(Expression {
-                                desc: ExpressionDesc::Call(func, _, _),
-                                ..
-                            }),
-                        ..
-                    }] = body.as_slice()
+                    let [
+                        Statement {
+                            desc:
+                                StatementDesc::Return(Expression {
+                                    desc: ExpressionDesc::Call(func, _, _),
+                                    ..
+                                }),
+                            ..
+                        },
+                    ] = body.as_slice()
                     else {
                         panic!("expected the closure body to stay a direct function call");
                     };
@@ -1863,8 +1859,7 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_value_effect()
-{
+fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_value_effect() {
     let mut compiler = LambdaCompiler::new();
     let module = ModuleId {
         id: Ident::create_persistent("A3_a4"),
@@ -1942,8 +1937,8 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_to_tail_across_
 }
 
 #[test]
-fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_field_name_to_tail_after_unused_later_effect(
-) {
+fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_field_name_to_tail_after_unused_later_effect()
+ {
     let mut compiler = LambdaCompiler::new();
     let module = ModuleId {
         id: Ident::create_persistent("Belt_MutableSetInt"),
@@ -1955,7 +1950,10 @@ fn coerce_toplevel_exports_moves_same_name_ml_module_field_alias_with_different_
     let mut block = vec![
         Statement::variable(VariableDeclaration {
             ident: exported.clone(),
-            value: Some(Expression::qualified(module.clone(), Some("make".to_string()))),
+            value: Some(Expression::qualified(
+                module.clone(),
+                Some("make".to_string()),
+            )),
             property: LetKind::Alias,
             ident_info: IdentInfo::default(),
         }),
@@ -2087,8 +2085,8 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
 }
 
 #[test]
-fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_rewrites_function_and_literal_aliases(
-) {
+fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_rewrites_function_and_literal_aliases()
+ {
     let target = Ident::create_local("myField");
     let exported_same_name_alias = Ident::create_local("myField");
     let no_param = Ident::create_local("noParam");
@@ -2159,8 +2157,7 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_rewrites_f
 }
 
 #[test]
-fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_skips_non_export_aliases(
-) {
+fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_skips_non_export_aliases() {
     let target = Ident::create_local("myField");
     let exported_same_name_alias = Ident::create_local("myField");
     let non_export_alias = Ident::create_local("_myFieldAlias");
@@ -2199,8 +2196,7 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_skips_non_
         &[exported_same_name_alias.clone()],
     );
 
-    let Some(non_export_alias_value) = find_variable_initializer(&block, &non_export_alias)
-    else {
+    let Some(non_export_alias_value) = find_variable_initializer(&block, &non_export_alias) else {
         panic!("expected the non-export alias binding to remain");
     };
     match &non_export_alias_value.desc {
@@ -2210,8 +2206,8 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_skips_non_
 }
 
 #[test]
-fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_keeps_shared_literal_roots_materialized(
-) {
+fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_keeps_shared_literal_roots_materialized()
+ {
     let shared_root = Ident::create_local("a10");
     let shared_use = Ident::create_local("a20");
     let exported_alias = Ident::create_local("a15");
@@ -2246,8 +2242,6 @@ fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases_keeps_shar
     };
     match &exported_alias_value.desc {
         ExpressionDesc::Var(VIdent::Id(ident)) => assert!(ident.same(&shared_root)),
-        other => panic!(
-            "expected the shared literal root to stay materialized, got {other:?}"
-        ),
+        other => panic!("expected the shared literal root to stay materialized, got {other:?}"),
     }
 }

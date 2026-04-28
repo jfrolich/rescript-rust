@@ -2932,7 +2932,6 @@ fn handle_re(
     }
 }
 
-
 /// Handle %raw extension by transforming it into local_external_apply pattern.
 ///
 /// OCaml transforms `%raw("code")` into:
@@ -6451,10 +6450,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let body_expr = arena.get_expr(*body).clone();
             let rw_collection = rewrite_expression_generic(&coll_expr, arena);
             let rw_body = rewrite_expression_generic(&body_expr, arena);
-            ExpressionDesc::Pexp_inline_for(Box::new((*pat, arena.push_expr(rw_collection), arena.push_expr(rw_body))))
+            ExpressionDesc::Pexp_inline_for(Box::new((
+                *pat,
+                arena.push_expr(rw_collection),
+                arena.push_expr(rw_body),
+            )))
         }
-        ExpressionDesc::Pexp_comptime_typeinfo(_)
-        | ExpressionDesc::Pexp_comptime_typename(_) => {
+        ExpressionDesc::Pexp_comptime_typeinfo(_) | ExpressionDesc::Pexp_comptime_typename(_) => {
             // Pass through as-is (no sub-expressions to rewrite)
             (*expr.pexp_desc).clone()
         }
@@ -6464,7 +6466,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let field_expr = arena.get_expr(*field).clone();
             let rw_value = rewrite_expression_generic(&val_expr, arena);
             let rw_field = rewrite_expression_generic(&field_expr, arena);
-            ExpressionDesc::Pexp_comptime_field(Box::new((arena.push_expr(rw_value), arena.push_expr(rw_field))))
+            ExpressionDesc::Pexp_comptime_field(Box::new((
+                arena.push_expr(rw_value),
+                arena.push_expr(rw_field),
+            )))
         }
         ExpressionDesc::Pexp_comptime_compile_error(expr_idx) => {
             let inner_expr = arena.get_expr(*expr_idx).clone();
@@ -10497,7 +10502,10 @@ fn expand_signature_deriving_items(
         return vec![rewritten];
     };
     let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
-    if !actions.iter().any(|action| matches!(action, DeriveAction::Accessors)) {
+    if !actions
+        .iter()
+        .any(|action| matches!(action, DeriveAction::Accessors))
+    {
         return vec![rewritten];
     }
 

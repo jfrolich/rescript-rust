@@ -88,17 +88,15 @@ fn rewrite_statement(stmt: &Statement, shadowed_globals: &HashSet<String>) -> St
             rewrite_global_static_index_expr(cond, shadowed_globals),
             rewrite_block(body, shadowed_globals),
         ),
-        StatementDesc::ForRange(label, init, end, id, direction, body) => {
-            StatementDesc::ForRange(
-                label.clone(),
-                init.as_ref()
-                    .map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
-                rewrite_global_static_index_expr(end, shadowed_globals),
-                id.clone(),
-                *direction,
-                rewrite_block(body, shadowed_globals),
-            )
-        }
+        StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
+            label.clone(),
+            init.as_ref()
+                .map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
+            rewrite_global_static_index_expr(end, shadowed_globals),
+            id.clone(),
+            *direction,
+            rewrite_block(body, shadowed_globals),
+        ),
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label.clone(),
             id.clone(),

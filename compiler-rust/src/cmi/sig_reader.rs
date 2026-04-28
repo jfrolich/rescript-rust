@@ -1190,11 +1190,9 @@ fn extract_ident_payload_name(structure: &OcamlValue) -> Option<String> {
                     _ => None,
                 }
             }
-            OcamlValue::Block(_, fields) => {
-                fields
-                    .iter()
-                    .find_map(|field| find_ident_in_value(field, depth + 1))
-            }
+            OcamlValue::Block(_, fields) => fields
+                .iter()
+                .find_map(|field| find_ident_in_value(field, depth + 1)),
             _ => None,
         }
     }
@@ -1362,7 +1360,10 @@ mod tests {
     fn cmi_ident_pstr(name: &str) -> OcamlValue {
         block(
             0,
-            vec![block(0, vec![block(0, vec![OcamlValue::String(name.to_string())])])],
+            vec![block(
+                0,
+                vec![block(0, vec![OcamlValue::String(name.to_string())])],
+            )],
         )
     }
 

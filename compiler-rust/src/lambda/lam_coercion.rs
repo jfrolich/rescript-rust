@@ -11,14 +11,14 @@ use crate::js_ir::{
     BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
     VariableDeclaration, ocaml_eq_expression,
 };
-use crate::lambda::lam_compat::LetKind;
+use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
-    flatten_toplevel_block, statement_mentions_ident_anywhere, tail_move_materialized_root_ident,
-    resolve_tail_move_initializer_kind, resolve_tail_move_replacement_expression,
-    TailMoveInitializerKind,
+    TailMoveInitializerKind, flatten_toplevel_block, resolve_tail_move_initializer_kind,
+    resolve_tail_move_replacement_expression, statement_mentions_ident_anywhere,
+    tail_move_materialized_root_ident,
 };
-use crate::lambda::TagInfo;
+use crate::lambda::lam_compat::LetKind;
 
 pub(crate) fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     let mut declared = HashSet::new();
@@ -38,7 +38,10 @@ pub(crate) fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<
         .collect()
 }
 
-pub(crate) fn keeps_declared_same_name_function_export_alias(block: &Block, export: &Ident) -> bool {
+pub(crate) fn keeps_declared_same_name_function_export_alias(
+    block: &Block,
+    export: &Ident,
+) -> bool {
     block_declares_initialized_ident(block, export)
         && matches!(
             resolve_tail_move_initializer_kind(block, export),
@@ -64,7 +67,10 @@ pub(crate) fn count_materialized_same_name_binding_roots(block: &Block, name: &s
         .count()
 }
 
-pub(crate) fn resolve_declared_same_name_self_alias_target(block: &Block, export: &Ident) -> Option<Ident> {
+pub(crate) fn resolve_declared_same_name_self_alias_target(
+    block: &Block,
+    export: &Ident,
+) -> Option<Ident> {
     match resolve_tail_move_replacement_expression(
         block,
         &Expression::var(export.clone()),
@@ -82,7 +88,10 @@ pub(crate) fn resolve_declared_same_name_self_alias_target(block: &Block, export
     }
 }
 
-pub(crate) fn reusable_declared_same_name_export_alias(block: &Block, export: &Ident) -> Option<Ident> {
+pub(crate) fn reusable_declared_same_name_export_alias(
+    block: &Block,
+    export: &Ident,
+) -> Option<Ident> {
     let initializer =
         flatten_toplevel_block(block)
             .into_iter()
@@ -193,8 +202,7 @@ pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases
                 continue;
             };
 
-            let materialized_root =
-                tail_move_materialized_root_ident(&flattened, &current_value);
+            let materialized_root = tail_move_materialized_root_ident(&flattened, &current_value);
             let Some(mut replacement) =
                 resolve_rewriteable_toplevel_alias_initializer(&flattened, &target)
             else {
@@ -233,7 +241,10 @@ pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases
     *block = flattened;
 }
 
-pub(crate) fn reorder_trailing_export_bindings_by_export_order(block: &mut Block, exports: &[Ident]) {
+pub(crate) fn reorder_trailing_export_bindings_by_export_order(
+    block: &mut Block,
+    exports: &[Ident],
+) {
     if block.len() < 2 || exports.len() < 2 {
         return;
     }
@@ -244,10 +255,9 @@ pub(crate) fn reorder_trailing_export_bindings_by_export_order(block: &mut Block
         .enumerate()
         .map(|(index, ident)| (ident, index))
         .collect();
-    let Some(end) = block
-        .iter()
-        .rposition(|stmt| reorderable_trailing_export_binding_ident(stmt, &export_positions).is_some())
-    else {
+    let Some(end) = block.iter().rposition(|stmt| {
+        reorderable_trailing_export_binding_ident(stmt, &export_positions).is_some()
+    }) else {
         return;
     };
     let start = block[..=end]
@@ -286,10 +296,7 @@ pub(crate) fn reorderable_trailing_export_binding_ident<'a>(
                     ..
                 }),
             ..
-        }) if export_positions.contains_key(ident) =>
-        {
-            Some(ident)
-        }
+        }) if export_positions.contains_key(ident) => Some(ident),
         _ => None,
     }
 }
@@ -322,17 +329,18 @@ pub(crate) fn resolve_rewriteable_toplevel_alias_initializer(
             return None;
         }
 
-        let (value, property) = flatten_toplevel_block(block)
-            .into_iter()
-            .find_map(|stmt| match stmt.desc {
-                StatementDesc::Variable(VariableDeclaration {
-                    ident,
-                    value: Some(initializer),
-                    property,
-                    ..
-                }) if ident.same(&current) => Some((initializer, property)),
-                _ => None,
-            })?;
+        let (value, property) =
+            flatten_toplevel_block(block)
+                .into_iter()
+                .find_map(|stmt| match stmt.desc {
+                    StatementDesc::Variable(VariableDeclaration {
+                        ident,
+                        value: Some(initializer),
+                        property,
+                        ..
+                    }) if ident.same(&current) => Some((initializer, property)),
+                    _ => None,
+                })?;
 
         // OCaml's lam_pass_lets_dce.ml:21-23 only substitutes Strict / Alias /
         // StrictOpt. A Variable-kind binding compiles to a `let`-mutable JS
@@ -395,9 +403,11 @@ pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
             .max(ident.stamp())
             .max(max_ident_stamp_in_block(body)),
         StatementDesc::ForOf(_, ident, iterable, body)
-        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => max_ident_stamp_in_expression(iterable)
-            .max(ident.stamp())
-            .max(max_ident_stamp_in_block(body)),
+        | StatementDesc::ForAwaitOf(_, ident, iterable, body) => {
+            max_ident_stamp_in_expression(iterable)
+                .max(ident.stamp())
+                .max(max_ident_stamp_in_block(body))
+        }
         StatementDesc::IntSwitch(test, clauses, default) => {
             let mut max_stamp = max_ident_stamp_in_expression(test);
             for (_, clause) in clauses {
@@ -543,7 +553,10 @@ pub(crate) struct ExtractedExports {
     pub(crate) values: Vec<Expression>,
 }
 
-pub(crate) fn extract_toplevel_exports(expr: Expression, block: &mut Block) -> Option<ExtractedExports> {
+pub(crate) fn extract_toplevel_exports(
+    expr: Expression,
+    block: &mut Block,
+) -> Option<ExtractedExports> {
     let Expression { desc, comment } = expr;
     match desc {
         ExpressionDesc::CamlBlock(values, _, _, TagInfo::ModuleExport(exports)) => {

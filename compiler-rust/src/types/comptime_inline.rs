@@ -99,7 +99,9 @@ pub fn translate_simple_expr_to_js(
                 Some(arena.get_string(longident.last_idx()).to_string())
             } else {
                 // Module path like String.toUpperCase — translate common ones
-                let parts: Vec<String> = longident.flatten_idx().iter()
+                let parts: Vec<String> = longident
+                    .flatten_idx()
+                    .iter()
                     .map(|idx| arena.get_string(*idx).to_string())
                     .collect();
                 match parts.as_slice() {
@@ -125,7 +127,8 @@ pub fn translate_simple_expr_to_js(
             let crate::parser::ast::PexpApply { funct, args, .. } = &**inner;
             let funct_expr = arena.get_expr(*funct);
             let funct_js = translate_simple_expr_to_js(funct_expr, arena)?;
-            let args_js: Option<Vec<String>> = args.iter()
+            let args_js: Option<Vec<String>> = args
+                .iter()
                 .map(|(_label, arg_idx)| {
                     let arg_expr = arena.get_expr(*arg_idx);
                     translate_simple_expr_to_js(arg_expr, arena)
@@ -143,7 +146,9 @@ pub fn translate_simple_expr_to_js(
         ED::Pexp_fun(inner) => {
             let pat = arena.get_pat(inner.lhs);
             let param_name = match &*pat.ppat_desc {
-                crate::parser::ast::PatternDesc::Ppat_var(nl) => arena.get_string(nl.txt).to_string(),
+                crate::parser::ast::PatternDesc::Ppat_var(nl) => {
+                    arena.get_string(nl.txt).to_string()
+                }
                 crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
                     let (inner_pat_idx, _) = &**inner_box;
                     let inner_pat = arena.get_pat(*inner_pat_idx);

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_util::refine_let;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
+use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 

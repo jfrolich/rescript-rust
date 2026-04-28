@@ -2241,7 +2241,13 @@ fn print_expression_inner<W: Write>(
             f.string(" for ");
             print_pattern(f, arena, arena.get_pat(*pat));
             f.string(" in ");
-            print_expression_inner(f, arena, arena.get_expr(*collection), false, PrintCtx::reset());
+            print_expression_inner(
+                f,
+                arena,
+                arena.get_expr(*collection),
+                false,
+                PrintCtx::reset(),
+            );
             f.string(" { ");
             print_expression_inner(f, arena, arena.get_expr(*body), false, PrintCtx::reset());
             f.string(" }");
