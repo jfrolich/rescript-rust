@@ -1021,8 +1021,6 @@ fn value_descriptions<'a>(
     );
     let sig_ty =
         ctype::subst_identity_copy(type_ctx, ctype::instance(type_ctx, expected_ty));
-    let mut expanded_expected = HashSet::new();
-    expand_expected_manifest_aliases(type_ctx, env, sig_ty, &mut expanded_expected);
 
     // Try to unify (signature type should match implementation type)
     if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
