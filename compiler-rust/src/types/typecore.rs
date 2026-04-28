@@ -19856,14 +19856,15 @@ fn lookup_constructor_by_expected_type<'b>(
                 } else {
                     crate::types::decl::ConstructorTag::CstrBlock(block_idx)
                 };
-                let module_access_path = result_type_path.parent();
+                let constructor_module_access_path = concrete_type_path.parent();
+                let result_module_access_path = result_type_path.parent();
                 let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
                     crate::types::ConstructorArguments::CstrTuple(args) => {
                         let mut copied_args = Vec::with_capacity(args.len());
                         for arg in args {
                             let copied =
                                 crate::types::ctype::copy_type_deep(ctx, *arg, &mut inst_cache);
-                            if let Some(module_path) = module_access_path.as_ref() {
+                            if let Some(module_path) = constructor_module_access_path.as_ref() {
                                 let mut visited = HashSet::new();
                                 qualify_module_local_type_paths_in_place(
                                     ctx,
@@ -19888,7 +19889,7 @@ fn lookup_constructor_by_expected_type<'b>(
                                     label.ld_type,
                                     &mut inst_cache,
                                 );
-                                if let Some(module_path) = module_access_path.as_ref() {
+                                if let Some(module_path) = constructor_module_access_path.as_ref() {
                                     let mut visited = HashSet::new();
                                     qualify_module_local_type_paths_in_place(
                                         ctx,
@@ -19915,7 +19916,9 @@ fn lookup_constructor_by_expected_type<'b>(
                                         param,
                                         &mut inst_cache,
                                     );
-                                    if let Some(module_path) = module_access_path.as_ref() {
+                                    if let Some(module_path) =
+                                        constructor_module_access_path.as_ref()
+                                    {
                                         let mut visited = HashSet::new();
                                         qualify_module_local_type_paths_in_place(
                                             ctx,
@@ -19930,7 +19933,7 @@ fn lookup_constructor_by_expected_type<'b>(
                                 })
                                 .collect::<Vec<_>>();
                         let inline_path =
-                            Path::pdot(result_type_path.clone(), cstr_name.to_string());
+                            Path::pdot(concrete_type_path.clone(), cstr_name.to_string());
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
                         let inline_decl = crate::types::TypeDeclaration {
@@ -19986,7 +19989,7 @@ fn lookup_constructor_by_expected_type<'b>(
                                         *arg,
                                         &mut inst_cache,
                                     );
-                                    if let Some(module_path) = module_access_path.as_ref() {
+                                    if let Some(module_path) = result_module_access_path.as_ref() {
                                         let mut visited = HashSet::new();
                                         qualify_module_local_type_paths_in_place(
                                             ctx,
@@ -20006,7 +20009,7 @@ fn lookup_constructor_by_expected_type<'b>(
                             drop(res_desc);
                             let copied =
                                 crate::types::ctype::copy_type_deep(ctx, res, &mut inst_cache);
-                            if let Some(module_path) = module_access_path.as_ref() {
+                            if let Some(module_path) = result_module_access_path.as_ref() {
                                 let mut visited = HashSet::new();
                                 qualify_module_local_type_paths_in_place(
                                     ctx,
@@ -20027,7 +20030,7 @@ fn lookup_constructor_by_expected_type<'b>(
                         .map(|param| {
                             let copied =
                                 crate::types::ctype::copy_type_deep(ctx, *param, &mut inst_cache);
-                            if let Some(module_path) = module_access_path.as_ref() {
+                            if let Some(module_path) = result_module_access_path.as_ref() {
                                 let mut visited = HashSet::new();
                                 qualify_module_local_type_paths_in_place(
                                     ctx,
