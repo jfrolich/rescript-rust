@@ -3074,12 +3074,12 @@ fn unify_types<'a>(
             TypeDesc::Tconstr {
                 path: path1,
                 args: args1,
-                abbrev: abbrev1,
+                ..
             },
             TypeDesc::Tconstr {
                 path: path2,
                 args: args2,
-                abbrev: abbrev2,
+                ..
             },
         ) => {
             if !path1.same(path2) {
@@ -3421,76 +3421,21 @@ fn unify_types<'a>(
 
             let args1 = args1.clone();
             let args2 = args2.clone();
-            let path_name = path1.head_name().to_string();
-            let path_full = path1.name();
             drop(desc1);
             drop(desc2);
 
-            if let Some(env) = state.env() {
-                let exp1 = expand_head(ctx, env, t1);
-                let exp2 = expand_head(ctx, env, t2);
-                if exp1 != t1 || exp2 != t2 {
-                    return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
-                }
-            }
-
-            // OCaml ctype.ml unify3: for same-path Tconstr, just unify args.
-            // OCaml's unify2 expands abbreviations BEFORE unify3, but the
-            // same-path case in unify3 simply does `unify_list env tl1 tl2`.
-            // We cannot expand here because recursive type aliases like
-            // `type rec vlist<'a> = [#Nil | #Cons('a, vlist<'a>)]` would
-            // infinite-loop: each expansion creates fresh Tconstr nodes that
-            // get expanded again without termination. OCaml avoids this via
-            // abbreviation memoization (expand_abbrev + proper_abbrevs) that
-            // Rust doesn't fully have yet.
-            //
-            // OCaml's unify2 expands both sides, so phantom type parameters
-            // (non-injective variance) vanish in the expansion and are never
-            // unified. We approximate this by checking type declaration
-            // variance: only unify args for injective params, skip phantom.
-            // OCaml's unify2 expands both Tconstr sides before unify3.
-            // For types with phantom params (params not appearing in the
-            // manifest body), the expansion hides those params, so they're
-            // never unified. We detect phantom params by checking if the
-            // type param appears in the manifest via deep_occur.
-            let phantom_mask: Vec<bool> = if !args1.is_empty() {
-                state
-                    .env()
-                    .and_then(|env| {
-                        env.find_type(&path_name).ok().and_then(|decl| {
-                            let manifest = decl.type_manifest?;
-                            let params = &decl.type_params;
-                            if params.len() != args1.len() {
-                                return None;
-                            }
-                            Some(
-                                params
-                                    .iter()
-                                    .map(|p| {
-                                        // Phantom = param NOT appearing in manifest
-                                        !deep_occur(ctx, *p, manifest)
-                                    })
-                                    .collect(),
-                            )
-                        })
-                    })
-                    .unwrap_or_else(|| vec![false; args1.len()])
-            } else {
-                vec![]
-            };
-
+            // OCaml ctype.ml:2412-2414: same constructor paths unify the full
+            // argument lists. This includes phantom parameters; manifest expansion
+            // must not skip them here because values can carry those parameters
+            // through another result type.
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
-                .enumerate()
-                .map(|(i, (&a, &b))| (i, a, b))
+                .map(|(&a, &b)| (a, b))
                 .collect();
 
-            for (i, a, b) in pairs {
-                // Skip phantom params — OCaml's expansion hides them.
-                if !phantom_mask.get(i).copied().unwrap_or(false) {
-                    unify(ctx, state, a, b)?;
-                }
+            for (a, b) in pairs {
+                unify(ctx, state, a, b)?;
             }
 
             if state.mode != crate::types::UnifyMode::Pattern {
