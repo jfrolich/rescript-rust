@@ -2411,7 +2411,10 @@ fn moregen_link_exported_alias(
     )>,
     debug: &mut Vec<String>,
 ) {
-    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, true);
+    // OCaml Ctype.moregeneral instantiates generic variables on copies before
+    // comparison (compiler/ml/ctype.ml:3124-3139). Only non-generic variables
+    // are shared with the original typedtree and can be linked by inclusion.
+    moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
 }
 
 fn moregen_link_impl(
