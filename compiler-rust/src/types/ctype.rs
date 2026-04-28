@@ -3464,10 +3464,20 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            // OCaml ctype.ml:2412-2414: same constructor paths unify the full
-            // argument lists. This includes phantom parameters; manifest expansion
-            // must not skip them here because values can carry those parameters
-            // through another result type.
+            // OCaml ctype.ml:2338-2414 runs same-constructor cases through
+            // `unify2`, expanding abbreviations before structurally comparing
+            // arguments. This keeps phantom parameters of manifest aliases
+            // (for example `type t<'k, 'id> = N.t<'k>`) out of result unification.
+            if let Some(env) = state.env() {
+                let exp1 = expand_head_unif(ctx, env, t1);
+                let exp2 = expand_head_unif(ctx, env, t2);
+                if exp1 != t1 || exp2 != t2 {
+                    return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+                }
+            }
+
+            // OCaml ctype.ml:2412-2414: after abbreviation expansion, equal
+            // concrete constructor paths unify their full argument lists.
             let pairs: Vec<_> = args1
                 .iter()
                 .zip(args2.iter())
