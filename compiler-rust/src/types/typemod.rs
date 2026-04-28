@@ -27,7 +27,7 @@ use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
 use crate::types::type_expr::TypeExprRef;
 use crate::types::typecore::{
-    TypeCheckContext, TypeCoreError, transl_type, type_binding, type_expression,
+    TypeCheckContext, TypeCoreError, transl_type, type_binding, type_exp, type_expression,
 };
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, ModuleBinding, ModuleCoercion, ModuleExpr,
@@ -8268,7 +8268,10 @@ fn type_module_expr_with_alias<'a>(
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
             // Unpack: unpack(E)
             let expr = arena.get_expr(*expr_idx);
-            let typed_expr = type_expression(tctx, env, expr)?;
+            // Matches compiler/ml/typemod.ml:1358-1366: `Pmod_unpack` types
+            // its payload with `Typecore.type_exp`, not top-level
+            // `type_expression`, so no extra begin_def/end_def scope is added.
+            let typed_expr = type_exp(tctx, env, expr, None)?;
             let expanded =
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {

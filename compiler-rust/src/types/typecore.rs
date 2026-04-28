@@ -4047,7 +4047,7 @@ fn type_pattern_open(
 // Expression Type Checking
 // ============================================================================
 
-fn type_exp<'a>(
+pub(crate) fn type_exp<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
@@ -13444,7 +13444,7 @@ fn type_pack(
     loc: LocIdx,
     module_expr: &crate::parser::ast::ModuleExpr,
     expected_ty: TypeExprRef,
-    _context: Option<TypeClashContext>,
+    context: Option<TypeClashContext>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     // Matches OCaml `Pexp_pack` in compiler/ml/typecore.ml:3518-3525:
@@ -13678,9 +13678,10 @@ fn type_pack(
         lids: pack_lids,
         args: pack_args,
     });
-    // Match OCaml Pexp_pack: read the package shape from ty_expected, but keep
-    // the packed expression's type as a fresh Tpackage node rather than
-    // unifying it back into the expected alias/constr form.
+    // Matches compiler/ml/typecore.ml:3525-3531: `Pexp_pack` returns via
+    // `rue`, whose helper at compiler/ml/typecore.ml:2408-2410 unifies the
+    // fresh package expression type with `instance env ty_expected`.
+    rue_unify(tctx, loc, packed_type, expected_ty, context)?;
     let exp_type = packed_type;
 
     Ok(Expression::new(

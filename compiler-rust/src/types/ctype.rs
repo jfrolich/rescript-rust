@@ -32,6 +32,7 @@ use super::type_expr::{
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
+use crate::location::Location;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 // ============================================================================
 // Type Errors
@@ -2531,7 +2532,18 @@ fn subst_with_memo(
     // 3. Set global abbreviations context so copy_type_cached can use find_repr
     ctx.set_current_abbreviations(memo_ref);
 
-    let (fresh_params, fresh_body) = instance_parameterized_type(ctx, params, body);
+    let (fresh_params, mut fresh_body) = instance_parameterized_type(ctx, params, body);
+    if ctx.repr(fresh_body) == ctx.repr(body) {
+        // Matches compiler/ml/ctype.ml:1273-1292: `subst` feeds the result of
+        // `instance_parameterized_type` (compiler/ml/ctype.ml:1134-1138) into
+        // unification. OCaml can safely relink the copied body because
+        // `cleanup_types` restores source nodes; in Rust, when copying a
+        // non-generic manifest returns the original `TypeExprRef`, make the
+        // top node fresh so unify3-style relinking cannot mutate the stored
+        // declaration manifest.
+        let desc = ctx.get_desc(fresh_body);
+        fresh_body = ctx.new_type((*desc).clone());
+    }
 
     // 5. Clear instantiation abbreviations before the unifications below.
     // OCaml sets the global `abbreviations` ref back to `ref Mnil` here rather
@@ -2562,6 +2574,35 @@ fn subst_with_memo(
 // ============================================================================
 // Core Unification
 // ============================================================================
+
+fn package_type_lists_have_ocaml_same_label_completion_side_effect(
+    ctx: &TypeContext<'_>,
+    env: Option<&Env>,
+    mty: super::decl::ModuleType,
+    required_lids: &[crate::parser::longident::Longident],
+    existing_lids: &[crate::parser::longident::Longident],
+) -> bool {
+    // Matches the same-label path through compiler/ml/ctype.ml:2199-2206:
+    // `complete_type_list` first allocates `Pkg` and calls `Env.add_module`
+    // (compiler/ml/ctype.ml:2200-2201), then returns existing entries when
+    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206). This helper is
+    // intentionally limited to that exact path; missing-label completion at
+    // compiler/ml/ctype.ml:2207-2231 needs a full Longident string comparator.
+    let pkg_id = ctx.create_ident("Pkg");
+    if let Some(env) = env {
+        let mut env_prime = env.clone_preserve_id();
+        env_prime.add_module(
+            pkg_id,
+            super::decl::ModuleDeclaration {
+                md_type: mty,
+                md_attributes: vec![],
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+    }
+    required_lids == existing_lids
+}
 
 /// Unify two types.
 ///
@@ -3577,24 +3618,52 @@ fn unify_types<'a>(
         (
             TypeDesc::Tpackage {
                 path: path1,
+                lids: lids1,
                 args: args1,
-                ..
             },
             TypeDesc::Tpackage {
                 path: path2,
+                lids: lids2,
                 args: args2,
-                ..
             },
         ) => {
-            if !path1.same(path2) && path1.name() != path2.name() {
-                drop(desc1);
-                drop(desc2);
+            let path1 = path1.clone();
+            let path2 = path2.clone();
+            let lids1 = lids1.clone();
+            let lids2 = lids2.clone();
+            let args1 = args1.clone();
+            let args2 = args2.clone();
+            drop(desc1);
+            drop(desc2);
+
+            let unify_env = state.env().map(Env::clone_preserve_id);
+            let labels_2_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                unify_env.as_ref(),
+                super::decl::ModuleType::MtyIdent(path2.clone()),
+                &lids1,
+                &lids2,
+            );
+            let labels_1_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                unify_env.as_ref(),
+                super::decl::ModuleType::MtyIdent(path1.clone()),
+                &lids2,
+                &lids1,
+            );
+            if !labels_1_complete || !labels_2_complete {
+                return Err(TypeError::Unify(vec![(t1, t2)]));
+            }
+
+            if !path1.same(&path2) && path1.name() != path2.name() {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
             if args1.len() != args2.len() {
-                drop(desc1);
-                drop(desc2);
+                return Err(TypeError::Unify(vec![(t1, t2)]));
+            }
+
+            if lids1.len() != args1.len() || lids2.len() != args2.len() {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
@@ -3603,8 +3672,6 @@ fn unify_types<'a>(
                 .zip(args2.iter())
                 .map(|(&a, &b)| (a, b))
                 .collect();
-            drop(desc1);
-            drop(desc2);
 
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
