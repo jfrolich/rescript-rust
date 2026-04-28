@@ -348,31 +348,37 @@ pub fn compile(
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
-        // Pre-compile all @rescript/runtime modules into the registry.
-        // In in-process mode, the registry is the sole source of truth —
-        // no CMI fallback. Every dependency must be in the registry.
-        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(scope, || pre_compile_runtime_modules(build_state))
-                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
-            match handle.join() {
-                Ok(result) => result,
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+        if build_includes_runtime_package(build_state) {
+            debug!("Skipping runtime pre-compilation because @rescript/runtime is in the build graph");
+        } else {
+            // Pre-compile all @rescript/runtime modules into the registry.
+            // In in-process mode, the registry is the sole source of truth —
+            // no CMI fallback. Every dependency must be in the registry.
+            let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+                let handle = std::thread::Builder::new()
+                    .name("rewatch-runtime-precompile".to_string())
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, || pre_compile_runtime_modules(build_state))
+                    .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+
+                match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
+                        Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                    }
                 }
-            }
-        });
-        pre_compile_result?;
+            });
+            pre_compile_result?;
+        }
+
         // Clear source-fallback paths after pre-compilation.
         build_state
             .module_registry
@@ -746,6 +752,13 @@ pub fn compile(
     }
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
+}
+
+fn build_includes_runtime_package(build_state: &BuildCommandState) -> bool {
+    build_state
+        .packages
+        .values()
+        .any(|package| package.name == "@rescript/runtime")
 }
 
 static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
@@ -1905,7 +1918,8 @@ fn compile_module_in_process(
         }
     };
 
-    // Update the shared registry with the implementation's PersStruct
+    // Update the shared registry. When a .resi exists, the interface remains
+    // the published signature; the implementation only contributes JS metadata.
     let impl_fingerprint = compile_result
         .pers_struct
         .as_ref()
@@ -1913,7 +1927,19 @@ fn compile_module_in_process(
         .unwrap_or(0);
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
-    if let Some(ps) = compile_result.pers_struct {
+    if has_interface {
+        let mut registry = build_command_state.module_registry.lock().unwrap();
+        registry.module_info.insert(
+            module_name.to_string(),
+            InMemoryModuleInfo {
+                source_path: source_abs.clone(),
+                is_pure,
+                cmj_export_constants,
+                is_runtime,
+            },
+        );
+        registry.alias_rewrites.extend(compile_result.new_alias_rewrites);
+    } else if let Some(ps) = compile_result.pers_struct {
         build_command_state.update_module_registry(
             module_name,
             ps,

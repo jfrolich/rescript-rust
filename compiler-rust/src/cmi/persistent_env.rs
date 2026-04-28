@@ -1495,14 +1495,33 @@ pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &Type
 /// (e.g., `Pident(ref)` inside Pervasives) need to be rewritten to qualified paths
 /// (e.g., `Pdot(Pident "Pervasives") "ref"`).
 ///
-/// The `stamp_map` maps type identifier stamps to their qualified paths.
+/// Module stamp substitution protects the current local access-path head because
+/// in-process compilation stores signatures produced by independent compiler
+/// contexts whose local stamp counters can overlap.
 /// The `name_map` maps type names (for persistent idents with stamp 0) to their qualified paths.
+type ModuleStampSubstMap = HashMap<i32, (String, Path)>;
+
+fn insert_module_stamp_subst(map: &mut ModuleStampSubstMap, id: &Ident, path: Path) {
+    map.insert(id.stamp(), (id.name().to_string(), path));
+}
+
+fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
+    match path {
+        Path::Pident(id) => (id.stamp() != 0).then(|| (id.stamp(), id.name().to_string())),
+        Path::Pdot(prefix, _, _) => nonpersistent_path_head(prefix),
+        Path::Papply(left, right) => {
+            nonpersistent_path_head(left).or_else(|| nonpersistent_path_head(right))
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct SubstMaps {
     type_stamp_map: HashMap<i32, Path>,
     type_name_map: HashMap<String, Path>,
-    module_stamp_map: HashMap<i32, Path>,
+    module_stamp_map: ModuleStampSubstMap,
     module_name_map: HashMap<String, Path>,
+    protected_module_head: Option<(i32, String)>,
 }
 
 impl SubstMaps {
@@ -1516,6 +1535,7 @@ impl SubstMaps {
 
 fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
     let mut maps = SubstMaps::default();
+    maps.protected_module_head = nonpersistent_path_head(module_path);
 
     for item in sig_items {
         match item {
@@ -1534,7 +1554,7 @@ fn build_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> SubstMap
                 let qualified_path = Path::pdot(module_path.clone(), id.name());
                 if id.stamp() != 0 {
                     // OCaml Subst uses identifier identity for non-persistent ids.
-                    maps.module_stamp_map.insert(id.stamp(), qualified_path);
+                    insert_module_stamp_subst(&mut maps.module_stamp_map, id, qualified_path);
                 } else {
                     // Persistent ids (stamp=0) rewrite by name.
                     maps.module_name_map
@@ -1561,7 +1581,7 @@ fn insert_type_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) 
 fn insert_module_subst_path(maps: &mut SubstMaps, old_id: &Ident, new_id: &Ident) {
     let new_path = Path::pident(new_id.clone());
     if old_id.stamp() != 0 {
-        maps.module_stamp_map.insert(old_id.stamp(), new_path);
+        insert_module_stamp_subst(&mut maps.module_stamp_map, old_id, new_path);
     } else {
         maps.module_name_map
             .insert(old_id.name().to_string(), new_path);
@@ -1606,6 +1626,9 @@ fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
         .module_stamp_map
         .extend(child.module_stamp_map.clone());
     merged.module_name_map.extend(child.module_name_map.clone());
+    if merged.protected_module_head.is_none() {
+        merged.protected_module_head = child.protected_module_head.clone();
+    }
     merged
 }
 
@@ -1623,6 +1646,7 @@ fn freshen_module_type_bound_idents_with_maps(
                     &maps.type_name_map,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
                 );
             }
         }
@@ -1741,6 +1765,7 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
         &maps.type_name_map,
         &maps.module_stamp_map,
         &maps.module_name_map,
+        maps.protected_module_head.as_ref(),
     )
 }
 
@@ -1753,6 +1778,7 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
                 &maps.type_name_map,
                 &maps.module_stamp_map,
                 &maps.module_name_map,
+                maps.protected_module_head.as_ref(),
             );
         }
         ModuleType::MtySignature(sig) => {
@@ -1784,6 +1810,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                     );
                 }
             }
@@ -1795,6 +1822,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                     );
                 }
             }
@@ -1805,6 +1833,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                     &maps.type_name_map,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
                 );
             }
             SignatureItem::SigModule(_, md, _) => {
@@ -1815,6 +1844,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                     );
                 }
                 substitute_module_type_paths_with_maps(&mut md.md_type, maps);
@@ -1854,6 +1884,7 @@ fn substitute_type_paths_in_sig_with_maps(
                     &maps.type_name_map,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
                     ctx,
                     &mut visited,
                 );
@@ -1866,6 +1897,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                         ctx,
                         &mut visited,
                     );
@@ -1878,6 +1910,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                         ctx,
                         &mut visited,
                     );
@@ -1895,6 +1928,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.type_name_map,
                                             &maps.module_stamp_map,
                                             &maps.module_name_map,
+                                            maps.protected_module_head.as_ref(),
                                             ctx,
                                             &mut visited,
                                         );
@@ -1908,6 +1942,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                             &maps.type_name_map,
                                             &maps.module_stamp_map,
                                             &maps.module_name_map,
+                                            maps.protected_module_head.as_ref(),
                                             ctx,
                                             &mut visited,
                                         );
@@ -1921,6 +1956,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                     &maps.type_name_map,
                                     &maps.module_stamp_map,
                                     &maps.module_name_map,
+                                    maps.protected_module_head.as_ref(),
                                     ctx,
                                     &mut visited,
                                 );
@@ -1935,6 +1971,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.type_name_map,
                                 &maps.module_stamp_map,
                                 &maps.module_name_map,
+                                maps.protected_module_head.as_ref(),
                                 ctx,
                                 &mut visited,
                             );
@@ -1951,6 +1988,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                         ctx,
                         &mut visited,
                     );
@@ -1964,6 +2002,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.type_name_map,
                                 &maps.module_stamp_map,
                                 &maps.module_name_map,
+                                maps.protected_module_head.as_ref(),
                                 ctx,
                                 &mut visited,
                             );
@@ -1977,6 +2016,7 @@ fn substitute_type_paths_in_sig_with_maps(
                                 &maps.type_name_map,
                                 &maps.module_stamp_map,
                                 &maps.module_name_map,
+                                maps.protected_module_head.as_ref(),
                                 ctx,
                                 &mut visited,
                             );
@@ -1990,6 +2030,7 @@ fn substitute_type_paths_in_sig_with_maps(
                         &maps.type_name_map,
                         &maps.module_stamp_map,
                         &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
                         ctx,
                         &mut visited,
                     );
@@ -2068,6 +2109,7 @@ pub fn substitute_type_paths_in_sig(
     let type_name_map = &maps.type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
+    let protected_module_head = maps.protected_module_head.as_ref();
 
     if type_stamp_map.is_empty()
         && type_name_map.is_empty()
@@ -2090,6 +2132,7 @@ pub fn substitute_type_paths_in_sig(
                     &type_name_map,
                     &module_stamp_map,
                     &module_name_map,
+                    protected_module_head,
                     ctx,
                     &mut visited,
                 );
@@ -2103,6 +2146,7 @@ pub fn substitute_type_paths_in_sig(
                         &type_name_map,
                         &module_stamp_map,
                         &module_name_map,
+                        protected_module_head,
                         ctx,
                         &mut visited,
                     );
@@ -2115,6 +2159,7 @@ pub fn substitute_type_paths_in_sig(
                         &type_name_map,
                         &module_stamp_map,
                         &module_name_map,
+                        protected_module_head,
                         ctx,
                         &mut visited,
                     );
@@ -2132,6 +2177,7 @@ pub fn substitute_type_paths_in_sig(
                                             &type_name_map,
                                             &module_stamp_map,
                                             &module_name_map,
+                                            protected_module_head,
                                             ctx,
                                             &mut visited,
                                         );
@@ -2145,6 +2191,7 @@ pub fn substitute_type_paths_in_sig(
                                             &type_name_map,
                                             &module_stamp_map,
                                             &module_name_map,
+                                            protected_module_head,
                                             ctx,
                                             &mut visited,
                                         );
@@ -2158,6 +2205,7 @@ pub fn substitute_type_paths_in_sig(
                                     &type_name_map,
                                     &module_stamp_map,
                                     &module_name_map,
+                                    protected_module_head,
                                     ctx,
                                     &mut visited,
                                 );
@@ -2172,6 +2220,7 @@ pub fn substitute_type_paths_in_sig(
                                 &type_name_map,
                                 &module_stamp_map,
                                 &module_name_map,
+                                protected_module_head,
                                 ctx,
                                 &mut visited,
                             );
@@ -2188,6 +2237,7 @@ pub fn substitute_type_paths_in_sig(
                         &type_name_map,
                         &module_stamp_map,
                         &module_name_map,
+                        protected_module_head,
                         ctx,
                         &mut visited,
                     );
@@ -2201,6 +2251,7 @@ pub fn substitute_type_paths_in_sig(
                                 &type_name_map,
                                 &module_stamp_map,
                                 &module_name_map,
+                                protected_module_head,
                                 ctx,
                                 &mut visited,
                             );
@@ -2214,6 +2265,7 @@ pub fn substitute_type_paths_in_sig(
                                 &type_name_map,
                                 &module_stamp_map,
                                 &module_name_map,
+                                protected_module_head,
                                 ctx,
                                 &mut visited,
                             );
@@ -2227,6 +2279,7 @@ pub fn substitute_type_paths_in_sig(
                         &type_name_map,
                         &module_stamp_map,
                         &module_name_map,
+                        protected_module_head,
                         ctx,
                         &mut visited,
                     );
@@ -2239,7 +2292,7 @@ pub fn substitute_type_paths_in_sig(
 
 /// Rewrite Tconstr paths in a signature using a direct stamp → path map.
 /// Used to remap CMI idents to implementation idents before moregen linking.
-pub fn substitute_type_paths_in_sig_with_stamp_map(
+pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     sig_items: &[SignatureItem],
     stamp_map: &HashMap<i32, Path>,
     ctx: &TypeContext<'_>,
@@ -2248,6 +2301,7 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
         return;
     }
     let empty: HashMap<String, Path> = HashMap::new();
+    let empty_module_stamp: ModuleStampSubstMap = HashMap::new();
     let mut visited = HashSet::new();
     for item in sig_items {
         match item {
@@ -2256,8 +2310,9 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
                     desc.val_type,
                     stamp_map,
                     &empty,
+                    &empty_module_stamp,
                     &HashMap::new(),
-                    &HashMap::new(),
+                    None,
                     ctx,
                     &mut visited,
                 );
@@ -2268,8 +2323,9 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
                         param,
                         stamp_map,
                         &empty,
+                        &empty_module_stamp,
                         &HashMap::new(),
-                        &HashMap::new(),
+                        None,
                         ctx,
                         &mut visited,
                     );
@@ -2279,8 +2335,9 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
                         manifest,
                         stamp_map,
                         &empty,
+                        &empty_module_stamp,
                         &HashMap::new(),
-                        &HashMap::new(),
+                        None,
                         ctx,
                         &mut visited,
                     );
@@ -2293,12 +2350,13 @@ pub fn substitute_type_paths_in_sig_with_stamp_map(
 
 /// Recursively walk a type expression and substitute Tconstr paths.
 /// Public wrapper for substitute_type_expr_path.
-pub fn substitute_type_expr_path_pub(
+pub(crate) fn substitute_type_expr_path_pub(
     ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
     type_name_map: &HashMap<String, Path>,
-    module_stamp_map: &HashMap<i32, Path>,
+    module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
+    protected_module_head: Option<&(i32, String)>,
     ctx: &TypeContext<'_>,
     visited: &mut HashSet<usize>,
 ) {
@@ -2308,6 +2366,7 @@ pub fn substitute_type_expr_path_pub(
         type_name_map,
         module_stamp_map,
         module_name_map,
+        protected_module_head,
         ctx,
         visited,
     );
@@ -2317,8 +2376,9 @@ fn substitute_type_expr_path(
     initial_ty_ref: TypeExprRef,
     type_stamp_map: &HashMap<i32, Path>,
     type_name_map: &HashMap<String, Path>,
-    module_stamp_map: &HashMap<i32, Path>,
+    module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
+    protected_module_head: Option<&(i32, String)>,
     ctx: &TypeContext<'_>,
     visited: &mut HashSet<usize>,
 ) {
@@ -2342,6 +2402,7 @@ fn substitute_type_expr_path(
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
+                    protected_module_head,
                 );
                 if new_path != *path {
                     let mut new_desc = (*desc).clone();
@@ -2406,6 +2467,7 @@ fn substitute_type_expr_path(
                     type_name_map,
                     module_stamp_map,
                     module_name_map,
+                    protected_module_head,
                 );
                 if new_path != *path {
                     let mut new_desc = (*desc).clone();
@@ -2427,8 +2489,9 @@ fn substitute_type_path(
     path: &Path,
     type_stamp_map: &HashMap<i32, Path>,
     type_name_map: &HashMap<String, Path>,
-    module_stamp_map: &HashMap<i32, Path>,
+    module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
+    protected_module_head: Option<&(i32, String)>,
 ) -> Path {
     match path {
         Path::Pident(ident) => {
@@ -2454,8 +2517,12 @@ fn substitute_type_path(
             }
         }
         Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix =
-                substitute_module_path(prefix, module_stamp_map, module_name_map);
+            let rewritten_prefix = substitute_module_path(
+                prefix,
+                module_stamp_map,
+                module_name_map,
+                protected_module_head,
+            );
             Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
@@ -2463,11 +2530,13 @@ fn substitute_type_path(
                 left,
                 module_stamp_map,
                 module_name_map,
+                protected_module_head,
             )),
             Box::new(substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
+                protected_module_head,
             )),
         ),
     }
@@ -2475,8 +2544,9 @@ fn substitute_type_path(
 
 fn substitute_module_path(
     path: &Path,
-    module_stamp_map: &HashMap<i32, Path>,
+    module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
+    protected_module_head: Option<&(i32, String)>,
 ) -> Path {
     match path {
         Path::Pident(ident) => {
@@ -2487,14 +2557,19 @@ fn substitute_module_path(
                     "[subst-module] ident={} stamp={} has_stamp={} has_name={}",
                     ident.name(),
                     ident.stamp(),
-                    module_stamp_map.contains_key(&ident.stamp()),
+                    module_stamp_map.get(&ident.stamp()).is_some()
+                        && !protected_module_head.is_some_and(|(stamp, name)| {
+                            *stamp == ident.stamp() && name == ident.name()
+                        }),
                     module_name_map.contains_key(ident.name())
                 );
             }
             if ident.stamp() != 0 {
+                let protected = protected_module_head
+                    .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());
                 module_stamp_map
                     .get(&ident.stamp())
-                    .cloned()
+                    .and_then(|(_, path)| (!protected).then(|| path.clone()))
                     .or_else(|| {
                         // Flattened module names (Stdlib_JSON, Stdlib_Intl_*)
                         // may appear with non-zero stamps; allow a targeted
@@ -2514,8 +2589,12 @@ fn substitute_module_path(
             }
         }
         Path::Pdot(prefix, name, pos) => {
-            let rewritten_prefix =
-                substitute_module_path(prefix, module_stamp_map, module_name_map);
+            let rewritten_prefix = substitute_module_path(
+                prefix,
+                module_stamp_map,
+                module_name_map,
+                protected_module_head,
+            );
             Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
@@ -2523,11 +2602,13 @@ fn substitute_module_path(
                 left,
                 module_stamp_map,
                 module_name_map,
+                protected_module_head,
             )),
             Box::new(substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
+                protected_module_head,
             )),
         ),
     }
