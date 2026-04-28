@@ -1245,6 +1245,20 @@ pub(crate) fn jsx_preserve_for_structure(
     options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
+fn preprocess_signature_for_typecheck(
+    signature: Signature,
+    options: &CompilerOptions,
+    arena: &mut crate::parse_arena::ParseArena,
+) -> Result<Signature> {
+    let signature = if let Some(jsx_version) = options.jsx_version {
+        jsx_ppx::transform_signature(signature, jsx_version, arena)
+    } else {
+        signature
+    };
+
+    ppx::rewrite_signature(&signature, arena).map_err(|e| anyhow!("PPX rewrite failed: {e}"))
+}
+
 /// Compile ReScript source to JavaScript.
 pub fn compile_source_to_js(source: &str, filename: &str) -> Result<String> {
     compile_source_to_js_with_options(source, filename, &CompilerOptions::default())
@@ -1664,6 +1678,7 @@ pub fn typecheck_interface_source(
             parser.diagnostics().len()
         ));
     }
+    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -1915,10 +1930,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+        // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
+        // at module initialization, consuming stamp 1000 before any compilation.
+        let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         let mut env = initial_env(&type_ctx);
@@ -3455,6 +3474,7 @@ pub fn typecheck_interface_in_process(
             parser.diagnostics().len()
         ));
     }
+    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
 
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
