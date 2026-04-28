@@ -28,6 +28,7 @@ use crate::types::decl::{
 use crate::types::path::Path;
 use crate::types::type_expr::{
     Commutable, FieldKind, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExprRef,
+    GENERIC_LEVEL,
 };
 
 use super::persistent_env::PersStruct;
@@ -824,7 +825,14 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext<'_>) 
     let remap: Vec<TypeExprRef> = graph
         .entries
         .iter()
-        .map(|entry| ctx.alloc_type_at_level(TypeDesc::Tvar(None), entry.level))
+        .map(|entry| {
+            let level = if entry.level >= GENERIC_LEVEL {
+                GENERIC_LEVEL
+            } else {
+                entry.level
+            };
+            ctx.alloc_type_at_level(TypeDesc::Tvar(None), level)
+        })
         .collect();
 
     // Phase 2: set descriptors using remapped refs.
