@@ -498,7 +498,6 @@ fn generate_ast(
     in_process: bool,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
-    let contents = helpers::read_file(&file_path).expect("Error reading file");
 
     let build_path_abs = package.get_build_path();
     let ast_path = helpers::get_ast_path(filename);
@@ -535,6 +534,7 @@ fn generate_ast(
             deps,
         })
     } else {
+        let contents = helpers::read_file(&file_path).expect("Error reading file");
         let (_expected_ast_path, parser_args) = parser_args(
             &build_state.project_context,
             &package.config,

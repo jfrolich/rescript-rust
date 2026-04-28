@@ -160,13 +160,9 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                                 )
                             })
                             .unwrap_or_else(|| {
-                                get_dep_modules(
-                                    &ast_path.to_string_lossy(),
-                                    package.namespace.to_suffix(),
-                                    package.modules.as_ref().unwrap(),
-                                    all_mod,
-                                    package,
-                                    build_state,
+                                panic!(
+                                    "in-process invariant violated: missing stored implementation deps for {module_name}; refusing to read {} from disk",
+                                    ast_path.display()
                                 )
                             })
                     } else {
@@ -198,13 +194,9 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                                     )
                                 })
                                 .unwrap_or_else(|| {
-                                    get_dep_modules(
-                                        &iast_path.to_string_lossy(),
-                                        package.namespace.to_suffix(),
-                                        package.modules.as_ref().unwrap(),
-                                        all_mod,
-                                        package,
-                                        build_state,
+                                    panic!(
+                                        "in-process invariant violated: missing stored interface deps for {module_name}; refusing to read {} from disk",
+                                        iast_path.display()
                                     )
                                 })
                         } else {
