@@ -3243,7 +3243,7 @@ pub(crate) fn consume_fake_package_mty_freshening<'b>(
         return;
     }
 
-    let Some(mut sig) = resolve_mod_type_to_sig(
+    let Some(sig) = resolve_mod_type_to_sig(
         &crate::types::decl::ModuleType::MtyIdent(package_path.clone()),
         Some(env),
         pers_env,
@@ -3251,6 +3251,7 @@ pub(crate) fn consume_fake_package_mty_freshening<'b>(
     ) else {
         return;
     };
+    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, ctx);
 
     for _ in 0..constraint_count {
         crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, ctx);
