@@ -1238,6 +1238,226 @@ fn force_module_lookup_signature_side_effect(
     }
 }
 
+fn force_datarepr_component_side_effects(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    owner_module_path: &Path,
+    decl: &crate::types::decl::TypeDeclaration,
+) {
+    fn force_persistent_module(
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        path: &Path,
+        visited_modules: &mut HashSet<String>,
+    ) {
+        let module_name = primitive_js_extern_alias_side_effect(path).or_else(|| {
+            let Ok((head, components)) = path.flatten() else {
+                return None;
+            };
+            if components.is_empty() || !(head.is_persistent() || head.stamp() == 0) {
+                return None;
+            }
+            Some(head.name().to_string())
+        });
+        if let Some(module_name) = module_name {
+            if visited_modules.insert(module_name.clone())
+                && let Some(pers) = pers_env.as_mut()
+            {
+                let _ = pers.force_lazy_signature_rename(&module_name, ctx);
+            }
+        }
+    }
+
+    fn primitive_js_extern_alias_side_effect(path: &Path) -> Option<String> {
+        let Path::Pdot(parent, type_name, _) = path else {
+            return None;
+        };
+        if !matches!(
+            type_name.as_str(),
+            "null" | "undefined" | "nullable" | "null_undefined"
+        ) {
+            return None;
+        }
+        let Path::Pident(head) = parent.as_ref() else {
+            return None;
+        };
+        if (head.is_persistent() || head.stamp() == 0) && head.name() == "Js" {
+            Some("Primitive_js_extern".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn direct_child_of(path: &Path, parent: &Path) -> bool {
+        path.parent()
+            .is_some_and(|path_parent| path_parent.same(parent))
+    }
+
+    fn force_type_expr(
+        ty: TypeExprRef,
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &crate::types::context::TypeContext<'_>,
+        owner_module_path: &Path,
+        visited_types: &mut HashSet<String>,
+        visited_modules: &mut HashSet<String>,
+    ) {
+        enum Action {
+            None,
+            Constr(Path, Vec<TypeExprRef>),
+            Children(Vec<TypeExprRef>),
+        }
+
+        let ty = ctx.repr(ty);
+        let action = {
+            let desc = ctx.get_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. } => {
+                    Action::Constr(path.clone(), args.clone())
+                }
+                TypeDesc::Tarrow { arg, ret, .. } => Action::Children(vec![arg.typ, *ret]),
+                TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
+                    Action::Children(types.clone())
+                }
+                TypeDesc::Tobject { fields, name, .. } => {
+                    let mut children = vec![*fields];
+                    if let Some((_, name_types)) = name {
+                        children.extend(name_types.iter().copied());
+                    }
+                    Action::Children(children)
+                }
+                TypeDesc::Tfield { typ, rest, .. } => Action::Children(vec![*typ, *rest]),
+                TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => Action::Children(vec![*inner]),
+                TypeDesc::Tpoly { body, vars } => {
+                    let mut children = vec![*body];
+                    children.extend(vars.iter().copied());
+                    Action::Children(children)
+                }
+                TypeDesc::Tvariant(row) => {
+                    let mut children = vec![row.row_more];
+                    for (_, field) in &row.row_fields {
+                        match field {
+                            crate::types::type_expr::RowField::Rpresent(Some(field_ty)) => {
+                                children.push(*field_ty);
+                            }
+                            crate::types::type_expr::RowField::Reither { types, .. } => {
+                                children.extend(types.iter().copied());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Action::Children(children)
+                }
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => Action::None,
+            }
+        };
+
+        match action {
+            Action::None => {}
+            Action::Children(children) => {
+                for child in children {
+                    force_type_expr(
+                        child,
+                        env,
+                        pers_env,
+                        ctx,
+                        owner_module_path,
+                        visited_types,
+                        visited_modules,
+                    );
+                }
+            }
+            Action::Constr(path, args) => {
+                force_persistent_module(pers_env, ctx, &path, visited_modules);
+
+                // OCaml's Env.components_of_module_maker derives record/variant
+                // component tables from the substituted module signature
+                // (env.ml:1542-1559). That derivation follows aliases inside the
+                // same module, which can force dependent persistent signatures
+                // through find_module. Follow only direct owner-module aliases so
+                // `C.container` reaches `C.opt -> Js.undefined` without expanding
+                // the newly-forced `Js.undefined` declaration itself.
+                if direct_child_of(&path, owner_module_path) {
+                    let path_key = path.name();
+                    if visited_types.insert(path_key)
+                        && let Some(dep_decl) =
+                            lookup_type_decl_for_path(&path, env, pers_env, ctx)
+                    {
+                        if let Some(manifest) = dep_decl.type_manifest {
+                            force_type_expr(
+                                manifest,
+                                env,
+                                pers_env,
+                                ctx,
+                                owner_module_path,
+                                visited_types,
+                                visited_modules,
+                            );
+                        }
+                    }
+                }
+
+                for arg in args {
+                    force_type_expr(
+                        arg,
+                        env,
+                        pers_env,
+                        ctx,
+                        owner_module_path,
+                        visited_types,
+                        visited_modules,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut visited_types = HashSet::new();
+    let mut visited_modules = HashSet::new();
+    match &decl.type_kind {
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                force_type_expr(
+                    label.ld_type,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                    owner_module_path,
+                    &mut visited_types,
+                    &mut visited_modules,
+                );
+            }
+        }
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for constructor in constructors {
+                crate::types::btype::iter_type_expr_cstr_args(&constructor.cd_args, |ty| {
+                    force_type_expr(
+                        ty,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                        owner_module_path,
+                        &mut visited_types,
+                        &mut visited_modules,
+                    );
+                });
+                if let Some(result) = constructor.cd_res {
+                    force_type_expr(
+                        result,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                        owner_module_path,
+                        &mut visited_types,
+                        &mut visited_modules,
+                    );
+                }
+            }
+        }
+        crate::types::TypeKind::TypeAbstract | crate::types::TypeKind::TypeOpen => {}
+    }
+}
+
 fn resolve_type_constructor_path(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -1323,6 +1543,7 @@ fn resolve_type_constructor_path(
                     })
                 },
             ) {
+                force_datarepr_component_side_effects(tctx, env, &mod_path, &decl);
                 return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
             }
             if let Some(mod_path) = env.resolve_module_access_path_for_lid(

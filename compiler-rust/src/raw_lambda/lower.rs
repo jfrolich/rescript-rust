@@ -10,7 +10,6 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
-use crate::lambda::lam_free_variables::free_variables;
 use crate::lambda::lam_primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
@@ -1444,25 +1443,52 @@ fn rebuild_recursive_bindings(bindings: Vec<(Ident, Lambda)>, body: Lambda) -> L
             if components.len() <= 1 {
                 Lambda::letrec(bindings, body)
             } else {
-                components.into_iter().rev().fold(body, |acc, component| {
-                    let singleton_index = component[0];
-                    let group = component
-                        .into_iter()
-                        .map(|index| bindings[index].clone())
-                        .collect::<Vec<_>>();
-                    match group.as_slice() {
-                        [(id, bind)]
-                            if !deps[singleton_index].contains(&singleton_index)
-                                && !has_incoming_dependency(singleton_index, &deps) =>
-                        {
-                            Lambda::let_(LetKind::Strict, id.clone(), bind.clone(), acc)
-                        }
-                        _ => Lambda::letrec(group, acc),
-                    }
-                })
+                rebuild_component_groups(&bindings, &deps, components, body)
             }
         }
     }
+}
+
+enum RecursiveComponentGroup {
+    Strict(usize),
+    Recursive(Vec<usize>),
+}
+
+fn rebuild_component_groups(
+    bindings: &[(Ident, Lambda)],
+    deps: &[Vec<usize>],
+    components: Vec<Vec<usize>>,
+    body: Lambda,
+) -> Lambda {
+    let mut groups: Vec<RecursiveComponentGroup> = Vec::new();
+
+    for component in components {
+        if let [index] = component.as_slice() {
+            if !deps[*index].contains(index) && !has_incoming_dependency(*index, deps) {
+                groups.push(RecursiveComponentGroup::Strict(*index));
+                continue;
+            }
+        }
+
+        match groups.last_mut() {
+            Some(RecursiveComponentGroup::Recursive(indices)) => indices.extend(component),
+            _ => groups.push(RecursiveComponentGroup::Recursive(component)),
+        }
+    }
+
+    groups.into_iter().rev().fold(body, |acc, group| match group {
+        RecursiveComponentGroup::Strict(index) => {
+            let (id, bind) = bindings[index].clone();
+            Lambda::let_(LetKind::Strict, id, bind, acc)
+        }
+        RecursiveComponentGroup::Recursive(indices) => {
+            let group = indices
+                .into_iter()
+                .map(|index| bindings[index].clone())
+                .collect::<Vec<_>>();
+            Lambda::letrec(group, acc)
+        }
+    })
 }
 
 fn has_incoming_dependency(target: usize, deps: &[Vec<usize>]) -> bool {
@@ -1472,24 +1498,115 @@ fn has_incoming_dependency(target: usize, deps: &[Vec<usize>]) -> bool {
 }
 
 fn binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize>> {
-    let index_by_id = bindings
-        .iter()
-        .enumerate()
-        .map(|(index, (id, _))| (id.clone(), index))
-        .collect::<HashMap<_, _>>();
-    bindings
-        .iter()
-        .map(|(_, lam)| {
-            let fv = free_variables(lam);
-            let mut indices = fv
-                .into_iter()
-                .filter_map(|id| index_by_id.get(&id).copied())
-                .collect::<Vec<_>>();
-            indices.sort_unstable();
-            indices.dedup();
-            indices
-        })
-        .collect::<Vec<_>>()
+    let len = bindings.len();
+    if len == 0 {
+        return Vec::new();
+    }
+
+    // OCaml's Lam_scc.preprocess_deps accidentally shares one Vec_int across
+    // every row (`Array.make ... (Vec_int.empty ())`) at lam_scc.ml:80-88.
+    // Preserve that exact dependency graph: each row receives the union of all
+    // group-local hits, appended in Ordered_hash_map_local_ident.iter order.
+    let domain_order = ocaml_local_ident_hash_iteration_order(bindings);
+    let mask_order = ocaml_ident_mask_iteration_order(bindings);
+    let mut shared = Vec::new();
+
+    for binding_index in domain_order {
+        let lam = &bindings[binding_index].1;
+        for dep_index in &mask_order {
+            if hit_variable(&bindings[*dep_index].0, lam) {
+                shared.push(*dep_index);
+            }
+        }
+    }
+
+    vec![shared; len]
+}
+
+fn ocaml_local_ident_hash_iteration_order(bindings: &[(Ident, Lambda)]) -> Vec<usize> {
+    let bucket_len = ocaml_hashtbl_power_2_above(16, bindings.len());
+    let mut buckets = vec![Vec::<usize>::new(); bucket_len];
+    for (index, (id, _)) in bindings.iter().enumerate() {
+        let bucket = (ocaml_hash_int(id.stamp()) as usize) & (bucket_len - 1);
+        buckets[bucket].insert(0, index);
+    }
+    buckets.into_iter().flatten().collect()
+}
+
+fn ocaml_ident_mask_iteration_order(bindings: &[(Ident, Lambda)]) -> Vec<usize> {
+    let bucket_len = ocaml_hashtbl_power_2_above(8, bindings.len());
+    let mut buckets = vec![Vec::<usize>::new(); bucket_len];
+    for (index, (id, _)) in bindings.iter().enumerate() {
+        let bucket = (ocaml_hash_string_int(id.name(), id.stamp()) as usize) & (bucket_len - 1);
+        buckets[bucket].insert(0, index);
+    }
+    buckets.into_iter().flatten().collect()
+}
+
+fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
+    while x < n {
+        x <<= 1;
+    }
+    x
+}
+
+fn ocaml_hash_int(i: i32) -> u32 {
+    ocaml_hash_final_mix(ocaml_hash_mix_uint32(0, ocaml_tagged_int_bits(i))) & 0x3fff_ffff
+}
+
+fn ocaml_hash_string_int(s: &str, i: i32) -> u32 {
+    let h = ocaml_hash_mix_string(0, s);
+    ocaml_hash_final_mix(ocaml_hash_mix_uint32(h, ocaml_tagged_int_bits(i))) & 0x3fff_ffff
+}
+
+fn ocaml_tagged_int_bits(i: i32) -> u32 {
+    ((i as u32) << 1) | 1
+}
+
+fn ocaml_hash_mix_string(mut h: u32, s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+
+    while i + 4 <= len {
+        let word = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        h = ocaml_hash_mix_uint32(h, word);
+        i += 4;
+    }
+
+    let rem = len & 3;
+    if rem != 0 {
+        let mut word = 0u32;
+        if rem >= 3 {
+            word |= (bytes[i + 2] as u32) << 16;
+        }
+        if rem >= 2 {
+            word |= (bytes[i + 1] as u32) << 8;
+        }
+        word |= bytes[i] as u32;
+        h = ocaml_hash_mix_uint32(h, word);
+    }
+
+    h ^ (len as u32)
+}
+
+fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h = h.rotate_left(13);
+    h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
+    h
+}
+
+fn ocaml_hash_final_mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
 }
 
 fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -1529,7 +1646,9 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
                     break;
                 }
             }
-            component.sort_unstable();
+            // OCaml's Ext_scc.graph returns the contiguous stack range in stack
+            // order (`Vec_int.get_and_delete_range`) at ext_scc.ml:80-91.
+            component.reverse();
             state.components.push(component);
         }
     }

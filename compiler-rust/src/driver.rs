@@ -1643,6 +1643,9 @@ fn compute_raw_implementation_coercion(
     } else {
         crate::types::includemod::simplify_signature(&impl_sig)
     };
+    if !has_resi && target_sig.len() == impl_sig.len() {
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    }
 
     match crate::types::includemod::compunit(
         type_ctx,
