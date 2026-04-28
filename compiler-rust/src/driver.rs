@@ -1183,6 +1183,8 @@ pub struct CompilerOptions {
     pub no_version_header: bool,
     /// Mirror `Js_config.check_div_by_zero` for checked integer/bigint lowering.
     pub check_div_by_zero: bool,
+    /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
+    pub no_assert_false: bool,
     /// When true, do not implicitly open Pervasives and Stdlib.
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
@@ -1212,6 +1214,7 @@ impl Default for CompilerOptions {
             debug: false,
             no_version_header: false,
             check_div_by_zero: true,
+            no_assert_false: false,
             nopervasives: false,
             module_name: None,
             capture_intermediates: false,
@@ -1402,6 +1405,7 @@ pub fn compile_source_to_js_with_options(
             lambda_start_stamp,
             unit_name,
         );
+    raw_converter.set_no_assert_false(options.no_assert_false);
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
     }
@@ -3273,6 +3277,7 @@ pub fn compile_preprocessed_structure_in_process(
             lambda_start_stamp,
             unit_name,
         );
+    raw_converter.set_no_assert_false(options.no_assert_false);
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
     }

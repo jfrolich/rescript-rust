@@ -93,6 +93,7 @@ struct Options {
     jsx_preserve: bool,
     nopervasives: bool,
     no_version_header: bool,
+    no_assert_false: bool,
 }
 
 impl Options {
@@ -195,6 +196,7 @@ fn run() -> Result<()> {
                 }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
                 "-bs-no-version-header" => opts.no_version_header = true,
+                "-bs-noassertfalse" => opts.no_assert_false = true,
                 "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
                 | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
@@ -262,6 +264,7 @@ fn run() -> Result<()> {
         debug: opts.debug,
         no_version_header: opts.no_version_header,
         check_div_by_zero: true,
+        no_assert_false: opts.no_assert_false,
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         capture_intermediates: false,

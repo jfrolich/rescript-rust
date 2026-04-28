@@ -484,6 +484,61 @@ fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<Tag
         .collect()
 }
 
+fn config_payload_flags_contains(
+    payload: &crate::parser::ast::Payload,
+    value: &str,
+    arena: &ParseArena,
+) -> bool {
+    use crate::parser::ast::{Constant as PConstant, ExpressionDesc as PExpressionDesc};
+    use crate::parser::longident::Longident;
+
+    let crate::parser::ast::Payload::PStr(items) = payload else {
+        return false;
+    };
+
+    items.iter().any(|item| {
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+            return false;
+        };
+        let (expr_idx, _) = &**inner;
+        let expr = arena.get_expr(*expr_idx);
+        let PExpressionDesc::Pexp_record(record) = &*expr.pexp_desc else {
+            return false;
+        };
+        let (fields, _) = &**record;
+        fields.iter().any(|field| {
+            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                return false;
+            };
+            if arena.get_string(*name_idx) != "flags" {
+                return false;
+            }
+            let field_expr = arena.get_expr(field.expr);
+            let PExpressionDesc::Pexp_array(elements) = &*field_expr.pexp_desc else {
+                return false;
+            };
+            elements.iter().any(|elem_idx| {
+                let elem = arena.get_expr(*elem_idx);
+                matches!(
+                    &*elem.pexp_desc,
+                    PExpressionDesc::Pexp_constant(c)
+                        if matches!(&**c, PConstant::String(s, _) if s.as_ref() == value)
+                )
+            })
+        })
+    })
+}
+
+fn structure_has_config_string(structure: &Structure, value: &str, arena: &ParseArena) -> bool {
+    structure.str_items.iter().any(|item| {
+        let StructureItemDesc::Tstr_attribute(attr) = &item.str_desc else {
+            return false;
+        };
+        arena.get_string(attr.0.txt) == "config"
+            && config_payload_flags_contains(&attr.1, value, arena)
+    })
+}
+
 fn raw_polyvariant_const(tag: &str) -> RawLambda {
     RawLambda::const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
@@ -752,6 +807,7 @@ pub struct RawLambdaConverter<'a> {
     next_negative_raise: i32,
     lowered: LambdaConverter<'a>,
     unit_name: String,
+    no_assert_false: bool,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -772,6 +828,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
+            no_assert_false: false,
         }
     }
 
@@ -793,6 +850,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
+            no_assert_false: false,
         }
     }
 
@@ -815,6 +873,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
+            no_assert_false: false,
         }
     }
 
@@ -823,6 +882,10 @@ impl<'a> RawLambdaConverter<'a> {
         persistent_env: crate::cmi::persistent_env::PersistentEnv,
     ) {
         self.persistent_env = Some(persistent_env);
+    }
+
+    pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
+        self.no_assert_false = no_assert_false;
     }
 
     pub fn current_stamp(&self) -> i32 {
@@ -2143,11 +2206,23 @@ impl<'a> RawLambdaConverter<'a> {
         Lambda::prim(Primitive::Praise, vec![block], loc)
     }
 
-    fn raw_assert_failure(&self, loc: Location) -> RawLambda {
+    fn raw_assert_failed(&self, loc: Location) -> RawLambda {
         RawLambda::from_lowered(self.raise_predef_exception(
             "Assert_failure",
             PREDEF_ASSERT_FAILURE_STAMP,
             loc,
+        ))
+    }
+
+    fn raw_assert_false(&self, loc: Location) -> RawLambda {
+        // OCaml translcore.ml:926-931 only lowers `assert false` to
+        // Lambda.lambda_assert_false when -bs-noassertfalse is active.
+        if !self.no_assert_false {
+            return self.raw_assert_failed(loc);
+        }
+        RawLambda::const_(Constant::int_with_comment(
+            0,
+            crate::lambda::lam_constant::PointerInfo::AssertFalse,
         ))
     }
 
@@ -3249,6 +3324,9 @@ impl<'a> RawLambdaConverter<'a> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
+        if structure_has_config_string(structure, "-bs-noassertfalse", self.arena) {
+            self.no_assert_false = true;
+        }
         self.register_signature_type_paths(None, &structure.str_type);
         let mut fields = Vec::new();
         self.convert_structure_items_raw(
@@ -5243,9 +5321,9 @@ impl<'a> RawLambdaConverter<'a> {
                     ExpressionDesc::Texp_construct(_, ref cstr, ref args)
                         if cstr.cstr_name == "false" && args.is_empty()
                 ) {
-                    self.raw_assert_failure(self.loc(expr.exp_loc))
+                    self.raw_assert_false(self.loc(expr.exp_loc))
                 } else {
-                    let failure = self.raw_assert_failure(self.loc(expr.exp_loc));
+                    let failure = self.raw_assert_failed(self.loc(expr.exp_loc));
                     RawLambda::LifThenElse(
                         Box::new(self.convert_expr_raw(inner_expr)),
                         Box::new(RawLambda::unit()),
