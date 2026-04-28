@@ -441,6 +441,28 @@ impl BuildCommandState {
         is_runtime: bool,
         new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
+        self.update_module_registry_arc(
+            module_name,
+            Arc::new(pers_struct),
+            source_path,
+            is_pure,
+            cmj_export_constants,
+            is_runtime,
+            new_alias_rewrites,
+        );
+    }
+
+    /// Update the module registry with a compiled module's shared portable PersStruct.
+    pub fn update_module_registry_arc(
+        &self,
+        module_name: &str,
+        pers_struct: Arc<PortablePersStruct>,
+        source_path: std::path::PathBuf,
+        is_pure: bool,
+        cmj_export_constants: AHashMap<String, CmjExportConstant>,
+        is_runtime: bool,
+        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
+    ) {
         let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path,
             is_pure,
@@ -450,7 +472,7 @@ impl BuildCommandState {
         self.module_registry
             .lock()
             .unwrap()
-            .register_module(module_name, pers_struct, info, new_alias_rewrites);
+            .register_module_arc(module_name, pers_struct, info, new_alias_rewrites);
     }
 
     /// Register a namespace in the module registry.

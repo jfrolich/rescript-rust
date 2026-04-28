@@ -384,8 +384,7 @@ pub fn compile(
             .module_registry
             .lock()
             .unwrap()
-            .source_fallback_paths
-            .clear();
+            .set_source_fallback_paths(AHashMap::new());
     }
 
     // Expand the compile universe: every dirty module plus everything that
@@ -1348,7 +1347,11 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
         }
     }
 
-    build_state.module_registry.lock().unwrap().source_fallback_paths = fallback_paths;
+    build_state
+        .module_registry
+        .lock()
+        .unwrap()
+        .set_source_fallback_paths(fallback_paths);
 }
 
 #[derive(Debug)]
@@ -1402,14 +1405,12 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let mut local_registry = build_state.snapshot_module_registry();
     for module in &runtime_modules {
         let fallback_path = module.resi_path.as_ref().unwrap_or(&module.res_path).clone();
-        local_registry
-            .source_fallback_paths
-            .insert(module.module_name.clone(), fallback_path);
+        local_registry.insert_source_fallback_path(module.module_name.clone(), fallback_path);
 
         // Seed runtime metadata for every runtime module up front. This lets
         // JS import resolution classify runtime deps without disk probes even
         // before each module's real signature and cmj metadata are compiled.
-        local_registry.module_info.insert(
+        local_registry.insert_module_info(
             module.module_name.clone(),
             InMemoryModuleInfo {
                 source_path: module.res_path.clone(),
@@ -1479,12 +1480,8 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         };
 
         if has_runtime_interface {
-            local_registry
-                .module_info
-                .insert(module.module_name.clone(), module_info);
-            local_registry
-                .alias_rewrites
-                .extend(compile_result.new_alias_rewrites);
+            local_registry.insert_module_info(module.module_name.clone(), module_info);
+            local_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
         } else if let Some(pers_struct) = compile_result.pers_struct {
             local_registry.register_module(
                 &module.module_name,
@@ -1790,7 +1787,7 @@ fn compile_module_in_process(
     let mut local_registry = registry.clone();
 
     // Register this module's metadata in the local registry
-    local_registry.module_info.insert(
+    local_registry.insert_module_info(
         module_name.to_string(),
         rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path: source_abs.clone(),
@@ -1843,11 +1840,21 @@ fn compile_module_in_process(
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
         if let Some(ps) = intf_result.pers_struct {
-            local_registry
-                .cached_modules
-                .insert(module_name.to_string(), Arc::new(ps.clone()));
+            let ps = Arc::new(ps);
+            let module_info = InMemoryModuleInfo {
+                source_path: source_abs.clone(),
+                is_pure: provisional_is_pure,
+                cmj_export_constants: AHashMap::new(),
+                is_runtime,
+            };
+            local_registry.register_module_arc(
+                module_name,
+                ps.clone(),
+                module_info,
+                intf_result.new_alias_rewrites.clone(),
+            );
             // Update the shared registry with the .resi result
-            build_command_state.update_module_registry(
+            build_command_state.update_module_registry_arc(
                 module_name,
                 ps,
                 source_abs.clone(),
@@ -1929,7 +1936,7 @@ fn compile_module_in_process(
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
     if has_interface {
         let mut registry = build_command_state.module_registry.lock().unwrap();
-        registry.module_info.insert(
+        registry.insert_module_info(
             module_name.to_string(),
             InMemoryModuleInfo {
                 source_path: source_abs.clone(),
@@ -1938,7 +1945,7 @@ fn compile_module_in_process(
                 is_runtime,
             },
         );
-        registry.alias_rewrites.extend(compile_result.new_alias_rewrites);
+        registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
     } else if let Some(ps) = compile_result.pers_struct {
         build_command_state.update_module_registry(
             module_name,
