@@ -3127,16 +3127,12 @@ pub fn lookup_module_path_by_lid<'b>(
         }
         Longident::Ldot(prefix, submod_idx) => {
             let submod_name = arena.get_string(*submod_idx);
-            if let Some(path) = crate::types::typecore::with_resolved_module_components_for_lid(
-                lid,
-                arena,
-                env,
-                pers_env,
-                ctx,
-                |components| components.access_path().clone(),
-            ) {
-                return Some(path);
-            }
+            // Match OCaml Pmod_ident path lookup: type_module calls
+            // Typetexp.lookup_module (compiler/ml/typemod.ml:1227-1230),
+            // and Env.lookup_module for Ldot only looks up the child in the
+            // parent components (compiler/ml/env.ml:1064-1073). It does not
+            // force the final child module's signature while merely building
+            // the path.
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
             crate::types::typecore::lookup_module_in_resolved_path(
                 &parent_path,
