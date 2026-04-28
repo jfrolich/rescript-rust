@@ -1439,11 +1439,13 @@ impl<'a> TypeContext<'a> {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: &str) -> Ident {
+        self.id_gen.set_current_stamp(Ident::current_local_stamp());
         self.id_gen.create(name)
     }
 
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        self.id_gen.set_current_stamp(Ident::current_local_stamp());
         id.rename(self.id_gen)
     }
 
