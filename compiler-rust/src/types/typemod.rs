@@ -12545,11 +12545,28 @@ fn transl_sig_type_declarations_with_ids<'a>(
 
                     for label in labels {
                         let lbl_name = arena.get_string(label.pld_name.txt);
-                        let (typed_label_ty, mut lbl_type) =
+                        let (mut typed_label_ty, mut lbl_type) =
                             transl_type(tctx, &temp_env, arena.get_core_type(label.pld_type))?;
                         if label.pld_optional {
                             let option_path = crate::types::predef::path_option();
-                            lbl_type = tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
+                            let option_type_ref =
+                                tctx.type_ctx.new_constr(option_path.clone(), vec![lbl_type]);
+                            let label_type = arena.get_core_type(label.pld_type);
+                            typed_label_ty = TypedCoreType {
+                                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                    option_path,
+                                    Located {
+                                        txt: arena.placeholder_lid(),
+                                        loc: label_type.ptyp_loc,
+                                    },
+                                    vec![typed_label_ty],
+                                ),
+                                ctyp_type: option_type_ref,
+                                ctyp_env: EnvRef(0),
+                                ctyp_loc: label_type.ptyp_loc,
+                                ctyp_attributes: Attributes::new(),
+                            };
+                            lbl_type = option_type_ref;
                         }
                         let (poly_typed_core_type, poly_lbl_type) =
                             force_poly_typed_core_type(tctx.type_ctx, typed_label_ty, lbl_type);
@@ -12638,15 +12655,32 @@ fn transl_sig_type_declarations_with_ids<'a>(
                                 let mut typed_record_labels = Vec::with_capacity(labels.len());
                                 for label in labels {
                                     let lbl_name = arena.get_string(label.pld_name.txt);
-                                    let (typed_label_ty, mut lbl_type) = transl_type(
+                                    let (mut typed_label_ty, mut lbl_type) = transl_type(
                                         tctx,
                                         &temp_env,
                                         arena.get_core_type(label.pld_type),
                                     )?;
                                     if label.pld_optional {
                                         let option_path = crate::types::predef::path_option();
-                                        lbl_type =
-                                            tctx.type_ctx.new_constr(option_path, vec![lbl_type]);
+                                        let option_type_ref = tctx
+                                            .type_ctx
+                                            .new_constr(option_path.clone(), vec![lbl_type]);
+                                        let label_type = arena.get_core_type(label.pld_type);
+                                        typed_label_ty = TypedCoreType {
+                                            ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                                                option_path,
+                                                Located {
+                                                    txt: arena.placeholder_lid(),
+                                                    loc: label_type.ptyp_loc,
+                                                },
+                                                vec![typed_label_ty],
+                                            ),
+                                            ctyp_type: option_type_ref,
+                                            ctyp_env: EnvRef(0),
+                                            ctyp_loc: label_type.ptyp_loc,
+                                            ctyp_attributes: Attributes::new(),
+                                        };
+                                        lbl_type = option_type_ref;
                                     }
                                     let (poly_typed_core_type, poly_lbl_type) =
                                         force_poly_typed_core_type(
