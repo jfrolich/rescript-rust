@@ -1874,6 +1874,7 @@ fn try_expand_head_with_mode<'a>(
             // queried path exactly. For qualified paths, reject leaf-fallback
             // hits to unrelated declarations.
             let mut forbid_fallback_manifest_expansion = false;
+            let mut local_env_type_is_authoritative = false;
             if let Ok(env_decl) = env.lookup_type(&path) {
                 let exact_lookup = match &path {
                     Path::Pident(_) => true,
@@ -1881,6 +1882,8 @@ fn try_expand_head_with_mode<'a>(
                         decl_path.same(&path) || decl_path.name() == path_name
                     }),
                 };
+                local_env_type_is_authoritative = matches!(&path, Path::Pident(id) if !id.is_persistent() && id.stamp() != 0)
+                    && exact_lookup;
                 if exact_lookup {
                     let self_manifest = env_decl.type_manifest.is_some_and(|manifest| {
                         let manifest = ctx.repr(manifest);
@@ -2134,6 +2137,9 @@ fn try_expand_head_with_mode<'a>(
             // `expand_abbrev_gen` does this for both `expand_head` and
             // `expand_head_unif`, so keep unification on the same path instead
             // of recovering later with Rust-only alias fallback work.
+            if local_env_type_is_authoritative && forbid_fallback_manifest_expansion {
+                return None;
+            }
             {
                 let path_norm = match mode {
                     ExpandHeadMode::General => normalize_path_full(ctx, env, &path),

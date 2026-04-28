@@ -214,6 +214,10 @@ pub struct PersistentEnv {
     portable_cache: HashMap<String, PortablePersStruct>,
 }
 
+fn should_register_lazy_raw_sig(name: &str) -> bool {
+    name.contains('_')
+}
+
 impl PersistentEnv {
     /// Create a new persistent environment with no load paths.
     pub fn new() -> Self {
@@ -370,7 +374,11 @@ impl PersistentEnv {
     ) -> Option<&PersStruct> {
         // Check cache first (already internalized)
         if self.cache.contains_key(name) {
-            return self.cache.get(name).and_then(|opt| opt.as_ref());
+            let ps = self.cache.get(name).and_then(|opt| opt.as_ref())?;
+            if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
+                ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+            }
+            return Some(ps);
         }
 
         // Check portable cache (from ModuleRegistry, needs internalization).
@@ -393,6 +401,9 @@ impl PersistentEnv {
                 &mut self.alias_prefix_rewrites,
             );
             register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
+            if should_register_lazy_raw_sig(name) {
+                ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+            }
             self.cache.insert(name.to_string(), Some(ps));
             return self.cache.get(name).and_then(|opt| opt.as_ref());
         }
@@ -443,6 +454,9 @@ impl PersistentEnv {
             &mut self.alias_prefix_rewrites,
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
+        if should_register_lazy_raw_sig(name) {
+            ctx.register_raw_module_sig(name, signature.clone());
+        }
 
         PersStruct {
             ps_name,
@@ -894,9 +908,13 @@ impl PersistentEnv {
         if let Some(cached) = self.renamed_sig_cache.get(name) {
             return Some(cached.clone());
         }
-        // Do the rename
-        let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = rename_bound_idents_in_sig(&ps.ps_sig, ctx);
+        // Do the rename. OCaml's `ps_sig` lazy is `Subst.signature
+        // Subst.identity sign`: it first copies the signature graph, then
+        // freshens all bound identifiers and rewrites declaration references
+        // through the fresh identifiers.
+        let raw_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
+        let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&raw_sig, ctx);
+        freshen_signature_bound_idents(&mut renamed, ctx);
         self.renamed_sig_cache
             .insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
@@ -1037,37 +1055,6 @@ impl PersistentEnv {
     pub fn is_in_process_mode(&self) -> bool {
         self.in_process_mode
     }
-}
-
-/// Recursively register all type declarations from a signature
-/// into the type context's global store for alias expansion.
-///
-/// Rename all bound idents in a signature, matching OCaml's
-/// `Subst.signature Subst.identity` which calls `rename_bound_idents`.
-/// This gives each signature item a fresh stamp even with identity substitution.
-fn rename_bound_idents_in_sig<'a>(sig_items: &Signature, ctx: &'a TypeContext<'a>) -> Signature {
-    sig_items
-        .iter()
-        .map(|item| match item {
-            SignatureItem::SigValue(id, desc) => {
-                SignatureItem::SigValue(ctx.rename_ident(id), desc.clone())
-            }
-            SignatureItem::SigType(id, decl, rec_status) => {
-                SignatureItem::SigType(ctx.rename_ident(id), decl.clone(), *rec_status)
-            }
-            SignatureItem::SigTypext(id, ext, ext_status) => {
-                SignatureItem::SigTypext(ctx.rename_ident(id), ext.clone(), *ext_status)
-            }
-            SignatureItem::SigModule(id, md, rec_status) => {
-                SignatureItem::SigModule(ctx.rename_ident(id), md.clone(), *rec_status)
-            }
-            SignatureItem::SigModtype(id, mtd) => {
-                SignatureItem::SigModtype(ctx.rename_ident(id), mtd.clone())
-            }
-            SignatureItem::SigClass => SignatureItem::SigClass,
-            SignatureItem::SigClassType => SignatureItem::SigClassType,
-        })
-        .collect()
 }
 
 /// `module_path` is the path to the module containing this signature

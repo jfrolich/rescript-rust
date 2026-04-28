@@ -13078,7 +13078,6 @@ fn type_letmodule(
     let arena = tctx.arena;
     let ctx = tctx.type_ctx;
     let mod_name_str = arena.get_string(name.txt).to_string();
-    let mod_id = ctx.create_ident(&mod_name_str);
     let letmodule_ty = ctx.new_var(None);
 
     // Match OCaml `Pexp_letmodule` level scoping (`begin_def`/`end_def`).
@@ -13087,9 +13086,13 @@ fn type_letmodule(
     let narrow_global_level = ctx.increase_global_level();
     let saved_type_variables = tctx.type_variables.clone();
     ctx.begin_def();
+    // OCaml advances the ident stamp to the fresh let-module result type's
+    // level before typing the module expression.
+    ctx.set_current_time(ctx.get_level(letmodule_ty));
     let letmodule_def_level = ctx.current_level();
     let scoped_result = (|| -> TypeCoreResult<(
         crate::types::typedtree::ModuleExpr,
+        Ident,
         Env,
         Expression,
         TypeExprRef,
@@ -13213,8 +13216,8 @@ fn type_letmodule(
             }
         }
 
-
         // Add the module to the environment so the body can access M.value
+        let mod_id = ctx.create_ident(&mod_name_str);
         let mut body_env = env.clone();
         register_module_type_type_decls_by_stamp(ctx, &mod_sig);
         let md_decl = crate::types::decl::ModuleDeclaration {
@@ -13257,7 +13260,7 @@ fn type_letmodule(
         // merge the Pexp_tuple's result_ty with the filter_arrow's return_ty,
         // collapsing two distinct Ttuple nodes that OCaml keeps separate.
         // OCaml only does unify_var(ty, body.exp_type) after end_def (below).
-        Ok((typed_mod, body_env, typed_body, rewritten_ty))
+        Ok((typed_mod, mod_id, body_env, typed_body, rewritten_ty))
     })();
     if scoped_result.is_err() {
         ctx.restore_global_level(narrow_global_level);
@@ -13265,7 +13268,7 @@ fn type_letmodule(
     }
     ctx.end_def();
 
-    let (typed_mod, body_env, typed_body, rewritten_ty) = scoped_result?;
+    let (typed_mod, mod_id, body_env, typed_body, rewritten_ty) = scoped_result?;
     tctx.set_unify_env(&body_env);
     unify_expression_types(tctx, loc, letmodule_ty, rewritten_ty, None)?;
 
@@ -16094,14 +16097,10 @@ impl Env {
                         visiting.remove(path);
                         return result;
                     }
-                    // Prefer local bindings first. If no local module binding exists,
-                    // keep the persistent-path fallback on the same qualified-view
-                    // source of truth as the other hot callers instead of reading
-                    // raw ps_sig directly.
-                    let persistent_path = Path::pident(Ident::create_persistent(mod_name));
-                    if let Some((_, sig)) =
-                        resolve_module_signature_for_path(&persistent_path, env, pers_env, ctx)
+                    if let Some(pers) = pers_env.as_mut()
+                        && let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx)
                     {
+                        let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
@@ -18198,32 +18197,12 @@ fn lookup_constructor_by_expected_type<'b>(
         .type_path
         .clone()
         .unwrap_or(type_path.clone());
-    // Use the concrete expanded path to find the declaration, but preserve the
-    // original expected alias family for the reconstructed constructor result
-    // when the two paths are alias-equivalent. This matches OCaml's behavior
-    // for pattern typing over aliases like `M.t = Path.t`: the constructor is
-    // selected from `Path.t`, but the resulting pattern type still inhabits
-    // the expected `M.t` family.
-    let result_type_path = {
-        let expected_repr = ctx.repr(expected_ty);
-        let expected_desc = ctx.get_desc(expected_repr);
-        match &*expected_desc {
-            TypeDesc::Tconstr { path, args, .. }
-                if args.len() == concrete_type_decl.type_params.len()
-                    && (path.same(&concrete_type_path)
-                        || compare_type_paths_for_disambiguation(
-                            path,
-                            &concrete_type_path,
-                            env,
-                            pers_env,
-                            ctx,
-                        )) =>
-            {
-                path.clone()
-            }
-            _ => concrete_type_path.clone(),
-        }
-    };
+    // OCaml `extract_concrete_typedecl` returns both the original expected path
+    // and the expanded concrete path (compiler/ml/ctype.ml:1449-1460), but
+    // `NameChoice.lookup_from_type` fetches constructors from the concrete path
+    // (compiler/ml/typecore.ml:948-958). `instance_constructor` then copies that
+    // concrete constructor result unchanged (compiler/ml/ctype.ml:1109-1130).
+    let result_type_path = concrete_type_path.clone();
 
     // Check if it's a variant type with a matching constructor
     if let crate::types::TypeKind::TypeVariant(ref constrs) = concrete_type_decl.type_kind {
@@ -18885,6 +18864,7 @@ fn with_resolved_child_module_components<'a, R>(
     parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
     child_name: &str,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
@@ -18916,7 +18896,16 @@ fn with_resolved_child_module_components<'a, R>(
         crate::types::decl::ModuleType::MtySignature(sig) => {
             crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
         }
-        _ => return None,
+        _ => {
+            let sig = build_qualified_signature_for_access_path(
+                env,
+                &access_path,
+                &md.md_type,
+                pers_env,
+                ctx,
+            )?;
+            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
+        }
     };
     let result = (f
         .take()
@@ -18954,25 +18943,23 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
-            let mut continue_with_child =
-                |components: &crate::types::env_lazy::QualifiedModuleComponents| {
-                    with_resolved_child_module_components(
-                        components,
-                        child_name.as_str(),
-                        env,
-                        ctx,
-                        |child| f(child),
-                    )
-                    .flatten()
-                };
-            with_resolved_module_components_for_lid_inner(
-                prefix,
-                arena,
+            let parent_path =
+                env.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
+            let (_, child_path, _) = lookup_module_in_resolved_path(
+                &parent_path,
+                child_name.as_str(),
                 env,
                 pers_env,
                 ctx,
-                &mut continue_with_child,
+            )?;
+            with_resolved_module_components_for_path(
+                &child_path,
+                env,
+                pers_env,
+                ctx,
+                |components| f(components),
             )
+            .flatten()
         }
         Longident::Lapply(_, _) => None,
     }

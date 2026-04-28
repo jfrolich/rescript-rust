@@ -2681,6 +2681,141 @@ fn union_variance_rows(lhs: &[TypesVariance], rhs: &[TypesVariance]) -> Vec<Type
         .collect()
 }
 
+fn has_decl_attr(attrs: &[crate::types::decl::Attribute], name: &str) -> bool {
+    attrs.iter().any(|attr| attr.attr_name.txt == name)
+}
+
+fn path_is_t_of_persistent_module(path: &Path, module_name: &str) -> bool {
+    matches!(
+        path,
+        Path::Pdot(parent, type_name, _)
+            if type_name == "t"
+                && matches!(parent.as_ref(), Path::Pident(id) if id.name() == module_name)
+    )
+}
+
+fn path_is_t_of_stdlib_child(path: &Path, child_name: &str) -> bool {
+    matches!(
+        path,
+        Path::Pdot(parent, type_name, _)
+            if type_name == "t"
+                && matches!(
+                    parent.as_ref(),
+                    Path::Pdot(root, module_name, _)
+                        if module_name == child_name
+                            && matches!(root.as_ref(), Path::Pident(id) if id.name() == "Stdlib")
+                )
+    )
+}
+
+fn type_path_is_instanceof_backed_object(path: &Path) -> bool {
+    if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
+        return true;
+    }
+    path_is_t_of_persistent_module(path, "Stdlib_ArrayBuffer")
+        || path_is_t_of_persistent_module(path, "Stdlib_Date")
+        || path_is_t_of_persistent_module(path, "Stdlib_RegExp")
+        || path_is_t_of_persistent_module(path, "Js_file")
+        || path_is_t_of_persistent_module(path, "Js_blob")
+        || path_is_t_of_stdlib_child(path, "ArrayBuffer")
+        || path_is_t_of_stdlib_child(path, "Promise")
+        || path_is_t_of_stdlib_child(path, "BigInt64Array")
+        || path_is_t_of_stdlib_child(path, "BigUint64Array")
+        || path_is_t_of_stdlib_child(path, "DataView")
+        || path_is_t_of_stdlib_child(path, "Float32Array")
+        || path_is_t_of_stdlib_child(path, "Float64Array")
+        || path_is_t_of_stdlib_child(path, "Int16Array")
+        || path_is_t_of_stdlib_child(path, "Int32Array")
+        || path_is_t_of_stdlib_child(path, "Int8Array")
+        || path_is_t_of_stdlib_child(path, "Set")
+        || path_is_t_of_stdlib_child(path, "Map")
+        || path_is_t_of_stdlib_child(path, "Uint16Array")
+        || path_is_t_of_stdlib_child(path, "Uint32Array")
+        || path_is_t_of_stdlib_child(path, "Uint8Array")
+        || path_is_t_of_stdlib_child(path, "Uint8ClampedArray")
+        || path_is_t_of_stdlib_child(path, "WeakSet")
+        || path_is_t_of_stdlib_child(path, "WeakMap")
+}
+
+fn force_persistent_module_for_type_path(
+    ctx: &crate::types::context::TypeContext<'_>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+) {
+    let Path::Pdot(parent, type_name, _) = path else {
+        return;
+    };
+    if type_name != "t" {
+        return;
+    }
+    let Path::Pident(module_id) = parent.as_ref() else {
+        return;
+    };
+    if !module_id.is_persistent() {
+        return;
+    }
+    if let Some(pers) = pers_env.as_mut() {
+        let _ = pers.get_renamed_sig(module_id.name(), ctx);
+    }
+}
+
+fn touch_untagged_constructor_payload_type(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+) {
+    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
+        if type_path_is_instanceof_backed_object(path) {
+            return;
+        }
+    }
+
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    match &*ctx.get_desc(expanded) {
+        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+            if type_path_is_instanceof_backed_object(path) {
+                force_persistent_module_for_type_path(ctx, pers_env, path);
+                let _ = crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path);
+            }
+        }
+        crate::types::type_expr::TypeDesc::Tarrow { .. }
+        | crate::types::type_expr::TypeDesc::Ttuple(_) => {}
+        _ => {}
+    }
+}
+
+fn touch_untagged_variant_well_formedness(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    decl: &crate::types::decl::TypeDeclaration,
+) {
+    let crate::types::decl::TypeKind::TypeVariant(constructors) = &decl.type_kind else {
+        return;
+    };
+
+    // OCaml `Typedecl.transl_type_decl` runs
+    // `Ast_untagged_variants.check_well_formed` before computing final
+    // properties. That check classifies constructor payloads by first looking
+    // at the original type and then calling `Ctype.expand_head` only if needed.
+    // The expansion has observable stamp-order effects because it can force
+    // persistent module signatures behind aliases such as Js.Date.t.
+    for constructor in constructors {
+        if !has_decl_attr(&constructor.cd_attributes, "unboxed") {
+            continue;
+        }
+        match &constructor.cd_args {
+            crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                if let [arg] = args.as_slice() {
+                    touch_untagged_constructor_payload_type(ctx, env, pers_env, *arg);
+                }
+            }
+            crate::types::decl::ConstructorArguments::CstrRecord(_) => {}
+        }
+    }
+}
+
 fn compute_type_variance_fixpoint(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
@@ -3111,6 +3246,23 @@ pub fn lookup_module_type_by_lid<'b>(
             _ => None,
         }
     }
+    fn parent_alias_by_lid<'b>(
+        lid: &crate::parser::longident::Longident,
+        arena: &ParseArena,
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'b crate::types::context::TypeContext<'b>,
+    ) -> Option<(crate::types::decl::AliasPresence, Path)> {
+        local_parent_alias_by_lid(lid, arena, env).or_else(|| {
+            // OCaml `type_module` wraps identifiers whose `Env.find_module`
+            // result is `Mty_alias` (compiler/ml/typemod.ml:1242-1252).
+            // Nested paths such as Belt.Id.MakeComparable must preserve the
+            // alias for the Belt.Id prefix so the final lookup still sees an
+            // alias module type instead of the resolved target signature.
+            lookup_module_type_by_lid(lid, arena, env, pers_env, ctx)
+                .and_then(|mty| alias_of_module_type(&mty))
+        })
+    }
     match lid {
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
@@ -3135,7 +3287,7 @@ pub fn lookup_module_type_by_lid<'b>(
             // Avoid recursively forcing a persistent parent module's `ps_sig`
             // here. OCaml dotted lookup goes through `ps_comps` for the parent;
             // `ps_sig` is only forced by `Env.find_module` on the final path.
-            let parent_alias = local_parent_alias_by_lid(prefix, arena, env);
+            let parent_alias = parent_alias_by_lid(prefix, arena, env, pers_env, ctx);
             if let Some(found) = crate::types::typecore::with_resolved_module_components_for_lid(
                 prefix,
                 arena,
@@ -9713,7 +9865,6 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_primitive(vd) => {
             // Primitive declaration: external f : t = "..."
             let name_str = arena.get_string(vd.pval_name.txt).to_string();
-            let id = tctx.type_ctx.create_ident(&name_str);
 
             // Translate the type annotation using transl_type_scheme pattern:
             // OCaml: reset_type_variables() clears type var map so each declaration
@@ -9732,6 +9883,14 @@ fn type_structure_item<'a>(
             // this entry via find_simple_abbrev and returns Tlink to the
             // original instead of a fresh copy — creating node sharing.
             crate::types::ctype::expand_head(ctx, env, val_ty);
+            let prim_desc = primitive_description_from_value_decl(
+                arena,
+                ctx,
+                env,
+                &vd.pval_prim,
+                vd.pval_type,
+                val_ty,
+            );
 
             // PPX has already encoded the FFI attributes into pval_prim,
             // so just resolve StrIdx -> String for the typed tree
@@ -9742,17 +9901,11 @@ fn type_structure_item<'a>(
                 .collect();
 
             // Add the external value to the environment
+            let id = ctx.create_ident(&name_str);
             let mut new_env = env.clone();
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
-                val_kind: crate::types::ValueKind::ValPrim(primitive_description_from_value_decl(
-                    arena,
-                    ctx,
-                    env,
-                    &vd.pval_prim,
-                    vd.pval_type,
-                    val_ty,
-                )),
+                val_kind: crate::types::ValueKind::ValPrim(prim_desc),
                 val_loc: arena.to_location(loc),
                 val_attributes: vec![],
                 val_path: None,
@@ -11132,6 +11285,15 @@ fn type_structure_item<'a>(
             // pattern type variables via update_level_expand during unification.
             for ty in &env_desc_types_for_generalize {
                 crate::types::ctype::generalize(ctx, *ty);
+            }
+
+            for decl in &internal_decls_for_generalize {
+                touch_untagged_variant_well_formedness(
+                    ctx,
+                    &new_env,
+                    &mut tctx.persistent_env,
+                    decl,
+                );
             }
 
             // OCaml typedecl.ml compute_properties_fixpoint:

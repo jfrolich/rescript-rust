@@ -1345,6 +1345,10 @@ impl<'a> TypeContext<'a> {
             .insert(name.to_string(), sig);
     }
 
+    pub fn has_raw_module_sig(&self, name: &str) -> bool {
+        self.raw_module_sigs.borrow().contains_key(name)
+    }
+
     /// Trigger module signature renaming for a persistent module.
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
@@ -1379,42 +1383,8 @@ impl<'a> TypeContext<'a> {
             raw.get(module_name).cloned()
         };
         if let Some(sig) = raw_sig {
-            let renamed: super::decl::Signature = sig
-                .iter()
-                .map(|item| match item {
-                    super::decl::SignatureItem::SigValue(id, desc) => {
-                        super::decl::SignatureItem::SigValue(self.rename_ident(id), desc.clone())
-                    }
-                    super::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                        super::decl::SignatureItem::SigType(
-                            self.rename_ident(id),
-                            decl.clone(),
-                            *rec_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                        super::decl::SignatureItem::SigTypext(
-                            self.rename_ident(id),
-                            ext.clone(),
-                            *ext_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                        super::decl::SignatureItem::SigModule(
-                            self.rename_ident(id),
-                            md.clone(),
-                            *rec_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigModtype(id, mtd) => {
-                        super::decl::SignatureItem::SigModtype(self.rename_ident(id), mtd.clone())
-                    }
-                    super::decl::SignatureItem::SigClass => super::decl::SignatureItem::SigClass,
-                    super::decl::SignatureItem::SigClassType => {
-                        super::decl::SignatureItem::SigClassType
-                    }
-                })
-                .collect();
+            let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&sig, self);
+            crate::cmi::persistent_env::freshen_signature_bound_idents(&mut renamed, self);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
