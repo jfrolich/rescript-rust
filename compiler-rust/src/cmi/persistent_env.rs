@@ -455,7 +455,7 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.alias_prefix_rewrites,
             );
-            register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
             self.cache.insert(portable_key.clone(), Some(ps));
             return self.cache.get(&portable_key).and_then(|opt| opt.as_ref());
         }
