@@ -2816,6 +2816,54 @@ fn touch_untagged_variant_well_formedness(
     }
 }
 
+fn touch_type_constraint_path(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return;
+    }
+
+    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
+        if let Path::Pdot(parent, type_name, _) = path {
+            // OCaml typedecl.ml:767-785 checks declaration constraints by
+            // calling Ctype.enforce_constraints on every Tconstr, and
+            // typedecl.ml:800-855 applies that traversal to record labels,
+            // constructor args/results, and manifests. For Pdot paths this
+            // reaches Env.find_type/env.ml:800-807 and can force a persistent
+            // signature after all label ids have been created.
+            let _ = crate::types::typecore::lookup_type_in_resolved_path(
+                parent, type_name, env, pers_env, ctx,
+            );
+        }
+    }
+
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        touch_type_constraint_path(ctx, env, pers_env, child, visited);
+    }
+}
+
+fn touch_type_declaration_constraints(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    decl: &crate::types::decl::TypeDeclaration,
+) {
+    let mut visited = HashSet::default();
+    crate::types::btype::iter_type_expr_kind(&decl.type_kind, |ty| {
+        touch_type_constraint_path(ctx, env, pers_env, ty, &mut visited);
+    });
+    if let Some(manifest) = decl.type_manifest {
+        touch_type_constraint_path(ctx, env, pers_env, manifest, &mut visited);
+    }
+}
+
 fn compute_type_variance_fixpoint(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
@@ -5648,6 +5696,16 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 Some(TypedMtyDesc::Tmty_signature(sig)) => Some(sig.sig_items.as_slice()),
                 _ => None,
             };
+            if let Some(TypedMtyDesc::Tmty_signature(sig)) = typed_hint.map(|hint| &hint.mty_desc) {
+                // OCaml typemod.ml:709-712 builds `Mty_signature sg.sig_type`
+                // from the already translated signature, and typemod.ml:879-883
+                // computes `sg.sig_type` once. Reusing the typed signature here
+                // avoids rewalking the parsed signature and recreating constructor
+                // identifiers after `transl_modtype`.
+                return Ok(DeclMty::MtySignature(decl_signature_from_typed_signature(
+                    sig, arena,
+                )));
+            }
             for (sig_index, sig_item) in sig_items.iter().enumerate() {
                 let typed_sig_item = typed_sig_items.and_then(|items| items.get(sig_index));
                 match &*sig_item.psig_desc {
@@ -8770,7 +8828,6 @@ pub fn transl_signature<'a>(
         let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
-                let id = ctx.create_ident(&name_str);
                 // Use transl_type_scheme pattern: begin_def/end_def/generalize
                 // OCaml: reset_type_variables() for each val declaration
                 tctx.type_variables.clear();
@@ -8783,6 +8840,11 @@ pub fn transl_signature<'a>(
                 // Keep signature value declaration abbreviation memo side effects
                 // aligned with OCaml transl_value_decl.
                 crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
+                // OCaml typedecl.ml:1875-1914 translates the type scheme before
+                // Env.enter_value creates the value ident. Keep the same order so
+                // lazy signature forcing during type translation consumes stamps
+                // before the signature value id.
+                let id = ctx.create_ident(&name_str);
                 // For primitives, we need the pval_prim as Vec<String> for the typed tree
                 let val_prim: Vec<String> = vd
                     .pval_prim
@@ -11292,6 +11354,12 @@ fn type_structure_item<'a>(
                 );
             }
 
+            // OCaml typedecl.ml:1588-1592 runs untagged checks first, then
+            // check_constraints over the finalized declaration group.
+            for decl in &internal_decls_for_generalize {
+                touch_type_declaration_constraints(ctx, &new_env, &mut tctx.persistent_env, decl);
+            }
+
             // OCaml typedecl.ml compute_properties_fixpoint:
             // recompute variances for the whole declaration group as a fixpoint.
             let resolved_variances =
@@ -13046,6 +13114,14 @@ fn transl_sig_type_declarations_with_ids<'a>(
     {
         variance_env.add_type(type_id.clone(), decl.clone());
     }
+
+    // OCaml transl_signature routes Psig_type through
+    // Typedecl.transl_type_decl, whose typedecl.ml:1588-1592 runs
+    // check_constraints before compute_properties_fixpoint.
+    for decl in &internal_decls_for_generalize {
+        touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
+    }
+
     let resolved_variances = compute_type_variance_fixpoint(ctx, &variance_env, &declared_type_ids);
     if resolved_variances.len() == declared_type_ids.len() {
         for (idx, variance_row) in resolved_variances.iter().enumerate() {

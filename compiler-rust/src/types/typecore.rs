@@ -1213,6 +1213,29 @@ fn resolve_type_constructor_path(
                 }
             }
 
+            if let Some(module_path) = env.resolve_module_access_path_for_lid(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
+                if let Some((resolved_module_path, _, decl)) = lookup_type_in_resolved_path(
+                    &module_path,
+                    type_name,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    // OCaml typetexp.ml:116-123 dispatches constructors through
+                    // Env.lookup_type, whose Ldot case in env.ml:1091-1099 looks
+                    // up the type table after resolving module components.
+                    return (
+                        Path::pdot(resolved_module_path, type_name.to_string()),
+                        Some(decl),
+                    );
+                }
+            }
+
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
                 prefix,
                 tctx.arena,
@@ -19179,6 +19202,53 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
+    }
+
+    if let Path::Pident(id) = parent_module_path {
+        if id.is_persistent() {
+            if let Some(pers) = pers_env.as_mut() {
+                if let Some(sig) = pers.get_renamed_sig(id.name(), ctx) {
+                    // OCaml env.ml:1091-1099 forces persistent components when
+                    // `lookup_type` reads a module's type table. Keep this here,
+                    // rather than in submodule lookup, because env.ml:1008-1014
+                    // walks child modules through component tables without
+                    // forcing the whole parent signature first.
+                    let access_path = Path::pident(Ident::create_persistent(id.name()));
+                    if let Some(qualified_alias_path) =
+                        pers.qualified_alias_path_for_flattened_head(id.name())
+                    {
+                        rewrite_flattened_alias_child_prefixes(
+                            &sig,
+                            &qualified_alias_path,
+                            &access_path,
+                            ctx,
+                        );
+                    }
+                    let components = crate::types::env_lazy::QualifiedModuleComponents::new(
+                        access_path.clone(),
+                        sig,
+                    );
+                    let result = components.lookup_type(type_name).map(|(type_id, decl)| {
+                        (access_path.clone(), type_id.clone(), decl.clone())
+                    });
+                    if let Some((resolved_path, resolved_id, resolved_decl)) = result.clone() {
+                        ctx.register_resolved_module_type(
+                            parent_module_path,
+                            type_name,
+                            resolved_path,
+                            resolved_id,
+                            resolved_decl,
+                        );
+                    }
+                    if let Some(module_key) = module_components_cache_key(parent_module_path, env) {
+                        ctx.register_qualified_module_components(module_key, components);
+                    }
+                    if result.is_some() {
+                        return result;
+                    }
+                }
+            }
+        }
     }
 
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
