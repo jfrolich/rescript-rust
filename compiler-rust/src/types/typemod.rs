@@ -113,6 +113,45 @@ fn force_poly_typed_core_type(
     }
 }
 
+fn lookup_rebind_constructor<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    lid: &Located<LidentIdx>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    let longident = tctx.arena.get_longident(lid.txt);
+    match longident {
+        Longident::Lident(name_idx) => {
+            let name = tctx.arena.get_string(*name_idx);
+            let desc = env.find_constructor(name).ok()?.clone();
+            let path = match &desc.cstr_tag {
+                crate::types::decl::ConstructorTag::CstrExtension(path) => path.clone(),
+                _ => Path::pident(Ident::create_persistent(name)),
+            };
+            Some((path, desc))
+        }
+        Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
+            longident,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+            None,
+        ),
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+fn rebind_constructor_arguments(
+    desc: &crate::types::decl::ConstructorDescription,
+) -> crate::types::ConstructorArguments {
+    if let Some(inlined) = &desc.cstr_inlined {
+        if let crate::types::TypeKind::TypeRecord(labels, _) = &inlined.type_kind {
+            return crate::types::ConstructorArguments::CstrRecord(labels.clone());
+        }
+    }
+    crate::types::ConstructorArguments::CstrTuple(desc.cstr_args.clone())
+}
+
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     attr: &ParsedAttribute,
@@ -8495,6 +8534,46 @@ pub fn transl_signature<'a>(
                 }
                 TSigDesc::Tsig_type(*rec_flag, typed_decls)
             }
+            PSigDesc::Psig_typext(ext) => {
+                let structure_item = ParsedStructureItem {
+                    pstr_desc: Box::new(ParsedStructureItemDesc::Pstr_typext(ext.clone())),
+                    pstr_loc: loc,
+                };
+                let (typed_item, _item_sig, new_env) =
+                    type_structure_item(tctx, &sig_env, arena, &structure_item)?;
+                sig_env = new_env;
+                match typed_item.str_desc {
+                    StructureItemDesc::Tstr_typext(typed_ext) => TSigDesc::Tsig_typext(typed_ext),
+                    _ => TSigDesc::Tsig_attribute((
+                        Located {
+                            txt: crate::intern::StrIdx(0),
+                            loc: LocIdx(0),
+                        },
+                        crate::parser::ast::Payload::PStr(Box::new(vec![])),
+                    )),
+                }
+            }
+            PSigDesc::Psig_exception(ext) => {
+                let structure_item = ParsedStructureItem {
+                    pstr_desc: Box::new(ParsedStructureItemDesc::Pstr_exception(ext.clone())),
+                    pstr_loc: loc,
+                };
+                let (typed_item, _item_sig, new_env) =
+                    type_structure_item(tctx, &sig_env, arena, &structure_item)?;
+                sig_env = new_env;
+                match typed_item.str_desc {
+                    StructureItemDesc::Tstr_exception(typed_ext) => {
+                        TSigDesc::Tsig_exception(typed_ext)
+                    }
+                    _ => TSigDesc::Tsig_attribute((
+                        Located {
+                            txt: crate::intern::StrIdx(0),
+                            loc: LocIdx(0),
+                        },
+                        crate::parser::ast::Payload::PStr(Box::new(vec![])),
+                    )),
+                }
+            }
             PSigDesc::Psig_module(md) => {
                 let name_str = arena.get_string(md.pmd_name.txt).to_string();
                 let id = ctx.create_ident(&name_str);
@@ -11075,7 +11154,7 @@ fn type_structure_item<'a>(
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
                 let id = ctx.create_ident(&name_str);
 
-                let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
+                let (ext_kind, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
                     match &ec.pext_kind {
                         crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
                             let mut arg_ty_refs = Vec::new();
@@ -11213,22 +11292,35 @@ fn type_structure_item<'a>(
                                 None => (None, None),
                             };
                             (
-                                typed_args,
-                                typed_ret,
+                                crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                                    typed_args, typed_ret,
+                                ),
                                 ext_args,
                                 cstr_args,
                                 cstr_inlined,
                                 ext_ret_ty,
                             )
                         }
-                        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                            None,
-                            crate::types::ConstructorArguments::CstrTuple(vec![]),
-                            vec![],
-                            None,
-                            None,
-                        ),
+                        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
+                            let (rebind_path, rebind_desc) =
+                                lookup_rebind_constructor(tctx, env, lid).ok_or_else(|| {
+                                    TypeModError::ModuleNotFound(format!(
+                                        "constructor {}",
+                                        arena.get_string(ec.pext_name.txt)
+                                    ))
+                                })?;
+                            let ext_args = rebind_constructor_arguments(&rebind_desc);
+                            (
+                                crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
+                                    rebind_path,
+                                    lid.clone(),
+                                ),
+                                ext_args,
+                                rebind_desc.cstr_args.clone(),
+                                rebind_desc.cstr_inlined.clone(),
+                                None,
+                            )
+                        }
                     };
 
                 crate::types::btype::iter_type_expr_cstr_args(&ext_args, |ty| {
@@ -11303,9 +11395,7 @@ fn type_structure_item<'a>(
                         ext_attributes: vec![],
                         ext_is_exception: false,
                     },
-                    ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        typed_args, typed_ret,
-                    ),
+                    ext_kind,
                     ext_loc: ec.pext_loc,
                     ext_attributes: ec.pext_attributes.clone(),
                 });
@@ -11375,7 +11465,7 @@ fn type_structure_item<'a>(
             ctx.begin_def();
 
             // Translate constructor arguments and collect type refs for env registration
-            let (typed_args, _ext_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
+            let (ext_kind, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
                 match &ext_constr.pext_kind {
                     crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
                         let mut arg_ty_refs = Vec::new();
@@ -11509,22 +11599,35 @@ fn type_structure_item<'a>(
                             None => (None, None),
                         };
                         (
-                            typed_args,
-                            typed_ret,
+                            crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                                typed_args, typed_ret,
+                            ),
                             ext_args,
                             cstr_args,
                             cstr_inlined,
                             ext_ret_ty,
                         )
                     }
-                    crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-                        crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                        None,
-                        crate::types::ConstructorArguments::CstrTuple(vec![]),
-                        vec![],
-                        None,
-                        None,
-                    ),
+                    crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
+                        let (rebind_path, rebind_desc) =
+                            lookup_rebind_constructor(tctx, env, lid).ok_or_else(|| {
+                                TypeModError::ModuleNotFound(format!(
+                                    "constructor {}",
+                                    arena.get_string(ext_constr.pext_name.txt)
+                                ))
+                            })?;
+                        let ext_args = rebind_constructor_arguments(&rebind_desc);
+                        (
+                            crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
+                                rebind_path,
+                                lid.clone(),
+                            ),
+                            ext_args,
+                            rebind_desc.cstr_args.clone(),
+                            rebind_desc.cstr_inlined.clone(),
+                            None,
+                        )
+                    }
                 };
 
             // OCaml typedecl.ml:1843-1846: end_def and generalize args
@@ -11611,9 +11714,7 @@ fn type_structure_item<'a>(
                         loc: ext_constr.pext_name.loc,
                     },
                     ext_type: ext_type.clone(),
-                    ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        typed_args, _ext_ret,
-                    ),
+                    ext_kind,
                     ext_loc: loc,
                     ext_attributes: ext_constr.pext_attributes.clone(),
                 });

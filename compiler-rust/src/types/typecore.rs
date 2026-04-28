@@ -17784,7 +17784,7 @@ impl Env {
 
 /// Look up a constructor in a module-qualified path (e.g., Nullable.Value).
 /// For Ldot paths, resolves the module and searches its type declarations.
-fn lookup_constructor_in_module<'b>(
+pub(crate) fn lookup_constructor_in_module<'b>(
     lid: &Longident,
     arena: &ParseArena,
     env: &Env,
