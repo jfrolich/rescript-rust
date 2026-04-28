@@ -9777,6 +9777,24 @@ fn type_function(
             c_guard: None,
             c_rhs: typed_body,
         }];
+        let needs_exhaust_check = !is_simple_param;
+        let partial = if needs_exhaust_check {
+            // Match OCaml type_cases exhaustiveness setup before returning to
+            // type_function's `name_pattern "param"`:
+            // compiler/ml/typecore.ml:4511-4535 runs init_env/end_def, and
+            // compiler/ml/typecore.ml:3631 creates the param ident afterward.
+            ctx.begin_def();
+            ctx.set_current_time(ctx.current_level());
+            let lev = ctx.current_stamp();
+            ctx.init_def(lev + 1000);
+            let partial = check_partial_simple(ctx, env, &cases);
+            ctx.end_def();
+            let return_inst = crate::types::instance(ctx, return_ty);
+            unify_expression_types(tctx, loc, return_inst, ctx.new_var(None), None)?;
+            partial
+        } else {
+            check_partial_simple(ctx, env, &cases)
+        };
         let param_id = name_pattern(ctx, "param", &cases);
         let fp = FunctionParam {
             param_id,
@@ -9793,8 +9811,6 @@ fn type_function(
             ctx,
             ctx.new_generic_arrow(ctx_label, exp_param_ty, return_ty, arity_opt),
         );
-
-        let partial = check_partial_simple(ctx, env, &cases);
 
         Ok(Expression::new(
             ExpressionDesc::Texp_function {
