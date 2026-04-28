@@ -1029,6 +1029,59 @@ fn get_dependency_paths(
         .concat()
 }
 
+struct InProcessCompilerFlags {
+    nopervasives: bool,
+    no_version_header: bool,
+    check_div_by_zero: bool,
+    no_assert_false: bool,
+    debug: bool,
+    jsx_preserve: bool,
+    jsx_version: Option<i32>,
+    open_modules: Vec<String>,
+}
+
+impl Default for InProcessCompilerFlags {
+    fn default() -> Self {
+        Self {
+            nopervasives: false,
+            no_version_header: false,
+            check_div_by_zero: true,
+            no_assert_false: false,
+            debug: false,
+            jsx_preserve: false,
+            jsx_version: None,
+            open_modules: Vec::new(),
+        }
+    }
+}
+
+fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
+    let mut parsed = InProcessCompilerFlags::default();
+    let mut iter = flags.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "-nopervasives" => parsed.nopervasives = true,
+            "-bs-no-version-header" => parsed.no_version_header = true,
+            "-bs-no-check-div-by-zero" => parsed.check_div_by_zero = false,
+            "-bs-noassertfalse" => parsed.no_assert_false = true,
+            "-bs-g" => parsed.debug = true,
+            "-bs-jsx-preserve" => parsed.jsx_preserve = true,
+            "-bs-jsx" => {
+                if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
+                    parsed.jsx_version = Some(version);
+                }
+            }
+            "-open" => {
+                if let Some(mod_name) = iter.next() {
+                    parsed.open_modules.push(mod_name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
 /// Build `CompilerOptions` for an in-process compilation from the package config.
 fn build_compiler_options(
     package: &packages::Package,
@@ -1042,24 +1095,7 @@ fn build_compiler_options(
     // Parse package compiler-flags for flags the in-process compiler needs to honor.
     // In the subprocess path, these are passed as raw CLI args to bsc.
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
-    let mut nopervasives = false;
-    let mut no_version_header = false;
-    let mut flag_open_modules: Vec<String> = Vec::new();
-    {
-        let mut iter = bsc_flags.iter();
-        while let Some(flag) = iter.next() {
-            match flag.as_str() {
-                "-nopervasives" => nopervasives = true,
-                "-bs-no-version-header" => no_version_header = true,
-                "-open" => {
-                    if let Some(mod_name) = iter.next() {
-                        flag_open_modules.push(mod_name.clone());
-                    }
-                }
-                _ => {} // Other flags (-nostdlib, -make-runtime, etc.) are not needed in-process
-            }
-        }
-    }
+    let parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
@@ -1084,11 +1120,13 @@ fn build_compiler_options(
     // (omitted for simplicity in first cut; can be added later)
 
     // Extract JSX version from root config
-    let jsx_version = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.version)
-        .filter(|&v| v == 4);
+    let jsx_version = parsed_flags.jsx_version.or_else(|| {
+        root_config
+            .jsx
+            .as_ref()
+            .and_then(|jsx| jsx.version)
+            .filter(|&v| v == 4)
+    });
 
     // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
     // In the file-based mode, `-bs-ns Namespace` is passed to all namespaced modules.
@@ -1102,7 +1140,7 @@ fn build_compiler_options(
     // Append explicit -open flags from package compiler-flags.
     // Self-open filtering (e.g., skip `-open Pervasives` when compiling Pervasives.res)
     // is handled inside load_pervasives via the module_name field.
-    open_modules.extend(flag_open_modules);
+    open_modules.extend(parsed_flags.open_modules);
 
     // Runtime path
     let runtime_path = get_runtime_path(&package.config, project_context).ok();
@@ -1124,8 +1162,12 @@ fn build_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version,
-        nopervasives,
-        no_version_header,
+        jsx_preserve: parsed_flags.jsx_preserve,
+        debug: parsed_flags.debug,
+        check_div_by_zero: parsed_flags.check_div_by_zero,
+        no_assert_false: parsed_flags.no_assert_false,
+        nopervasives: parsed_flags.nopervasives,
+        no_version_header: parsed_flags.no_version_header,
         module_name: Some(module_name.to_string()),
         ..Default::default()
     })
@@ -1376,7 +1418,8 @@ struct RuntimeModuleSource {
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let runtime_root = &build_state.build_state.compiler_info.runtime_path;
-    let root_config = build_state.get_root_config();
+    let runtime_config = packages::read_config(runtime_root)
+        .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     let runtime_path = runtime_root.join("lib").join("ocaml");
     let mut runtime_modules = collect_runtime_sources(&runtime_path)?;
 
@@ -1428,7 +1471,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
             &runtime_path,
             &module.module_name,
             &module.res_path,
-            root_config,
+            &runtime_config,
         );
 
         let has_runtime_interface = module.resi_path.is_some();
@@ -1706,16 +1749,22 @@ fn runtime_compiler_options(
     runtime_path: &Path,
     module_name: &str,
     source_path: &Path,
-    root_config: &config::Config,
+    runtime_config: &config::Config,
 ) -> rescript_compiler::driver::CompilerOptions {
-    let js_output_targets: Vec<rescript_compiler::driver::JsOutputTarget> = root_config
+    let bsc_flags = config::flatten_flags(&runtime_config.compiler_flags);
+    let mut parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
+    if parsed_flags.open_modules.is_empty() {
+        parsed_flags.open_modules.push("Pervasives".to_string());
+    }
+
+    let js_output_targets: Vec<rescript_compiler::driver::JsOutputTarget> = runtime_config
         .get_package_specs()
         .iter()
         .map(|spec| rescript_compiler::driver::JsOutputTarget {
             path: runtime_root
                 .join("lib")
                 .join(spec.get_out_of_source_dir())
-                .join(format!("{}{}", module_name, root_config.get_suffix(spec))),
+                .join(format!("{}{}", module_name, runtime_config.get_suffix(spec))),
             module_format: package_spec_to_module_format(spec),
         })
         .collect();
@@ -1725,15 +1774,18 @@ fn runtime_compiler_options(
     rescript_compiler::driver::CompilerOptions {
         include_paths: vec![runtime_path.to_path_buf()],
         runtime_path: Some(runtime_root.to_path_buf()),
-        open_modules: vec!["Pervasives".to_string()],
+        open_modules: parsed_flags.open_modules,
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path,
         output_module_format,
         js_output_targets,
-        debug: false,
-        no_version_header: true,
-        check_div_by_zero: false,
-        nopervasives: true,
+        jsx_version: parsed_flags.jsx_version,
+        jsx_preserve: parsed_flags.jsx_preserve,
+        debug: parsed_flags.debug,
+        no_version_header: parsed_flags.no_version_header,
+        check_div_by_zero: parsed_flags.check_div_by_zero,
+        no_assert_false: parsed_flags.no_assert_false,
+        nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
         ..Default::default()
     }
