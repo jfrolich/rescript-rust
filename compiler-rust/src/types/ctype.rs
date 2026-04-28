@@ -7130,8 +7130,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                     let abbrevs = ctx.current_abbreviations();
                     let lookup_abbrevs = proper_abbrevs(ctx, &path, &args, abbrevs);
 
-                    let is_local_nonpersistent =
-                        matches!(&path, Path::Pident(id) if !id.is_persistent());
+                    let is_local_nonpersistent = is_local_path(&path);
                     if let Some(found_ty) = ctx.find_abbrev_repr(lookup_abbrevs, &path) {
                         let found_source = ctx.repr(found_ty);
                         // OCaml copy() mutates source nodes to Tsubst stubs while
@@ -7144,15 +7143,12 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                             .get(&found_ty)
                             .copied()
                             .or_else(|| cache.nodes.get(&found_source).copied());
-                        let found_repr = found_cached.unwrap_or(if is_local_nonpersistent {
-                            found_source
-                        } else {
-                            found_ty
-                        });
-                        let stale_local_generic_hit = is_local_nonpersistent
-                            && found_cached.is_none()
-                            && ctx.get_level(found_source) == GENERIC_LEVEL;
-                        if !stale_local_generic_hit && found_repr != placeholder {
+                        // OCaml ctype.ml:916-925 installs Tsubst stubs only for
+                        // the active copy window, so local-path abbreviation hits
+                        // from an older window are not reusable.
+                        let stale_local_hit = is_local_nonpersistent && found_cached.is_none();
+                        let found_repr = found_cached.unwrap_or(found_ty);
+                        if !stale_local_hit && found_repr != placeholder {
                             cache.nodes.insert(ty, found_repr);
                             ctx.set_desc(placeholder, TypeDesc::Tlink(found_repr));
                             return found_repr;
