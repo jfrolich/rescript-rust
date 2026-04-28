@@ -402,6 +402,10 @@ impl<'a> TypeContext<'a> {
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
+    pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
+        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+    }
+
     /// Snapshot synthetic CMI longident component names so portable signatures
     /// can move across TypeContexts without losing the side table.
     pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {

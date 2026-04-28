@@ -3406,8 +3406,12 @@ pub fn compile_preprocessed_structure_in_process(
         &type_ctx,
     );
 
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
+    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
+        module_name,
+        original_alias_count,
+        &type_ctx,
+        Some(arena),
+    );
 
     Ok(InProcessCompileResult {
         js_output: js,
@@ -3567,8 +3571,12 @@ pub fn typecheck_preprocessed_signature_in_process(
         &type_ctx,
     );
 
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
+    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
+        module_name,
+        original_alias_count,
+        &type_ctx,
+        Some(arena),
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,
@@ -3646,8 +3654,12 @@ pub fn typecheck_implementation_in_process(
         &type_ctx,
     );
 
-    let (pers_struct, new_alias_rewrites) =
-        internal_env.extract_module_update(module_name, original_alias_count, &type_ctx);
+    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
+        module_name,
+        original_alias_count,
+        &type_ctx,
+        Some(parser.arena()),
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

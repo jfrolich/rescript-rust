@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::parse_arena::ParseArena;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
@@ -27,8 +28,8 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    Commutable, FieldKind, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExprRef,
-    GENERIC_LEVEL,
+    Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc,
+    TypeExprRef,
 };
 
 use super::persistent_env::PersStruct;
@@ -87,9 +88,16 @@ pub enum PortableTypeDesc {
     },
     Tpackage {
         path: Path,
-        lids: Vec<Longident>,
+        lids: Vec<PortableLongident>,
         args: Vec<usize>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PortableLongident {
+    Lident(String),
+    Ldot(Box<PortableLongident>, String),
+    Lapply(Box<PortableLongident>, Box<PortableLongident>),
 }
 
 /// Portable row description for polymorphic variants.
@@ -270,8 +278,6 @@ fn hash_portable_desc(
         }
         PortableTypeDesc::Tpackage { path, lids, args } => {
             hash_path_by_name(hasher, path);
-            // Longident contains StrIdx; hash raw discriminant + index.
-            // Same-session comparisons are correct; cross-session is best-effort.
             lids.hash(hasher);
             hash_type_refs(hasher, args, entries, visiting);
         }
@@ -543,9 +549,14 @@ fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &[Porta
 /// Serialize a PersStruct's type graph into portable form while the TypeContext
 /// is still alive. All TypeExprRef values in the signature are replaced with
 /// indices into the returned PortableTypeGraph.
-pub fn serialize_pers_struct(ps: &PersStruct, ctx: &TypeContext<'_>) -> PortablePersStruct {
+pub fn serialize_pers_struct(
+    ps: &PersStruct,
+    ctx: &TypeContext<'_>,
+    arena: Option<&ParseArena>,
+) -> PortablePersStruct {
     let mut ser = TypeGraphSerializer {
         ctx,
+        arena,
         entries: Vec::new(),
         cache: HashMap::new(),
     };
@@ -565,6 +576,7 @@ pub fn serialize_pers_struct(ps: &PersStruct, ctx: &TypeContext<'_>) -> Portable
 
 struct TypeGraphSerializer<'a, 'b> {
     ctx: &'a TypeContext<'b>,
+    arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
     cache: HashMap<TypeExprRef, usize>,
 }
@@ -641,10 +653,42 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
             },
             TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
                 path: path.clone(),
-                lids: lids.clone(),
+                lids: lids
+                    .iter()
+                    .map(|lid| self.serialize_longident(lid))
+                    .collect(),
                 args: args.iter().map(|t| self.serialize_type(*t)).collect(),
             },
         }
+    }
+
+    fn serialize_longident(&self, lid: &Longident) -> PortableLongident {
+        match lid {
+            Longident::Lident(idx) => {
+                PortableLongident::Lident(self.resolve_longident_component(*idx))
+            }
+            Longident::Ldot(prefix, idx) => PortableLongident::Ldot(
+                Box::new(self.serialize_longident(prefix)),
+                self.resolve_longident_component(*idx),
+            ),
+            Longident::Lapply(functor, arg) => PortableLongident::Lapply(
+                Box::new(self.serialize_longident(functor)),
+                Box::new(self.serialize_longident(arg)),
+            ),
+        }
+    }
+
+    fn resolve_longident_component(&self, idx: crate::intern::StrIdx) -> String {
+        if let Some(name) = self.ctx.resolve_cmi_longident_component(idx) {
+            return name;
+        }
+        if let Some(arena) = self.arena {
+            return arena.get_string(idx).to_string();
+        }
+        panic!(
+            "portable type serialization invariant violated: unresolved Longident component #{}",
+            idx.raw()
+        );
     }
 
     fn serialize_row_desc(&mut self, rd: &RowDesc) -> PortableRowDesc {
@@ -906,9 +950,26 @@ fn internalize_desc(
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
             path: path.clone(),
-            lids: lids.clone(),
+            lids: lids
+                .iter()
+                .map(|lid| internalize_longident(lid, ctx))
+                .collect(),
             args: args.iter().map(|&i| remap[i]).collect(),
         },
+    }
+}
+
+fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext<'_>) -> Longident {
+    match lid {
+        PortableLongident::Lident(name) => Longident::Lident(ctx.intern_cmi_longident_name(name)),
+        PortableLongident::Ldot(prefix, name) => Longident::Ldot(
+            Box::new(internalize_longident(prefix, ctx)),
+            ctx.intern_cmi_longident_name(name),
+        ),
+        PortableLongident::Lapply(functor, arg) => Longident::Lapply(
+            Box::new(internalize_longident(functor, ctx)),
+            Box::new(internalize_longident(arg, ctx)),
+        ),
     }
 }
 

@@ -336,12 +336,13 @@ impl PersistentEnv {
         module_name: &str,
         original_alias_count: usize,
         ctx: &TypeContext<'_>,
+        arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
         let portable = self
             .cache
             .get(module_name)
             .and_then(|opt| opt.as_ref())
-            .map(|ps| portable_types::serialize_pers_struct(ps, ctx));
+            .map(|ps| portable_types::serialize_pers_struct(ps, ctx, arena));
         // New alias rewrites are any beyond what was in the original registry
         let new_rewrites = if self.alias_prefix_rewrites.len() > original_alias_count {
             self.alias_prefix_rewrites.clone()
@@ -358,13 +359,18 @@ impl PersistentEnv {
     pub fn extract_all_cached_modules(
         &self,
         ctx: &TypeContext<'_>,
+        arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (HashMap<String, PortablePersStruct>, HashMap<String, Path>) {
         let portables: HashMap<String, PortablePersStruct> = self
             .cache
             .iter()
             .filter_map(|(name, opt)| {
-                opt.as_ref()
-                    .map(|ps| (name.clone(), portable_types::serialize_pers_struct(ps, ctx)))
+                opt.as_ref().map(|ps| {
+                    (
+                        name.clone(),
+                        portable_types::serialize_pers_struct(ps, ctx, arena),
+                    )
+                })
             })
             .collect();
         (portables, self.alias_prefix_rewrites.clone())
