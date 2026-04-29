@@ -719,8 +719,12 @@ fn colorize_location(location: &str) -> String {
     }
 }
 
-fn source_bytes_to_latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| b as char).collect()
+fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
+    if bytes.is_ascii() {
+        String::from_utf8(bytes).expect("ASCII source bytes should always be valid UTF-8")
+    } else {
+        bytes.into_iter().map(|b| b as char).collect()
+    }
 }
 
 fn generate_ast_with_rust_parser(
@@ -739,7 +743,7 @@ fn generate_ast_with_rust_parser(
 )> {
     let bytes =
         std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
-    let source = source_bytes_to_latin1(&bytes);
+    let source = source_bytes_to_latin1(bytes);
     let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
     let mut warnings = String::new();
 

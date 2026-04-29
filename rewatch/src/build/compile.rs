@@ -1818,7 +1818,15 @@ fn module_name_from_stem(stem: &str) -> Option<String> {
 fn read_source_latin1(path: &Path) -> Result<String> {
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
-    Ok(bytes.iter().map(|&b| b as char).collect())
+    Ok(source_bytes_to_latin1(bytes))
+}
+
+fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
+    if bytes.is_ascii() {
+        String::from_utf8(bytes).expect("ASCII source bytes should always be valid UTF-8")
+    } else {
+        bytes.into_iter().map(|b| b as char).collect()
+    }
 }
 
 fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
