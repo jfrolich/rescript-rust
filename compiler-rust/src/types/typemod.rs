@@ -3307,11 +3307,48 @@ fn resolve_mod_type_to_sig_impl<'b>(
     use crate::types::decl::ModuleType as DeclMty;
     match mty {
         DeclMty::MtySignature(sig) => Some(sig.clone()),
-        DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
-            resolve_path_to_sig_impl(path, env, pers_env, ctx, visiting)
+        DeclMty::MtyAlias(_, path) => resolve_path_to_sig_impl(path, env, pers_env, ctx, visiting),
+        DeclMty::MtyIdent(path) => {
+            resolve_modtype_path_to_sig_impl(path, env, pers_env, ctx, visiting)
+                .or_else(|| resolve_path_to_sig_impl(path, env, pers_env, ctx, visiting))
         }
         _ => None,
     }
+}
+
+fn resolve_modtype_path_to_sig_impl<'b>(
+    path: &Path,
+    env: Option<&Env>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+    visiting: &mut HashSet<Path>,
+) -> Option<crate::types::decl::Signature> {
+    if !visiting.insert(path.clone()) {
+        return None;
+    }
+
+    let result = match path {
+        Path::Pident(id) => env.and_then(|local_env| {
+            let mtd = local_env.lookup_modtype(&Path::pident(id.clone())).ok()?;
+            let mty = mtd.mtd_type.as_ref()?;
+            resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
+        }),
+        Path::Pdot(parent, name, _) => env.and_then(|local_env| {
+            let (_, mtd) = crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                name.as_str(),
+                local_env,
+                pers_env,
+                ctx,
+            )?;
+            let mty = mtd.mtd_type.as_ref()?;
+            resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, visiting)
+        }),
+        Path::Papply(_, _) => None,
+    };
+
+    visiting.remove(path);
+    result
 }
 
 /// Resolve a module/modtype path to a signature by following through local and
