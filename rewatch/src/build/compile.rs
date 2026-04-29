@@ -2125,7 +2125,9 @@ fn runtime_compiler_options(
 /// fresh `PersistentEnv` internally, enabling parallel compilation.
 ///
 /// Returns the user-visible warning state plus registry updates to publish
-/// after the worker returns, before dependents are scheduled.
+/// after the worker returns, before dependents are scheduled. Actual compiler
+/// failures are returned as errors so the DAG scheduler stops dependents, like
+/// the bsc subprocess path does.
 fn compile_module_in_process(
     package: &packages::Package,
     module: &Module,
@@ -2200,11 +2202,7 @@ fn compile_module_in_process(
         let intf_result = match intf_result {
             Ok(r) => r,
             Err(e) => {
-                let warning = format!("{}", e);
-                return Ok(InProcessModuleResult {
-                    warning: Some(warning),
-                    registry_updates: Vec::new(),
-                });
+                return Err(e);
             }
         };
 
@@ -2288,13 +2286,7 @@ fn compile_module_in_process(
     let compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            // Return as a warning, not an error. The module won't produce JS
-            // output but the build should continue for other modules.
-            let warning = format!("Compilation failed for {}: {}", module_name, e);
-            return Ok(InProcessModuleResult {
-                warning: Some(warning),
-                registry_updates: interface_registry_update.into_iter().collect(),
-            });
+            return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
         }
         Err(panic) => {
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
@@ -2304,13 +2296,7 @@ fn compile_module_in_process(
             } else {
                 "unknown panic".to_string()
             };
-            // Return as a warning, not an error. The module won't produce JS
-            // output but the build should continue for other modules.
-            let warning = format!("Compilation panicked for {}: {}", module_name, msg);
-            return Ok(InProcessModuleResult {
-                warning: Some(warning),
-                registry_updates: interface_registry_update.into_iter().collect(),
-            });
+            return Err(anyhow!("Compilation panicked for {}: {}", module_name, msg));
         }
     };
 
