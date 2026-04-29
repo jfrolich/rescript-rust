@@ -3826,6 +3826,12 @@ impl<'a> RawLambdaConverter<'a> {
     where
         F: FnMut(&mut Self, &str, usize) -> RawLambda,
     {
+        // OCaml's fold in compiler/ml/translmod.ml:112-127 leaves `lam`
+        // unchanged for an empty `id_pos_list`; avoid the free-variable walk.
+        if id_pos_list.is_empty() {
+            return lam;
+        }
+
         let fv = raw_free_variables(&lam);
         let mut lam = lam;
         let mut subst = HashMap::new();

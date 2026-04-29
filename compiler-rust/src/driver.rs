@@ -1606,6 +1606,82 @@ fn build_name_based_coercion(
     }
 }
 
+fn build_inferred_signature_coercion(
+    impl_sig: &crate::types::decl::Signature,
+) -> crate::types::typedtree::ModuleCoercion {
+    use crate::types::decl::{SignatureItem, ValueKind};
+    use crate::types::includemod::is_runtime_component;
+    use crate::types::typedtree::ModuleCoercion;
+
+    let mut seen_values = std::collections::HashSet::new();
+    let mut keep = vec![true; impl_sig.len()];
+    // OCaml's inferred-signature path uses Typemod.simplify_signature before
+    // Includemod.compunit; simplify_signature only drops earlier duplicate
+    // values by name. See compiler/ml/typemod.ml:650-663 and 1768-1770.
+    for (idx, item) in impl_sig.iter().enumerate().rev() {
+        if let SignatureItem::SigValue(id, _) = item {
+            keep[idx] = seen_values.insert(id.name().to_string());
+        }
+    }
+
+    let mut runtime_pos = 0usize;
+    let mut len_impl = 0usize;
+    let mut coercions = Vec::new();
+    let mut runtime_fields = Vec::new();
+    let mut id_pos_list = Vec::new();
+
+    for (idx, item) in impl_sig.iter().enumerate() {
+        let current_runtime_pos = runtime_pos;
+        if let SignatureItem::SigModule(id, _, _) = item {
+            // OCaml builds id_pos_list by consing during a left fold, so the
+            // final list is reverse module order. See compiler/ml/includemod.ml:288-293.
+            id_pos_list.push((id.clone(), current_runtime_pos, ModuleCoercion::Tcoerce_none));
+        }
+        if is_runtime_component(item) {
+            runtime_pos += 1;
+            len_impl += 1;
+        }
+        if !keep[idx] {
+            continue;
+        }
+        match item {
+            SignatureItem::SigValue(id, desc)
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
+            {
+                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
+                runtime_fields.push(id.name().to_string());
+            }
+            SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
+                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
+                runtime_fields.push(id.name().to_string());
+            }
+            SignatureItem::SigClass => {
+                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
+            }
+            _ => {}
+        }
+    }
+
+    id_pos_list.reverse();
+
+    // Matches Includemod.signatures: it returns Tcoerce_structure when the
+    // runtime lengths differ, otherwise simplify_structure_coercion can erase
+    // identity coercions. See compiler/ml/includemod.ml:329-342 and 181-188.
+    let is_identity = len_impl == coercions.len()
+        && coercions
+            .iter()
+            .enumerate()
+            .all(|(expected_pos, (actual_pos, coercion))| {
+                *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
+            });
+
+    if is_identity {
+        ModuleCoercion::Tcoerce_none
+    } else {
+        ModuleCoercion::Tcoerce_structure(coercions, id_pos_list, runtime_fields)
+    }
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext<'_>,
@@ -1620,43 +1696,40 @@ fn compute_raw_implementation_coercion(
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
 
-    let impl_sig = typed_structure.str_type.clone();
+    let impl_sig = &typed_structure.str_type;
     let has_resi = std::path::Path::new(&format!("{source_file}i")).exists();
-    let target_sig = if has_resi {
-        let Some(module_name) = std::path::Path::new(source_file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-        else {
-            return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
-        };
-        let Some(pers) = &mut tctx.persistent_env else {
-            return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
-        };
-        let source_dir = std::path::Path::new(source_file)
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        if !pers.load_path_contains(&source_dir) {
-            pers.add_load_path(source_dir);
-        }
-        let _ = pers.find_pers_struct(&module_name, type_ctx);
-        match pers.read_raw_sig(&module_name, type_ctx) {
-            Some(sig) => sig,
-            None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
-        }
-    } else {
-        crate::types::includemod::simplify_signature(&impl_sig)
-    };
-    if !has_resi && target_sig.len() == impl_sig.len() {
-        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    if !has_resi {
+        return build_inferred_signature_coercion(impl_sig);
     }
+
+    let Some(module_name) = std::path::Path::new(source_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+    else {
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    };
+    let Some(pers) = &mut tctx.persistent_env else {
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
+    };
+    let source_dir = std::path::Path::new(source_file)
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if !pers.load_path_contains(&source_dir) {
+        pers.add_load_path(source_dir);
+    }
+    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    let target_sig = match pers.read_raw_sig(&module_name, type_ctx) {
+        Some(sig) => sig,
+        None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+    };
 
     match crate::types::includemod::compunit(
         type_ctx,
         env,
         source_file,
-        &impl_sig,
+        impl_sig,
         "(inferred signature)",
         &target_sig,
     ) {
@@ -1668,7 +1741,7 @@ fn compute_raw_implementation_coercion(
             // to match the interface's set of exported items. This ensures functors
             // and other implementation-only items are excluded from the module export
             // block, matching OCaml's behavior.
-            build_name_based_coercion(&impl_sig, &target_sig)
+            build_name_based_coercion(impl_sig, &target_sig)
         }
         Err(_) => crate::types::typedtree::ModuleCoercion::Tcoerce_none,
     }
