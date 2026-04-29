@@ -3690,24 +3690,28 @@ impl<'a> RawLambdaConverter<'a> {
             ) => {
                 let composed_ids = left_ids
                     .iter()
-                    .filter_map(|(id, left_pos, left_cc)| {
-                        right_positions.get(*left_pos).map(|(right_pos, right_cc)| {
-                            (
-                                id.clone(),
-                                *right_pos,
-                                Self::compose_coercions_raw(left_cc, right_cc),
-                            )
-                        })
+                    .map(|(id, left_pos, left_cc)| {
+                        let (right_pos, right_cc) = &right_positions[*left_pos];
+                        (
+                            id.clone(),
+                            *right_pos,
+                            Self::compose_coercions_raw(left_cc, right_cc),
+                        )
                     })
                     .collect::<Vec<_>>();
 
                 let composed_positions = left_positions
                     .iter()
-                    .filter_map(|(left_pos, left_cc)| match left_cc {
-                        ModuleCoercion::Tcoerce_primitive(_) => Some((*left_pos, left_cc.clone())),
-                        _ => right_positions.get(*left_pos).map(|(right_pos, right_cc)| {
+                    // Match compiler/ml/translmod.ml:137-157: OCaml turns the
+                    // right-hand coercion list into an array and indexes it
+                    // directly with the left position. Missing entries are a
+                    // malformed coercion, not something to skip.
+                    .map(|(left_pos, left_cc)| match left_cc {
+                        ModuleCoercion::Tcoerce_primitive(_) => (*left_pos, left_cc.clone()),
+                        _ => {
+                            let (right_pos, right_cc) = &right_positions[*left_pos];
                             (*right_pos, Self::compose_coercions_raw(left_cc, right_cc))
-                        }),
+                        }
                     })
                     .collect::<Vec<_>>();
 

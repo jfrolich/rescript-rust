@@ -3166,16 +3166,17 @@ pub(crate) fn decl_module_type_from_typed_module_expr_for_constraint_arg(
             Some(DeclMty::MtySignature(structure.str_type.clone()))
         }
         ModuleExprDesc::Tmod_constraint(
-            inner,
+            _inner,
             _,
             crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
             _,
-        ) => match &inner.mod_desc {
-            ModuleExprDesc::Tmod_structure(structure) => {
-                Some(DeclMty::MtySignature(structure.str_type.clone()))
-            }
-            _ => Some(mod_expr.mod_type.clone()),
-        },
+        ) => {
+            // Match compiler/ml/typemod.ml:1205-1217 and 1349-1355:
+            // `wrap_constraint` checks inclusion against `arg.mod_type`.
+            // An implicit duplicate-removal constraint has already replaced
+            // that type with the simplified signature at typemod.ml:1277-1282.
+            Some(mod_expr.mod_type.clone())
+        }
         _ => Some(mod_expr.mod_type.clone()),
     }
 }
