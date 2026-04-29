@@ -38,7 +38,8 @@ use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, ValueBinding,
 };
 use crate::types::{
-    Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState, ValueDescription,
+    Env, Path, RowField, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState,
+    ValueDescription,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cmp::Ordering;
@@ -4102,6 +4103,135 @@ fn type_statement<'a>(
     Ok(typed)
 }
 
+fn force_qualified_value_type_paths<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    value_path: &Path,
+    ty: TypeExprRef,
+) {
+    if !matches!(value_path, Path::Pdot(..)) {
+        return;
+    }
+
+    fn visit<'a>(
+        tctx: &mut TypeCheckContext<'a>,
+        env: &Env,
+        ty: TypeExprRef,
+        seen: &mut HashSet<TypeExprRef>,
+    ) {
+        let ctx = tctx.type_ctx;
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                let arg_ty = arg.typ;
+                let ret_ty = *ret;
+                drop(desc);
+                visit(tctx, env, arg_ty, seen);
+                visit(tctx, env, ret_ty, seen);
+            }
+            TypeDesc::Ttuple(items) => {
+                let items = items.clone();
+                drop(desc);
+                for item in items {
+                    visit(tctx, env, item, seen);
+                }
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let path = path.clone();
+                let args = args.clone();
+                drop(desc);
+                if let Path::Pdot(parent, name, _) = &path {
+                    // OCaml compiler/ml/typecore.ml:2421-2457 types
+                    // `Pexp_ident` by calling Typetexp.find_value and then
+                    // instancing `desc.val_type`. The qualified value lookup
+                    // path goes through compiler/ml/typetexp.ml:135-143 into
+                    // Env.lookup_value, whose Ldot case at compiler/ml/env.ml:1090-1104
+                    // reads component tables built by env.ml:1496-1524. Those
+                    // component value descriptions are already substituted by
+                    // compiler/ml/subst.ml:303-309, so type constructors inside
+                    // a looked-up value type force their module components at
+                    // this point, before the next source binding is typed.
+                    let _ = lookup_type_in_resolved_path(
+                        parent,
+                        name.as_str(),
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    );
+                }
+                for arg in args {
+                    visit(tctx, env, arg, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, name } => {
+                let fields = *fields;
+                let name_args = name.as_ref().map(|(_, args)| args.clone());
+                drop(desc);
+                visit(tctx, env, fields, seen);
+                if let Some(args) = name_args {
+                    for arg in args {
+                        visit(tctx, env, arg, seen);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                let typ = *typ;
+                let rest = *rest;
+                drop(desc);
+                visit(tctx, env, typ, seen);
+                visit(tctx, env, rest, seen);
+            }
+            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
+                let inner = *inner;
+                drop(desc);
+                visit(tctx, env, inner, seen);
+            }
+            TypeDesc::Tvariant(row) => {
+                let row_more = row.row_more;
+                let fields = row.row_fields.clone();
+                drop(desc);
+                visit(tctx, env, row_more, seen);
+                for (_, field) in fields {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => visit(tctx, env, arg, seen),
+                        RowField::Reither { types: args, .. } => {
+                            for arg in args {
+                                visit(tctx, env, arg, seen);
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                let body = *body;
+                let vars = vars.clone();
+                drop(desc);
+                visit(tctx, env, body, seen);
+                for var in vars {
+                    visit(tctx, env, var, seen);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                let args = args.clone();
+                drop(desc);
+                for arg in args {
+                    visit(tctx, env, arg, seen);
+                }
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    let mut seen = HashSet::new();
+    visit(tctx, env, ty, &mut seen);
+}
+
 /// Type check an expression against an expected type.
 pub fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -4158,6 +4288,7 @@ pub fn type_expect<'a>(
             )?;
 
             let ty = crate::types::instance(ctx, desc.val_type);
+            force_qualified_value_type_paths(tctx, env, &path, ty);
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
