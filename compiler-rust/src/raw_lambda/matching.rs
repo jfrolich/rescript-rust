@@ -7312,70 +7312,67 @@ fn approx_present(v: &Ident, lam: &RawLambda) -> bool {
 /// Lower a binding into the appropriate branch.
 /// Equivalent to OCaml's `lower_bind`.
 fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
-    match &lam {
+    // OCaml `compiler/ml/matching.ml:2413-2435` rebuilds only the branch that
+    // needs the alias binding. Pattern-match the Rust value by ownership so
+    // unchanged subtrees move through instead of recursively cloning the
+    // already-built raw lambda.
+    match lam {
         RawLambda::LifThenElse(cond, ifso, ifnot) => {
-            let pcond = approx_present(v, cond);
-            let pso = approx_present(v, ifso);
-            let pnot = approx_present(v, ifnot);
+            let pcond = approx_present(v, &cond);
+            let pso = approx_present(v, &ifso);
+            let pnot = approx_present(v, &ifnot);
             match (pcond, pso, pnot) {
-                (false, false, false) => lam,
+                (false, false, false) => RawLambda::LifThenElse(cond, ifso, ifnot),
                 (false, true, false) => RawLambda::LifThenElse(
-                    cond.clone(),
-                    Box::new(lower_bind(v, arg, (**ifso).clone())),
-                    ifnot.clone(),
+                    cond,
+                    Box::new(lower_bind(v, arg, *ifso)),
+                    ifnot,
                 ),
                 (false, false, true) => RawLambda::LifThenElse(
-                    cond.clone(),
-                    ifso.clone(),
-                    Box::new(lower_bind(v, arg, (**ifnot).clone())),
+                    cond,
+                    ifso,
+                    Box::new(lower_bind(v, arg, *ifnot)),
                 ),
-                _ => bind(LetKind::Alias, v, arg, lam),
+                _ => bind(
+                    LetKind::Alias,
+                    v,
+                    arg,
+                    RawLambda::LifThenElse(cond, ifso, ifnot),
+                ),
             }
         }
-        RawLambda::Lswitch(ls, sw, loc)
-            if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, ls) =>
-        {
-            let (i, act) = &sw.sw_consts[0];
-            let new_act = lower_bind(v, arg, act.clone());
-            RawLambda::Lswitch(
-                ls.clone(),
-                RawLambdaSwitch {
-                    sw_consts: vec![(*i, new_act)],
-                    ..(*sw).clone()
-                },
-                loc.clone(),
-            )
-        }
-        RawLambda::Lswitch(ls, sw, loc)
-            if sw.sw_consts.is_empty() && sw.sw_blocks.len() == 1 && !approx_present(v, ls) =>
-        {
-            let (i, act) = &sw.sw_blocks[0];
-            let new_act = lower_bind(v, arg, act.clone());
-            RawLambda::Lswitch(
-                ls.clone(),
-                RawLambdaSwitch {
-                    sw_blocks: vec![(*i, new_act)],
-                    ..(*sw).clone()
-                },
-                loc.clone(),
-            )
+        RawLambda::Lswitch(ls, mut sw, loc) => {
+            if sw.sw_consts.len() == 1 && sw.sw_blocks.is_empty() && !approx_present(v, &ls) {
+                let (i, act) = sw.sw_consts.pop().expect("single const switch branch");
+                sw.sw_consts.push((i, lower_bind(v, arg, act)));
+                RawLambda::Lswitch(ls, sw, loc)
+            } else if sw.sw_consts.is_empty()
+                && sw.sw_blocks.len() == 1
+                && !approx_present(v, &ls)
+            {
+                let (i, act) = sw.sw_blocks.pop().expect("single block switch branch");
+                sw.sw_blocks.push((i, lower_bind(v, arg, act)));
+                RawLambda::Lswitch(ls, sw, loc)
+            } else {
+                bind(LetKind::Alias, v, arg, RawLambda::Lswitch(ls, sw, loc))
+            }
         }
         RawLambda::Llet(LetKind::Alias, vv, lv, l) => {
-            if approx_present(v, lv) {
-                bind(LetKind::Alias, v, arg, lam)
-            } else {
-                RawLambda::Llet(
+            if approx_present(v, &lv) {
+                bind(
                     LetKind::Alias,
-                    vv.clone(),
-                    lv.clone(),
-                    Box::new(lower_bind(v, arg, (**l).clone())),
+                    v,
+                    arg,
+                    RawLambda::Llet(LetKind::Alias, vv, lv, l),
                 )
+            } else {
+                RawLambda::Llet(LetKind::Alias, vv, lv, Box::new(lower_bind(v, arg, *l)))
             }
         }
         RawLambda::Lvar(u) if u.same(v) && u.name() == "*sth*" => {
             arg.clone() // eliminate let *sth* = from_option x in *sth*
         }
-        _ => bind(LetKind::Alias, v, arg, lam),
+        other => bind(LetKind::Alias, v, arg, other),
     }
 }
 
