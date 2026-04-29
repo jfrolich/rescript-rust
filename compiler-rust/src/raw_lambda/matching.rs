@@ -7410,22 +7410,23 @@ fn comp_match_handlers(
     partial: &Partial,
     ctx: &[Ctx],
     arg: &RawLambda,
-    first_match: PmHalfCompiled,
-    next_matchs: Vec<(i32, PmHalfCompiled)>,
+    first_match: &PmHalfCompiled,
+    next_matchs: &[(i32, PmHalfCompiled)],
 ) -> Result<(RawLambda, Jumps), Unused> {
     if next_matchs.is_empty() {
-        return comp_fun(partial, ctx, arg, &first_match);
+        return comp_fun(partial, ctx, arg, first_match);
     }
 
-    match comp_fun(&Partial::Partial, ctx, arg, &first_match) {
+    // OCaml `compiler/ml/matching.ml:2448-2482` recurses over `next_matchs`
+    // structurally by sharing the tail list. Borrow the Rust slice for the
+    // same control flow instead of cloning precompiled match trees.
+    match comp_fun(&Partial::Partial, ctx, arg, first_match) {
         Ok((first_lam, total)) => {
-            c_rec(comp_fun, partial, ctx, arg, first_lam, total, &next_matchs)
+            c_rec(comp_fun, partial, ctx, arg, first_lam, total, next_matchs)
         }
         Err(Unused) => match next_matchs.split_first() {
             None => Err(Unused),
-            Some(((_, x), xs)) => {
-                comp_match_handlers(comp_fun, partial, ctx, arg, x.clone(), xs.to_vec())
-            }
+            Some(((_, x), xs)) => comp_match_handlers(comp_fun, partial, ctx, arg, x, xs),
         },
     }
 }
@@ -7626,7 +7627,7 @@ fn compile_match(
             };
 
             let (lam, total) =
-                comp_match_handlers(&mut comp_fn, partial, ctx, &newarg, first_match, rem)?;
+                comp_match_handlers(&mut comp_fn, partial, ctx, &newarg, &first_match, &rem)?;
             Ok((bind_check(*str_kind, &v, arg, lam), total))
         }
         (cases, []) if !cases.is_empty() => {
@@ -9103,8 +9104,8 @@ pub fn do_for_multiple_match(
             &partial,
             &start_ctx(size),
             &dummy_arg,
-            flat_next,
-            flat_nexts,
+            &flat_next,
+            &flat_nexts,
         )
         .map_err(|_| CannotFlattenExn)?;
 
