@@ -268,6 +268,7 @@ fn run() -> Result<()> {
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         capture_intermediates: false,
+        skip_js_render: false,
     };
 
     if is_interface {
