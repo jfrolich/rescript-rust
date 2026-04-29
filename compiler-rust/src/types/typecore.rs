@@ -4194,6 +4194,7 @@ fn force_qualified_value_type_paths<'a>(
         path: &Path,
         arity: usize,
         value_access_root_is_local: bool,
+        value_access_root: Option<&Ident>,
     ) -> Option<Path> {
         fn path_root_is_local(path: &Path) -> bool {
             match path {
@@ -4239,6 +4240,9 @@ fn force_qualified_value_type_paths<'a>(
 
         env.with_current_local_module_aliases(|aliases| {
             aliases.iter().find_map(|(alias_id, alias_target)| {
+                if !value_access_root.is_some_and(|root| root.same(alias_id)) {
+                    return None;
+                }
                 let alias_path = Path::pident(alias_id.clone());
                 if alias_path.same(parent) {
                     return None;
@@ -4261,13 +4265,17 @@ fn force_qualified_value_type_paths<'a>(
                 ) {
                     return None;
                 }
-                // OCaml compiler/ml/env.ml:1530-1538 builds component values
-                // with `prefix_idents` and `Subst.value_description`, whose
-                // constructor paths are rewritten by compiler/ml/subst.ml:87-95.
+                // OCaml compiler/ml/env.ml:1091-1100 selects values from the
+                // component table of the looked-up module path, and
+                // env.ml:1530-1538 builds those component values with
+                // `prefix_idents` plus compiler/ml/subst.ml:303-309
+                // `Subst.value_description`. Keep this direct value-lookup
+                // compensation tied to the selected root; later alias spelling
+                // changes from application/unification are handled by ctype.rs
+                // to mirror compiler/ml/ctype.ml:2367-2379.
                 // Rust's cached qualified value descriptors can still contain
-                // the alias target here, so only prefer a visible local alias
-                // when both the alias target and the rewritten path resolve to
-                // that same type component.
+                // the selected alias target here, so only prefer that visible
+                // local alias when it resolves to the same type component.
                 let shares_identity = crate::types::ctype::resolved_type_items_share_identity(
                     ctx, env, &candidate, path, arity,
                 );
@@ -4512,6 +4520,7 @@ fn force_qualified_value_type_paths<'a>(
                     &path,
                     args.len(),
                     value_access_root_is_local,
+                    value_access_root,
                 )
                 .or_else(|| {
                     persistent_nested_type_path(

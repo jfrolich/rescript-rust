@@ -3073,6 +3073,58 @@ fn unify_types<'a>(
             },
         ) => {
             if !path1.same(path2) {
+                if args1.len() == args2.len()
+                    && let Some(env) = state.env()
+                    && resolved_type_items_share_identity(ctx, env, path1, path2, args1.len())
+                {
+                    let pairs: Vec<_> = args1
+                        .iter()
+                        .zip(args2.iter())
+                        .map(|(&a, &b)| (a, b))
+                        .collect();
+                    let p1_persistent = path_root_is_persistent(path1);
+                    let p2_persistent = path_root_is_persistent(path2);
+                    let flat_persistent_parent = |path: &Path| {
+                        matches!(
+                            path,
+                            Path::Pdot(parent, _, _)
+                                if matches!(parent.as_ref(), Path::Pident(id) if id.is_persistent())
+                        )
+                    };
+                    let p1_flat_persistent = flat_persistent_parent(path1);
+                    let p2_flat_persistent = flat_persistent_parent(path2);
+                    drop(desc1);
+                    drop(desc2);
+                    // OCaml compiler/ml/ctype.ml:2341-2344 expands
+                    // abbreviations before ctype.ml:2412-2414 handles
+                    // `Path.same` constructors by unifying only arguments.
+                    // When Rust still has two access paths that resolve to the
+                    // same signature type item, take the same argument-only
+                    // path without forcing Env.normalize_path from
+                    // compiler/ml/env.ml:903-914.
+                    //
+                    // OCaml compiler/ml/ctype.ml:2367-2379 links the
+                    // representative in expression mode before constructor
+                    // arguments are unified. Rust can still expose flattened
+                    // persistent runtime paths here, while OCaml
+                    // compiler/ml/env.ml:1530-1538 plus
+                    // compiler/ml/subst.ml:87-95 have already substituted
+                    // selected module components. Only move a flattened
+                    // persistent module identifier onto the visible local alias;
+                    // nested selected paths such as `Js.Dict.t` or
+                    // `Belt.Id.cmp` are already in OCaml's spelling.
+                    if p1_persistent != p2_persistent {
+                        if p1_flat_persistent {
+                            link_type(ctx, t1, t2);
+                        } else if p2_flat_persistent {
+                            link_type(ctx, t2, t1);
+                        }
+                    }
+                    for (a, b) in pairs {
+                        unify(ctx, state, a, b)?;
+                    }
+                    return Ok(());
+                }
                 if let Some(env) = state.env() {
                     let exp1 = expand_head_unif(ctx, env, t1);
                     let exp2 = expand_head_unif(ctx, env, t2);
