@@ -2886,6 +2886,81 @@ fn preferred_alias_equiv_representative<'a>(
     result
 }
 
+fn preserve_apply_argument_alias_representative(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    parameter_ty: TypeExprRef,
+    argument_ty: TypeExprRef,
+) {
+    fn path_head_is_local_module_alias(env: &Env, path: &Path) -> bool {
+        let head = path.head();
+        !head.is_persistent()
+            && env.find_module(head.name()).ok().is_some_and(|md| {
+                matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(..))
+            })
+    }
+
+    let ctx = tctx.type_ctx;
+    let parameter_repr = ctx.repr(parameter_ty);
+    let argument_repr = ctx.repr(argument_ty);
+    if parameter_repr == argument_repr {
+        return;
+    }
+
+    let candidate = {
+        let parameter_desc = ctx.get_desc(parameter_repr);
+        let argument_desc = ctx.get_desc(argument_repr);
+        let candidate = match (&*parameter_desc, &*argument_desc) {
+            (
+                TypeDesc::Tconstr {
+                    path: parameter_path,
+                    args: parameter_args,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: argument_path,
+                    args: argument_args,
+                    ..
+                },
+            ) if parameter_args.len() == argument_args.len()
+                && !parameter_path.same(argument_path)
+                && path_head_is_local_module_alias(env, argument_path)
+                && !path_head_is_local_module_alias(env, parameter_path) =>
+            {
+                Some((parameter_path.clone(), argument_path.clone()))
+            }
+            _ => None,
+        };
+        drop(parameter_desc);
+        drop(argument_desc);
+        candidate
+    };
+
+    let Some((parameter_path, argument_path)) = candidate else {
+        return;
+    };
+
+    if !resolved_type_items_share_identity(
+        &parameter_path,
+        &argument_path,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+    ) {
+        return;
+    }
+
+    // OCaml typecore.ml:4171-4176 types an application argument against the
+    // original parameter type, then typecore.ml:3771-3773 unifies the result
+    // with the parameter instance. Through ctype.ml:2361-2364 and
+    // ctype.ml:2393-2397, a local module-alias argument can become the shared
+    // representative for both parameter nodes. Mirror only that alias-sharing
+    // mutation here; argument recursion already happened in unify.
+    if !crate::types::ctype::deep_occur(ctx, parameter_repr, argument_repr) {
+        crate::types::ctype::link_type(ctx, parameter_repr, argument_repr);
+    }
+}
+
 /// Unify pattern types, raising PatternTypeClash on error.
 fn unify_pattern_types(
     tctx: &mut TypeCheckContext<'_>,
@@ -7210,6 +7285,12 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let mut typed_arg = typed_arg_result?;
+                preserve_apply_argument_alias_representative(
+                    tctx,
+                    env,
+                    arg_expected_ty,
+                    typed_arg.exp_type,
+                );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
@@ -7226,6 +7307,12 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
+                    preserve_apply_argument_alias_representative(
+                        tctx,
+                        env,
+                        unify_ty,
+                        typed_arg.exp_type,
+                    );
                 }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
