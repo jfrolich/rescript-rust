@@ -15070,13 +15070,26 @@ fn type_letmodule(
         // Add the module to the environment so the body can access M.value
         let mut body_env = env.clone();
         register_module_type_type_decls_by_stamp(ctx, &mod_sig);
+        let access_path = Path::pident(mod_id.clone());
         let md_decl = crate::types::decl::ModuleDeclaration {
-            md_type: mod_sig,
+            md_type: mod_sig.clone(),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
         };
-        body_env.add_module(mod_id.clone(), md_decl);
+        let component_decl = crate::types::decl::ModuleDeclaration {
+            md_type: qualify_unpack_module_type_for_components(&mod_sig, &access_path, ctx),
+            md_attributes: vec![],
+            md_loc: crate::location::Location::none(),
+            md_path: None,
+        };
+        body_env.add_module_with_component_context(
+            mod_id.clone(),
+            md_decl,
+            component_decl,
+            access_path,
+            None,
+        );
 
         // Match OCaml `Ctype.init_def(Ident.current_time())` + Typetexp.widen()
         // after module typing
@@ -15615,6 +15628,20 @@ fn typed_module_type_for_unpack(
     }
 }
 
+fn qualify_unpack_module_type_for_components(
+    module_type: &crate::types::decl::ModuleType,
+    access_path: &Path,
+    ctx: &TypeContext<'_>,
+) -> crate::types::decl::ModuleType {
+    let mut qualified = copy_lookup_module_type_for_subst(module_type, ctx);
+    if let crate::types::decl::ModuleType::MtySignature(sig) = &mut qualified {
+        crate::cmi::persistent_env::substitute_type_paths_in_sig(sig, access_path, ctx);
+        crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(sig, access_path);
+        crate::cmi::persistent_env::substitute_submodule_paths_pub(sig, access_path, ctx);
+    }
+    qualified
+}
+
 fn type_expect_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -15657,14 +15684,25 @@ fn type_expect_with_module_unpacks(
     // The remaining cosmetic difference (Pident vs Pdot for first-class module
     // type paths) is accepted as a known limitation.
     let mut body_env = env.clone();
-    body_env.add_module(
+    let access_path = Path::pident(letmod_id.clone());
+    let raw_decl = crate::types::decl::ModuleDeclaration {
+        md_type: decl_mty.clone(),
+        md_attributes: vec![],
+        md_loc: crate::location::Location::none(),
+        md_path: None,
+    };
+    let component_decl = crate::types::decl::ModuleDeclaration {
+        md_type: qualify_unpack_module_type_for_components(&decl_mty, &access_path, tctx.type_ctx),
+        md_attributes: vec![],
+        md_loc: crate::location::Location::none(),
+        md_path: None,
+    };
+    body_env.add_module_with_component_context(
         letmod_id.clone(),
-        crate::types::decl::ModuleDeclaration {
-            md_type: decl_mty.clone(),
-            md_attributes: vec![],
-            md_loc: crate::location::Location::none(),
-            md_path: None,
-        },
+        raw_decl,
+        component_decl,
+        access_path,
+        None,
     );
     let typed_body =
         type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context)?;

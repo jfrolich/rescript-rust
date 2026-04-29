@@ -180,8 +180,10 @@ pub struct BindingTable<T> {
     /// Bindings indexed by name. The bool indicates whether the binding is
     /// local (true = from `add`, false = from `add_opened`).
     by_name: im_rc::HashMap<String, Vec<(Ident, T, bool)>>,
-    /// Bindings indexed by identifier stamp.
-    by_stamp: im_rc::HashMap<i32, T>,
+    /// Bindings indexed by identifier stamp. The identifier is stored with the
+    /// value so long-lived in-process environments can reject stamp collisions
+    /// from different source units.
+    by_stamp: im_rc::HashMap<i32, (Ident, T)>,
 }
 
 impl<T: Clone> BindingTable<T> {
@@ -199,7 +201,7 @@ impl<T: Clone> BindingTable<T> {
         let name = id.name().to_string();
         let stamp = id.stamp();
 
-        self.by_stamp.insert(stamp, value.clone());
+        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, true)),
@@ -216,7 +218,7 @@ impl<T: Clone> BindingTable<T> {
         let name = id.name().to_string();
         let stamp = id.stamp();
 
-        self.by_stamp.insert(stamp, value.clone());
+        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, false)),
@@ -274,7 +276,20 @@ impl<T: Clone> BindingTable<T> {
                 entries.last().map(|(_, value, _)| value)
             })
         } else {
-            self.by_stamp.get(&stamp)
+            if let Some((entry_id, value)) = self.by_stamp.get(&stamp)
+                && entry_id.same(id)
+                && entry_id.name() == id.name()
+            {
+                return Some(value);
+            }
+
+            self.by_name.get(id.name()).and_then(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|(entry_id, _, _)| entry_id.same(id) && entry_id.name() == id.name())
+                    .map(|(_, value, _)| value)
+            })
         }
     }
 
@@ -626,7 +641,9 @@ impl Env {
         // Persistent idents share stamp=0, and lookup for those already goes
         // through by_name. Keep by_stamp untouched for stamp=0.
         if id.stamp() != 0 {
-            self.values.by_stamp.insert(id.stamp(), updated);
+            self.values
+                .by_stamp
+                .insert(id.stamp(), (id.clone(), updated));
         }
 
         self.bump_id();

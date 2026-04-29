@@ -3873,15 +3873,77 @@ fn apply_package_constraints_to_module_type<'b>(
         return Some(mty.clone());
     }
 
+    fn rewrite_package_type_path_idents(
+        ctx: &crate::types::context::TypeContext<'_>,
+        ty: TypeExprRef,
+        direct_type_ids: &HashMap<String, Ident>,
+        visited: &mut HashSet<TypeExprRef>,
+    ) {
+        use crate::types::type_expr::TypeDesc;
+
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return;
+        }
+
+        let desc = ctx.get_desc(ty).clone();
+        match desc {
+            TypeDesc::Tconstr { path, args, abbrev } => {
+                let rewritten_path = match &path {
+                    Path::Pident(id) => direct_type_ids
+                        .get(id.name())
+                        .filter(|sig_id| !sig_id.same(&id))
+                        .map(|sig_id| Path::pident(sig_id.clone())),
+                    _ => None,
+                };
+                if let Some(path) = rewritten_path {
+                    ctx.set_desc(
+                        ty,
+                        TypeDesc::Tconstr {
+                            path,
+                            args: args.clone(),
+                            abbrev,
+                        },
+                    );
+                }
+                for arg in args {
+                    rewrite_package_type_path_idents(ctx, arg, direct_type_ids, visited);
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                rewrite_package_type_path_idents(ctx, arg.typ, direct_type_ids, visited);
+                rewrite_package_type_path_idents(ctx, ret, direct_type_ids, visited);
+            }
+            TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
+                for ty in types {
+                    rewrite_package_type_path_idents(ctx, ty, direct_type_ids, visited);
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                rewrite_package_type_path_idents(ctx, body, direct_type_ids, visited);
+                for var in vars {
+                    rewrite_package_type_path_idents(ctx, var, direct_type_ids, visited);
+                }
+            }
+            _ => {
+                crate::types::iter_type_expr(ctx, ty, |child| {
+                    rewrite_package_type_path_idents(ctx, child, direct_type_ids, visited);
+                });
+            }
+        }
+    }
+
     fn rewrite_package_constraints_over_sig(
         sig: &[crate::types::decl::SignatureItem],
         constraints: &[PackageConstraint],
+        ctx: &crate::types::context::TypeContext<'_>,
     ) -> (
         crate::types::decl::Signature,
         Vec<(usize, Vec<PackageConstraint>)>,
     ) {
         let mut rewritten_sig = Vec::with_capacity(sig.len());
         let mut nested_modules = Vec::new();
+        let mut direct_type_ids = HashMap::new();
 
         for item in sig {
             match item {
@@ -3896,6 +3958,7 @@ fn apply_package_constraints_to_module_type<'b>(
                             .find(|(path, _)| path.len() == 1 && path[0] == id.name())
                         {
                             td.type_manifest = Some(*manifest_ty);
+                            direct_type_ids.insert(id.name().to_string(), id.clone());
                         }
                     }
                     rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
@@ -3912,6 +3975,41 @@ fn apply_package_constraints_to_module_type<'b>(
                     ));
                 }
                 other => rewritten_sig.push(other.clone()),
+            }
+        }
+
+        if !direct_type_ids.is_empty() {
+            let mut visited = HashSet::new();
+            for item in &rewritten_sig {
+                match item {
+                    SignatureItem::SigValue(_, vd) => {
+                        rewrite_package_type_path_idents(
+                            ctx,
+                            vd.val_type,
+                            &direct_type_ids,
+                            &mut visited,
+                        );
+                    }
+                    SignatureItem::SigType(_, td, _) => {
+                        for param in &td.type_params {
+                            rewrite_package_type_path_idents(
+                                ctx,
+                                *param,
+                                &direct_type_ids,
+                                &mut visited,
+                            );
+                        }
+                        if let Some(manifest) = td.type_manifest {
+                            rewrite_package_type_path_idents(
+                                ctx,
+                                manifest,
+                                &direct_type_ids,
+                                &mut visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -3990,6 +4088,7 @@ fn apply_package_constraints_to_module_type<'b>(
                             rewrite_package_constraints_over_sig(
                                 components.signature(),
                                 constraints,
+                                ctx,
                             )
                         },
                     )
@@ -4015,6 +4114,7 @@ fn apply_package_constraints_to_module_type<'b>(
                             rewrite_package_constraints_over_sig(
                                 components.signature(),
                                 constraints,
+                                ctx,
                             )
                         },
                     )
@@ -4044,7 +4144,7 @@ fn apply_package_constraints_to_module_type<'b>(
                 } else {
                     let sig = resolve_path_to_sig_impl(path, Some(env), pers_env, ctx, visiting)?;
                     let (rewritten_sig, nested_modules) =
-                        rewrite_package_constraints_over_sig(&sig, constraints);
+                        rewrite_package_constraints_over_sig(&sig, constraints, ctx);
                     finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
                 }
             }
@@ -4068,7 +4168,7 @@ fn apply_package_constraints_to_module_type<'b>(
         match mty {
             DeclMty::MtySignature(sig) => {
                 let (rewritten_sig, nested_modules) =
-                    rewrite_package_constraints_over_sig(sig, constraints);
+                    rewrite_package_constraints_over_sig(sig, constraints, ctx);
                 finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
             }
             DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
