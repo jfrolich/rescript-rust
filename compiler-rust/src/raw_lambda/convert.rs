@@ -61,6 +61,11 @@ enum RawFunctionBinding {
     Module(Ident, Located<String>, ModuleExpr),
 }
 
+enum RawFunctionBindingRef<'a> {
+    Value(&'a [ValueBinding]),
+    Module(&'a Ident, &'a ModuleExpr),
+}
+
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
@@ -2260,6 +2265,73 @@ impl<'a> RawLambdaConverter<'a> {
                 wrapped
             }
         })
+    }
+
+    fn push_raw_function_binding_refs<'b>(
+        bindings: &mut Vec<RawFunctionBindingRef<'b>>,
+        pending: Vec<RawFunctionBindingRef<'b>>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let old = std::mem::take(bindings);
+        bindings.reserve(pending.len() + old.len());
+        bindings.extend(pending);
+        bindings.extend(old);
+    }
+
+    fn strip_default_bindings_before_function<'b>(
+        &self,
+        mut rhs: &'b Expression,
+    ) -> (&'b Expression, Vec<RawFunctionBindingRef<'b>>) {
+        let mut bindings = Vec::new();
+        loop {
+            match &rhs.exp_desc {
+                ExpressionDesc::Texp_let(
+                    crate::parser::ast::RecFlag::Nonrecursive,
+                    binds,
+                    inner,
+                ) if self.has_only_expr_attr(rhs, "#default")
+                    && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    bindings.push(RawFunctionBindingRef::Value(binds));
+                    rhs = inner;
+                }
+                ExpressionDesc::Texp_letmodule(_id, _name, _mexpr, inner)
+                    if self.has_only_expr_attr(rhs, "#modulepat")
+                        && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    if let ExpressionDesc::Texp_letmodule(id, _name, mexpr, _) = &rhs.exp_desc {
+                        bindings.push(RawFunctionBindingRef::Module(id, mexpr));
+                    }
+                    rhs = inner;
+                }
+                _ => return (rhs, bindings),
+            }
+        }
+    }
+
+    fn wrap_raw_function_binding_refs(
+        &mut self,
+        mut body: RawLambda,
+        bindings: &[RawFunctionBindingRef<'_>],
+    ) -> RawLambda {
+        for binding in bindings {
+            body = match binding {
+                RawFunctionBindingRef::Value(binds) => self.convert_let_with_body_raw(
+                    crate::parser::ast::RecFlag::Nonrecursive,
+                    binds,
+                    body,
+                ),
+                RawFunctionBindingRef::Module(id, mexpr) => RawLambda::let_(
+                    LetKind::Strict,
+                    (*id).clone(),
+                    self.convert_module_expr_raw(mexpr, &None),
+                    body,
+                ),
+            };
+        }
+        body
     }
 
     fn push_defaults_case(&self, bindings: Vec<RawFunctionBinding>, case: &Case) -> Case {
@@ -5122,12 +5194,24 @@ impl<'a> RawLambdaConverter<'a> {
                 arity,
                 async_,
             } if body.len() == 1 && body[0].c_guard.is_none() => {
+                let directive =
+                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
+                if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
+                    params,
+                    &body[0],
+                    *partial,
+                    *arity,
+                    expr.exp_type,
+                    *async_,
+                    directive.clone(),
+                    self.loc(expr.exp_loc),
+                ) {
+                    return lambda;
+                }
                 let pushed_body = body
                     .iter()
                     .map(|case| self.push_defaults_case(Vec::new(), case))
                     .collect::<Vec<_>>();
-                let directive =
-                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 self.convert_function_raw(
                     params,
                     &pushed_body,
@@ -9369,6 +9453,146 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::prim(prim, vec![lambda], loc)
             }
             None => lambda,
+        }
+    }
+
+    fn convert_single_case_function_raw_borrowed(
+        &mut self,
+        params: &[FunctionParam],
+        case: &Case,
+        partial: Partial,
+        arity: Arity,
+        function_type: TypeExprRef,
+        async_: bool,
+        directive: Option<String>,
+        loc: Location,
+    ) -> Option<RawLambda> {
+        if case.c_guard.is_some() {
+            return None;
+        }
+
+        let target_arity = match self.arena.get_arity(arity) {
+            Some(n) => n as usize,
+            None => params.len(),
+        };
+
+        let mut all_params: Vec<&FunctionParam> = params.iter().collect();
+        let mut current_case = case;
+        let mut current_partial = partial;
+        let mut pushed_bindings = Vec::new();
+        let final_body = loop {
+            let (rhs, pending_bindings) =
+                self.strip_default_bindings_before_function(&current_case.c_rhs);
+            let stripped_defaults = !pending_bindings.is_empty();
+            Self::push_raw_function_binding_refs(&mut pushed_bindings, pending_bindings);
+
+            if all_params.len() < target_arity {
+                if let ExpressionDesc::Texp_function {
+                    params: inner_params,
+                    body: inner_cases,
+                    partial: inner_partial,
+                    arity: inner_arity,
+                    async_: inner_async,
+                } = &rhs.exp_desc
+                {
+                    let last_param = all_params.last()?;
+                    let last_pat = Self::param_pattern(last_param);
+                    if inner_cases.len() == 1
+                        && inner_cases[0].c_guard.is_none()
+                        // OCaml's transl_function flattens through nested function
+                        // cases only when Parmatch.inactive succeeds and the inner
+                        // function has no arity/async marker. See
+                        // compiler/ml/translcore.ml:1048-1076.
+                        && Self::parmatch_inactive(&last_pat, current_partial)
+                        && self.arena.get_arity(*inner_arity).is_none()
+                        && !inner_async
+                    {
+                        all_params.extend(inner_params.iter());
+                        current_partial = *inner_partial;
+                        current_case = &inner_cases[0];
+                        continue;
+                    }
+                }
+            }
+
+            if stripped_defaults && matches!(rhs.exp_desc, ExpressionDesc::Texp_function { .. }) {
+                return None;
+            }
+
+            break rhs;
+        };
+
+        if !pushed_bindings.is_empty()
+            && matches!(final_body.exp_desc, ExpressionDesc::Texp_function { .. })
+        {
+            // OCaml's push_defaults keeps pushing saved default/module-pattern
+            // bindings through nested function cases before transl_function
+            // decides arity flattening. Falling back preserves that exact
+            // placement for higher-order defaults. See
+            // compiler/ml/translcore.ml:544-607 and 668-688.
+            return None;
+        }
+
+        let mut param_ids = Vec::with_capacity(all_params.len());
+        for param in all_params.iter() {
+            param_ids.push(param.param_id.clone());
+        }
+
+        let return_unit = self.is_base_type(final_body.exp_type, "unit");
+        let mut body = self.convert_expr_raw(final_body);
+        // OCaml's push_defaults uses shallow record updates, so the huge body is
+        // shared while default/module-pattern bindings are pushed under function
+        // abstractions. Rust expression clones were deep-copying the body here;
+        // keep a borrowed binding stack and wrap the converted lambda instead.
+        // See compiler/ml/translcore.ml:544-589 and 668-688.
+        body = self.wrap_raw_function_binding_refs(body, &pushed_bindings);
+
+        for (param, id) in all_params.iter().zip(param_ids.iter()).rev() {
+            let pat = Self::param_pattern(param);
+            body = match &pat.pat_desc {
+                PatternDesc::Tpat_any => body,
+                PatternDesc::Tpat_var(bound, _) if bound.same(id) => body,
+                _ => {
+                    let loc = self.loc(pat.pat_loc);
+                    let pat_act = vec![(pat, body)];
+                    full_matching::for_function(
+                        self.type_ctx,
+                        self.arena,
+                        loc,
+                        RawLambda::var(id.clone()),
+                        pat_act,
+                        Partial::Total,
+                        &mut self.next_static_raise,
+                    )
+                }
+            };
+        }
+        let lambda = RawLambda::function_(
+            param_ids.len() as i32,
+            param_ids,
+            body,
+            FunctionAttribute {
+                return_unit,
+                async_,
+                directive,
+                ..FunctionAttribute::default()
+            },
+        );
+
+        match self.arena.get_arity(arity) {
+            Some(n) => {
+                let prim = if let Some((lhs, _)) = self.is_nolabel_function_type(function_type) {
+                    if self.is_base_type(lhs, "unit") {
+                        Primitive::PjsFnMakeUnit
+                    } else {
+                        Primitive::PjsFnMake(n as i32)
+                    }
+                } else {
+                    Primitive::PjsFnMake(n as i32)
+                };
+                Some(RawLambda::prim(prim, vec![lambda], loc))
+            }
+            None => Some(lambda),
         }
     }
 
