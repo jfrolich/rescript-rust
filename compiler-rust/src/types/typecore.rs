@@ -12185,9 +12185,41 @@ fn type_open(
     let open_lid = tctx.arena.get_longident(lid.txt);
     let mut open_env = env.clone();
 
+    let persistent_root_open = match open_lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = tctx.arena.get_string(*mod_idx);
+            if env.find_module_with_origin(mod_name).is_err() {
+                if let Some(pers) = tctx.persistent_env.as_mut() {
+                    // OCaml compiler/ml/typemod.ml:88-90 implements
+                    // expression `open` through `Typetexp.lookup_module`
+                    // followed by `Env.open_signature`. For persistent roots,
+                    // compiler/ml/env.ml:658-672 precomputes `ps_comps`, and
+                    // env.ml:1874-1877 opens those components. The component
+                    // builder at env.ml:1516-1538 applies prefix substitution to
+                    // value descriptions but does not force `ps_sig` or freshen
+                    // exported value identifiers. Reuse the raw persistent open
+                    // path here so local opens do not eagerly consume hidden
+                    // signature binder stamps before the body is finished.
+                    if pers.open_module(mod_name, &mut open_env, tctx.type_ctx) {
+                        Some(Path::pident(Ident::create_persistent(mod_name)))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
     // Resolve through Env alias scraping and rewritten signatures so opened
     // bindings preserve OCaml-style module prefixes in types.
-    let path = if let Some((resolved_path, sig_items)) = env.resolve_module_lid(
+    let path = if let Some(path) = persistent_root_open {
+        path
+    } else if let Some((resolved_path, sig_items)) = env.resolve_module_lid(
         open_lid,
         tctx.arena,
         &mut tctx.persistent_env,
