@@ -4113,10 +4113,107 @@ fn force_qualified_value_type_paths<'a>(
         return;
     }
 
+    fn visible_local_alias_type_path(
+        ctx: &TypeContext<'_>,
+        env: &Env,
+        path: &Path,
+        arity: usize,
+        value_access_root_is_local: bool,
+    ) -> Option<Path> {
+        fn path_root_is_local(path: &Path) -> bool {
+            match path {
+                Path::Pident(id) => !id.is_persistent(),
+                Path::Pdot(parent, _, _) => path_root_is_local(parent),
+                Path::Papply(_, _) => false,
+            }
+        }
+
+        fn module_signature_declares_type_component(
+            ctx: &TypeContext<'_>,
+            env: &Env,
+            module_path: &Path,
+            type_name: &str,
+        ) -> bool {
+            // OCaml compiler/ml/env.ml:1530-1538 rewrites paths while walking
+            // actual signature components, and compiler/ml/subst.ml:303-309
+            // substitutes value descriptions without inventing missing type
+            // declarations. Require a real `Sig_type` in the alias target
+            // before rewriting a constructor path through that visible alias.
+            let mut no_persistent_env = None;
+            resolve_module_signature_for_path(module_path, env, &mut no_persistent_env, ctx)
+                .is_some_and(|(_, sig)| {
+                    sig.iter().any(|item| {
+                        matches!(
+                            item,
+                            crate::types::decl::SignatureItem::SigType(id, _, _)
+                                if id.name() == type_name
+                        )
+                    })
+                })
+        }
+
+        if !value_access_root_is_local {
+            return None;
+        }
+        let Path::Pdot(parent, type_name, pos) = path else {
+            return None;
+        };
+        if path_root_is_local(parent) {
+            return None;
+        }
+
+        env.with_current_local_module_aliases(|aliases| {
+            aliases.iter().find_map(|(alias_id, alias_target)| {
+                let alias_path = Path::pident(alias_id.clone());
+                if alias_path.same(parent) {
+                    return None;
+                }
+                let candidate = Path::Pdot(Box::new(alias_path), type_name.clone(), *pos);
+                if candidate.same(path) {
+                    return None;
+                }
+                if !module_signature_declares_type_component(ctx, env, alias_target, type_name) {
+                    return None;
+                }
+                let target_type_path =
+                    Path::Pdot(Box::new(alias_target.clone()), type_name.clone(), *pos);
+                if !crate::types::ctype::resolved_type_items_share_identity(
+                    ctx,
+                    env,
+                    &target_type_path,
+                    path,
+                    arity,
+                ) {
+                    return None;
+                }
+                // OCaml compiler/ml/env.ml:1530-1538 builds component values
+                // with `prefix_idents` and `Subst.value_description`, whose
+                // constructor paths are rewritten by compiler/ml/subst.ml:87-95.
+                // Rust's cached qualified value descriptors can still contain
+                // the alias target here, so only prefer a visible local alias
+                // when both the alias target and the rewritten path resolve to
+                // that same type component.
+                let shares_identity = crate::types::ctype::resolved_type_items_share_identity(
+                    ctx, env, &candidate, path, arity,
+                );
+                shares_identity.then_some(candidate)
+            })
+        })
+    }
+
+    fn path_root_is_local(path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => !id.is_persistent(),
+            Path::Pdot(parent, _, _) => path_root_is_local(parent),
+            Path::Papply(_, _) => false,
+        }
+    }
+
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
         ty: TypeExprRef,
+        value_access_root_is_local: bool,
         seen: &mut HashSet<TypeExprRef>,
     ) {
         let ctx = tctx.type_ctx;
@@ -4131,19 +4228,20 @@ fn force_qualified_value_type_paths<'a>(
                 let arg_ty = arg.typ;
                 let ret_ty = *ret;
                 drop(desc);
-                visit(tctx, env, arg_ty, seen);
-                visit(tctx, env, ret_ty, seen);
+                visit(tctx, env, arg_ty, value_access_root_is_local, seen);
+                visit(tctx, env, ret_ty, value_access_root_is_local, seen);
             }
             TypeDesc::Ttuple(items) => {
                 let items = items.clone();
                 drop(desc);
                 for item in items {
-                    visit(tctx, env, item, seen);
+                    visit(tctx, env, item, value_access_root_is_local, seen);
                 }
             }
-            TypeDesc::Tconstr { path, args, .. } => {
+            TypeDesc::Tconstr { path, args, abbrev } => {
                 let path = path.clone();
                 let args = args.clone();
+                let abbrev = abbrev.clone();
                 drop(desc);
                 if let Path::Pdot(parent, name, _) = &path {
                     // OCaml compiler/ml/typecore.ml:2421-2457 types
@@ -4164,18 +4262,36 @@ fn force_qualified_value_type_paths<'a>(
                         ctx,
                     );
                 }
+                if let Some(rewritten_path) =
+                    visible_local_alias_type_path(
+                        ctx,
+                        env,
+                        &path,
+                        args.len(),
+                        value_access_root_is_local,
+                    )
+                {
+                    ctx.set_desc(
+                        ty,
+                        TypeDesc::Tconstr {
+                            path: rewritten_path,
+                            args: args.clone(),
+                            abbrev,
+                        },
+                    );
+                }
                 for arg in args {
-                    visit(tctx, env, arg, seen);
+                    visit(tctx, env, arg, value_access_root_is_local, seen);
                 }
             }
             TypeDesc::Tobject { fields, name } => {
                 let fields = *fields;
                 let name_args = name.as_ref().map(|(_, args)| args.clone());
                 drop(desc);
-                visit(tctx, env, fields, seen);
+                visit(tctx, env, fields, value_access_root_is_local, seen);
                 if let Some(args) = name_args {
                     for arg in args {
-                        visit(tctx, env, arg, seen);
+                        visit(tctx, env, arg, value_access_root_is_local, seen);
                     }
                 }
             }
@@ -4183,25 +4299,27 @@ fn force_qualified_value_type_paths<'a>(
                 let typ = *typ;
                 let rest = *rest;
                 drop(desc);
-                visit(tctx, env, typ, seen);
-                visit(tctx, env, rest, seen);
+                visit(tctx, env, typ, value_access_root_is_local, seen);
+                visit(tctx, env, rest, value_access_root_is_local, seen);
             }
             TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
                 let inner = *inner;
                 drop(desc);
-                visit(tctx, env, inner, seen);
+                visit(tctx, env, inner, value_access_root_is_local, seen);
             }
             TypeDesc::Tvariant(row) => {
                 let row_more = row.row_more;
                 let fields = row.row_fields.clone();
                 drop(desc);
-                visit(tctx, env, row_more, seen);
+                visit(tctx, env, row_more, value_access_root_is_local, seen);
                 for (_, field) in fields {
                     match field {
-                        RowField::Rpresent(Some(arg)) => visit(tctx, env, arg, seen),
+                        RowField::Rpresent(Some(arg)) => {
+                            visit(tctx, env, arg, value_access_root_is_local, seen)
+                        }
                         RowField::Reither { types: args, .. } => {
                             for arg in args {
-                                visit(tctx, env, arg, seen);
+                                visit(tctx, env, arg, value_access_root_is_local, seen);
                             }
                         }
                         RowField::Rpresent(None) | RowField::Rabsent => {}
@@ -4212,24 +4330,25 @@ fn force_qualified_value_type_paths<'a>(
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
-                visit(tctx, env, body, seen);
+                visit(tctx, env, body, value_access_root_is_local, seen);
                 for var in vars {
-                    visit(tctx, env, var, seen);
+                    visit(tctx, env, var, value_access_root_is_local, seen);
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
                 let args = args.clone();
                 drop(desc);
                 for arg in args {
-                    visit(tctx, env, arg, seen);
+                    visit(tctx, env, arg, value_access_root_is_local, seen);
                 }
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
     }
 
+    let value_access_root_is_local = path_root_is_local(value_path);
     let mut seen = HashSet::new();
-    visit(tctx, env, ty, &mut seen);
+    visit(tctx, env, ty, value_access_root_is_local, &mut seen);
 }
 
 /// Type check an expression against an expected type.
