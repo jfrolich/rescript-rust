@@ -7167,33 +7167,32 @@ fn compile_list<K: Clone>(
     compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
     division: Vec<(K, MatchCell)>,
 ) -> Result<(Vec<(K, RawLambda)>, Jumps, Vec<Pattern>), Unused> {
-    fn c_rec<K: Clone>(
-        compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
-        totals: Vec<Jumps>,
-        division: &[(K, MatchCell)],
-    ) -> Result<(Vec<(K, RawLambda)>, Jumps, Vec<Pattern>), Unused> {
-        match division.split_first() {
-            None => Ok((Vec::new(), jumps_unions(totals), Vec::new())),
-            Some(((key, cell), rem)) => {
-                if cell.ctx.is_empty() {
-                    return c_rec(compile_fun, totals, rem);
-                }
-                match compile_fun(&cell.ctx, &cell.pm) {
-                    Ok((lambda1, total1)) => {
-                        let mut next_totals = vec![jumps_map(|c| ctx_combine(&c), &total1)];
-                        next_totals.extend(totals);
-                        let (mut c_rem, total, mut new_pats) =
-                            c_rec(compile_fun, next_totals, rem)?;
-                        c_rem.insert(0, (key.clone(), lambda1));
-                        new_pats.insert(0, cell.pat.clone());
-                        Ok((c_rem, total, new_pats))
-                    }
-                    Err(Unused) => c_rec(compile_fun, totals, rem),
-                }
+    let mut compiled = Vec::new();
+    let mut totals = Vec::new();
+    let mut new_pats = Vec::new();
+
+    for (key, cell) in division {
+        if cell.ctx.is_empty() {
+            continue;
+        }
+        match compile_fun(&cell.ctx, &cell.pm) {
+            Ok((lambda1, total1)) => {
+                // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
+                // tail with `jumps_map ctx_combine total1 :: totals`, then
+                // conses `(key, lambda1)` and `cell.pat` onto the returned
+                // lists. Rust vectors need the result lists in forward order
+                // and the jump totals in reverse-success order, so push
+                // results linearly and reverse only the totals once.
+                compiled.push((key, lambda1));
+                totals.push(jumps_map(|c| ctx_combine(&c), &total1));
+                new_pats.push(cell.pat);
             }
+            Err(Unused) => {}
         }
     }
-    c_rec(compile_fun, Vec::new(), &division)
+
+    totals.reverse();
+    Ok((compiled, jumps_unions(totals), new_pats))
 }
 
 /// Compile or-pattern handlers.
