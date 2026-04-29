@@ -7202,7 +7202,7 @@ fn compile_orhandlers(
     lambda1: RawLambda,
     total1: Jumps,
     ctx: &[Ctx],
-    to_catch: Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>,
+    to_catch: &[(Matrix, i32, Vec<Ident>, PatternMatching)],
 ) -> (RawLambda, Jumps) {
     fn do_rec(
         compile_fun: &mut dyn FnMut(&[Ctx], &PatternMatching) -> Result<(RawLambda, Jumps), Unused>,
@@ -7216,38 +7216,47 @@ fn compile_orhandlers(
             Some(((mat, i, vars, pm), rem)) => {
                 let ctx_i = select_columns(mat, ctx);
                 match compile_fun(&ctx_i, pm) {
-                    Ok((handler_i, total_i)) => match raw_action(&r) {
-                        RawLambda::LstaticRaise(j, args) if j == *i => {
-                            let body = vars
-                                .iter()
-                                .zip(args.iter())
-                                .rev()
-                                .fold(handler_i, |body, (var, arg)| {
-                                    bind(LetKind::Alias, var, arg, body)
-                                });
-                            do_rec(
+                    Ok((handler_i, total_i)) => {
+                        // OCaml `compiler/ml/matching.ml:2375-2388` skips a
+                        // handler when `raw_action r` is a different static
+                        // raise; it only wraps non-raise actions in a catch.
+                        if matches!(raw_action(&r), RawLambda::LstaticRaise(j, _) if j != *i) {
+                            return do_rec(compile_fun, r, total_r, ctx, rem);
+                        }
+
+                        match raw_action(&r) {
+                            RawLambda::LstaticRaise(j, args) if j == *i => {
+                                let body = vars
+                                    .iter()
+                                    .zip(args.iter())
+                                    .rev()
+                                    .fold(handler_i, |body, (var, arg)| {
+                                        bind(LetKind::Alias, var, arg, body)
+                                    });
+                                do_rec(
+                                    compile_fun,
+                                    body,
+                                    jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                    ctx,
+                                    rem,
+                                )
+                            }
+                            _ => do_rec(
                                 compile_fun,
-                                body,
-                                jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                RawLambda::LstaticCatch(
+                                    Box::new(r),
+                                    (*i, vars.clone()),
+                                    Box::new(handler_i),
+                                ),
+                                jumps_union(
+                                    &jumps_remove(*i, &total_r),
+                                    &jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
+                                ),
                                 ctx,
                                 rem,
-                            )
+                            ),
                         }
-                        _ => do_rec(
-                            compile_fun,
-                            RawLambda::LstaticCatch(
-                                Box::new(r),
-                                (*i, vars.clone()),
-                                Box::new(handler_i),
-                            ),
-                            jumps_union(
-                                &jumps_remove(*i, &total_r),
-                                &jumps_map(|c| ctx_rshift_num(ncols(mat), &c), &total_i),
-                            ),
-                            ctx,
-                            rem,
-                        ),
-                    },
+                    }
                     Err(Unused) => do_rec(
                         compile_fun,
                         RawLambda::LstaticCatch(
@@ -7264,7 +7273,7 @@ fn compile_orhandlers(
         }
     }
 
-    do_rec(compile_fun, lambda1, total1, ctx, &to_catch)
+    do_rec(compile_fun, lambda1, total1, ctx, to_catch)
 }
 
 /// Compile a test (divide + combine pattern).
@@ -7843,7 +7852,7 @@ fn do_compile_matching(
                 lam,
                 total,
                 ctx,
-                handlers.clone(),
+                handlers,
             ))
         }
     }
@@ -9004,7 +9013,7 @@ fn compile_flattened(
                 lam,
                 total,
                 ctx,
-                handlers.clone(),
+                handlers,
             ))
         }
         PmHalfCompiled::PmVar(_) => panic!("compile_flattened: PmVar"),
