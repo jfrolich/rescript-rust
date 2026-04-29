@@ -2751,15 +2751,36 @@ fn path_is_t_of_stdlib_child(path: &Path, child_name: &str) -> bool {
     )
 }
 
+fn path_is_t_of_js_child(path: &Path, child_name: &str) -> bool {
+    matches!(
+        path,
+        Path::Pdot(parent, type_name, _)
+            if type_name == "t"
+                && matches!(
+                    parent.as_ref(),
+                    Path::Pdot(root, module_name, _)
+                        if module_name == child_name
+                            && matches!(root.as_ref(), Path::Pident(id) if id.name() == "Js")
+                )
+    )
+}
+
 fn type_path_is_instanceof_backed_object(path: &Path) -> bool {
     if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
         return true;
     }
+    // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes
+    // `Js_file.t` and `Js_blob.t` after component lookup. Rust can still hold
+    // the selected `Js.File.t`/`Js.Blob.t` access path here; treating those as
+    // the same instance-backed object avoids forcing `Js.ps_sig` earlier than
+    // OCaml's env.ml:1000-1007 component-table lookup does.
     path_is_t_of_persistent_module(path, "Stdlib_ArrayBuffer")
         || path_is_t_of_persistent_module(path, "Stdlib_Date")
         || path_is_t_of_persistent_module(path, "Stdlib_RegExp")
         || path_is_t_of_persistent_module(path, "Js_file")
         || path_is_t_of_persistent_module(path, "Js_blob")
+        || path_is_t_of_js_child(path, "File")
+        || path_is_t_of_js_child(path, "Blob")
         || path_is_t_of_stdlib_child(path, "ArrayBuffer")
         || path_is_t_of_stdlib_child(path, "Promise")
         || path_is_t_of_stdlib_child(path, "BigInt64Array")
@@ -2871,8 +2892,23 @@ fn touch_type_constraint_path(
         return;
     }
 
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
-        if let Path::Pdot(parent, type_name, _) = path {
+    let constr_path = {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    };
+
+    if let Some(path) = constr_path {
+        // OCaml compiler/ml/typedecl.ml:767-785 checks each declaration
+        // `Tconstr` by building a fresh constructor, running
+        // `Ctype.enforce_constraints`, then calling `Ctype.matches` on the
+        // original node. It does not pre-expand every constructor before that
+        // match; expansion is only observed if unification needs it. Keeping
+        // this lazy avoids forcing persistent signatures for paths such as
+        // `Js.File.t` and `Stdlib_RegExp.t` before OCaml would.
+        if let Path::Pdot(parent, type_name, _) = &path {
             // OCaml typedecl.ml:767-785 checks declaration constraints by
             // calling Ctype.enforce_constraints on every Tconstr, and
             // typedecl.ml:800-855 applies that traversal to record labels,
