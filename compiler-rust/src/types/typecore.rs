@@ -1312,9 +1312,7 @@ fn force_datarepr_component_side_effects(
         let action = {
             let desc = ctx.get_desc(ty);
             match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => {
-                    Action::Constr(path.clone(), args.clone())
-                }
+                TypeDesc::Tconstr { path, args, .. } => Action::Constr(path.clone(), args.clone()),
                 TypeDesc::Tarrow { arg, ret, .. } => Action::Children(vec![arg.typ, *ret]),
                 TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
                     Action::Children(types.clone())
@@ -1380,8 +1378,7 @@ fn force_datarepr_component_side_effects(
                 if direct_child_of(&path, owner_module_path) {
                     let path_key = path.name();
                     if visited_types.insert(path_key)
-                        && let Some(dep_decl) =
-                            lookup_type_decl_for_path(&path, env, pers_env, ctx)
+                        && let Some(dep_decl) = lookup_type_decl_for_path(&path, env, pers_env, ctx)
                     {
                         if let Some(manifest) = dep_decl.type_manifest {
                             force_type_expr(
@@ -2416,41 +2413,40 @@ fn build_or_pat(
     loc: LocIdx,
     lid: &Located<LidentIdx>,
 ) -> TypeCoreResult<(Path, Pattern, TypeExprRef)> {
-    use crate::types::type_expr::{RowDesc, RowField, RowFieldRef};
+    use crate::types::type_expr::{RowDesc, RowField};
     use crate::types::typedtree::RowDescRef;
-    let ctx = tctx.type_ctx;
     let lid_txt = tctx.resolve_lid(lid.txt).clone();
 
-    // Step 1: Find the type declaration and get the path
-    let spread_ct = crate::parser::ast::CoreType {
-        ptyp_desc: Box::new(crate::parser::ast::CoreTypeDesc::Ptyp_constr(Box::new((
-            *lid,
-            vec![],
-        )))),
-        ptyp_loc: lid.loc,
-        ptyp_attributes: Attributes::new(),
+    // Step 1: Find the type declaration and get the path.
+    // OCaml build_or_pat uses Typetexp.find_type followed by one fresh
+    // variable per declared type parameter, even when the source pattern omits
+    // the arguments (for example `#...Shadow.t` where `t` has arity 1).
+    let (path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
+        (path, Some(type_decl)) => (path, type_decl),
+        _ => {
+            return Err(TypeCoreError::NotAVariantType(lid_txt));
+        }
     };
-    let (_, spread_ty_ref) = transl_type(tctx, env, &spread_ct)?;
-    let spread_ty = ctx.repr(spread_ty_ref);
-    let spread_ty_desc = ctx.get_desc(spread_ty);
-    let (path, args) = match &*spread_ty_desc {
-        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
-        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
-    };
-    drop(spread_ty_desc);
+    let ctx = tctx.type_ctx;
+    let args: Vec<_> = type_decl
+        .type_params
+        .iter()
+        .map(|_| ctx.new_var(None))
+        .collect();
+    let spread_ty_ref = ctx.new_constr(path.clone(), args.clone());
 
     // Step 2: Create fresh type variables for type params and expand to get the variant row
     // OCaml: let tyl = List.map (fun _ -> newvar()) decl.type_params
     // OCaml: let ty = expand_head env (newty (Tconstr(path, tyl, ref Mnil)))
-    // We already have spread_ty_ref from transl_type which should be Tconstr(path, args)
-    // Expand it to get the Tvariant
     let expanded = crate::types::ctype::expand_head(ctx, env, spread_ty_ref);
     let expanded_desc = ctx.get_desc(expanded);
     let row0 = match &*expanded_desc {
         TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, row) => {
             crate::types::btype::row_repr(ctx, row)
         }
-        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
+        _ => {
+            return Err(TypeCoreError::NotAVariantType(lid_txt));
+        }
     };
     drop(expanded_desc);
 
@@ -3177,7 +3173,7 @@ fn preferred_alias_equiv_representative<'a>(
 /// Unify pattern types, raising PatternTypeClash on error.
 fn unify_pattern_types(
     tctx: &mut TypeCheckContext<'_>,
-    loc: LocIdx,
+    _loc: LocIdx,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
 ) -> TypeCoreResult<()> {
