@@ -30,11 +30,11 @@ use crate::types::typecore::{
     TypeCheckContext, TypeCoreError, transl_type, type_binding, type_expression,
 };
 use crate::types::typedtree::{
-    EnvRef, Expression, IncludeDeclaration, ModuleBinding, ModuleCoercion, ModuleExpr,
-    ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure, StructureItem,
-    StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
-    TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
-    ValueBinding,
+    EnvRef, Expression, IncludeDeclaration, IncludeDescription, ModuleBinding, ModuleCoercion,
+    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, OpenDeclaration, Structure,
+    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
+    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
@@ -3261,6 +3261,33 @@ pub fn resolve_mod_type_to_sig<'b>(
 ) -> Option<crate::types::decl::Signature> {
     let mut visiting = HashSet::new();
     resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, &mut visiting)
+}
+
+fn freshened_signature_from_module_type<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+) -> Option<crate::types::decl::Signature> {
+    let sig = resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)?;
+    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, tctx.type_ctx);
+    crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, tctx.type_ctx);
+    Some(sig)
+}
+
+fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], env: &mut Env) {
+    use crate::types::decl::SignatureItem;
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(id, desc) => env.add_value(id.clone(), desc.clone()),
+            SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),
+            SignatureItem::SigModule(id, md, _) => env.add_module(id.clone(), md.clone()),
+            SignatureItem::SigModtype(id, mtd) => env.add_modtype(id.clone(), mtd.clone()),
+            SignatureItem::SigTypext(_, _, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
 }
 
 /// Mirror the hidden stamp side effect of OCaml's
@@ -6529,6 +6556,30 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             }
                         }
                     }
+                    crate::parser::ast::SignatureItemDesc::Psig_include(incl) => {
+                        let include_sig = match typed_sig_item.map(|item| &item.sig_desc) {
+                            Some(TypedSigDesc::Tsig_include(typed_incl)) => {
+                                typed_incl.incl_type.clone()
+                            }
+                            _ => {
+                                let include_mty = translate_module_type_to_decl_with_typed_hint(
+                                    tctx,
+                                    &sig_env,
+                                    arena,
+                                    arena.get_mod_type(incl.pincl_mod),
+                                    None,
+                                )?;
+                                freshened_signature_from_module_type(tctx, &sig_env, &include_mty)
+                                    .ok_or_else(|| {
+                                        TypeModError::ModuleNotFound(
+                                            "included signature".to_string(),
+                                        )
+                                    })?
+                            }
+                        };
+                        add_signature_items_to_env(&include_sig, &mut sig_env);
+                        items.extend(include_sig);
+                    }
                     _ => {}
                 }
             }
@@ -6969,9 +7020,10 @@ pub(crate) fn decl_signature_from_typed_signature(
                     },
                 ));
             }
-            TypedSignatureItemDesc::Tsig_include(_)
-            | TypedSignatureItemDesc::Tsig_open(_)
-            | TypedSignatureItemDesc::Tsig_attribute(_) => {}
+            TypedSignatureItemDesc::Tsig_include(incl) => {
+                out.extend(incl.incl_type.clone());
+            }
+            TypedSignatureItemDesc::Tsig_open(_) | TypedSignatureItemDesc::Tsig_attribute(_) => {}
         }
     }
     crate::types::includemod::simplify_signature(&out)
@@ -9138,6 +9190,23 @@ pub fn transl_signature<'a>(
                     mtd_type: typed_mty,
                     mtd_attributes: mtd.pmtd_attributes.clone(),
                     mtd_loc: mtd.pmtd_loc,
+                })
+            }
+            PSigDesc::Psig_include(incl) => {
+                let typed_mty =
+                    transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(incl.pincl_mod))?;
+                let include_sig = freshened_signature_from_module_type(
+                    tctx,
+                    &sig_env,
+                    &typed_mty.mty_type,
+                )
+                .ok_or_else(|| TypeModError::ModuleNotFound("included signature".to_string()))?;
+                add_signature_items_to_env(&include_sig, &mut sig_env);
+                TSigDesc::Tsig_include(IncludeDescription {
+                    incl_mod: typed_mty,
+                    incl_type: include_sig,
+                    incl_attributes: incl.pincl_attributes.clone(),
+                    incl_loc: incl.pincl_loc,
                 })
             }
             PSigDesc::Psig_open(od) => {
