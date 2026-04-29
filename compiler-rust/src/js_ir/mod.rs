@@ -95,8 +95,20 @@ impl ModulePathResolver {
         self.format
     }
 
+    /// Whether module resolution is backed by the in-memory registry. In this
+    /// mode the build scheduler has already scanned source files, so JS
+    /// lowering must not probe sibling directories.
+    pub fn is_in_process_mode(&self) -> bool {
+        self.persistent_env
+            .as_ref()
+            .is_some_and(PersistentEnv::is_in_process_mode)
+    }
+
     /// Resolve a same-directory source fallback path for an ML module.
     pub fn resolve_local_module_fallback_path(&self, module_name: &str) -> Option<String> {
+        if self.is_in_process_mode() {
+            return None;
+        }
         let target_source = self.fallback_local_module_source(module_name)?;
         self.relative_output_path(&target_source)
     }
