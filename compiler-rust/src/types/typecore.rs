@@ -2892,6 +2892,12 @@ fn preserve_apply_argument_alias_representative(
     parameter_ty: TypeExprRef,
     argument_ty: TypeExprRef,
 ) {
+    #[derive(Clone, Copy)]
+    enum AliasLinkDirection {
+        ParameterToArgument,
+        ArgumentToParameter,
+    }
+
     fn path_head_is_local_module_alias(env: &Env, path: &Path) -> bool {
         let head = path.head();
         !head.is_persistent()
@@ -2923,11 +2929,45 @@ fn preserve_apply_argument_alias_representative(
                     ..
                 },
             ) if parameter_args.len() == argument_args.len()
-                && !parameter_path.same(argument_path)
-                && path_head_is_local_module_alias(env, argument_path)
-                && !path_head_is_local_module_alias(env, parameter_path) =>
+                && !parameter_path.same(argument_path) =>
             {
-                Some((parameter_path.clone(), argument_path.clone()))
+                let argument_is_local_alias = path_head_is_local_module_alias(env, argument_path);
+                let parameter_is_local_alias = path_head_is_local_module_alias(env, parameter_path);
+                let flattened_alias_equiv =
+                    crate::types::ctype::flattened_alias_paths_equivalent(
+                        ctx,
+                        env,
+                        parameter_path,
+                        argument_path,
+                        parameter_args.len(),
+                    );
+                let direction = if argument_is_local_alias && !parameter_is_local_alias {
+                    Some(AliasLinkDirection::ParameterToArgument)
+                } else if flattened_alias_equiv {
+                    match preferred_alias_equiv_representative(
+                        env,
+                        ctx,
+                        parameter_repr,
+                        argument_repr,
+                    ) {
+                        Some(preferred) if preferred == parameter_repr => {
+                            Some(AliasLinkDirection::ArgumentToParameter)
+                        }
+                        _ => Some(AliasLinkDirection::ParameterToArgument),
+                    }
+                } else {
+                    None
+                };
+                if let Some(direction) = direction {
+                    Some((
+                        parameter_path.clone(),
+                        argument_path.clone(),
+                        parameter_args.len(),
+                        direction,
+                    ))
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -2936,28 +2976,45 @@ fn preserve_apply_argument_alias_representative(
         candidate
     };
 
-    let Some((parameter_path, argument_path)) = candidate else {
+    let Some((parameter_path, argument_path, arity, direction)) = candidate else {
         return;
     };
 
-    if !resolved_type_items_share_identity(
+    let shares_identity = resolved_type_items_share_identity(
         &parameter_path,
         &argument_path,
         env,
         &mut tctx.persistent_env,
         ctx,
-    ) {
+    ) || crate::types::ctype::flattened_alias_paths_equivalent(
+        ctx,
+        env,
+        &parameter_path,
+        &argument_path,
+        arity,
+    );
+    if !shares_identity {
         return;
     }
 
-    // OCaml typecore.ml:4171-4176 types an application argument against the
-    // original parameter type, then typecore.ml:3771-3773 unifies the result
-    // with the parameter instance. Through ctype.ml:2361-2364 and
-    // ctype.ml:2393-2397, a local module-alias argument can become the shared
-    // representative for both parameter nodes. Mirror only that alias-sharing
-    // mutation here; argument recursion already happened in unify.
-    if !crate::types::ctype::deep_occur(ctx, parameter_repr, argument_repr) {
-        crate::types::ctype::link_type(ctx, parameter_repr, argument_repr);
+    // OCaml compiler/ml/typecore.ml:4171-4176 types an application argument
+    // against the original parameter type, then typecore.ml:3771-3773 unifies
+    // the result with that parameter instance. Through compiler/ml/ctype.ml:2361-2364
+    // and ctype.ml:2393-2397, a local module-alias argument can become the
+    // representative; for flattened persistent backing units, keep the
+    // selected qualified parameter as representative when OCaml's value lookup
+    // already exposed it that way.
+    match direction {
+        AliasLinkDirection::ParameterToArgument => {
+            if !crate::types::ctype::deep_occur(ctx, parameter_repr, argument_repr) {
+                crate::types::ctype::link_type(ctx, parameter_repr, argument_repr);
+            }
+        }
+        AliasLinkDirection::ArgumentToParameter => {
+            if !crate::types::ctype::deep_occur(ctx, argument_repr, parameter_repr) {
+                crate::types::ctype::link_type(ctx, argument_repr, parameter_repr);
+            }
+        }
     }
 }
 
