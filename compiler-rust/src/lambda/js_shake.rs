@@ -1624,12 +1624,17 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
 }
 
 fn shake_program(mut program: Program) -> Program {
-    program.block = shake_block(&program.block, &program.export_set);
+    // OCaml flattens the JS block once, computes the required identifiers over
+    // that same list, then folds it to keep live/effectful statements
+    // (`compiler/core/js_shake.ml:62-104`). This pass owns the Rust `Program`,
+    // so moving statements into that flattened list is functionally equivalent
+    // to OCaml's shared-list traversal and avoids cloning the full JS tree.
+    program.block = shake_block_owned(std::mem::take(&mut program.block), &program.export_set);
     program
 }
 
-fn shake_block(block: &Block, export_set: &HashSet<Ident>) -> Block {
-    let block = flatten_toplevel_block(block);
+fn shake_block_owned(block: Block, export_set: &HashSet<Ident>) -> Block {
+    let block = flatten_toplevel_block_owned(block);
     let required = fixed_point_required_idents(&block, export_set);
 
     block
@@ -1649,14 +1654,18 @@ fn shake_block(block: &Block, export_set: &HashSet<Ident>) -> Block {
         .collect()
 }
 
-pub(crate) fn flatten_toplevel_block(block: &Block) -> Block {
-    let mut flattened = Vec::new();
-    flatten_toplevel_block_into(block, &mut flattened);
+pub(crate) fn flatten_toplevel_block_owned(block: Block) -> Block {
+    // Owned flattened traversal: same filtering as OCaml's
+    // `Js_analyzer.rev_toplevel_flatten` use in `compiler/core/js_shake.ml:64`,
+    // but it moves `Statement`s instead of cloning them because `shake_program`
+    // consumes the post-pass `Program`.
+    let mut flattened = Vec::with_capacity(block.len());
+    flatten_toplevel_block_owned_into(block, &mut flattened);
     flattened
 }
 
 pub(crate) fn flatten_toplevel_block_refs(block: &Block) -> Vec<&Statement> {
-    // Borrowed counterpart to `flatten_toplevel_block`. OCaml flattens once and
+    // Borrowed flattened traversal. OCaml flattens once and
     // then folds the same list (`compiler/core/js_shake.ml:63-104`); callers
     // that only inspect exports should not pay for cloning a JS block.
     let mut flattened = Vec::with_capacity(block.len());
@@ -1664,9 +1673,10 @@ pub(crate) fn flatten_toplevel_block_refs(block: &Block) -> Vec<&Statement> {
     flattened
 }
 
-fn flatten_toplevel_block_into(block: &Block, flattened: &mut Block) {
+fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
     for stmt in block {
-        match &stmt.desc {
+        let Statement { desc, comment } = stmt;
+        match desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident_info:
                     IdentInfo {
@@ -1682,8 +1692,8 @@ fn flatten_toplevel_block_into(block: &Block, flattened: &mut Block) {
                 value: None,
                 ..
             }) => {}
-            StatementDesc::Block(inner) => flatten_toplevel_block_into(inner, flattened),
-            _ => flattened.push(stmt.clone()),
+            StatementDesc::Block(inner) => flatten_toplevel_block_owned_into(inner, flattened),
+            desc => flattened.push(Statement { desc, comment }),
         }
     }
 }

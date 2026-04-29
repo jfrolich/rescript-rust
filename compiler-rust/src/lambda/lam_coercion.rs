@@ -8,17 +8,17 @@ use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
-    VariableDeclaration, ocaml_eq_expression,
+    ocaml_eq_expression, BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc,
+    VIdent, VariableDeclaration,
 };
-use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
-    TailMoveInitializerKind, flatten_toplevel_block, resolve_tail_move_initializer_kind,
+    flatten_toplevel_block_owned, flatten_toplevel_block_refs, resolve_tail_move_initializer_kind,
     resolve_tail_move_replacement_expression, statement_mentions_ident_anywhere,
-    tail_move_materialized_root_ident,
+    tail_move_materialized_root_ident, TailMoveInitializerKind,
 };
 use crate::lambda::lam_compat::LetKind;
+use crate::lambda::TagInfo;
 
 pub(crate) fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     let mut declared = HashSet::new();
@@ -51,7 +51,7 @@ pub(crate) fn keeps_declared_same_name_function_export_alias(
 }
 
 pub(crate) fn count_materialized_same_name_binding_roots(block: &Block, name: &str) -> usize {
-    flatten_toplevel_block(block)
+    flatten_toplevel_block_refs(block)
         .into_iter()
         .filter(|stmt| match &stmt.desc {
             StatementDesc::Variable(VariableDeclaration {
@@ -92,18 +92,16 @@ pub(crate) fn reusable_declared_same_name_export_alias(
     block: &Block,
     export: &Ident,
 ) -> Option<Ident> {
-    let initializer =
-        flatten_toplevel_block(block)
-            .into_iter()
-            .find_map(|stmt| match stmt.desc {
-                StatementDesc::Variable(VariableDeclaration {
-                    ident,
-                    value: Some(initializer),
-                    ..
-                }) if ident.same(export) => Some(initializer),
-                _ => None,
-            })?;
-    reusable_same_name_export_binding(block, export, &initializer)
+    let flattened_refs = flatten_toplevel_block_refs(block);
+    let initializer = flattened_refs.iter().find_map(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(initializer),
+            ..
+        }) if ident.same(export) => Some(initializer),
+        _ => None,
+    })?;
+    reusable_same_name_export_binding_ref(&flattened_refs, export, initializer)
 }
 
 pub(crate) fn collect_declared_idents(block: &Block, declared: &mut HashSet<Ident>) {
@@ -173,7 +171,13 @@ pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases
     }
 
     let exported_idents: HashSet<Ident> = exports.iter().cloned().collect();
-    let mut flattened = flatten_toplevel_block(block);
+    // OCaml export coercion works over the flattened lambda group list before
+    // JS lowering (`compiler/core/lam_coercion.ml:179-199`) and only
+    // substitutes Strict/Alias/StrictOpt bindings
+    // (`compiler/core/lam_pass_lets_dce.ml:21-23`). This Rust repair pass runs
+    // after JS lowering, owns the top-level block, and mirrors that flattened
+    // traversal by moving statements into one list instead of cloning it.
+    let mut flattened = flatten_toplevel_block_owned(std::mem::take(block));
     let mut changed = true;
 
     while changed {
@@ -318,7 +322,7 @@ pub(crate) fn rewriteable_alias_root_has_other_toplevel_uses(
 }
 
 pub(crate) fn resolve_rewriteable_toplevel_alias_initializer(
-    block: &Block,
+    block: &[Statement],
     start: &Ident,
 ) -> Option<Expression> {
     let mut current = start.clone();
@@ -329,37 +333,35 @@ pub(crate) fn resolve_rewriteable_toplevel_alias_initializer(
             return None;
         }
 
-        let (value, property) =
-            flatten_toplevel_block(block)
-                .into_iter()
-                .find_map(|stmt| match stmt.desc {
-                    StatementDesc::Variable(VariableDeclaration {
-                        ident,
-                        value: Some(initializer),
-                        property,
-                        ..
-                    }) if ident.same(&current) => Some((initializer, property)),
-                    _ => None,
-                })?;
+        let (value, property) = block.iter().find_map(|stmt| match &stmt.desc {
+            StatementDesc::Variable(VariableDeclaration {
+                ident,
+                value: Some(initializer),
+                property,
+                ..
+            }) if ident.same(&current) => Some((initializer, *property)),
+            _ => None,
+        })?;
 
-        // OCaml's lam_pass_lets_dce.ml:21-23 only substitutes Strict / Alias /
-        // StrictOpt. A Variable-kind binding compiles to a `let`-mutable JS
-        // declaration (post-eliminate_ref ref); folding through its initial
-        // value is unsound because later code may mutate the binding.
+        // OCaml's `compiler/core/lam_pass_lets_dce.ml:21-23` only substitutes
+        // Strict / Alias / StrictOpt. A Variable-kind binding compiles to a
+        // `let`-mutable JS declaration (post-eliminate_ref ref); folding
+        // through its initial value is unsound because later code may mutate
+        // the binding.
         if matches!(property, LetKind::Variable) {
             return None;
         }
 
-        match value.desc {
+        match &value.desc {
             ExpressionDesc::Var(VIdent::Id(next)) if next.name() == current.name() => {
-                current = next;
+                current = next.clone();
             }
             ExpressionDesc::Fun { .. } => return Some(Expression::var(current)),
             ExpressionDesc::Number(_)
             | ExpressionDesc::Str { .. }
             | ExpressionDesc::Bool(_)
             | ExpressionDesc::Undefined { .. }
-            | ExpressionDesc::Null => return Some(value),
+            | ExpressionDesc::Null => return Some(value.clone()),
             _ => return None,
         }
     }
@@ -599,7 +601,7 @@ pub(crate) fn extract_toplevel_exports(
 }
 
 pub(crate) fn can_reuse_existing_undefined_export_binding(block: &Block, export: &Ident) -> bool {
-    let flattened = flatten_toplevel_block(block);
+    let flattened = flatten_toplevel_block_refs(block);
     let Some(export_index) = flattened.iter().position(|stmt| {
         matches!(
             &stmt.desc,
@@ -611,7 +613,7 @@ pub(crate) fn can_reuse_existing_undefined_export_binding(block: &Block, export:
 
     flattened[export_index + 1..]
         .iter()
-        .all(statement_allows_undefined_export_reuse)
+        .all(|stmt| statement_allows_undefined_export_reuse(*stmt))
 }
 
 pub(crate) fn insert_rebound_export_before_equivalent_later_binding(
@@ -674,23 +676,30 @@ pub(crate) fn reusable_same_name_export_binding(
     export: &Ident,
     value: &Expression,
 ) -> Option<Ident> {
-    flatten_toplevel_block(block)
-        .into_iter()
-        .find_map(|stmt| match stmt.desc {
-            StatementDesc::Variable(VariableDeclaration {
-                ident,
-                value: Some(initializer),
-                property,
-                ..
-            }) if ident.name() == export.name()
-                && !ident.same(export)
-                && !matches!(property, LetKind::Variable)
-                && same_reusable_export_value(&initializer, value) =>
-            {
-                Some(ident)
-            }
-            _ => None,
-        })
+    let flattened_refs = flatten_toplevel_block_refs(block);
+    reusable_same_name_export_binding_ref(&flattened_refs, export, value)
+}
+
+fn reusable_same_name_export_binding_ref(
+    block: &[&Statement],
+    export: &Ident,
+    value: &Expression,
+) -> Option<Ident> {
+    block.iter().find_map(|stmt| match &stmt.desc {
+        StatementDesc::Variable(VariableDeclaration {
+            ident,
+            value: Some(initializer),
+            property,
+            ..
+        }) if ident.name() == export.name()
+            && !ident.same(export)
+            && !matches!(property, LetKind::Variable)
+            && same_reusable_export_value(&initializer, value) =>
+        {
+            Some(ident.clone())
+        }
+        _ => None,
+    })
 }
 
 pub(crate) fn same_reusable_export_value(left: &Expression, right: &Expression) -> bool {
