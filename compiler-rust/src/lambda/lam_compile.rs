@@ -81,6 +81,16 @@ struct FlatHandler {
     handler: Lambda,
 }
 
+// OCaml's export coercion only reuses direct variables and module-field
+// projections while folding `pairs` (`compiler/core/lam_coercion.ml:99-121`).
+fn reusable_export_value_candidate(value: &Expression) -> bool {
+    match &value.desc {
+        ExpressionDesc::Var(_) => true,
+        ExpressionDesc::StaticIndex(target, _, _) => reusable_export_value_candidate(target),
+        _ => false,
+    }
+}
+
 /// Direct port of `Lam_compile.flat_catches` + `flatten_nested_caches`
 /// (lam_compile.ml:104-118).
 ///
@@ -538,25 +548,30 @@ impl LambdaCompiler {
                 exports.push(export.clone());
                 continue;
             }
-            if let Some((late_value, property)) =
-                move_reused_same_name_export_binding_to_export_tail(block, export, value)
-            {
-                exports.push(export.clone());
-                rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export.clone(),
-                    value: Some(late_value),
-                    property,
-                    ident_info: IdentInfo::default(),
-                }));
-                continue;
-            }
-            if keeps_declared_same_name_reusable_export_binding(block, export, value) {
-                exports.push(export.clone());
-                continue;
-            }
-            if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
-                exports.push(reused);
-                continue;
+            if reusable_export_value_candidate(value) {
+                // Same OCaml export fold as above: reusable same-name bindings
+                // only arise from variable/module-field export values. See
+                // compiler/core/lam_coercion.ml:99-121.
+                if let Some((late_value, property)) =
+                    move_reused_same_name_export_binding_to_export_tail(block, export, value)
+                {
+                    exports.push(export.clone());
+                    rebound_exports.push(Statement::variable(VariableDeclaration {
+                        ident: export.clone(),
+                        value: Some(late_value),
+                        property,
+                        ident_info: IdentInfo::default(),
+                    }));
+                    continue;
+                }
+                if keeps_declared_same_name_reusable_export_binding(block, export, value) {
+                    exports.push(export.clone());
+                    continue;
+                }
+                if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
+                    exports.push(reused);
+                    continue;
+                }
             }
             if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
                 block,

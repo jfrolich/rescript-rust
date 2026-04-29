@@ -207,107 +207,22 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
     }
 }
 
-/// Walks `lam` and returns the idents carried in the top-level
-/// `Pmakeblock(_, TagInfo::ModuleExport(ids), _)` blocks. These mirror the
+/// Walks the same top-level spine as `Lam_coercion.flatten`
+/// (`compiler/core/lam_coercion.ml:179-199`) and returns the idents carried in
+/// the final `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`. These mirror the
 /// `exports` list `Translmod.transl_implementation` returns to
-/// `Lam_compile_main.compile` (js_implementation.ml:158-163). The lowering
-/// stage already collects the same set into `LoweringContext.exported_idents`
-/// (raw_lambda/lower.rs:502-577), so this helper applies the same shape match
-/// against the post-lowering Lambda.
+/// `Lam_compile_main.compile` (`compiler/core/js_implementation.ml:158-163`).
+/// Do not walk nested module values: OCaml's `meta.exports` contains the
+/// structure-level exports passed to `Lam_coercion.handle_exports`, not every
+/// nested module-export block reachable from the payload.
 fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
-    let mut exports: Vec<Ident> = Vec::new();
-    let mut seen: std::collections::HashSet<Ident> = std::collections::HashSet::new();
-    walk(lam, &mut exports, &mut seen);
-    exports
-}
-
-fn walk(lam: &Lambda, exports: &mut Vec<Ident>, seen: &mut std::collections::HashSet<Ident>) {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
-        Lambda::Lapply(apply) => {
-            walk(&apply.ap_func, exports, seen);
-            for arg in &apply.ap_args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lfunction(func) => walk(&func.body, exports, seen),
-        Lambda::Llet(_, _, value, body) => {
-            walk(value, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lletrec(bindings, body) => {
-            for (_, lam) in bindings {
-                walk(lam, exports, seen);
-            }
-            walk(body, exports, seen);
-        }
+        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
+        Lambda::Lsequence(_, right) => extract_export_idents(right),
         Lambda::Lprim(PrimInfo {
             primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
-            args,
             ..
-        }) => {
-            for id in ids {
-                if seen.insert(id.clone()) {
-                    exports.push(id.clone());
-                }
-            }
-            for arg in args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lprim(prim) => {
-            for arg in &prim.args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lswitch(scrut, switch) => {
-            walk(scrut, exports, seen);
-            for (_, lam) in &switch.sw_consts {
-                walk(lam, exports, seen);
-            }
-            for (_, lam) in &switch.sw_blocks {
-                walk(lam, exports, seen);
-            }
-            if let Some(failaction) = &switch.sw_failaction {
-                walk(failaction, exports, seen);
-            }
-        }
-        Lambda::LstringSwitch(scrut, cases, default) => {
-            walk(scrut, exports, seen);
-            for (_, lam) in cases {
-                walk(lam, exports, seen);
-            }
-            if let Some(default) = default {
-                walk(default, exports, seen);
-            }
-        }
-        Lambda::LstaticRaise(_, args) => {
-            for arg in args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::LstaticCatch(body, _, handler)
-        | Lambda::LtryWith(body, _, handler)
-        | Lambda::Lsequence(body, handler)
-        | Lambda::Lwhile(body, handler) => {
-            walk(body, exports, seen);
-            walk(handler, exports, seen);
-        }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            walk(cond, exports, seen);
-            walk(then_, exports, seen);
-            walk(else_, exports, seen);
-        }
-        Lambda::Lfor(_, start, end, _, body) => {
-            walk(start, exports, seen);
-            walk(end, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            walk(iterable, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lbreak | Lambda::Lcontinue => {}
-        Lambda::Lassign(_, value) => walk(value, exports, seen),
+        }) => ids.clone(),
+        _ => Vec::new(),
     }
 }

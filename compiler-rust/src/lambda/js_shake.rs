@@ -46,6 +46,21 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
         else {
             return None;
         };
+        let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, initializer);
+        // OCaml only substitutes Strict/Alias/StrictOpt simple bindings in
+        // `compiler/core/lam_pass_lets_dce.ml:21-23` and
+        // `compiler/core/lam_pass_lets_dce.ml:44-72`, then JS dead-code
+        // marking gathers use info in one pass
+        // (`compiler/core/js_pass_flatten_and_mark_dead.ml:32-91`). If this
+        // binding is already outside the tail-movable shapes, the later
+        // reference scans cannot make it movable; this is the same
+        // `blocked_by_kind` / `blocked_by_variable` rejection below, just
+        // before walking large function bodies.
+        if matches!(property, LetKind::Variable)
+            || matches!(initializer_kind, TailMoveInitializerKind::Other)
+        {
+            return None;
+        }
         let remaining = &flattened_refs[index + 1..];
         let later_initializer_mentions_target =
             later_toplevel_initializer_mentions_ident_ref(remaining, target);
@@ -65,7 +80,6 @@ pub(crate) fn move_same_name_export_alias_to_export_tail(
             target,
             prefer_materialized_root,
         );
-        let initializer_kind = same_name_export_initializer_kind_ref(&flattened_refs, &replacement);
         let binding_is_direct_literal = matches!(
             &initializer.desc,
             ExpressionDesc::Number(_)
