@@ -61,6 +61,49 @@ pub fn path_from_longident<'a>(
     }
 }
 
+fn flattened_persistent_alias_path(
+    path: &Path,
+    pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
+) -> Option<Path> {
+    let pers = pers_env?;
+    let Ok((head, components)) = path.flatten() else {
+        return None;
+    };
+    if components.is_empty() || !head.is_persistent() {
+        return None;
+    }
+
+    let mut flattened_heads = Vec::new();
+    let mut underscore_joined = head.name().to_string();
+    for component in &components {
+        underscore_joined.push('_');
+        underscore_joined.push_str(component);
+    }
+    flattened_heads.push(underscore_joined);
+    if components.len() > 1 {
+        let mut concatenated = head.name().to_string();
+        concatenated.push('_');
+        for component in &components {
+            concatenated.push_str(component);
+        }
+        flattened_heads.push(concatenated);
+    }
+    // OCaml compiler/ml/env.ml:781-813 resolves dotted lookups through
+    // component tables. ReScript's persistent environment can materialize
+    // those components as flattened compile units (`Stdlib.JSON` ->
+    // `Stdlib_JSON`, `Belt.Map.String` -> `Belt_MapString`) before the alias
+    // rewrite table has been populated, so accept a known flattened persistent
+    // head as the same semantic alias.
+    flattened_heads.into_iter().find_map(|flattened_head| {
+        let alias_registered = pers
+            .flattened_alias_heads_for_path(path)
+            .iter()
+            .any(|candidate| candidate == &flattened_head);
+        (alias_registered || pers.has_known_module_without_loading(&flattened_head))
+            .then(|| Path::pident(Ident::create_persistent(&flattened_head)))
+    })
+}
+
 /// Wrap a translated label type in Ttyp_poly if not already poly.
 /// Mirrors OCaml `Ast_helper.Typ.force_poly` + `transl_simple_type` flow in `transl_labels`:
 /// if the parsed label type was already `Ptyp_poly`, `transl_type` already produced a
@@ -8151,9 +8194,28 @@ fn type_module_expr_with_alias<'a>(
             };
             let path_clone = path.clone();
             let env_ref = tctx.type_ctx.store_typed_env(env);
+            // OCaml compiler/ml/typemod.ml:1227-1235 keeps the looked-up path
+            // in `Tmod_ident`, while compiler/ml/env.ml:781-793 and 800-813
+            // resolve later qualified type lookups through `find_module_descr`
+            // component tables. For ReScript flattened submodules, those
+            // components point at the flattened compile unit; keep the printed
+            // module path intact but store that flattened alias as the semantic
+            // module type so `S.t` reaches `Belt_MutableStack.t` before forcing
+            // `Belt.ps_sig`.
+            let semantic_alias_path = if alias {
+                // OCaml compiler/ml/typemod.ml:1227-1235 uses the looked-up
+                // path itself for `Pmod_ident` in alias mode. Later value
+                // lookup/normalization follows that alias through Env
+                // components, which preserves runtime aliases like
+                // `Js.Dict -> Js_dict` instead of guessing `Js_Dict`.
+                path.clone()
+            } else {
+                flattened_persistent_alias_path(&path, tctx.persistent_env.as_ref())
+                    .unwrap_or_else(|| path.clone())
+            };
             let alias_mod_type = crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                path.clone(),
+                semantic_alias_path,
             );
             let semantic_mod_type = if alias {
                 alias_mod_type.clone()
