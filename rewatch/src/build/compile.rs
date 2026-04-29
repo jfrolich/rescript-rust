@@ -16,6 +16,8 @@ use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::parse_arena::ParseArena;
+use rescript_compiler::parser::ast::{Signature, Structure};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -1397,12 +1399,19 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
 }
 
 #[derive(Debug)]
+struct RuntimeInterfaceSource {
+    path: PathBuf,
+    arena: ParseArena,
+    signature: Signature,
+}
+
+#[derive(Debug)]
 struct RuntimeModuleSource {
     module_name: String,
     res_path: PathBuf,
-    res_source: String,
-    resi_path: Option<PathBuf>,
-    resi_source: Option<String>,
+    res_arena: ParseArena,
+    structure: Structure,
+    resi: Option<RuntimeInterfaceSource>,
     deps: AHashSet<String>,
 }
 
@@ -1447,7 +1456,12 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
 
     let mut local_registry = build_state.snapshot_module_registry();
     for module in &runtime_modules {
-        let fallback_path = module.resi_path.as_ref().unwrap_or(&module.res_path).clone();
+        let fallback_path = module
+            .resi
+            .as_ref()
+            .map(|interface| &interface.path)
+            .unwrap_or(&module.res_path)
+            .clone();
         local_registry.insert_source_fallback_path(module.module_name.clone(), fallback_path);
 
         // Seed runtime metadata for every runtime module up front. This lets
@@ -1474,16 +1488,22 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
             &runtime_config,
         );
 
-        let has_runtime_interface = module.resi_path.is_some();
-        if let (Some(resi_path), Some(resi_source)) = (&module.resi_path, &module.resi_source) {
-            let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
-                resi_source,
-                &resi_path.to_string_lossy(),
+        let has_runtime_interface = module.resi.is_some();
+        if let Some(interface) = &module.resi {
+            let intf_result = rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+                &interface.arena,
+                &interface.signature,
+                &interface.path.to_string_lossy(),
                 &module.module_name,
                 &options,
                 &local_registry,
             )
-            .with_context(|| format!("runtime interface typecheck failed for {}", resi_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "runtime interface typecheck failed for {}",
+                    interface.path.display()
+                )
+            })?;
 
             if let Some(pers_struct) = intf_result.pers_struct {
                 local_registry.register_module(
@@ -1500,8 +1520,9 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
             }
         }
 
-        let compile_result = rescript_compiler::driver::compile_source_in_process(
-            &module.res_source,
+        let compile_result = rescript_compiler::driver::compile_preprocessed_structure_in_process(
+            &module.res_arena,
+            &module.structure,
             &module.res_path.to_string_lossy(),
             &module.module_name,
             &options,
@@ -1571,21 +1592,28 @@ fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSourc
         };
 
         let res_source = read_source_latin1(&path)?;
+        let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
         let resi_path = path.with_extension("resi");
-        let (resi_path, resi_source) = if resi_path.exists() {
+        let resi = if resi_path.exists() {
             let source = read_source_latin1(&resi_path)?;
-            (Some(resi_path), Some(source))
+            let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+            deps.extend(intf_deps);
+            Some(RuntimeInterfaceSource {
+                path: resi_path,
+                arena,
+                signature,
+            })
         } else {
-            (None, None)
+            None
         };
 
         runtime_modules.push(RuntimeModuleSource {
             module_name,
             res_path: path,
-            res_source,
-            resi_path,
-            resi_source,
-            deps: AHashSet::new(),
+            res_arena,
+            structure,
+            resi,
+            deps,
         });
     }
 
@@ -1614,66 +1642,65 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) -> Result<
     let has_pervasives = runtime_names.contains("Pervasives");
 
     for module in runtime_modules {
-        let mut deps = AHashSet::new();
-        if let Some(resi_source) = &module.resi_source {
-            deps.extend(runtime_signature_deps(
-                &module.resi_path.as_ref().unwrap().to_string_lossy(),
-                resi_source,
-            )?);
-        }
-        deps.extend(runtime_structure_deps(
-            &module.res_path.to_string_lossy(),
-            &module.res_source,
-        )?);
-
-        deps.retain(|dep| runtime_names.contains(dep) && dep != &module.module_name);
+        module
+            .deps
+            .retain(|dep| runtime_names.contains(dep) && dep != &module.module_name);
         if has_pervasives && module.module_name != "Pervasives" {
-            deps.insert("Pervasives".to_string());
+            module.deps.insert("Pervasives".to_string());
         }
-        module.deps = deps;
     }
 
     Ok(())
 }
 
-fn runtime_signature_deps(filename: &str, source: &str) -> Result<AHashSet<String>> {
-    let mut parser = rescript_compiler::parser::Parser::new(filename, source);
+fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Signature, AHashSet<String>)> {
+    let filename = path.to_string_lossy();
+    let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
     let signature = rescript_compiler::parser::module::parse_signature(&mut parser);
     if parser.has_errors() {
         return Err(anyhow!(
             "failed to parse runtime interface {} with {} error(s)",
-            filename,
+            path.display(),
             parser.diagnostics().len()
         ));
     }
     let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
-        .map_err(|err| anyhow!("runtime interface PPX rewrite failed for {filename}: {err}"))?;
-    Ok(
-        rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
-            .into_iter()
-            .collect(),
-    )
+        .map_err(|err| {
+            anyhow!(
+                "runtime interface PPX rewrite failed for {}: {err}",
+                path.display()
+            )
+        })?;
+    let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
+        .into_iter()
+        .collect();
+    Ok((parser.into_arena(), signature, deps))
 }
 
-fn runtime_structure_deps(filename: &str, source: &str) -> Result<AHashSet<String>> {
-    let mut parser = rescript_compiler::parser::Parser::new(filename, source);
+fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Structure, AHashSet<String>)> {
+    let filename = path.to_string_lossy();
+    let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
     let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
     if parser.has_errors() {
         return Err(anyhow!(
             "failed to parse runtime implementation {} with {} error(s)",
-            filename,
+            path.display(),
             parser.diagnostics().len()
         ));
     }
     let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|err| anyhow!("runtime implementation PPX rewrite failed for {filename}: {err}"))?;
+        .map_err(|err| {
+            anyhow!(
+                "runtime implementation PPX rewrite failed for {}: {err}",
+                path.display()
+            )
+        })?;
     let structure =
         rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
-    Ok(
-        rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
-            .into_iter()
-            .collect(),
-    )
+    let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
+        .into_iter()
+        .collect();
+    Ok((parser.into_arena(), structure, deps))
 }
 
 fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> {
