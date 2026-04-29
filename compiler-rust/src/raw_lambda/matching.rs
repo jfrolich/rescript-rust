@@ -1955,18 +1955,35 @@ pub fn make_catch_delayed(
 }
 
 // ============================================================================
-// raw_action — Extract raw (normalized) action
+// raw_static_raise — Borrow the raw action only for the static-raise test
 // ============================================================================
 
-/// Extract the raw (normalized) form of a lambda action.
-/// If normalization succeeds, returns the normalized form; otherwise returns
-/// the original.
-///
-/// Equivalent to OCaml's `raw_action`.
-fn raw_action(l: &RawLambda) -> RawLambda {
+enum StaticRaiseArgs<'a> {
+    Borrowed(&'a [RawLambda]),
+    Owned(Vec<RawLambda>),
+}
+
+impl StaticRaiseArgs<'_> {
+    fn iter(&self) -> std::slice::Iter<'_, RawLambda> {
+        match self {
+            StaticRaiseArgs::Borrowed(args) => args.iter(),
+            StaticRaiseArgs::Owned(args) => args.iter(),
+        }
+    }
+}
+
+/// Return the raw action's static-raise shape without cloning the fallback.
+fn raw_static_raise(l: &RawLambda) -> Option<(i32, StaticRaiseArgs<'_>)> {
     match make_key(l) {
-        Some(k) => k,
-        None => l.clone(),
+        Some(RawLambda::LstaticRaise(i, args)) => Some((i, StaticRaiseArgs::Owned(args))),
+        Some(_) => None,
+        None => match l {
+            // OCaml `compiler/ml/matching.ml:479-482` returns the original
+            // lambda when `make_key` fails. Borrow that original static raise
+            // instead of cloning the whole raw lambda tree.
+            RawLambda::LstaticRaise(i, args) => Some((*i, StaticRaiseArgs::Borrowed(args))),
+            _ => None,
+        },
     }
 }
 
@@ -7217,15 +7234,8 @@ fn compile_orhandlers(
                 let ctx_i = select_columns(mat, ctx);
                 match compile_fun(&ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
-                        // OCaml `compiler/ml/matching.ml:2375-2388` skips a
-                        // handler when `raw_action r` is a different static
-                        // raise; it only wraps non-raise actions in a catch.
-                        if matches!(raw_action(&r), RawLambda::LstaticRaise(j, _) if j != *i) {
-                            return do_rec(compile_fun, r, total_r, ctx, rem);
-                        }
-
-                        match raw_action(&r) {
-                            RawLambda::LstaticRaise(j, args) if j == *i => {
+                        match raw_static_raise(&r) {
+                            Some((j, args)) if j == *i => {
                                 let body = vars
                                     .iter()
                                     .zip(args.iter())
@@ -7241,7 +7251,14 @@ fn compile_orhandlers(
                                     rem,
                                 )
                             }
-                            _ => do_rec(
+                            Some((_, args)) => {
+                                // OCaml `compiler/ml/matching.ml:2375-2388`
+                                // skips a handler when `raw_action r` is a
+                                // different static raise.
+                                drop(args);
+                                do_rec(compile_fun, r, total_r, ctx, rem)
+                            }
+                            None => do_rec(
                                 compile_fun,
                                 RawLambda::LstaticCatch(
                                     Box::new(r),
