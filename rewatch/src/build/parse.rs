@@ -374,51 +374,58 @@ pub fn generate_asts(
             let is_dirty = match &module.source_type {
                 SourceType::MlMap(_) => {
                     if dirty_packages.contains(&package_name) {
-                        let package = build_state
-                            .build_state
-                            .packages
-                            .get(&package_name)
-                            .expect("Package not found");
-                        // probably better to do this in a different function
-                        // specific to compiling mlmaps
-                        let compile_path = package.get_mlmap_compile_path();
-                        let mlmap_hash = helpers::compute_file_hash(Path::new(&compile_path));
-                        if let Err(err) = namespaces::compile_mlmap(
-                            &build_state.build_state.project_context,
-                            package,
-                            &module_name,
-                            &build_state.build_state.compiler_info.bsc_path,
-                        ) {
-                            has_failure = true;
-                            stderr.push_str(&format!("{err}\n"));
-                        }
-                        let mlmap_hash_after = helpers::compute_file_hash(Path::new(&compile_path));
+                        if in_process {
+                            // In-process builds synthesize namespace signatures directly into
+                            // the module registry during compilation. The file-backed mlmap
+                            // compiler only creates .cmi/.cmj/.cmt assets for subprocess mode.
+                            true
+                        } else {
+                            let package = build_state
+                                .build_state
+                                .packages
+                                .get(&package_name)
+                                .expect("Package not found");
+                            // probably better to do this in a different function
+                            // specific to compiling mlmaps
+                            let compile_path = package.get_mlmap_compile_path();
+                            let mlmap_hash = helpers::compute_file_hash(Path::new(&compile_path));
+                            if let Err(err) = namespaces::compile_mlmap(
+                                &build_state.build_state.project_context,
+                                package,
+                                &module_name,
+                                &build_state.build_state.compiler_info.bsc_path,
+                            ) {
+                                has_failure = true;
+                                stderr.push_str(&format!("{err}\n"));
+                            }
+                            let mlmap_hash_after = helpers::compute_file_hash(Path::new(&compile_path));
 
-                        let suffix = package
-                            .namespace
-                            .to_suffix()
-                            .expect("namespace should be set for mlmap module");
-                        let base_build_path = package.get_build_path().join(&suffix);
-                        let base_ocaml_build_path = package.get_ocaml_build_path().join(&suffix);
-                        let _ = std::fs::copy(
-                            base_build_path.with_extension("cmi"),
-                            base_ocaml_build_path.with_extension("cmi"),
-                        );
-                        let _ = std::fs::copy(
-                            base_build_path.with_extension("cmt"),
-                            base_ocaml_build_path.with_extension("cmt"),
-                        );
-                        let _ = std::fs::copy(
-                            base_build_path.with_extension("cmj"),
-                            base_ocaml_build_path.with_extension("cmj"),
-                        );
-                        let _ = std::fs::copy(
-                            base_build_path.with_extension("mlmap"),
-                            base_ocaml_build_path.with_extension("mlmap"),
-                        );
-                        match (mlmap_hash, mlmap_hash_after) {
-                            (Some(digest), Some(digest_after)) => !digest.eq(&digest_after),
-                            _ => true,
+                            let suffix = package
+                                .namespace
+                                .to_suffix()
+                                .expect("namespace should be set for mlmap module");
+                            let base_build_path = package.get_build_path().join(&suffix);
+                            let base_ocaml_build_path = package.get_ocaml_build_path().join(&suffix);
+                            let _ = std::fs::copy(
+                                base_build_path.with_extension("cmi"),
+                                base_ocaml_build_path.with_extension("cmi"),
+                            );
+                            let _ = std::fs::copy(
+                                base_build_path.with_extension("cmt"),
+                                base_ocaml_build_path.with_extension("cmt"),
+                            );
+                            let _ = std::fs::copy(
+                                base_build_path.with_extension("cmj"),
+                                base_ocaml_build_path.with_extension("cmj"),
+                            );
+                            let _ = std::fs::copy(
+                                base_build_path.with_extension("mlmap"),
+                                base_ocaml_build_path.with_extension("mlmap"),
+                            );
+                            match (mlmap_hash, mlmap_hash_after) {
+                                (Some(digest), Some(digest_after)) => !digest.eq(&digest_after),
+                                _ => true,
+                            }
                         }
                     } else {
                         false
