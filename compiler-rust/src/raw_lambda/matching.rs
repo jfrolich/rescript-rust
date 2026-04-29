@@ -3782,13 +3782,6 @@ fn rev_vec<T>(mut v: Vec<T>) -> Vec<T> {
 // Layer 5: General divide functions (lines 1094-1131)
 // ============================================================================
 
-/// Add a case to a pattern matching.
-/// Equivalent to OCaml's `add_line`.
-fn add_line(patl_action: (Vec<Pattern>, RawLambda), mut pm: PatternMatching) -> PatternMatching {
-    pm.cases.insert(0, patl_action);
-    pm
-}
-
 /// A cell: a pattern matching with its context list and pattern.
 /// Equivalent to OCaml's `cell`.
 struct MatchCell {
@@ -3820,64 +3813,49 @@ fn add<K>(
 }
 
 /// Divide a pattern matching by the first pattern column, grouping by key.
-/// Equivalent to OCaml's `divide`.
+/// OCaml's `compiler/ml/matching.ml:1110-1120` recurses to the tail, then
+/// conses the current case with `add` (`compiler/ml/matching.ml:1100-1108`).
+/// Iterating from the tail, pushing, and reversing once preserves the same
+/// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
 fn divide<K>(
-    make: impl Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> MatchCell + Clone,
-    eq_key: impl Fn(&K, &K) -> bool + Clone,
-    get_key: impl Fn(&Pattern) -> K + Clone,
-    get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern> + Clone,
+    make: impl Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> MatchCell,
+    eq_key: impl Fn(&K, &K) -> bool,
+    get_key: impl Fn(&Pattern) -> K,
+    get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
     ctx: &[Ctx],
     pm: &PatternMatching,
 ) -> Vec<(K, MatchCell)> {
-    fn divide_rec<K>(
-        cases: &[(Vec<Pattern>, RawLambda)],
-        make: &dyn Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> MatchCell,
-        eq_key: &dyn Fn(&K, &K) -> bool,
-        get_key: &dyn Fn(&Pattern) -> K,
-        get_args: &dyn Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
-        default: &DefaultEnv,
-        ctx: &[Ctx],
-        args: &[(RawLambda, LetKind)],
-    ) -> Vec<(K, MatchCell)> {
-        match cases.split_first() {
-            Some(((patl, action), rem)) => {
-                match patl.split_first() {
-                    Some((p, rest_patl)) => {
-                        let this_match =
-                            divide_rec(rem, make, eq_key, get_key, get_args, default, ctx, args);
-                        let key = get_key(p);
-                        let mut new_patl = get_args(p, rest_patl);
-                        // get_args returns args @ rest_patl, which is the new pattern list
-                        add(
-                            |a| make(p, default, ctx, a),
-                            this_match,
-                            |a, b| eq_key(a, b),
-                            key,
-                            (new_patl, action.clone()),
-                            args,
-                        )
-                    }
-                    None => Vec::new(),
-                }
-            }
-            None => Vec::new(),
+    let mut division: Vec<(K, MatchCell)> = Vec::new();
+
+    for (patl, action) in pm.cases.iter().rev() {
+        let Some((p, rest_patl)) = patl.split_first() else {
+            division.clear();
+            continue;
+        };
+
+        let key = get_key(p);
+        let patl_action = (get_args(p, rest_patl), action.clone());
+
+        if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
+            division[pos].1.pm.cases.push(patl_action);
+        } else {
+            let mut cell = make(p, &pm.default, ctx, &pm.args);
+            cell.pm.cases.push(patl_action);
+            division.push((key, cell));
         }
     }
 
-    divide_rec(
-        &pm.cases,
-        &|p, def, ctx, args| make.clone()(p, def, ctx, args),
-        &|a, b| eq_key.clone()(a, b),
-        &|p| get_key.clone()(p),
-        &|p, rest| get_args.clone()(p, rest),
-        &pm.default,
-        ctx,
-        &pm.args,
-    )
+    division.reverse();
+    for (_, cell) in &mut division {
+        cell.pm.cases.reverse();
+    }
+    division
 }
 
 /// Divide a pattern matching into a single cell (no grouping by key).
-/// Equivalent to OCaml's `divide_line`.
+/// OCaml's `compiler/ml/matching.ml:1122-1130` uses the same tail-recursive
+/// consing shape as `divide`; use push + one suffix reverse to keep that order
+/// without shifting the whole Rust vector per case.
 fn divide_line(
     make_ctx: impl Fn(&[Ctx]) -> Vec<Ctx>,
     make: impl Fn(&DefaultEnv, &[(RawLambda, LetKind)]) -> PatternMatching,
@@ -3886,28 +3864,25 @@ fn divide_line(
     ctx: &[Ctx],
     pm: &PatternMatching,
 ) -> MatchCell {
-    fn divide_rec(
-        cases: &[(Vec<Pattern>, RawLambda)],
-        get_args: &dyn Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
-        make: &dyn Fn(&DefaultEnv, &[(RawLambda, LetKind)]) -> PatternMatching,
-        default: &DefaultEnv,
-        args: &[(RawLambda, LetKind)],
-    ) -> PatternMatching {
-        match cases.split_first() {
-            Some(((patl, action), rem)) => match patl.split_first() {
-                Some((p, rest_patl)) => {
-                    let this_match = divide_rec(rem, get_args, make, default, args);
-                    let new_patl = get_args(p, rest_patl);
-                    add_line((new_patl, action.clone()), this_match)
-                }
-                None => make(default, args),
-            },
-            None => make(default, args),
+    let mut divided = make(&pm.default, &pm.args);
+    let mut base_case_count = divided.cases.len();
+
+    for (patl, action) in pm.cases.iter().rev() {
+        match patl.split_first() {
+            Some((p, rest_patl)) => {
+                divided.cases.push((get_args(p, rest_patl), action.clone()));
+            }
+            None => {
+                divided = make(&pm.default, &pm.args);
+                base_case_count = divided.cases.len();
+            }
         }
     }
 
+    divided.cases[base_case_count..].reverse();
+
     MatchCell {
-        pm: divide_rec(&pm.cases, &get_args, &make, &pm.default, &pm.args),
+        pm: divided,
         ctx: make_ctx(ctx),
         pat,
     }
