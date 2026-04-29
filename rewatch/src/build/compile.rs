@@ -1415,6 +1415,36 @@ struct RuntimeModuleSource {
     deps: AHashSet<String>,
 }
 
+#[derive(Debug)]
+struct RuntimeWorkUnit {
+    priority: i64,
+    idx: usize,
+}
+
+impl PartialEq for RuntimeWorkUnit {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.idx == other.idx
+    }
+}
+impl Eq for RuntimeWorkUnit {}
+impl PartialOrd for RuntimeWorkUnit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RuntimeWorkUnit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.idx.cmp(&self.idx))
+    }
+}
+
+struct RuntimeCompletionMsg {
+    idx: usize,
+    result: Result<()>,
+}
+
 /// Pre-compile all @rescript/runtime modules from their `.res/.resi` sources
 /// into the ModuleRegistry before the main compile loop.
 ///
@@ -1451,23 +1481,39 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         return Ok(());
     }
 
-    populate_runtime_deps(&mut runtime_modules)?;
-    let order = runtime_compile_order(&runtime_modules);
+    populate_runtime_deps(&mut runtime_modules);
 
-    let mut local_registry = build_state.snapshot_module_registry();
-    for module in &runtime_modules {
+    seed_runtime_registry(build_state, &runtime_modules);
+    compile_runtime_modules_parallel(
+        build_state,
+        runtime_root,
+        &runtime_path,
+        &runtime_config,
+        &runtime_modules,
+    )?;
+
+    debug!(
+        "Compiled {} runtime modules from source into registry",
+        runtime_modules.len()
+    );
+    Ok(())
+}
+
+fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[RuntimeModuleSource]) {
+    let mut registry = build_state.snapshot_module_registry();
+    for module in runtime_modules {
         let fallback_path = module
             .resi
             .as_ref()
             .map(|interface| &interface.path)
             .unwrap_or(&module.res_path)
             .clone();
-        local_registry.insert_source_fallback_path(module.module_name.clone(), fallback_path);
+        registry.insert_source_fallback_path(module.module_name.clone(), fallback_path);
 
         // Seed runtime metadata for every runtime module up front. This lets
         // JS import resolution classify runtime deps without disk probes even
         // before each module's real signature and cmj metadata are compiled.
-        local_registry.insert_module_info(
+        registry.insert_module_info(
             module.module_name.clone(),
             InMemoryModuleInfo {
                 source_path: module.res_path.clone(),
@@ -1478,93 +1524,234 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         );
     }
 
-    for idx in order {
-        let module = &runtime_modules[idx];
-        let options = runtime_compiler_options(
-            runtime_root,
-            &runtime_path,
-            &module.module_name,
-            &module.res_path,
-            &runtime_config,
-        );
+    let mut shared_registry = build_state.module_registry.lock().unwrap();
+    *shared_registry = registry;
+}
 
-        let has_runtime_interface = module.resi.is_some();
-        if let Some(interface) = &module.resi {
-            let intf_result = rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
-                &interface.arena,
-                &interface.signature,
-                &interface.path.to_string_lossy(),
-                &module.module_name,
-                &options,
-                &local_registry,
-            )
-            .with_context(|| {
-                format!(
-                    "runtime interface typecheck failed for {}",
-                    interface.path.display()
-                )
-            })?;
+fn compile_runtime_modules_parallel(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_modules: &[RuntimeModuleSource],
+) -> Result<()> {
+    let (mut pending_deps, dependents) = runtime_dependency_graph(runtime_modules);
+    let priorities = runtime_critical_path_priorities(runtime_modules, &dependents);
+    let mut ready_heap: BinaryHeap<RuntimeWorkUnit> = pending_deps
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| {
+            (*count == 0).then_some(RuntimeWorkUnit {
+                priority: priorities[idx],
+                idx,
+            })
+        })
+        .collect();
 
-            if let Some(pers_struct) = intf_result.pers_struct {
-                local_registry.register_module(
-                    &module.module_name,
-                    pers_struct,
-                    InMemoryModuleInfo {
-                        source_path: module.res_path.clone(),
-                        is_pure: true,
-                        cmj_export_constants: AHashMap::new(),
-                        is_runtime: true,
-                    },
-                    intf_result.new_alias_rewrites,
-                );
+    let (tx, rx) = mpsc::channel::<RuntimeCompletionMsg>();
+    let capacity = rayon::current_num_threads().max(1);
+    let mut in_flight = 0usize;
+    let mut completed = vec![false; runtime_modules.len()];
+    let mut completed_count = 0usize;
+    let mut first_error: Option<anyhow::Error> = None;
+
+    rayon::in_place_scope(|scope| {
+        loop {
+            while in_flight < capacity && first_error.is_none() {
+                let Some(work) = ready_heap.pop() else { break };
+                let idx = work.idx;
+                let module = &runtime_modules[idx];
+                let registry_snapshot = build_state.snapshot_module_registry();
+                let tx = tx.clone();
+                in_flight += 1;
+                scope.spawn(move |_| {
+                    let result = compile_runtime_module_from_source(
+                        build_state,
+                        runtime_root,
+                        runtime_path,
+                        runtime_config,
+                        module,
+                        registry_snapshot,
+                    );
+                    let _ = tx.send(RuntimeCompletionMsg { idx, result });
+                });
+            }
+
+            if in_flight == 0 {
+                break;
+            }
+
+            let Ok(msg) = rx.recv() else { break };
+            in_flight -= 1;
+
+            if let Err(err) = msg.result {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                continue;
+            }
+
+            completed[msg.idx] = true;
+            completed_count += 1;
+
+            for &dependent in &dependents[msg.idx] {
+                pending_deps[dependent] -= 1;
+                if pending_deps[dependent] == 0 && !completed[dependent] {
+                    ready_heap.push(RuntimeWorkUnit {
+                        priority: priorities[dependent],
+                        idx: dependent,
+                    });
+                }
             }
         }
+    });
+    drop(tx);
 
-        let compile_result = rescript_compiler::driver::compile_preprocessed_structure_in_process(
-            &module.res_arena,
-            &module.structure,
-            &module.res_path.to_string_lossy(),
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+
+    if completed_count != runtime_modules.len() {
+        compile_runtime_cycle_remainder_serial(
+            build_state,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            runtime_modules,
+            &completed,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn compile_runtime_cycle_remainder_serial(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_modules: &[RuntimeModuleSource],
+    completed: &[bool],
+) -> Result<()> {
+    debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
+    for idx in runtime_compile_order(runtime_modules) {
+        if completed[idx] {
+            continue;
+        }
+        let registry_snapshot = build_state.snapshot_module_registry();
+        compile_runtime_module_from_source(
+            build_state,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            &runtime_modules[idx],
+            registry_snapshot,
+        )?;
+    }
+    Ok(())
+}
+
+fn compile_runtime_module_from_source(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    module: &RuntimeModuleSource,
+    registry_snapshot: ModuleRegistry,
+) -> Result<()> {
+    let options = runtime_compiler_options(
+        runtime_root,
+        runtime_path,
+        &module.module_name,
+        &module.res_path,
+        runtime_config,
+    );
+
+    let mut local_registry = registry_snapshot;
+    let has_runtime_interface = module.resi.is_some();
+    let mut interface_pers_struct = None;
+    let mut interface_alias_rewrites = AHashMap::new();
+
+    if let Some(interface) = &module.resi {
+        let intf_result = rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+            &interface.arena,
+            &interface.signature,
+            &interface.path.to_string_lossy(),
             &module.module_name,
             &options,
             &local_registry,
-            has_runtime_interface,
         )
         .with_context(|| {
             format!(
-                "runtime implementation compile failed for {}",
-                module.res_path.display()
+                "runtime interface typecheck failed for {}",
+                interface.path.display()
             )
         })?;
 
-        let module_info = InMemoryModuleInfo {
-            source_path: module.res_path.clone(),
-            is_pure: compile_result.is_pure,
-            cmj_export_constants: compile_result.cmj_export_constants,
-            is_runtime: true,
-        };
-
-        if has_runtime_interface {
-            local_registry.insert_module_info(module.module_name.clone(), module_info);
-            local_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
-        } else if let Some(pers_struct) = compile_result.pers_struct {
-            local_registry.register_module(
+        interface_alias_rewrites = intf_result.new_alias_rewrites;
+        if let Some(pers_struct) = intf_result.pers_struct {
+            let pers_struct = Arc::new(pers_struct);
+            local_registry.register_module_arc(
                 &module.module_name,
-                pers_struct,
-                module_info,
-                compile_result.new_alias_rewrites,
+                pers_struct.clone(),
+                InMemoryModuleInfo {
+                    source_path: module.res_path.clone(),
+                    is_pure: true,
+                    cmj_export_constants: AHashMap::new(),
+                    is_runtime: true,
+                },
+                interface_alias_rewrites.clone(),
             );
+            interface_pers_struct = Some(pers_struct);
         }
     }
 
-    {
-        let mut registry = build_state.module_registry.lock().unwrap();
-        *registry = local_registry;
+    let compile_result = rescript_compiler::driver::compile_preprocessed_structure_in_process(
+        &module.res_arena,
+        &module.structure,
+        &module.res_path.to_string_lossy(),
+        &module.module_name,
+        &options,
+        &local_registry,
+        has_runtime_interface,
+    )
+    .with_context(|| {
+        format!(
+            "runtime implementation compile failed for {}",
+            module.res_path.display()
+        )
+    })?;
+
+    let module_info = InMemoryModuleInfo {
+        source_path: module.res_path.clone(),
+        is_pure: compile_result.is_pure,
+        cmj_export_constants: compile_result.cmj_export_constants,
+        is_runtime: true,
+    };
+
+    let mut shared_registry = build_state.module_registry.lock().unwrap();
+    if has_runtime_interface {
+        if let Some(pers_struct) = interface_pers_struct {
+            shared_registry.register_module_arc(
+                &module.module_name,
+                pers_struct,
+                module_info,
+                interface_alias_rewrites,
+            );
+        } else {
+            shared_registry.insert_module_info(module.module_name.clone(), module_info);
+            shared_registry.extend_alias_rewrites(interface_alias_rewrites);
+        }
+        shared_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
+    } else if let Some(pers_struct) = compile_result.pers_struct {
+        shared_registry.register_module(
+            &module.module_name,
+            pers_struct,
+            module_info,
+            compile_result.new_alias_rewrites,
+        );
     }
 
-    debug!(
-        "Compiled {} runtime modules from source into registry",
-        runtime_modules.len()
-    );
     Ok(())
 }
 
@@ -1634,7 +1821,7 @@ fn read_source_latin1(path: &Path) -> Result<String> {
     Ok(bytes.iter().map(|&b| b as char).collect())
 }
 
-fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) -> Result<()> {
+fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
     let runtime_names: AHashSet<String> = runtime_modules
         .iter()
         .map(|module| module.module_name.clone())
@@ -1649,8 +1836,6 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) -> Result<
             module.deps.insert("Pervasives".to_string());
         }
     }
-
-    Ok(())
 }
 
 fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Signature, AHashSet<String>)> {
@@ -1701,6 +1886,46 @@ fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Str
         .into_iter()
         .collect();
     Ok((parser.into_arena(), structure, deps))
+}
+
+fn runtime_dependency_graph(runtime_modules: &[RuntimeModuleSource]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let index_by_name: AHashMap<String, usize> = runtime_modules
+        .iter()
+        .enumerate()
+        .map(|(idx, module)| (module.module_name.clone(), idx))
+        .collect();
+    let mut remaining_dep_count = vec![0usize; runtime_modules.len()];
+    let mut dependents = vec![Vec::<usize>::new(); runtime_modules.len()];
+
+    for (idx, module) in runtime_modules.iter().enumerate() {
+        for dep in &module.deps {
+            if let Some(&dep_idx) = index_by_name.get(dep) {
+                remaining_dep_count[idx] += 1;
+                dependents[dep_idx].push(idx);
+            }
+        }
+    }
+
+    (remaining_dep_count, dependents)
+}
+
+fn runtime_critical_path_priorities(
+    runtime_modules: &[RuntimeModuleSource],
+    dependents: &[Vec<usize>],
+) -> Vec<i64> {
+    let order = runtime_compile_order(runtime_modules);
+    let mut priorities = vec![1i64; runtime_modules.len()];
+
+    for idx in order.into_iter().rev() {
+        let dependent_priority = dependents[idx]
+            .iter()
+            .map(|dependent| priorities[*dependent])
+            .max()
+            .unwrap_or(0);
+        priorities[idx] = 1 + dependent_priority;
+    }
+
+    priorities
 }
 
 fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> {
