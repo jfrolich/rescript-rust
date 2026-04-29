@@ -101,6 +101,69 @@ pub struct InMemoryModuleInfo {
     pub is_runtime: bool,
 }
 
+#[derive(Clone)]
+struct AliasPrefixRewrites {
+    base: Arc<HashMap<String, Path>>,
+    local: HashMap<String, Path>,
+}
+
+impl AliasPrefixRewrites {
+    fn new() -> Self {
+        Self {
+            base: Arc::new(HashMap::new()),
+            local: HashMap::new(),
+        }
+    }
+
+    fn from_base(base: Arc<HashMap<String, Path>>) -> Self {
+        Self {
+            base,
+            local: HashMap::new(),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&Path> {
+        self.local.get(key).or_else(|| self.base.get(key))
+    }
+
+    fn insert_if_absent(&mut self, key: String, value: Path) {
+        if !self.local.contains_key(&key) && !self.base.contains_key(&key) {
+            self.local.insert(key, value);
+        }
+    }
+
+    fn extend_missing(&mut self, rewrites: HashMap<String, Path>) {
+        for (key, value) in rewrites {
+            self.insert_if_absent(key, value);
+        }
+    }
+
+    fn local_clone(&self) -> HashMap<String, Path> {
+        self.local.clone()
+    }
+
+    fn to_hash_map(&self) -> HashMap<String, Path> {
+        let mut rewrites = self.base.as_ref().clone();
+        rewrites.extend(self.local.clone());
+        rewrites
+    }
+
+    fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
+        let mut heads = Vec::new();
+        for (flat_head, qualified) in self.base.iter() {
+            if !self.local.contains_key(flat_head) && qualified.same(qualified_path) {
+                heads.push(flat_head.clone());
+            }
+        }
+        for (flat_head, qualified) in self.local.iter() {
+            if qualified.same(qualified_path) {
+                heads.push(flat_head.clone());
+            }
+        }
+        heads
+    }
+}
+
 /// Read-only module registry for `--in-process` builds.
 ///
 /// Contains all previously-published module interfaces and metadata.
@@ -243,7 +306,7 @@ pub struct PersistentEnv {
     /// Populated when loading a CMI that has MtyAlias submodules
     /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
     /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
-    alias_prefix_rewrites: HashMap<String, Path>,
+    alias_prefix_rewrites: AliasPrefixRewrites,
     /// Additional modules opened implicitly from `-open` flags.
     open_modules: Vec<String>,
     /// Default JSX version from CLI flags, if any.
@@ -283,7 +346,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: HashMap::new(),
             load_path: Vec::new(),
-            alias_prefix_rewrites: HashMap::new(),
+            alias_prefix_rewrites: AliasPrefixRewrites::new(),
             open_modules: Vec::new(),
             jsx_version: None,
             nopervasives: false,
@@ -310,7 +373,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: HashMap::new(),
             load_path: Vec::new(),
-            alias_prefix_rewrites: registry.alias_rewrites.as_ref().clone(),
+            alias_prefix_rewrites: AliasPrefixRewrites::from_base(registry.alias_rewrites.clone()),
             open_modules: Vec::new(),
             jsx_version: None,
             nopervasives: false,
@@ -334,7 +397,7 @@ impl PersistentEnv {
     pub fn extract_module_update(
         &self,
         module_name: &str,
-        original_alias_count: usize,
+        _original_alias_count: usize,
         ctx: &TypeContext<'_>,
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
@@ -343,13 +406,7 @@ impl PersistentEnv {
             .get(module_name)
             .and_then(|opt| opt.as_ref())
             .map(|ps| portable_types::serialize_pers_struct(ps, ctx, arena));
-        // New alias rewrites are any beyond what was in the original registry
-        let new_rewrites = if self.alias_prefix_rewrites.len() > original_alias_count {
-            self.alias_prefix_rewrites.clone()
-        } else {
-            HashMap::new()
-        };
-        (portable, new_rewrites)
+        (portable, self.alias_prefix_rewrites.local_clone())
     }
 
     /// Extract all currently-cached modules as portable structs, plus the full
@@ -373,7 +430,7 @@ impl PersistentEnv {
                 })
             })
             .collect();
-        (portables, self.alias_prefix_rewrites.clone())
+        (portables, self.alias_prefix_rewrites.to_hash_map())
     }
 
     /// Set the load path (list of directories to search for .cmi files).
@@ -414,15 +471,7 @@ impl PersistentEnv {
     /// when queried with `Stdlib.JSON`.
     pub fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
         self.alias_prefix_rewrites
-            .iter()
-            .filter_map(|(flat_head, qualified)| {
-                if qualified.same(qualified_path) {
-                    Some(flat_head.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
+            .flattened_alias_heads_for_path(qualified_path)
     }
 
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
@@ -814,7 +863,7 @@ impl PersistentEnv {
 
         let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
         self.alias_prefix_rewrites
-            .extend(fallback_pers.alias_prefix_rewrites.clone());
+            .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
         for (module_name, loaded) in fallback_pers.cache {
             if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
                 self.cache.insert(module_name, loaded);
@@ -891,7 +940,7 @@ impl PersistentEnv {
 
         // Merge any modules the fallback discovered
         self.alias_prefix_rewrites
-            .extend(fallback_pers.alias_prefix_rewrites.clone());
+            .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
         for (module_name, loaded) in fallback_pers.cache {
             if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
                 self.cache.insert(module_name, loaded);
@@ -3279,14 +3328,30 @@ fn substitute_submodule_paths(
     }
 }
 
+trait AliasRewriteSink {
+    fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path);
+}
+
+impl AliasRewriteSink for HashMap<String, Path> {
+    fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
+        self.entry(key).or_insert(value);
+    }
+}
+
+impl AliasRewriteSink for AliasPrefixRewrites {
+    fn insert_alias_rewrite_if_absent(&mut self, key: String, value: Path) {
+        self.insert_if_absent(key, value);
+    }
+}
+
 /// Collect alias rewrite mappings from MtyAlias submodules.
 /// When a module has `module JSON = Stdlib_JSON` (MtyAlias), record
 /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON") so that when
 /// Stdlib_JSON.cmi is later loaded, its types get rewritten.
-fn collect_alias_rewrites(
+fn collect_alias_rewrites<S: AliasRewriteSink>(
     sig_items: &[SignatureItem],
     module_path: &Path,
-    rewrites: &mut HashMap<String, Path>,
+    rewrites: &mut S,
 ) {
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
@@ -3295,9 +3360,7 @@ fn collect_alias_rewrites(
                 // flattened submodules. Record the mapping.
                 if let Path::Pident(alias_id) = alias_path {
                     let qualified = Path::pdot(module_path.clone(), id.name());
-                    rewrites
-                        .entry(alias_id.name().to_string())
-                        .or_insert(qualified);
+                    rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
                 }
             }
             // Also recurse into MtySignature submodules to find nested aliases

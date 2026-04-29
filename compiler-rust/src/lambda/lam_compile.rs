@@ -479,16 +479,21 @@ impl LambdaCompiler {
         let mut rebound_exports = Vec::new();
 
         let extracted_len = extracted.exports.len();
+        // OCaml's `compiler/core/lam_coercion.ml:82-121` folds over export ids
+        // and lambda values, only allocating a renamed export when the branch
+        // actually emits a rebound group (`compiler/core/lam_coercion.ml:113-120`
+        // and `compiler/core/lam_coercion.ml:140-156`). Mirror that here: borrow
+        // during classification and clone only for the selected output shape.
         for index in 0..extracted_len {
-            let export = extracted.exports[index].clone();
-            let value = extracted.values[index].clone();
+            let export = &extracted.exports[index];
+            let value = &extracted.values[index];
             let later_exports = &extracted.exports[index + 1..];
             if let Some((late_value, property)) =
-                move_same_name_export_alias_to_export_tail(block, &export, &value)
+                move_same_name_export_alias_to_export_tail(block, export, value)
             {
                 exports.push(export.clone());
                 rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export,
+                    ident: export.clone(),
                     value: Some(late_value),
                     property,
                     ident_info: IdentInfo::default(),
@@ -497,13 +502,13 @@ impl LambdaCompiler {
             }
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
-                    if declared.contains(&export) {
+                    if declared.contains(export) {
                         exports.push(
-                            if keeps_declared_same_name_function_export_alias(block, &export) {
-                                export
+                            if keeps_declared_same_name_function_export_alias(block, export) {
+                                export.clone()
                             } else {
-                                resolve_declared_same_name_self_alias_target(block, &export)
-                                    .unwrap_or(export)
+                                resolve_declared_same_name_self_alias_target(block, export)
+                                    .unwrap_or_else(|| export.clone())
                             },
                         );
                         continue;
@@ -525,38 +530,38 @@ impl LambdaCompiler {
                     }
                 }
             }
-            if matches!(value.desc, ExpressionDesc::Undefined { .. })
-                && ((declared.contains(&export)
-                    && can_reuse_existing_undefined_export_binding(block, &export))
+            if matches!(&value.desc, ExpressionDesc::Undefined { .. })
+                && ((declared.contains(export)
+                    && can_reuse_existing_undefined_export_binding(block, export))
                     || block_ended)
             {
-                exports.push(export);
+                exports.push(export.clone());
                 continue;
             }
             if let Some((late_value, property)) =
-                move_reused_same_name_export_binding_to_export_tail(block, &export, &value)
+                move_reused_same_name_export_binding_to_export_tail(block, export, value)
             {
                 exports.push(export.clone());
                 rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export,
+                    ident: export.clone(),
                     value: Some(late_value),
                     property,
                     ident_info: IdentInfo::default(),
                 }));
                 continue;
             }
-            if keeps_declared_same_name_reusable_export_binding(block, &export, &value) {
-                exports.push(export);
+            if keeps_declared_same_name_reusable_export_binding(block, export, value) {
+                exports.push(export.clone());
                 continue;
             }
-            if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
+            if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
                 exports.push(reused);
                 continue;
             }
             if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
                 block,
-                &export,
-                &value,
+                export,
+                value,
                 later_exports,
             ) {
                 exports.push(inserted_export);
@@ -564,7 +569,7 @@ impl LambdaCompiler {
             }
 
             let rebound = self.id_gen.create(export.name());
-            let property = if matches!(value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
+            let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
                 LetKind::Alias
             } else {
                 LetKind::Strict
@@ -572,7 +577,7 @@ impl LambdaCompiler {
             exports.push(rebound.clone());
             rebound_exports.push(Statement::variable(VariableDeclaration {
                 ident: rebound,
-                value: Some(value),
+                value: Some(value.clone()),
                 property,
                 ident_info: IdentInfo::default(),
             }));

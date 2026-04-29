@@ -16,8 +16,10 @@ use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
+use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -113,6 +115,43 @@ struct CompletionMsg {
     interface_result: Option<Result<Option<String>>>,
     is_clean: bool,
     is_compiled: bool,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+struct PendingRegistryUpdate {
+    module_name: String,
+    pers_struct: Option<Arc<PortablePersStruct>>,
+    module_info: InMemoryModuleInfo,
+    alias_rewrites: AHashMap<String, TypePath>,
+}
+
+struct InProcessModuleResult {
+    warning: Option<String>,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+fn apply_pending_registry_updates(
+    build_command_state: &BuildCommandState,
+    updates: Vec<PendingRegistryUpdate>,
+) {
+    if updates.is_empty() {
+        return;
+    }
+
+    let mut registry = build_command_state.module_registry.lock().unwrap();
+    for update in updates {
+        if let Some(pers_struct) = update.pers_struct {
+            registry.register_module_arc(
+                &update.module_name,
+                pers_struct,
+                update.module_info,
+                update.alias_rewrites,
+            );
+        } else {
+            registry.insert_module_info(update.module_name, update.module_info);
+            registry.extend_alias_rewrites(update.alias_rewrites);
+        }
+    }
 }
 
 /// Compute the critical-path priority of every module in the universe:
@@ -193,6 +232,7 @@ fn compile_one(
             interface_result: Some(Ok(None)),
             is_clean: true,
             is_compiled: false,
+            registry_updates: Vec::new(),
         };
     }
 
@@ -213,6 +253,10 @@ fn compile_one(
                 build_command_state,
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
+            let (result, registry_updates) = match result {
+                Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
+                Err(err) => (Err(err), Vec::new()),
+            };
             let is_clean_interface = matches!(&result, Ok(None))
                 && interface_generation_before.is_some()
                 && interface_generation_before == interface_generation_after;
@@ -222,6 +266,7 @@ fn compile_one(
                 interface_result: None,
                 is_clean: is_clean_interface,
                 is_compiled: true,
+                registry_updates,
             };
         }
     }
@@ -236,6 +281,7 @@ fn compile_one(
                 interface_result: Some(Ok(None)),
                 is_clean: false,
                 is_compiled: false,
+                registry_updates: Vec::new(),
             }
         }
         SourceType::SourceFile(source_file) => {
@@ -288,6 +334,7 @@ fn compile_one(
                 interface_result,
                 is_clean: is_clean_cmi,
                 is_compiled: true,
+                registry_updates: Vec::new(),
             }
         }
     }
@@ -516,8 +563,15 @@ pub fn compile(
                 break;
             }
 
-            let Ok(msg) = rx.recv() else { break };
+            let Ok(mut msg) = rx.recv() else { break };
             in_flight -= 1;
+
+            if in_process_mode {
+                apply_pending_registry_updates(
+                    build_command_state_ref,
+                    std::mem::take(&mut msg.registry_updates),
+                );
+            }
 
             if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
                 has_errors = true;
@@ -526,12 +580,13 @@ pub fn compile(
             let is_clean = msg.is_clean;
             let finished_name = msg.module_name.clone();
             completed.insert(finished_name.clone());
-            results_buffer.push(msg);
 
             // Look up dependents from the node the scheduler scheduled under —
             // for mlmap, compile_one returns the namespace suffix, which is the
             // key modules use to refer to the namespace entry.
             let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
+
+            results_buffer.push(msg);
 
             for dep in &dependents {
                 if !compile_universe.contains(dep) {
@@ -2069,8 +2124,8 @@ fn runtime_compiler_options(
 /// instead of a shared mutable `PersistentEnv`. Each call creates its own
 /// fresh `PersistentEnv` internally, enabling parallel compilation.
 ///
-/// Returns Ok(None) on success, Ok(Some(warning)) on success with warnings,
-/// Err on failure.
+/// Returns the user-visible warning state plus registry updates to publish
+/// after the worker returns, before dependents are scheduled.
 fn compile_module_in_process(
     package: &packages::Package,
     module: &Module,
@@ -2078,10 +2133,15 @@ fn compile_module_in_process(
     registry: &ModuleRegistry,
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
-) -> Result<Option<String>> {
+) -> Result<InProcessModuleResult> {
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
-        _ => return Ok(None), // MlMap handled elsewhere
+        _ => {
+            return Ok(InProcessModuleResult {
+                warning: None,
+                registry_updates: Vec::new(),
+            });
+        } // MlMap handled elsewhere
     };
 
     let implementation_path = &source_file.implementation.path;
@@ -2098,6 +2158,7 @@ fn compile_module_in_process(
     // For .resi + .res, we need the .resi to be in the registry before compiling .res.
     // Build a local registry that includes the .resi result (if any).
     let mut local_registry = registry.clone();
+    let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
 
     // Register this module's metadata in the local registry
     local_registry.insert_module_info(
@@ -2140,8 +2201,10 @@ fn compile_module_in_process(
             Ok(r) => r,
             Err(e) => {
                 let warning = format!("{}", e);
-                eprintln!("{}", warning);
-                return Ok(Some(warning));
+                return Ok(InProcessModuleResult {
+                    warning: Some(warning),
+                    registry_updates: Vec::new(),
+                });
             }
         };
 
@@ -2152,6 +2215,7 @@ fn compile_module_in_process(
             .as_ref()
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
+        let intf_alias_rewrites = intf_result.new_alias_rewrites;
         if let Some(ps) = intf_result.pers_struct {
             let ps = Arc::new(ps);
             let module_info = InMemoryModuleInfo {
@@ -2163,19 +2227,27 @@ fn compile_module_in_process(
             local_registry.register_module_arc(
                 module_name,
                 ps.clone(),
+                module_info.clone(),
+                intf_alias_rewrites.clone(),
+            );
+            interface_registry_update = Some(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: Some(ps),
                 module_info,
-                intf_result.new_alias_rewrites.clone(),
-            );
-            // Update the shared registry with the .resi result
-            build_command_state.update_module_registry_arc(
-                module_name,
-                ps,
-                source_abs.clone(),
-                provisional_is_pure,
-                AHashMap::new(),
-                is_runtime,
-                intf_result.new_alias_rewrites,
-            );
+                alias_rewrites: intf_alias_rewrites,
+            });
+        } else {
+            interface_registry_update = Some(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: None,
+                module_info: InMemoryModuleInfo {
+                    source_path: source_abs.clone(),
+                    is_pure: provisional_is_pure,
+                    cmj_export_constants: AHashMap::new(),
+                    is_runtime,
+                },
+                alias_rewrites: intf_alias_rewrites,
+            });
         }
 
         // Register the interface signature in rewatch's in-memory registry
@@ -2219,8 +2291,10 @@ fn compile_module_in_process(
             // Return as a warning, not an error. The module won't produce JS
             // output but the build should continue for other modules.
             let warning = format!("Compilation failed for {}: {}", module_name, e);
-            eprintln!("{}", warning);
-            return Ok(Some(warning));
+            return Ok(InProcessModuleResult {
+                warning: Some(warning),
+                registry_updates: interface_registry_update.into_iter().collect(),
+            });
         }
         Err(panic) => {
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
@@ -2233,8 +2307,10 @@ fn compile_module_in_process(
             // Return as a warning, not an error. The module won't produce JS
             // output but the build should continue for other modules.
             let warning = format!("Compilation panicked for {}: {}", module_name, msg);
-            eprintln!("{}", warning);
-            return Ok(Some(warning));
+            return Ok(InProcessModuleResult {
+                warning: Some(warning),
+                registry_updates: interface_registry_update.into_iter().collect(),
+            });
         }
     };
 
@@ -2247,28 +2323,33 @@ fn compile_module_in_process(
         .unwrap_or(0);
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
+    let mut registry_updates = Vec::new();
+    let module_info = InMemoryModuleInfo {
+        source_path: source_abs.clone(),
+        is_pure,
+        cmj_export_constants,
+        is_runtime,
+    };
     if has_interface {
-        let mut registry = build_command_state.module_registry.lock().unwrap();
-        registry.insert_module_info(
-            module_name.to_string(),
-            InMemoryModuleInfo {
-                source_path: source_abs.clone(),
-                is_pure,
-                cmj_export_constants,
-                is_runtime,
-            },
-        );
-        registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
+        if let Some(mut update) = interface_registry_update {
+            update.module_info = module_info;
+            update.alias_rewrites.extend(compile_result.new_alias_rewrites);
+            registry_updates.push(update);
+        } else {
+            registry_updates.push(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: None,
+                module_info,
+                alias_rewrites: compile_result.new_alias_rewrites,
+            });
+        }
     } else if let Some(ps) = compile_result.pers_struct {
-        build_command_state.update_module_registry(
-            module_name,
-            ps,
-            source_abs.clone(),
-            is_pure,
-            cmj_export_constants,
-            is_runtime,
-            compile_result.new_alias_rewrites,
-        );
+        registry_updates.push(PendingRegistryUpdate {
+            module_name: module_name.to_string(),
+            pers_struct: Some(Arc::new(ps)),
+            module_info,
+            alias_rewrites: compile_result.new_alias_rewrites,
+        });
     }
 
     // Register the implementation's inferred signature if no .resi
@@ -2313,7 +2394,10 @@ fn compile_module_in_process(
         }
     }
 
-    Ok(None)
+    Ok(InProcessModuleResult {
+        warning: None,
+        registry_updates,
+    })
 }
 
 fn compile_file(
