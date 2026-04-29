@@ -3,6 +3,9 @@ use console::Term;
 use log::LevelFilter;
 use std::{io::Write, path::Path};
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use rescript::{
     build, cli, cmd, format,
     lock::{LockKind, drop_lock, get_lock_or_exit},
