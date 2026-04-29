@@ -1787,6 +1787,7 @@ fn runtime_compiler_options(
         no_assert_false: parsed_flags.no_assert_false,
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
+        skip_js_render: true,
         ..Default::default()
     }
 }

@@ -1192,6 +1192,10 @@ pub struct CompilerOptions {
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
+    /// Build typed/lambda/JS IR metadata but skip rendering JavaScript text.
+    /// Used by runtime seeding, which only needs signatures, purity, and
+    /// closed constants in memory.
+    pub skip_js_render: bool,
 }
 
 impl Default for CompilerOptions {
@@ -1218,6 +1222,7 @@ impl Default for CompilerOptions {
             nopervasives: false,
             module_name: None,
             capture_intermediates: false,
+            skip_js_render: false,
         }
     }
 }
@@ -3334,56 +3339,66 @@ pub fn compile_preprocessed_structure_in_process(
     );
     let is_pure = program.side_effect.is_none();
     let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
-    let mut rendered_programs = vec![(
-        primary_target.map(|target| target.path.clone()),
-        program,
-        module_path_resolver,
-    )];
-    for target in js_targets.iter().skip(1) {
-        let (program, module_path_resolver) = compile_js_program_for_output(
-            &lowered_lambda,
-            &possible_required_modules,
-            options,
-            Some(&target.path),
-            Some(target.module_format),
-            persistent_env_for_js.clone(),
-            jsx_preserve,
-        );
-        rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
-    }
+    let mut rendered_programs = if options.skip_js_render {
+        Vec::new()
+    } else {
+        let mut rendered_programs = vec![(
+            primary_target.map(|target| target.path.clone()),
+            program,
+            module_path_resolver,
+        )];
+        for target in js_targets.iter().skip(1) {
+            let (program, module_path_resolver) = compile_js_program_for_output(
+                &lowered_lambda,
+                &possible_required_modules,
+                options,
+                Some(&target.path),
+                Some(target.module_format),
+                persistent_env_for_js.clone(),
+                jsx_preserve,
+            );
+            rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
+        }
+        rendered_programs
+    };
     let jsir_ms = phase_elapsed_ms(t_jsir);
 
     let t_js = phase_now();
-    let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
-    let js = print_deps_program_with_directives_and_options(
-        &primary_program,
-        Some(&primary_resolver),
-        &file_directives,
-        debug,
-        jsx_preserve,
-        !options.no_version_header,
-    );
-    let mut js_outputs = Vec::new();
-    if let Some(path) = primary_path {
-        js_outputs.push(JsOutput {
-            path,
-            code: js.clone(),
-        });
-    }
-    for (path, program, module_path_resolver) in rendered_programs {
-        let Some(path) = path else {
-            continue;
-        };
-        let code = print_deps_program_with_directives_and_options(
-            &program,
-            Some(&module_path_resolver),
+    let (js, js_outputs) = if options.skip_js_render {
+        (String::new(), Vec::new())
+    } else {
+        let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
+        let js = print_deps_program_with_directives_and_options(
+            &primary_program,
+            Some(&primary_resolver),
             &file_directives,
             debug,
             jsx_preserve,
             !options.no_version_header,
         );
-        js_outputs.push(JsOutput { path, code });
-    }
+        let mut js_outputs = Vec::new();
+        if let Some(path) = primary_path {
+            js_outputs.push(JsOutput {
+                path,
+                code: js.clone(),
+            });
+        }
+        for (path, program, module_path_resolver) in rendered_programs {
+            let Some(path) = path else {
+                continue;
+            };
+            let code = print_deps_program_with_directives_and_options(
+                &program,
+                Some(&module_path_resolver),
+                &file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+            );
+            js_outputs.push(JsOutput { path, code });
+        }
+        (js, js_outputs)
+    };
     let js_ms = phase_elapsed_ms(t_js);
 
     let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
