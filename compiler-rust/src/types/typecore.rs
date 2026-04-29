@@ -8764,7 +8764,36 @@ fn type_match(
     // typed_scrutinee.exp_type — that creates false node sharing between scrutinee
     // and pattern types (OCaml keeps them separate via fresh instances).
 
-    let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+    let needs_exhaust_check = !matches!(
+        val_caselist.as_slice(),
+        [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
+    );
+    let do_init = has_generalized_value_patterns || needs_exhaust_check;
+    let partial = if do_init {
+        // OCaml compiler/ml/typecore.ml:4387-4399 computes
+        // `needs_exhaust_check` and defines `init_env`, then
+        // typecore.ml:4511-4535 runs that init before `check_partial`
+        // and closes it with `end_def` plus the escaping-result check.
+        // `Ident.set_current_time (get_current_level ())` is observable:
+        // it advances later binder stamps when a previous begin_def raised
+        // the type level beyond the current ident stamp.
+        ctx.begin_def();
+        ctx.set_current_time(ctx.current_level());
+        let lev = ctx.current_stamp();
+        ctx.init_def(lev + 1000);
+        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+        ctx.end_def();
+        unify_expression_types(
+            tctx,
+            loc,
+            crate::types::instance(ctx, ty_res),
+            ctx.new_var(None),
+            None,
+        )?;
+        partial
+    } else {
+        check_partial_simple(ctx, val_case_env, &typed_val_cases)
+    };
 
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
     let result_ty = crate::types::instance(ctx, expected_ty);
