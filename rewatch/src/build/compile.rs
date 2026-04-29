@@ -563,45 +563,56 @@ pub fn compile(
                 break;
             }
 
-            let Ok(mut msg) = rx.recv() else { break };
-            in_flight -= 1;
+            let Ok(first_msg) = rx.recv() else { break };
+            let mut completed_messages = Vec::with_capacity(in_flight);
+            completed_messages.push(first_msg);
+            while completed_messages.len() < in_flight {
+                match rx.try_recv() {
+                    Ok(msg) => completed_messages.push(msg),
+                    Err(_) => break,
+                }
+            }
+            in_flight -= completed_messages.len();
 
             if in_process_mode {
-                apply_pending_registry_updates(
-                    build_command_state_ref,
-                    std::mem::take(&mut msg.registry_updates),
-                );
+                let mut batched_updates = Vec::new();
+                for msg in &mut completed_messages {
+                    batched_updates.extend(std::mem::take(&mut msg.registry_updates));
+                }
+                apply_pending_registry_updates(build_command_state_ref, batched_updates);
             }
 
-            if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
-                has_errors = true;
-            }
-
-            let is_clean = msg.is_clean;
-            let finished_name = msg.module_name.clone();
-            completed.insert(finished_name.clone());
-
-            // Look up dependents from the node the scheduler scheduled under —
-            // for mlmap, compile_one returns the namespace suffix, which is the
-            // key modules use to refer to the namespace entry.
-            let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
-
-            results_buffer.push(msg);
-
-            for dep in &dependents {
-                if !compile_universe.contains(dep) {
-                    continue;
+            for msg in completed_messages {
+                if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                    has_errors = true;
                 }
-                if !is_clean {
-                    dirty_set.insert(dep.clone());
-                }
-                let count = pending_deps.get_mut(dep).unwrap();
-                *count -= 1;
-                if *count == 0 && !completed.contains(dep) {
-                    ready_heap.push(WorkUnit {
-                        priority: priorities[dep],
-                        module_name: dep.clone(),
-                    });
+
+                let is_clean = msg.is_clean;
+                let finished_name = msg.module_name.clone();
+                completed.insert(finished_name.clone());
+
+                // Look up dependents from the node the scheduler scheduled under —
+                // for mlmap, compile_one returns the namespace suffix, which is the
+                // key modules use to refer to the namespace entry.
+                let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
+
+                results_buffer.push(msg);
+
+                for dep in &dependents {
+                    if !compile_universe.contains(dep) {
+                        continue;
+                    }
+                    if !is_clean {
+                        dirty_set.insert(dep.clone());
+                    }
+                    let count = pending_deps.get_mut(dep).unwrap();
+                    *count -= 1;
+                    if *count == 0 && !completed.contains(dep) {
+                        ready_heap.push(WorkUnit {
+                            priority: priorities[dep],
+                            module_name: dep.clone(),
+                        });
+                    }
                 }
             }
         }
