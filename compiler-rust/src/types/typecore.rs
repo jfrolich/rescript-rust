@@ -20686,10 +20686,10 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
 }
 
 fn path_cache_key(path: &Path) -> Option<String> {
-    if matches!(path, Path::Papply(_, _)) {
-        return None;
-    }
-    let head = path.head();
+    // Match `Path.flatten` in compiler/ml/path.ml:63-69: any nested
+    // `Papply` is `Contains_apply`, so cache keys that need a single head
+    // identifier are only valid for regular dotted paths.
+    let (head, _) = path.flatten().ok()?;
     let name = path.name();
     if head.is_persistent() || head.stamp() == 0 {
         Some(name)
@@ -20714,7 +20714,9 @@ fn module_components_cache_key(
     module_path: &Path,
     env: &Env,
 ) -> Option<crate::types::context::QualifiedModuleComponentsCacheKey> {
-    if matches!(module_path, Path::Papply(_, _)) {
+    // Match `Path.flatten` in compiler/ml/path.ml:63-69: dotted paths whose
+    // parent is a functor application have no single stable cache head.
+    if module_path.flatten().is_err() {
         return None;
     }
     Some(

@@ -501,10 +501,10 @@ impl Env {
     }
 
     fn module_path_scope_cache_key(path: &Path) -> Option<String> {
-        if matches!(path, Path::Papply(_, _)) {
-            return None;
-        }
-        let head = path.head();
+        // Match `Path.flatten` in compiler/ml/path.ml:63-69: any nested
+        // `Papply` is `Contains_apply`, so env-scoped cache keys that need a
+        // single head identifier are only valid for regular dotted paths.
+        let (head, _) = path.flatten().ok()?;
         let name = path.name();
         if head.is_persistent() || head.stamp() == 0 {
             Some(name)
