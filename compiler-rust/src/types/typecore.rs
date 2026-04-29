@@ -4306,6 +4306,7 @@ fn force_qualified_value_type_paths<'a>(
         path: &Path,
         arity: usize,
         value_access_root: Option<&Ident>,
+        selected_module_path: Option<&Path>,
         infer_stdlib_root_from_flat_parent: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
@@ -4393,6 +4394,16 @@ fn force_qualified_value_type_paths<'a>(
             if !valid_suffix {
                 continue;
             }
+            // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
+            // exactly the selected component table, and compiler/ml/subst.ml:303-309
+            // applies that substitution to value descriptions. Do not rewrite
+            // sibling flattened aliases just because their signatures are known
+            // in Rust's global caches.
+            if let Some(selected_module_path) = selected_module_path {
+                if !candidate_parent.same(selected_module_path) {
+                    continue;
+                }
+            }
             let candidate = Path::pdot(candidate_parent.clone(), type_name.clone());
             if candidate.same(path) {
                 continue;
@@ -4435,6 +4446,7 @@ fn force_qualified_value_type_paths<'a>(
         ty: TypeExprRef,
         value_access_root_is_local: bool,
         value_access_root: Option<&Ident>,
+        selected_module_path: Option<&Path>,
         allow_stdlib_flat_parent_inference: bool,
         seen: &mut HashSet<TypeExprRef>,
     ) {
@@ -4462,6 +4474,7 @@ fn force_qualified_value_type_paths<'a>(
                     arg_ty,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     true,
                     seen,
                 );
@@ -4471,6 +4484,7 @@ fn force_qualified_value_type_paths<'a>(
                     ret_ty,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     false,
                     seen,
                 );
@@ -4485,6 +4499,7 @@ fn force_qualified_value_type_paths<'a>(
                         item,
                         value_access_root_is_local,
                         value_access_root,
+                        selected_module_path,
                         allow_stdlib_flat_parent_inference,
                         seen,
                     );
@@ -4529,6 +4544,7 @@ fn force_qualified_value_type_paths<'a>(
                         &path,
                         args.len(),
                         value_access_root,
+                        selected_module_path,
                         false,
                     )
                 })
@@ -4541,6 +4557,7 @@ fn force_qualified_value_type_paths<'a>(
                                 &path,
                                 args.len(),
                                 value_access_root,
+                                selected_module_path,
                                 true,
                             )
                         })
@@ -4564,6 +4581,7 @@ fn force_qualified_value_type_paths<'a>(
                         arg,
                         value_access_root_is_local,
                         value_access_root,
+                        selected_module_path,
                         allow_stdlib_flat_parent_inference,
                         seen,
                     );
@@ -4579,6 +4597,7 @@ fn force_qualified_value_type_paths<'a>(
                     fields,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4590,6 +4609,7 @@ fn force_qualified_value_type_paths<'a>(
                             arg,
                             value_access_root_is_local,
                             value_access_root,
+                            selected_module_path,
                             allow_stdlib_flat_parent_inference,
                             seen,
                         );
@@ -4606,6 +4626,7 @@ fn force_qualified_value_type_paths<'a>(
                     typ,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4615,6 +4636,7 @@ fn force_qualified_value_type_paths<'a>(
                     rest,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4628,6 +4650,7 @@ fn force_qualified_value_type_paths<'a>(
                     inner,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4642,6 +4665,7 @@ fn force_qualified_value_type_paths<'a>(
                     row_more,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4654,6 +4678,7 @@ fn force_qualified_value_type_paths<'a>(
                                 arg,
                                 value_access_root_is_local,
                                 value_access_root,
+                                selected_module_path,
                                 allow_stdlib_flat_parent_inference,
                                 seen,
                             )
@@ -4666,6 +4691,7 @@ fn force_qualified_value_type_paths<'a>(
                                     arg,
                                     value_access_root_is_local,
                                     value_access_root,
+                                    selected_module_path,
                                     allow_stdlib_flat_parent_inference,
                                     seen,
                                 );
@@ -4685,6 +4711,7 @@ fn force_qualified_value_type_paths<'a>(
                     body,
                     value_access_root_is_local,
                     value_access_root,
+                    selected_module_path,
                     allow_stdlib_flat_parent_inference,
                     seen,
                 );
@@ -4695,6 +4722,7 @@ fn force_qualified_value_type_paths<'a>(
                         var,
                         value_access_root_is_local,
                         value_access_root,
+                        selected_module_path,
                         allow_stdlib_flat_parent_inference,
                         seen,
                     );
@@ -4710,6 +4738,7 @@ fn force_qualified_value_type_paths<'a>(
                         arg,
                         value_access_root_is_local,
                         value_access_root,
+                        selected_module_path,
                         allow_stdlib_flat_parent_inference,
                         seen,
                     );
@@ -4721,6 +4750,10 @@ fn force_qualified_value_type_paths<'a>(
 
     let value_access_root_is_local = path_root_is_local(value_path);
     let value_access_root = path_root_ident(value_path);
+    let selected_module_path = match value_path {
+        Path::Pdot(parent, _, _) => Some(parent.as_ref().clone()),
+        _ => None,
+    };
     let mut seen = HashSet::new();
     visit(
         tctx,
@@ -4728,6 +4761,7 @@ fn force_qualified_value_type_paths<'a>(
         ty,
         value_access_root_is_local,
         value_access_root.as_ref(),
+        selected_module_path.as_ref(),
         false,
         &mut seen,
     );

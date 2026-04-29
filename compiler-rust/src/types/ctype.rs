@@ -264,6 +264,21 @@ fn lookup_type_decl_for_path(
     None
 }
 
+fn type_decl_would_get_strengthened_manifest(decl: &super::decl::TypeDeclaration) -> bool {
+    // OCaml compiler/ml/mtype.ml:55-70 keeps public manifests and private
+    // record/variant manifests as-is; all other signature types receive a
+    // self-manifest rooted at the visible module access path.
+    !matches!(
+        (&decl.type_manifest, decl.type_private, &decl.type_kind),
+        (Some(_), PrivateFlag::Public, _)
+            | (
+                Some(_),
+                PrivateFlag::Private,
+                super::decl::TypeKind::TypeRecord(..) | super::decl::TypeKind::TypeVariant(..),
+            )
+    )
+}
+
 pub(crate) fn lookup_type_decl_for_path_pub(
     ctx: &TypeContext<'_>,
     env: &Env,
@@ -3093,6 +3108,14 @@ fn unify_types<'a>(
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
                     let p2_flat_persistent = flat_persistent_parent(path2);
+                    let p1_strengthened_flat_alias = p1_flat_persistent
+                        && !p2_flat_persistent
+                        && lookup_type_decl_for_path(ctx, env, path1)
+                            .is_some_and(|decl| type_decl_would_get_strengthened_manifest(&decl));
+                    let p2_strengthened_flat_alias = p2_flat_persistent
+                        && !p1_flat_persistent
+                        && lookup_type_decl_for_path(ctx, env, path2)
+                            .is_some_and(|decl| type_decl_would_get_strengthened_manifest(&decl));
                     drop(desc1);
                     drop(desc2);
                     // OCaml compiler/ml/ctype.ml:2341-2344 expands
@@ -3113,7 +3136,17 @@ fn unify_types<'a>(
                     // persistent module identifier onto the visible local alias;
                     // nested selected paths such as `Js.Dict.t` or
                     // `Belt.Id.cmp` are already in OCaml's spelling.
-                    if p1_persistent != p2_persistent {
+                    //
+                    // OCaml compiler/ml/mtype.ml:55-70 controls which alias
+                    // components get a strengthened self-manifest. If the flat
+                    // persistent declaration would be strengthened, unification
+                    // observes that visible alias path; public manifest aliases
+                    // such as Stdlib_Error.t keep the original target path.
+                    if p1_strengthened_flat_alias {
+                        link_type(ctx, t1, t2);
+                    } else if p2_strengthened_flat_alias {
+                        link_type(ctx, t2, t1);
+                    } else if p1_persistent != p2_persistent {
                         if p1_flat_persistent {
                             link_type(ctx, t1, t2);
                         } else if p2_flat_persistent {

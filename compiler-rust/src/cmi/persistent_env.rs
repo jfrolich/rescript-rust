@@ -1489,26 +1489,10 @@ pub(crate) fn freshen_signature_bound_idents(
 }
 
 fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
-    let mut maps = build_subst_maps(sig_items, module_path);
-
-    // Nested persistent modules are often materialized in CMIs with flattened
-    // names (for example `Stdlib.JSON` appears as `Stdlib_JSON`). Add an
-    // explicit mapping from that flattened head name back to the qualified
-    // module access path so substitution can normalize those references.
-    if let Ok((head, components)) = module_path.flatten() {
-        if !components.is_empty() {
-            let mut flat_name = head.name().to_string();
-            for component in components {
-                flat_name.push('_');
-                flat_name.push_str(component);
-            }
-            maps.module_name_map
-                .entry(flat_name)
-                .or_insert_with(|| module_path.clone());
-        }
-    }
-
-    maps
+    // OCaml compiler/ml/env.ml:1530-1538 builds substitution maps from the
+    // component signature with `prefix_idents`, and compiler/ml/subst.ml:69-95
+    // rewrites module paths only through those explicit maps.
+    build_subst_maps(sig_items, module_path)
 }
 
 pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path: &Path) -> Path {
