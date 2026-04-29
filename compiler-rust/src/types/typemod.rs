@@ -3311,7 +3311,20 @@ pub fn lookup_module_type_by_lid<'b>(
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
             // Try local env first
-            if let Ok(md) = env.find_module(mod_name) {
+            if let Ok((id, md)) = env.find_module_with_id(mod_name) {
+                if id.is_persistent() {
+                    // OCaml compiler/ml/typemod.ml:1227-1229 resolves
+                    // `Pmod_ident` with `Typetexp.lookup_module`, whose
+                    // Lident path uses compiler/ml/env.ml:1000-1007 and reads
+                    // persistent components without forcing `ps_sig`. The
+                    // following `Env.find_module` at typemod.ml:1244 reaches
+                    // env.ml:872-874 for persistent roots and forces
+                    // `Lazy.force ps.ps_sig` before include processing later
+                    // freshens the extracted signature at typemod.ml:1575-1578.
+                    let _ = pers_env
+                        .as_mut()
+                        .and_then(|pers| pers.get_renamed_sig(mod_name, ctx));
+                }
                 return Some(md.md_type.clone());
             }
             if let Some(pers) = pers_env.as_mut() {
