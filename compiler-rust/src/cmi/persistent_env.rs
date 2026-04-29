@@ -462,6 +462,9 @@ impl PersistentEnv {
                 &mut self.alias_prefix_rewrites,
             );
             register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            if !effective_module_path.same(&module_path) {
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+            }
             self.cache.insert(portable_key.clone(), Some(ps));
             return self.cache.get(&portable_key).and_then(|opt| opt.as_ref());
         }

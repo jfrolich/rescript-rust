@@ -1715,9 +1715,9 @@ fn compile_runtime_module_from_source(
         &local_registry,
         has_runtime_interface,
     )
-    .with_context(|| {
-        format!(
-            "runtime implementation compile failed for {}",
+    .map_err(|err| {
+        anyhow!(
+            "runtime implementation compile failed for {}: {err:#}",
             module.res_path.display()
         )
     })?;

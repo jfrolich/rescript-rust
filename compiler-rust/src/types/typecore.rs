@@ -18632,58 +18632,6 @@ fn expand_type_path_for_compare<'a>(
     path.clone()
 }
 
-fn resolve_type_item_identity<'a>(
-    path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) -> Option<(i32, usize)> {
-    match path {
-        Path::Pident(id) => {
-            if id.stamp() == 0 {
-                return None;
-            }
-            let arity = if let Ok(decl) = env.lookup_type(path) {
-                decl.type_params.len()
-            } else {
-                ctx.find_type_decl_by_stamp(id.stamp())?.type_params.len()
-            };
-            Some((id.stamp(), arity))
-        }
-        Path::Pdot(parent, type_name, _) => {
-            lookup_type_in_resolved_path(parent, type_name.as_str(), env, pers_env, ctx).and_then(
-                |(_, id, decl)| {
-                    if id.stamp() == 0 {
-                        None
-                    } else {
-                        Some((id.stamp(), decl.type_params.len()))
-                    }
-                },
-            )
-        }
-        Path::Papply(_, _) => None,
-    }
-}
-
-fn resolved_type_items_share_identity<'a>(
-    left: &Path,
-    right: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) -> bool {
-    let Some((left_stamp, left_arity)) = resolve_type_item_identity(left, env, pers_env, ctx)
-    else {
-        return false;
-    };
-    let Some((right_stamp, right_arity)) = resolve_type_item_identity(right, env, pers_env, ctx)
-    else {
-        return false;
-    };
-
-    left_stamp == right_stamp && left_arity == right_arity
-}
-
 fn compare_type_paths_for_disambiguation<'a>(
     left: &Path,
     right: &Path,
@@ -18692,9 +18640,6 @@ fn compare_type_paths_for_disambiguation<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> bool {
     if left.same(right) {
-        return true;
-    }
-    if resolved_type_items_share_identity(left, right, env, pers_env, ctx) {
         return true;
     }
     let mut left_visiting = HashSet::new();
@@ -19493,8 +19438,11 @@ fn lookup_label_by_expected_type<'a>(
         }
     }
 
-    let (_concrete_path, _actual_args, type_decl) =
-        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
+    let Some((_concrete_path, _actual_args, type_decl)) =
+        extract_concrete_record_type_info(record_ty, env, pers_env, ctx)
+    else {
+        return None;
+    };
     let (labels, repr) = match &type_decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
@@ -20071,13 +20019,26 @@ fn lookup_constructor_by_expected_type<'b>(
     )?;
 
     // Look up the type declaration.
-    let concrete_type_decl = lookup_type_decl_for_path(&type_path, env, pers_env, ctx)?;
+    let Some(concrete_type_decl) = lookup_type_decl_for_path(&type_path, env, pers_env, ctx) else {
+        return None;
+    };
     // Prefer declaration-carried canonical path (e.g. opened `t` -> `J.t`)
-    // so constructor result heads match OCaml's qualified paths.
-    let concrete_type_path = concrete_type_decl
+    // unless an in-process signature lookup reached the type through a
+    // non-local path while the declaration still carries a local one.
+    let stored_path_is_stale_local = concrete_type_decl
         .type_path
-        .clone()
-        .unwrap_or(type_path.clone());
+        .as_ref()
+        .is_some_and(|stored_path| {
+            is_local_module_access_path(stored_path) && !is_local_module_access_path(&type_path)
+        });
+    let concrete_type_path = if stored_path_is_stale_local {
+        type_path.clone()
+    } else {
+        concrete_type_decl
+            .type_path
+            .clone()
+            .unwrap_or(type_path.clone())
+    };
     // Use the concrete expanded path to find the declaration, but preserve the
     // original expected alias family for the reconstructed constructor result
     // when the two paths are alias-equivalent. This matches OCaml's behavior
@@ -21278,6 +21239,10 @@ fn build_module_signature_for_path<'a>(
                 {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
                     let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                    crate::types::ctype::force_generalize_module_sig_values(
+                        ctx,
+                        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
+                    );
                     Some((access_path, sig))
                 } else if let Ok(md) = env.lookup_module(module_path) {
                     let access_path = md
