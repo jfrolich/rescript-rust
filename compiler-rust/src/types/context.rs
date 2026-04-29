@@ -1381,14 +1381,58 @@ impl<'a> TypeContext<'a> {
         let raw_sig = {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
-        };
+        }
+        .or_else(|| self.load_lazy_raw_module_sig_for_rename(module_name));
         if let Some(sig) = raw_sig {
+            self.raw_module_sigs
+                .borrow_mut()
+                .entry(module_name.to_string())
+                .or_insert_with(|| sig.clone());
             let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&sig, self);
             crate::cmi::persistent_env::freshen_signature_bound_idents(&mut renamed, self);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
         }
+    }
+
+    fn load_lazy_raw_module_sig_for_rename(
+        &self,
+        module_name: &str,
+    ) -> Option<super::decl::Signature> {
+        let cmi_path = {
+            let load_paths = self.load_paths.borrow();
+            let cmi_filename = format!("{module_name}.cmi");
+            load_paths.iter().find_map(|dir| {
+                let exact = dir.join(&cmi_filename);
+                if exact.exists() {
+                    return Some(exact);
+                }
+
+                let first = module_name.chars().next()?;
+                if !first.is_ascii_uppercase() {
+                    return None;
+                }
+                let uncap_name =
+                    format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
+                let uncap = dir.join(format!("{uncap_name}.cmi"));
+                uncap.exists().then_some(uncap)
+            })
+        };
+        let cmi_path = cmi_path?;
+        let cmi = crate::cmi::cmi_format::read_cmi(&cmi_path.to_string_lossy()).ok()?;
+        let mut sig_ctx = crate::cmi::sig_reader::SigReadContext::new(self);
+        let mut sig = sig_ctx.read_signature(&cmi.cmi_sign);
+        let module_path = Path::Pident(Ident::create_persistent(module_name));
+        // OCaml compiler/ml/env.ml:1000-1007 reaches `lookup_module_descr`
+        // for dotted accesses, and env.ml:568-571/1516-1605 forces the
+        // persistent structure's component lazy. Loading whichever CMI the
+        // force requested lets the Rust force point consume the same
+        // `Subst.signature` stamps instead of special-casing one module family.
+        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
+        crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
+        crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, &module_path, self);
+        Some(sig)
     }
 
     /// Create a new identifier using the typing context's shared stamp source.

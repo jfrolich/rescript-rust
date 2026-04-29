@@ -1674,11 +1674,19 @@ fn normalize_path_full_inner<'a>(
         _ => path.clone(),
     };
 
-    // Match OCaml's normalize_path which calls find_module for the path.
-    // For persistent idents, OCaml's find_module forces ps_sig (renaming
-    // bound idents). Trigger the same stamp consumption here.
+    // Match OCaml compiler/ml/ctype.ml:1367-1372 and
+    // compiler/ml/env.ml:865-875/env.ml:903-914: `normalize_path` calls
+    // `find_module ~alias:true`, which forces a persistent structure's
+    // `ps_sig` unless the exact module id is already present in `env.modules`.
+    // Rust keeps a root `Pervasives` module binding for qualified lookup even
+    // though OCaml's implicit open in compiler/core/res_compmisc.ml:56-62 and
+    // compiler/ml/env.ml:1874-1877 only adds signature components. Ignore that
+    // Rust-only root binding for Pervasives so expanding paths like
+    // `Pervasives.ref` consumes the same lazy `Subst.signature` stamps.
     if let Path::Pident(id) = &path {
-        if id.is_persistent() {
+        let should_force_persistent_sig =
+            id.is_persistent() && (!env.has_module_ident(id) || id.name() == "Pervasives");
+        if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
         if env
