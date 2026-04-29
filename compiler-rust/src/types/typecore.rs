@@ -4284,11 +4284,99 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
+    fn path_root_ident(path: &Path) -> Option<Ident> {
+        match path {
+            Path::Pident(id) => Some(id.clone()),
+            Path::Pdot(parent, _, _) => path_root_ident(parent),
+            Path::Papply(_, _) => None,
+        }
+    }
+
+    fn persistent_nested_type_path(
+        ctx: &TypeContext<'_>,
+        env: &Env,
+        path: &Path,
+        arity: usize,
+        value_access_root: Option<&Ident>,
+    ) -> Option<Path> {
+        fn module_signature_declares_type_component(
+            ctx: &TypeContext<'_>,
+            env: &Env,
+            module_path: &Path,
+            type_name: &str,
+        ) -> bool {
+            let mut no_persistent_env = None;
+            resolve_module_signature_for_path(module_path, env, &mut no_persistent_env, ctx)
+                .is_some_and(|(_, sig)| {
+                    sig.iter().any(|item| {
+                        matches!(
+                            item,
+                            crate::types::decl::SignatureItem::SigType(id, _, _)
+                                if id.name() == type_name
+                        )
+                    })
+                })
+        }
+
+        let root = value_access_root?;
+        if !root.is_persistent() {
+            return None;
+        }
+        let Path::Pdot(parent, type_name, _) = path else {
+            return None;
+        };
+        if type_name != "t" {
+            return None;
+        }
+        let Path::Pident(flat_parent) = parent.as_ref() else {
+            return None;
+        };
+        if !flat_parent.is_persistent() {
+            return None;
+        }
+
+        let root_name = root.name();
+        let suffix = flat_parent.name().strip_prefix(&format!("{root_name}_"))?;
+        if suffix.is_empty() || suffix.contains("__") {
+            return None;
+        }
+
+        let mut candidate_parent = Path::pident(root.clone());
+        for segment in suffix.split('_') {
+            if segment.is_empty() {
+                return None;
+            }
+            candidate_parent = Path::pdot(candidate_parent, segment.to_string());
+        }
+        let candidate = Path::pdot(candidate_parent.clone(), type_name.clone());
+        if candidate.same(path) {
+            return None;
+        }
+        if !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name) {
+            return None;
+        }
+        if !crate::types::ctype::resolved_type_items_share_identity(
+            ctx, env, &candidate, path, arity,
+        ) {
+            return None;
+        }
+
+        // OCaml compiler/ml/env.ml:1496-1524 builds persistent module
+        // component tables under the visible `Stdlib.*` access path, then
+        // compiler/ml/subst.ml:303-309 substitutes value descriptions as those
+        // components are selected by env.ml:1090-1104. Rust can still see the
+        // flattened source module name (`Stdlib_ArrayBuffer.t`) from runtime
+        // signatures here, so rewrite only when the nested component exists and
+        // resolves to the same type item.
+        Some(candidate)
+    }
+
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
         ty: TypeExprRef,
         value_access_root_is_local: bool,
+        value_access_root: Option<&Ident>,
         seen: &mut HashSet<TypeExprRef>,
     ) {
         let ctx = tctx.type_ctx;
@@ -4303,14 +4391,35 @@ fn force_qualified_value_type_paths<'a>(
                 let arg_ty = arg.typ;
                 let ret_ty = *ret;
                 drop(desc);
-                visit(tctx, env, arg_ty, value_access_root_is_local, seen);
-                visit(tctx, env, ret_ty, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    arg_ty,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
+                visit(
+                    tctx,
+                    env,
+                    ret_ty,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
             }
             TypeDesc::Ttuple(items) => {
                 let items = items.clone();
                 drop(desc);
                 for item in items {
-                    visit(tctx, env, item, value_access_root_is_local, seen);
+                    visit(
+                        tctx,
+                        env,
+                        item,
+                        value_access_root_is_local,
+                        value_access_root,
+                        seen,
+                    );
                 }
             }
             TypeDesc::Tconstr { path, args, abbrev } => {
@@ -4337,14 +4446,17 @@ fn force_qualified_value_type_paths<'a>(
                         ctx,
                     );
                 }
-                if let Some(rewritten_path) =
-                    visible_local_alias_type_path(
-                        ctx,
-                        env,
-                        &path,
-                        args.len(),
-                        value_access_root_is_local,
-                    )
+                let rewritten_path = visible_local_alias_type_path(
+                    ctx,
+                    env,
+                    &path,
+                    args.len(),
+                    value_access_root_is_local,
+                )
+                .or_else(|| {
+                    persistent_nested_type_path(ctx, env, &path, args.len(), value_access_root)
+                });
+                if let Some(rewritten_path) = rewritten_path
                 {
                     ctx.set_desc(
                         ty,
@@ -4356,17 +4468,38 @@ fn force_qualified_value_type_paths<'a>(
                     );
                 }
                 for arg in args {
-                    visit(tctx, env, arg, value_access_root_is_local, seen);
+                    visit(
+                        tctx,
+                        env,
+                        arg,
+                        value_access_root_is_local,
+                        value_access_root,
+                        seen,
+                    );
                 }
             }
             TypeDesc::Tobject { fields, name } => {
                 let fields = *fields;
                 let name_args = name.as_ref().map(|(_, args)| args.clone());
                 drop(desc);
-                visit(tctx, env, fields, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    fields,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
                 if let Some(args) = name_args {
                     for arg in args {
-                        visit(tctx, env, arg, value_access_root_is_local, seen);
+                        visit(
+                            tctx,
+                            env,
+                            arg,
+                            value_access_root_is_local,
+                            value_access_root,
+                            seen,
+                        );
                     }
                 }
             }
@@ -4374,27 +4507,69 @@ fn force_qualified_value_type_paths<'a>(
                 let typ = *typ;
                 let rest = *rest;
                 drop(desc);
-                visit(tctx, env, typ, value_access_root_is_local, seen);
-                visit(tctx, env, rest, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    typ,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
+                visit(
+                    tctx,
+                    env,
+                    rest,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
             }
             TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
                 let inner = *inner;
                 drop(desc);
-                visit(tctx, env, inner, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    inner,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
             }
             TypeDesc::Tvariant(row) => {
                 let row_more = row.row_more;
                 let fields = row.row_fields.clone();
                 drop(desc);
-                visit(tctx, env, row_more, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    row_more,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
                 for (_, field) in fields {
                     match field {
                         RowField::Rpresent(Some(arg)) => {
-                            visit(tctx, env, arg, value_access_root_is_local, seen)
+                            visit(
+                                tctx,
+                                env,
+                                arg,
+                                value_access_root_is_local,
+                                value_access_root,
+                                seen,
+                            )
                         }
                         RowField::Reither { types: args, .. } => {
                             for arg in args {
-                                visit(tctx, env, arg, value_access_root_is_local, seen);
+                                visit(
+                                    tctx,
+                                    env,
+                                    arg,
+                                    value_access_root_is_local,
+                                    value_access_root,
+                                    seen,
+                                );
                             }
                         }
                         RowField::Rpresent(None) | RowField::Rabsent => {}
@@ -4405,16 +4580,37 @@ fn force_qualified_value_type_paths<'a>(
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
-                visit(tctx, env, body, value_access_root_is_local, seen);
+                visit(
+                    tctx,
+                    env,
+                    body,
+                    value_access_root_is_local,
+                    value_access_root,
+                    seen,
+                );
                 for var in vars {
-                    visit(tctx, env, var, value_access_root_is_local, seen);
+                    visit(
+                        tctx,
+                        env,
+                        var,
+                        value_access_root_is_local,
+                        value_access_root,
+                        seen,
+                    );
                 }
             }
             TypeDesc::Tpackage { args, .. } => {
                 let args = args.clone();
                 drop(desc);
                 for arg in args {
-                    visit(tctx, env, arg, value_access_root_is_local, seen);
+                    visit(
+                        tctx,
+                        env,
+                        arg,
+                        value_access_root_is_local,
+                        value_access_root,
+                        seen,
+                    );
                 }
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
@@ -4422,8 +4618,16 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     let value_access_root_is_local = path_root_is_local(value_path);
+    let value_access_root = path_root_ident(value_path);
     let mut seen = HashSet::new();
-    visit(tctx, env, ty, value_access_root_is_local, &mut seen);
+    visit(
+        tctx,
+        env,
+        ty,
+        value_access_root_is_local,
+        value_access_root.as_ref(),
+        &mut seen,
+    );
 }
 
 /// Type check an expression against an expected type.
