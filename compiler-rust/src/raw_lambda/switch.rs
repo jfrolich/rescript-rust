@@ -1074,6 +1074,32 @@ pub fn zyva(
     assert!(!cases.is_empty());
 
     let shared_actions = store.act_get_shared();
+    zyva_with_shared_actions(
+        loc,
+        edges,
+        arg,
+        cases,
+        shared_actions,
+        sw_names,
+        next_raise,
+    )
+}
+
+/// Main entry point when the caller already owns the action array.
+///
+/// This preserves the exact indices embedded in `cases`, matching OCaml's
+/// `Switcher.zyva` call where the `StoreExp` action array is passed directly.
+pub fn zyva_with_shared_actions(
+    loc: Location,
+    edges: (i32, i32),
+    arg: RawLambda,
+    cases: &[(i32, i32, usize)],
+    shared_actions: Vec<Shared<RawLambda>>,
+    sw_names: Option<SwitchNames>,
+    next_raise: &mut dyn FnMut() -> i32,
+) -> RawLambda {
+    assert!(!cases.is_empty());
+
     let (handlers, actions) = abstract_shared(shared_actions, next_raise);
 
     let (low, high) = edges;
