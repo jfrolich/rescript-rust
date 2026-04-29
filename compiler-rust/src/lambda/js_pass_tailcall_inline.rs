@@ -76,14 +76,10 @@ impl TailcallInlineState {
             }
         }
 
-        let mut iter = block.into_iter();
-        let Some(first) = iter.next() else {
-            return Vec::new();
-        };
-        let rest: Block = iter.collect();
-
-        let mut transformed = self.transform_statement(first);
-        transformed.extend(self.transform_block(rest));
+        let mut transformed = Vec::with_capacity(block.len());
+        for stmt in block {
+            transformed.extend(self.transform_statement(stmt));
+        }
         transformed
     }
 
