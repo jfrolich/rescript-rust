@@ -3946,9 +3946,10 @@ fn add_signature_to_env_with_options(
                 pos += 1;
                 md.md_path = Some(access_path.clone());
                 // Rewrite module-type paths against the opened signature.
-                // Some CMI signatures use hidden self-alias heads (e.g. `ArrayExt!`)
-                // that are not directly resolvable from the current environment.
-                // Normalize those to the qualified access path.
+                // Persistent identifiers in debug output carry `!` (e.g.
+                // `ArrayExt!`). Keep those top-level alias targets distinct so
+                // they resolve through the persistent registry rather than the
+                // opened binding currently being installed.
                 let normalize_hidden_alias_path = |path: Path| -> Path {
                     fn go(
                         path: Path,
@@ -3958,7 +3959,10 @@ fn add_signature_to_env_with_options(
                     ) -> Path {
                         match path {
                             Path::Pident(alias_id) => {
-                                let clean = alias_id.name().trim_end_matches('!');
+                                if alias_id.is_persistent() {
+                                    return Path::Pident(alias_id);
+                                }
+                                let clean = alias_id.name();
                                 if clean == module_name {
                                     access_path.clone()
                                 } else if clean == module_path.last() {

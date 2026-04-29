@@ -17955,6 +17955,19 @@ impl Env {
             match path {
                 Path::Pident(id) => {
                     let mod_name = id.name();
+                    if id.is_persistent() {
+                        let result = pers_env.as_mut().and_then(|pers| {
+                            let ps = pers.find_pers_struct(mod_name, ctx)?;
+                            Some((
+                                copy_lookup_signature_for_subst(&ps.ps_sig, ctx),
+                                Some(mod_name.to_string()),
+                            ))
+                        });
+                        if result.is_some() {
+                            visiting.remove(path);
+                            return result;
+                        }
+                    }
                     if let Ok(md) = env.find_module(mod_name) {
                         let result =
                             resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
@@ -20388,7 +20401,7 @@ fn module_type_has_hidden_unpack_ident(mty: &crate::types::decl::ModuleType) -> 
     match mty {
         crate::types::decl::ModuleType::MtyIdent(Path::Pident(id))
         | crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id)) => {
-            id.name().starts_with("__")
+            id.name().starts_with("__") || id.is_persistent()
         }
         _ => false,
     }
@@ -20755,6 +20768,7 @@ fn with_resolved_child_module_components<'a, R>(
     parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
     child_name: &str,
     env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
@@ -20786,7 +20800,16 @@ fn with_resolved_child_module_components<'a, R>(
         crate::types::decl::ModuleType::MtySignature(sig) => {
             crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
         }
-        _ => return None,
+        _ => {
+            let sig = build_qualified_signature_for_access_path(
+                env,
+                &access_path,
+                &md.md_type,
+                pers_env,
+                ctx,
+            )?;
+            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig)
+        }
     };
     let result = (f
         .take()
@@ -20824,25 +20847,27 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
-            let mut continue_with_child =
+            let mut clone_parent =
                 |components: &crate::types::env_lazy::QualifiedModuleComponents| {
-                    with_resolved_child_module_components(
-                        components,
-                        child_name.as_str(),
-                        env,
-                        ctx,
-                        |child| f(child),
-                    )
-                    .flatten()
+                    Some(components.clone())
                 };
-            with_resolved_module_components_for_lid_inner(
+            let parent_components = with_resolved_module_components_for_lid_inner(
                 prefix,
                 arena,
                 env,
                 pers_env,
                 ctx,
-                &mut continue_with_child,
+                &mut clone_parent,
+            )?;
+            with_resolved_child_module_components(
+                &parent_components,
+                child_name.as_str(),
+                env,
+                pers_env,
+                ctx,
+                |child| f(child),
             )
+            .flatten()
         }
         Longident::Lapply(_, _) => None,
     }
@@ -21246,7 +21271,31 @@ fn build_module_signature_for_path<'a>(
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
-            if let Ok(md) = env
+            if id.is_persistent() {
+                if let Some(ps) = pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                {
+                    let access_path = Path::pident(Ident::create_persistent(id.name()));
+                    let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
+                    Some((access_path, sig))
+                } else if let Ok(md) = env.lookup_module(module_path) {
+                    let access_path = md
+                        .md_path
+                        .clone()
+                        .unwrap_or_else(|| Path::pident(id.clone()));
+                    let sig = build_qualified_signature_for_access_path(
+                        env,
+                        &access_path,
+                        &md.md_type,
+                        pers_env,
+                        ctx,
+                    )?;
+                    Some((access_path, sig))
+                } else {
+                    None
+                }
+            } else if let Ok(md) = env
                 .lookup_module(module_path)
                 .or_else(|_| env.find_module(id.name()))
             {
