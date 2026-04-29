@@ -4298,6 +4298,7 @@ fn force_qualified_value_type_paths<'a>(
         path: &Path,
         arity: usize,
         value_access_root: Option<&Ident>,
+        infer_stdlib_root_from_flat_parent: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
             ctx: &TypeContext<'_>,
@@ -4318,10 +4319,6 @@ fn force_qualified_value_type_paths<'a>(
                 })
         }
 
-        let root = value_access_root?;
-        if !root.is_persistent() {
-            return None;
-        }
         let Path::Pdot(parent, type_name, _) = path else {
             return None;
         };
@@ -4335,40 +4332,93 @@ fn force_qualified_value_type_paths<'a>(
             return None;
         }
 
-        let root_name = root.name();
-        let suffix = flat_parent.name().strip_prefix(&format!("{root_name}_"))?;
-        if suffix.is_empty() || suffix.contains("__") {
-            return None;
-        }
-
-        let mut candidate_parent = Path::pident(root.clone());
-        for segment in suffix.split('_') {
-            if segment.is_empty() {
+        let mut root_candidates = Vec::new();
+        if !infer_stdlib_root_from_flat_parent {
+            if let Some(root) = value_access_root {
+                if root.is_persistent() {
+                    root_candidates.push(root.clone());
+                } else {
+                    return None;
+                }
+            } else {
                 return None;
             }
-            candidate_parent = Path::pdot(candidate_parent, segment.to_string());
         }
-        let candidate = Path::pdot(candidate_parent.clone(), type_name.clone());
-        if candidate.same(path) {
-            return None;
-        }
-        if !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name) {
-            return None;
-        }
-        if !crate::types::ctype::resolved_type_items_share_identity(
-            ctx, env, &candidate, path, arity,
-        ) {
-            return None;
+        let flat_parent_name = flat_parent.name();
+        if infer_stdlib_root_from_flat_parent {
+            // OCaml compiler/ml/env.ml:1496-1524 builds persistent module
+            // component tables under the visible `Stdlib.*` access path, then
+            // compiler/ml/subst.ml:303-309 substitutes value descriptions as
+            // components are selected by env.ml:1090-1104. Rust can still see
+            // the flattened source module name (`Stdlib_ArrayBuffer.t`) from
+            // runtime signatures here, so only synthesize the `Stdlib` root for
+            // the argument-side compensation requested by the visitor below.
+            if let Some((root_name, _)) = flat_parent_name.split_once('_') {
+                if !root_candidates
+                    .iter()
+                    .any(|candidate: &Ident| candidate.name() == root_name)
+                    && root_name == "Stdlib"
+                {
+                    root_candidates.push(Ident::create_persistent(root_name));
+                }
+            }
         }
 
-        // OCaml compiler/ml/env.ml:1496-1524 builds persistent module
-        // component tables under the visible `Stdlib.*` access path, then
-        // compiler/ml/subst.ml:303-309 substitutes value descriptions as those
-        // components are selected by env.ml:1090-1104. Rust can still see the
-        // flattened source module name (`Stdlib_ArrayBuffer.t`) from runtime
-        // signatures here, so rewrite only when the nested component exists and
-        // resolves to the same type item.
-        Some(candidate)
+        for root in root_candidates {
+            let root_name = root.name();
+            let Some(suffix) = flat_parent.name().strip_prefix(&format!("{root_name}_")) else {
+                continue;
+            };
+            if suffix.is_empty() || suffix.contains("__") {
+                continue;
+            }
+
+            let mut candidate_parent = Path::pident(root);
+            let mut valid_suffix = true;
+            for segment in suffix.split('_') {
+                if segment.is_empty() {
+                    valid_suffix = false;
+                    break;
+                }
+                candidate_parent = Path::pdot(candidate_parent, segment.to_string());
+            }
+            if !valid_suffix {
+                continue;
+            }
+            let candidate = Path::pdot(candidate_parent.clone(), type_name.clone());
+            if candidate.same(path) {
+                continue;
+            }
+            let flattened_alias_equivalent = infer_stdlib_root_from_flat_parent
+                && crate::types::ctype::flattened_alias_paths_equivalent(
+                    ctx, env, &candidate, path, arity,
+                );
+            if !flattened_alias_equivalent
+                && !module_signature_declares_type_component(
+                    ctx,
+                    env,
+                    &candidate_parent,
+                    type_name,
+                )
+            {
+                continue;
+            }
+            if !flattened_alias_equivalent
+                && !crate::types::ctype::resolved_type_items_share_identity(
+                    ctx, env, &candidate, path, arity,
+                )
+            {
+                continue;
+            }
+
+            return Some(candidate);
+        }
+
+        // Preserve the selected-root rewrite first. Avoid forcing persistent
+        // signatures just to prove this rewrite, because OCaml only forces
+        // compiler/ml/env.ml:1568 module thunks when that component is actually
+        // selected.
+        None
     }
 
     fn visit<'a>(
@@ -4377,6 +4427,7 @@ fn force_qualified_value_type_paths<'a>(
         ty: TypeExprRef,
         value_access_root_is_local: bool,
         value_access_root: Option<&Ident>,
+        allow_stdlib_flat_parent_inference: bool,
         seen: &mut HashSet<TypeExprRef>,
     ) {
         let ctx = tctx.type_ctx;
@@ -4391,12 +4442,19 @@ fn force_qualified_value_type_paths<'a>(
                 let arg_ty = arg.typ;
                 let ret_ty = *ret;
                 drop(desc);
+                // OCaml compiler/ml/typecore.ml:4171-4192 types actual
+                // application arguments through `type_argument` before the
+                // result type is returned from typecore.ml:4219-4224. Restrict
+                // flattened Stdlib path inference to this argument side so Rust
+                // does not eagerly rewrite return nodes that OCaml has not
+                // observed through argument propagation.
                 visit(
                     tctx,
                     env,
                     arg_ty,
                     value_access_root_is_local,
                     value_access_root,
+                    true,
                     seen,
                 );
                 visit(
@@ -4405,6 +4463,7 @@ fn force_qualified_value_type_paths<'a>(
                     ret_ty,
                     value_access_root_is_local,
                     value_access_root,
+                    false,
                     seen,
                 );
             }
@@ -4418,6 +4477,7 @@ fn force_qualified_value_type_paths<'a>(
                         item,
                         value_access_root_is_local,
                         value_access_root,
+                        allow_stdlib_flat_parent_inference,
                         seen,
                     );
                 }
@@ -4454,7 +4514,28 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root_is_local,
                 )
                 .or_else(|| {
-                    persistent_nested_type_path(ctx, env, &path, args.len(), value_access_root)
+                    persistent_nested_type_path(
+                        ctx,
+                        env,
+                        &path,
+                        args.len(),
+                        value_access_root,
+                        false,
+                    )
+                })
+                .or_else(|| {
+                    allow_stdlib_flat_parent_inference
+                        .then(|| {
+                            persistent_nested_type_path(
+                                ctx,
+                                env,
+                                &path,
+                                args.len(),
+                                value_access_root,
+                                true,
+                            )
+                        })
+                        .flatten()
                 });
                 if let Some(rewritten_path) = rewritten_path
                 {
@@ -4474,6 +4555,7 @@ fn force_qualified_value_type_paths<'a>(
                         arg,
                         value_access_root_is_local,
                         value_access_root,
+                        allow_stdlib_flat_parent_inference,
                         seen,
                     );
                 }
@@ -4488,6 +4570,7 @@ fn force_qualified_value_type_paths<'a>(
                     fields,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
                 if let Some(args) = name_args {
@@ -4498,6 +4581,7 @@ fn force_qualified_value_type_paths<'a>(
                             arg,
                             value_access_root_is_local,
                             value_access_root,
+                            allow_stdlib_flat_parent_inference,
                             seen,
                         );
                     }
@@ -4513,6 +4597,7 @@ fn force_qualified_value_type_paths<'a>(
                     typ,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
                 visit(
@@ -4521,6 +4606,7 @@ fn force_qualified_value_type_paths<'a>(
                     rest,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
             }
@@ -4533,6 +4619,7 @@ fn force_qualified_value_type_paths<'a>(
                     inner,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
             }
@@ -4546,6 +4633,7 @@ fn force_qualified_value_type_paths<'a>(
                     row_more,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
                 for (_, field) in fields {
@@ -4557,6 +4645,7 @@ fn force_qualified_value_type_paths<'a>(
                                 arg,
                                 value_access_root_is_local,
                                 value_access_root,
+                                allow_stdlib_flat_parent_inference,
                                 seen,
                             )
                         }
@@ -4568,6 +4657,7 @@ fn force_qualified_value_type_paths<'a>(
                                     arg,
                                     value_access_root_is_local,
                                     value_access_root,
+                                    allow_stdlib_flat_parent_inference,
                                     seen,
                                 );
                             }
@@ -4586,6 +4676,7 @@ fn force_qualified_value_type_paths<'a>(
                     body,
                     value_access_root_is_local,
                     value_access_root,
+                    allow_stdlib_flat_parent_inference,
                     seen,
                 );
                 for var in vars {
@@ -4595,6 +4686,7 @@ fn force_qualified_value_type_paths<'a>(
                         var,
                         value_access_root_is_local,
                         value_access_root,
+                        allow_stdlib_flat_parent_inference,
                         seen,
                     );
                 }
@@ -4609,6 +4701,7 @@ fn force_qualified_value_type_paths<'a>(
                         arg,
                         value_access_root_is_local,
                         value_access_root,
+                        allow_stdlib_flat_parent_inference,
                         seen,
                     );
                 }
@@ -4626,6 +4719,7 @@ fn force_qualified_value_type_paths<'a>(
         ty,
         value_access_root_is_local,
         value_access_root.as_ref(),
+        false,
         &mut seen,
     );
 }
