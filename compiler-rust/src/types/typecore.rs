@@ -12569,24 +12569,16 @@ fn type_record(
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
-    let mut explicit_overrides: HashMap<
-        i32,
-        (
-            Located<LidentIdx>,
-            crate::types::LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        ),
-    > = HashMap::new();
-    let mut explicit_overrides_by_name: HashMap<
-        String,
-        (
-            Located<LidentIdx>,
-            crate::types::LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        ),
-    > = HashMap::new();
+    type ExplicitOverrideEntry = (
+        Located<LidentIdx>,
+        crate::types::LabelDescription,
+        RecordLabelDefinition,
+        bool,
+    );
+
+    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> = Vec::new();
+    let mut explicit_overrides: HashMap<i32, usize> = HashMap::new();
+    let mut explicit_overrides_by_name: HashMap<String, usize> = HashMap::new();
     let mut explicit_overrides_in_order = Vec::new();
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
 
@@ -12790,14 +12782,11 @@ fn type_record(
         } else {
             typed_expr
         };
-        // OCaml `type_label_exp` returns `{arg with exp_type = instance env arg.exp_type}`.
-        let final_expr = Expression::new(
-            final_expr.exp_desc.clone(),
-            final_expr.exp_loc,
-            crate::types::ctype::instance(ctx, final_expr.exp_type),
-            final_expr.exp_env,
-            final_expr.exp_attributes.clone(),
-        );
+        // OCaml `type_label_exp` returns `{arg with exp_type = instance env arg.exp_type}`
+        // (compiler/ml/typecore.ml:1185-1198). That is a shallow record update;
+        // mutate the owned Rust expression instead of deep-cloning its desc.
+        let mut final_expr = final_expr;
+        final_expr.exp_type = crate::types::ctype::instance(ctx, final_expr.exp_type);
 
         let entry = (
             field.lid.clone(),
@@ -12806,9 +12795,11 @@ fn type_record(
             false, // OCaml Texp_record always uses false for this flag
         );
 
-        explicit_overrides.insert(label_desc.lbl_pos, entry.clone());
-        explicit_overrides_by_name.insert(label_desc.lbl_name.clone(), entry.clone());
-        explicit_overrides_in_order.push(entry);
+        let entry_idx = explicit_entries.len();
+        explicit_entries.push(Some(entry));
+        explicit_overrides.insert(label_desc.lbl_pos, entry_idx);
+        explicit_overrides_by_name.insert(label_desc.lbl_name.clone(), entry_idx);
+        explicit_overrides_in_order.push(entry_idx);
     }
 
     let has_dotdotdot_field = fields
@@ -12918,13 +12909,17 @@ fn type_record(
             // Check if this label has an explicit override BEFORE doing instance_label.
             // OCaml only calls instance_label for explicit fields (in type_label_exp),
             // not for missing optional fields (which use lbl.lbl_arg directly).
-            if let Some(explicit) = explicit_overrides.remove(&key_pos) {
+            if let Some(explicit_idx) = explicit_overrides.remove(&key_pos) {
                 explicit_overrides_by_name.remove(&label_name);
-                typed_fields.push(explicit);
+                if let Some(explicit) = explicit_entries[explicit_idx].take() {
+                    typed_fields.push(explicit);
+                }
                 continue;
             }
-            if let Some(explicit) = explicit_overrides_by_name.remove(&label_name) {
-                typed_fields.push(explicit);
+            if let Some(explicit_idx) = explicit_overrides_by_name.remove(&label_name) {
+                if let Some(explicit) = explicit_entries[explicit_idx].take() {
+                    typed_fields.push(explicit);
+                }
                 continue;
             }
 
@@ -13051,9 +13046,16 @@ fn type_record(
         }
 
         // Preserve explicitly-typed fields even if we couldn't align their position.
-        typed_fields.extend(explicit_overrides_by_name.into_values());
+        typed_fields.extend(
+            explicit_overrides_by_name
+                .into_values()
+                .filter_map(|idx| explicit_entries[idx].take()),
+        );
     } else {
-        typed_fields = explicit_overrides_in_order;
+        typed_fields = explicit_overrides_in_order
+            .into_iter()
+            .filter_map(|idx| explicit_entries[idx].take())
+            .collect();
     }
 
     // Match OCaml's unify_kept (typecore.ml:2755-2770):
