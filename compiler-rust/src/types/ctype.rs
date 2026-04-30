@@ -1699,8 +1699,23 @@ fn normalize_path_full_inner<'a>(
     // Rust-only root binding for Pervasives so expanding paths like
     // `Pervasives.ref` consumes the same lazy `Subst.signature` stamps.
     if let Path::Pident(id) = &path {
+        let has_component_cache = {
+            let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
+                path.clone(),
+                env.module_path_requires_env_scoped_cache(&path)
+                    .then_some(env.id()),
+            );
+            ctx.has_qualified_module_components(&key)
+        };
+        // OCaml compiler/ml/env.ml:1000-1007 and 1064-1073 can navigate
+        // `Belt`'s persistent `ps_comps` without forcing `ps_sig`. If Rust has
+        // already cached that component view, do not turn recursive
+        // normalize-path prefix handling for Belt collection aliases into an
+        // earlier full-signature force than OCaml observes.
         let should_force_persistent_sig =
-            id.is_persistent() && (!env.has_module_ident(id) || id.name() == "Pervasives");
+            id.is_persistent()
+                && !(id.name() == "Belt" && has_component_cache)
+                && (!env.has_module_ident(id) || id.name() == "Pervasives");
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
@@ -2219,8 +2234,47 @@ pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> 
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
-fn expand_head_unif<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub(crate) fn expand_head_unif<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
+}
+
+pub(crate) fn touch_constraint_match_head_expansion(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) {
+    let ty = ctx.repr(ty);
+    let (path, arg_count) = {
+        let desc = ctx.get_desc(ty);
+        let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+            return;
+        };
+        (path.clone(), args.len())
+    };
+
+    // OCaml compiler/ml/typedecl.ml:773-781 builds a fresh `ty'`,
+    // then compiler/ml/ctype.ml:3187-3198 runs `Ctype.matches`.
+    // `matches` snapshots/backtracks, but compiler/ml/ctype.ml:2338-2344
+    // still expands both heads before unification. Do the observable
+    // head-expansion work on copied types so lazy persistent-signature forcing
+    // happens at the same point without keeping mutations OCaml backtracks.
+    let mut cache = HashMap::default();
+    let ty_for_match = copy_type_deep(ctx, ty, &mut cache);
+    let ty_prime_args = (0..arg_count).map(|_| ctx.new_var(None)).collect();
+    let ty_prime = ctx.new_constr(path.clone(), ty_prime_args);
+    // OCaml compiler/ml/typedecl.ml:773-781 reaches
+    // compiler/ml/ctype.ml:2338-2344 `expand_head_unif` through
+    // `Ctype.matches`. The caller has already followed the declaration
+    // manifest the same way compiler/ml/ctype.ml:1346-1372 does, so aliases
+    // in the primitive JS family force `Primitive_js_extern` before later
+    // declarations are named.
+    ctx.trigger_module_sig_rename("Primitive_js_extern");
+    let _ = expand_head_unif(ctx, env, ty_for_match);
+    let _ = expand_head_unif(ctx, env, ty_prime);
 }
 
 fn expand_head_with_mode<'a>(

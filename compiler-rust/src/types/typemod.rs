@@ -2901,6 +2901,9 @@ fn touch_type_constraint_path(
     };
 
     if let Some(path) = constr_path {
+        if constraint_path_needs_primitive_js_match_force(ctx, env, pers_env, &path) {
+            crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
+        }
         // OCaml compiler/ml/typedecl.ml:767-785 checks each declaration
         // `Tconstr` by building a fresh constructor, running
         // `Ctype.enforce_constraints`, then calling `Ctype.matches` on the
@@ -2926,6 +2929,188 @@ fn touch_type_constraint_path(
     for child in children {
         touch_type_constraint_path(ctx, env, pers_env, child, visited);
     }
+}
+
+fn path_root_is_named(path: &Path, root_name: &str) -> bool {
+    match path {
+        Path::Pident(id) => id.name() == root_name,
+        Path::Pdot(parent, _, _) => path_root_is_named(parent, root_name),
+        Path::Papply(functor, arg) => {
+            path_root_is_named(functor, root_name) || path_root_is_named(arg, root_name)
+        }
+    }
+}
+
+fn type_expr_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    root_name: &str,
+    visited: &mut HashSet<TypeExprRef>,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    if depth > 12 {
+        return false;
+    }
+
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return false;
+    }
+
+    let path = {
+        let desc = ctx.get_desc(ty);
+        if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
+            Some(path.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(path) = path {
+        if path_root_is_named(&path, root_name) {
+            return true;
+        }
+        if type_path_decl_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            &path,
+            root_name,
+            visited_paths,
+            depth + 1,
+        ) {
+            return true;
+        }
+    }
+
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    children.into_iter().any(|child| {
+        type_expr_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            child,
+            root_name,
+            visited,
+            visited_paths,
+            depth,
+        )
+    })
+}
+
+fn type_decl_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    decl: &crate::types::decl::TypeDeclaration,
+    root_name: &str,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    let mut visited = HashSet::default();
+    if let Some(manifest) = decl.type_manifest {
+        if type_expr_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            manifest,
+            root_name,
+            &mut visited,
+            visited_paths,
+            depth,
+        ) {
+            return true;
+        }
+    }
+    let mut kind_types = Vec::new();
+    crate::types::btype::iter_type_expr_kind(&decl.type_kind, |ty| kind_types.push(ty));
+    kind_types.into_iter().any(|ty| {
+        type_expr_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            ty,
+            root_name,
+            &mut visited,
+            visited_paths,
+            depth,
+        )
+    })
+}
+
+fn type_path_decl_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+    root_name: &str,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    if depth > 12 || !visited_paths.insert(path.clone()) {
+        return false;
+    }
+
+    let decl = match path {
+        Path::Pdot(parent, type_name, _) => crate::types::typecore::lookup_type_in_resolved_path(
+            parent, type_name, env, pers_env, ctx,
+        )
+        .map(|(_, _, decl)| decl),
+        Path::Pident(_) => env.lookup_type(path).ok().cloned(),
+        Path::Papply(_, _) => None,
+    };
+
+    decl.is_some_and(|decl| {
+        type_decl_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            &decl,
+            root_name,
+            visited_paths,
+            depth + 1,
+        )
+    })
+}
+
+fn constraint_path_needs_primitive_js_match_force(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+) -> bool {
+    if path_root_is_named(path, "Primitive_js_extern") {
+        return true;
+    }
+
+    // OCaml compiler/ml/typedecl.ml:773-781 checks constructor constraints by
+    // running `Ctype.matches`; for aliases like `Js.null`, compiler/ml/ctype.ml
+    // 2338-2344 expands the heads and reaches the `Primitive_js_extern` manifest
+    // before subsequent generated declarations are named. Keep the compensation
+    // to this primitive alias family until Rust's full `matches` backtracking is
+    // equivalent enough to run it for every type declaration constraint.
+    if let Path::Pdot(parent, type_name, _) = path {
+        let mut visited_paths = HashSet::default();
+        return crate::types::typecore::lookup_type_in_resolved_path(
+            parent, type_name, env, pers_env, ctx,
+        )
+        .is_some_and(|(_, _, decl)| {
+            type_decl_mentions_path_root(
+                ctx,
+                env,
+                pers_env,
+                &decl,
+                "Primitive_js_extern",
+                &mut visited_paths,
+                0,
+            )
+        });
+    }
+
+    false
 }
 
 fn touch_type_declaration_constraints(
