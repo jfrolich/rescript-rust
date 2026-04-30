@@ -243,6 +243,106 @@ fn parser_attrs_to_decl_attrs(
         .collect()
 }
 
+fn decl_attrs_mark_immediate(attrs: &[crate::types::decl::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| matches!(attr.attr_name.txt.as_str(), "immediate" | "ocaml.immediate"))
+}
+
+fn type_expr_is_immediate(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> bool {
+    // This is the `not (Ctype.maybe_pointer_type env ty)` predicate used by
+    // `compiler/ml/typedecl.ml:1331,1335`. The relevant OCaml pointer test is
+    // `compiler/ml/ctype.ml:4492-4512`.
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+            find_type_decl_for_path(env, ctx, path).is_some_and(|decl| decl.type_immediate)
+        }
+        crate::types::type_expr::TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            row.row_closed
+                && !row.row_fields.iter().any(|(_, field)| {
+                    matches!(
+                        crate::types::btype::row_field_repr(ctx, field),
+                        crate::types::type_expr::RowField::Rpresent(Some(_))
+                            | crate::types::type_expr::RowField::Reither {
+                                constant: false,
+                                ..
+                            }
+                    )
+                })
+        }
+        crate::types::type_expr::TypeDesc::Tlink(next)
+        | crate::types::type_expr::TypeDesc::Tsubst(next) => {
+            type_expr_is_immediate(ctx, env, *next)
+        }
+        _ => false,
+    }
+}
+
+fn compute_type_immediacy(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    type_kind: &crate::types::TypeKind,
+    type_manifest: Option<TypeExprRef>,
+    type_attributes: &[crate::types::decl::Attribute],
+    type_unboxed: &crate::types::UnboxedStatus,
+) -> bool {
+    // OCaml `compiler/ml/typedecl.ml:1324-1336` marks all-constant
+    // variants immediate, marks abstract aliases immediate when their
+    // manifest is immediate, and only trusts `[@immediate]` on opaque
+    // abstracts. ReScript's comparison specialization depends on this via
+    // `compiler/ml/translcore.ml:407-415`.
+    match (type_kind, type_manifest) {
+        (crate::types::TypeKind::TypeVariant(cstrs), _)
+            if type_unboxed.unboxed && cstrs.len() == 1 =>
+        {
+            match &cstrs[0].cd_args {
+                crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 => {
+                    type_expr_is_immediate(ctx, env, args[0])
+                }
+                crate::types::decl::ConstructorArguments::CstrRecord(labels)
+                    if labels.len() == 1 =>
+                {
+                    type_expr_is_immediate(ctx, env, labels[0].ld_type)
+                }
+                _ => {
+                    !cstrs.is_empty()
+                        && cstrs.iter().all(|cstr| {
+                            matches!(
+                                &cstr.cd_args,
+                                crate::types::decl::ConstructorArguments::CstrTuple(args)
+                                    if args.is_empty()
+                            )
+                        })
+                }
+            }
+        }
+        (crate::types::TypeKind::TypeRecord(labels, _), _) if type_unboxed.unboxed => labels
+            .first()
+            .filter(|_| labels.len() == 1)
+            .is_some_and(|label| type_expr_is_immediate(ctx, env, label.ld_type)),
+        (crate::types::TypeKind::TypeVariant(cstrs), _) => {
+            !cstrs.is_empty()
+                && cstrs.iter().all(|cstr| {
+                    matches!(
+                        &cstr.cd_args,
+                        crate::types::decl::ConstructorArguments::CstrTuple(args)
+                            if args.is_empty()
+                    )
+                })
+        }
+        (crate::types::TypeKind::TypeAbstract, Some(manifest)) => {
+            type_expr_is_immediate(ctx, env, manifest)
+        }
+        (crate::types::TypeKind::TypeAbstract, None) => decl_attrs_mark_immediate(type_attributes),
+        _ => false,
+    }
+}
+
 fn decl_attr_to_parser_attr(
     arena: &ParseArena,
     attr: &crate::types::decl::Attribute,
@@ -6452,6 +6552,44 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     )
                                 }
                             };
+                            let type_attributes =
+                                parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+                            let decl_has_unboxed_attr = decl
+                                .ptype_attributes
+                                .iter()
+                                .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
+                            let typed_type_decl_hint =
+                                typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
+                            let type_unboxed = typed_type_decl_hint
+                                .map(|typed_decl| typed_decl.typ_type.type_unboxed)
+                                .unwrap_or_else(|| match &type_kind {
+                                    crate::types::TypeKind::TypeVariant(cstrs)
+                                        if decl_has_unboxed_attr && cstrs.len() <= 1 =>
+                                    {
+                                        crate::types::UnboxedStatus::TRUE_FALSE
+                                    }
+                                    crate::types::TypeKind::TypeRecord(labels, _)
+                                        if decl_has_unboxed_attr && labels.len() == 1 =>
+                                    {
+                                        crate::types::UnboxedStatus::TRUE_FALSE
+                                    }
+                                    _ => crate::types::UnboxedStatus::default(),
+                                });
+                            // Keep module-type declaration conversion aligned with
+                            // OCaml `compiler/ml/typedecl.ml:2005`; this path
+                            // feeds constrained module environments.
+                            let type_immediate = typed_type_decl_hint
+                                .map(|typed_decl| typed_decl.typ_type.type_immediate)
+                                .unwrap_or_else(|| {
+                                    compute_type_immediacy(
+                                        tctx.type_ctx,
+                                        &sig_env,
+                                        &type_kind,
+                                        type_manifest,
+                                        &type_attributes,
+                                        &type_unboxed,
+                                    )
+                                });
 
                             // end_def + generalize: mark params/manifest as generic
                             tctx.type_ctx.end_def();
@@ -6484,9 +6622,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     .unwrap_or(type_variance),
                                 type_newtype_level: None,
                                 type_loc: arena.to_location(decl.ptype_loc),
-                                type_attributes: vec![],
-                                type_immediate: false,
-                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_attributes,
+                                type_immediate,
+                                type_unboxed,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id.clone())),
                             };
@@ -11520,6 +11658,21 @@ fn type_structure_item<'a>(
                     ),
                 };
 
+                let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+                let type_unboxed = if decl_has_unboxed_attr && constructors.len() <= 1 {
+                    crate::types::UnboxedStatus::TRUE_FALSE
+                } else {
+                    crate::types::UnboxedStatus::default()
+                };
+                let type_immediate = compute_type_immediacy(
+                    ctx,
+                    &temp_env,
+                    &internal_type_kind,
+                    manifest_type_ref,
+                    &type_attributes,
+                    &type_unboxed,
+                );
+
                 // Create internal type declaration for the environment
                 let mut internal_decl = crate::types::TypeDeclaration {
                     type_params: internal_type_params,
@@ -11530,13 +11683,9 @@ fn type_structure_item<'a>(
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
                     type_loc: arena.to_location(decl.ptype_loc),
-                    type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
-                    type_immediate: false,
-                    type_unboxed: if decl_has_unboxed_attr && constructors.len() <= 1 {
-                        crate::types::UnboxedStatus::TRUE_FALSE
-                    } else {
-                        crate::types::UnboxedStatus::default()
-                    },
+                    type_attributes,
+                    type_immediate,
+                    type_unboxed,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -13238,6 +13387,10 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 }
                 None => (None, None),
             };
+            let decl_has_unboxed_attr = decl
+                .ptype_attributes
+                .iter()
+                .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
 
             // Preserve signature type kind like OCaml transl_signature -> Typedecl.transl_type_decl.
             let (internal_type_kind, typed_tree_kind) = match &decl.ptype_kind {
@@ -13495,6 +13648,32 @@ fn transl_sig_type_declarations_with_ids<'a>(
 
             let typ_private = decl.ptype_private;
 
+            let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+            let type_unboxed = match &internal_type_kind {
+                crate::types::TypeKind::TypeVariant(cstrs)
+                    if decl_has_unboxed_attr && cstrs.len() <= 1 =>
+                {
+                    crate::types::UnboxedStatus::TRUE_FALSE
+                }
+                crate::types::TypeKind::TypeRecord(labels, _)
+                    if decl_has_unboxed_attr && labels.len() == 1 =>
+                {
+                    crate::types::UnboxedStatus::TRUE_FALSE
+                }
+                _ => crate::types::UnboxedStatus::default(),
+            };
+            // OCaml computes signature declaration immediacy after translating
+            // the declaration body (`compiler/ml/typedecl.ml:2005`), using the
+            // same `compute_immediacy` helper as implementation declarations.
+            let type_immediate = compute_type_immediacy(
+                ctx,
+                &temp_env,
+                &internal_type_kind,
+                manifest_type_ref,
+                &type_attributes,
+                &type_unboxed,
+            );
+
             // Keep internal declaration shape aligned with parsed signature declaration.
             let internal_decl = crate::types::TypeDeclaration {
                 type_params: internal_type_params,
@@ -13508,12 +13687,9 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
                 type_newtype_level: None,
                 type_loc: arena.to_location(decl.ptype_loc),
-                type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
-                type_immediate: false,
-                type_unboxed: crate::types::UnboxedStatus {
-                    unboxed: false,
-                    default: false,
-                },
+                type_attributes,
+                type_immediate,
+                type_unboxed,
                 type_inlined_types: vec![],
                 type_path: Some(Path::pident(type_id.clone())),
             };
