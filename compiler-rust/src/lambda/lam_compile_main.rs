@@ -12,7 +12,7 @@ use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
 use crate::lambda::lam_pass_collect::collect_info;
 use crate::lambda::lam_pass_deep_flatten::deep_flatten;
-use crate::lambda::lam_pass_exits::simplify_exits;
+use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets;
 use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx;
 use crate::lambda::lam_primitive::Primitive;
@@ -57,7 +57,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:159 — simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:161 — collect_info before simplify_alias.
     collect_info(&mut meta, &lam);
@@ -84,7 +84,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = alpha_conversion(&meta, &lam);
 
     // lam_compile_main.ml:182 — simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:183 — collect_info.
     collect_info(&mut meta, &lam);
@@ -99,7 +99,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = simplify_lets(&lam);
 
     // lam_compile_main.ml:200 — final simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
     // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list

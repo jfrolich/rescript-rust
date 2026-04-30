@@ -225,6 +225,70 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
 /// (`subst_tbl = (Ident.t list * lam_subst) Hash_int.t` lam_pass_exits.ml:86)
 type SubstTbl = HashMap<i32, (Vec<Ident>, Lambda)>;
 
+fn contains_static_catch(lam: &Lambda) -> bool {
+    match lam {
+        Lambda::LstaticCatch(_, _, _) => true,
+        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
+        Lambda::Lapply(apply) => {
+            contains_static_catch(&apply.ap_func)
+                || apply.ap_args.iter().any(contains_static_catch)
+        }
+        Lambda::Lfunction(func) => contains_static_catch(&func.body),
+        Lambda::Llet(_, _, value, body) => {
+            contains_static_catch(value) || contains_static_catch(body)
+        }
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, expr)| contains_static_catch(expr))
+                || contains_static_catch(body)
+        }
+        Lambda::Lprim(info) => info.args.iter().any(contains_static_catch),
+        Lambda::Lswitch(arg, sw) => {
+            contains_static_catch(arg)
+                || sw
+                    .sw_consts
+                    .iter()
+                    .any(|(_, body)| contains_static_catch(body))
+                || sw
+                    .sw_blocks
+                    .iter()
+                    .any(|(_, body)| contains_static_catch(body))
+                || sw
+                    .sw_failaction
+                    .as_deref()
+                    .is_some_and(contains_static_catch)
+        }
+        Lambda::LstringSwitch(arg, cases, default) => {
+            contains_static_catch(arg)
+                || cases.iter().any(|(_, body)| contains_static_catch(body))
+                || default.as_deref().is_some_and(contains_static_catch)
+        }
+        Lambda::LstaticRaise(_, args) => args.iter().any(contains_static_catch),
+        Lambda::LtryWith(body, _, handler) => {
+            contains_static_catch(body) || contains_static_catch(handler)
+        }
+        Lambda::LifThenElse(cond, then_, else_) => {
+            contains_static_catch(cond)
+                || contains_static_catch(then_)
+                || contains_static_catch(else_)
+        }
+        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+            contains_static_catch(first) || contains_static_catch(second)
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            contains_static_catch(start)
+                || contains_static_catch(end)
+                || contains_static_catch(body)
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            contains_static_catch(iterable) || contains_static_catch(body)
+        }
+        Lambda::Lassign(_, value) => contains_static_catch(value),
+        Lambda::Lbreak | Lambda::Lcontinue => false,
+    }
+}
+
 /// `Lam_pass_exits.subst_helper` (lam_pass_exits.ml:153-239).
 fn subst_helper(
     subst: &mut SubstTbl,
@@ -450,9 +514,23 @@ fn subst_helper(
 /// global mutable counter, so the caller should thread a pipeline-wide
 /// `IdGenerator` to avoid collisions with later beta-reduction renames.
 pub fn simplify_exits(lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
-    let counts = count_helper(lam);
+    simplify_exits_owned(lam.clone(), id_gen)
+}
+
+/// Owned variant of `Lam_pass_exits.simplify_exits` (lam_pass_exits.ml:241-243).
+///
+/// If there is no `Lstaticcatch`, `subst_helper` cannot insert a substitution
+/// entry (lam_pass_exits.ml:157-183), and every later arm only rebuilds the
+/// same constructors while preserving `Lstaticraise` nodes (lam_pass_exits.ml:
+/// 184-239). Returning the owned input in that case is therefore the same
+/// transformation without a full-tree clone.
+pub fn simplify_exits_owned(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
+    if !contains_static_catch(&lam) {
+        return lam;
+    }
+    let counts = count_helper(&lam);
     let mut subst: SubstTbl = HashMap::new();
-    subst_helper(&mut subst, &counts, id_gen, lam)
+    subst_helper(&mut subst, &counts, id_gen, &lam)
 }
 
 /// Standalone entry point that seeds its own `IdGenerator` from the lambda's
