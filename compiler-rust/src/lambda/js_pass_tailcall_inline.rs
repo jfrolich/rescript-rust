@@ -69,10 +69,12 @@ impl TailcallInlineState {
         Self { decls, statuses }
     }
 
-    fn transform_block(&mut self, block: Block) -> Block {
+    fn transform_block(&mut self, mut block: Block) -> Block {
         if block.len() == 1 {
-            if let Some(inlined) = self.try_inline_single_return_block(&block[0]) {
-                return inlined;
+            let stmt = block.pop().expect("checked block length");
+            match self.try_inline_single_return_statement(stmt) {
+                Ok(inlined) => return inlined,
+                Err(stmt) => block.push(stmt),
             }
         }
 
@@ -387,36 +389,91 @@ impl TailcallInlineState {
         Expression { desc, comment }
     }
 
-    fn try_inline_single_return_block(&mut self, stmt: &Statement) -> Option<Block> {
-        let StatementDesc::Return(expr) = &stmt.desc else {
-            return None;
+    fn try_inline_single_return_statement(&mut self, stmt: Statement) -> Result<Block, Statement> {
+        let Statement { desc, comment } = stmt;
+        let StatementDesc::Return(expr) = desc else {
+            return Err(Statement { desc, comment });
         };
-        let ExpressionDesc::Call(func, args, _) = &expr.desc else {
-            return None;
+        let Expression {
+            desc: expr_desc,
+            comment: expr_comment,
+        } = expr;
+        let ExpressionDesc::Call(func, args, info) = expr_desc else {
+            return Err(Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: expr_desc,
+                    comment: expr_comment,
+                }),
+                comment,
+            });
         };
 
-        match &func.desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => self.inline_named_call(id, args),
+        let Expression {
+            desc: func_desc,
+            comment: func_comment,
+        } = *func;
+        match func_desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
+                match self.inline_named_call_owned(&id, args) {
+                    Ok(block) => Ok(block),
+                    Err(args) => Err(Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Call(
+                                Box::new(Expression {
+                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                    comment: func_comment,
+                                }),
+                                args,
+                                info,
+                            ),
+                            comment: expr_comment,
+                        }),
+                        comment,
+                    }),
+                }
+            }
             ExpressionDesc::Fun {
                 is_method: false,
                 params,
                 body,
+                env: _,
+                return_unit: _,
                 async_: false,
                 directive: None,
-                ..
-            } if params.len() == args.len() => Some(self.inline_function_call(params, body, args)),
-            _ => None,
+            } if params.len() == args.len() => {
+                Ok(self.inline_function_call_owned(params, body, args))
+            }
+            func_desc => Err(Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Call(
+                        Box::new(Expression {
+                            desc: func_desc,
+                            comment: func_comment,
+                        }),
+                        args,
+                        info,
+                    ),
+                    comment: expr_comment,
+                }),
+                comment,
+            }),
         }
     }
 
-    fn inline_named_call(&mut self, ident: &Ident, args: &[Expression]) -> Option<Block> {
+    fn inline_named_call_owned(
+        &mut self,
+        ident: &Ident,
+        args: Vec<Expression>,
+    ) -> Result<Block, Vec<Expression>> {
         if self.statuses.get(ident).copied() != Some(UsedStats::OncePure) {
-            return None;
+            return Err(args);
         }
 
-        let decl = self.decls.get(ident)?.clone();
+        let Some(decl) = self.decls.get(ident).cloned() else {
+            return Err(args);
+        };
         if !is_lexical_binding_kind(decl.property) {
-            return None;
+            return Err(args);
         }
 
         let Some(Expression {
@@ -432,31 +489,30 @@ impl TailcallInlineState {
             ..
         }) = decl.value
         else {
-            return None;
+            return Err(args);
         };
 
         if params.len() != args.len() {
-            return None;
+            return Err(args);
         }
 
         self.statuses.insert(ident.clone(), UsedStats::DeadPure);
-        Some(self.inline_function_call(&params, &body, args))
+        Ok(self.inline_function_call_owned(params, body, args))
     }
 
-    fn inline_function_call(
+    fn inline_function_call_owned(
         &mut self,
-        params: &[Ident],
-        body: &Block,
-        args: &[Expression],
+        params: Vec<Ident>,
+        body: Block,
+        args: Vec<Expression>,
     ) -> Block {
-        let processed_body = self.transform_block(body.clone());
-        let immutable_mask = immutable_param_mask(params, &processed_body);
+        let processed_body = self.transform_block(body);
+        let immutable_mask = immutable_param_mask(&params, &processed_body);
         let args = args
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|arg| self.transform_expression(arg))
             .collect();
-        inline_tailcall_call(&immutable_mask, params, args, processed_body)
+        inline_tailcall_call(&immutable_mask, &params, args, processed_body)
     }
 }
 
