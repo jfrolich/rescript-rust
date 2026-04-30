@@ -1580,8 +1580,9 @@ const MAX_RAW: i32 = 32;
 /// Equivalent to OCaml's `Lambda.make_key`.
 fn make_key(e: &RawLambda) -> Option<RawLambda> {
     let mut count = 0i32;
+    type KeyEnv = Vec<(Ident, RawLambda)>;
     fn tr_rec(
-        env: &HashMap<Ident, RawLambda>,
+        env: &mut KeyEnv,
         e: &RawLambda,
         count: &mut i32,
         next_id: &mut i32,
@@ -1592,7 +1593,9 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
         }
         match e {
             RawLambda::Lvar(id) => {
-                if let Some(replacement) = env.get(id) {
+                if let Some((_, replacement)) =
+                    env.iter().rev().find(|(key, _)| key.same(id))
+                {
                     Some(replacement.clone())
                 } else {
                     Some(e.clone())
@@ -1620,9 +1623,10 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             RawLambda::Llet(LetKind::Alias, x, ex, body) => {
                 // Ignore aliases -> substitute
                 let ex = tr_rec(env, ex, count, next_id)?;
-                let mut new_env = env.clone();
-                new_env.insert(x.clone(), ex);
-                tr_rec(&new_env, body, count, next_id)
+                env.push((x.clone(), ex));
+                let result = tr_rec(env, body, count, next_id);
+                env.pop();
+                result
             }
             RawLambda::Llet(kind, x, ex, body)
                 if matches!(
@@ -1638,9 +1642,9 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 let ex_norm = tr_rec(env, ex, count, next_id)?;
                 let y = Ident::new(x.name(), *next_id, IdentFlags::NONE);
                 *next_id += 1;
-                let mut new_env = env.clone();
-                new_env.insert(x.clone(), RawLambda::Lvar(y.clone()));
-                let body_norm = tr_rec(&new_env, body, count, next_id)?;
+                env.push((x.clone(), RawLambda::Lvar(y.clone())));
+                let body_norm = tr_rec(env, body, count, next_id)?;
+                env.pop();
                 Some(RawLambda::Llet(
                     *kind,
                     y,
@@ -1742,7 +1746,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
     }
 
     fn tr_recs(
-        env: &HashMap<Ident, RawLambda>,
+        env: &mut KeyEnv,
         es: &[RawLambda],
         count: &mut i32,
         next_id: &mut i32,
@@ -1751,7 +1755,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
     }
 
     fn tr_sw(
-        env: &HashMap<Ident, RawLambda>,
+        env: &mut KeyEnv,
         sw: &RawLambdaSwitch,
         count: &mut i32,
         next_id: &mut i32,
@@ -1778,7 +1782,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
     }
 
     fn tr_opt(
-        env: &HashMap<Ident, RawLambda>,
+        env: &mut KeyEnv,
         e: Option<&RawLambda>,
         count: &mut i32,
         next_id: &mut i32,
@@ -1790,7 +1794,11 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
     }
 
     let mut next_id = 0i32;
-    tr_rec(&HashMap::new(), e, &mut count, &mut next_id)
+    // OCaml's `Lambda.make_key` extends a tiny identifier environment with
+    // `Ident.add` while capped by `max_raw = 32`
+    // (`compiler/ml/lambda.ml:432-466`). Use a stack of bindings here instead
+    // of cloning a hash table for every normalized `let`.
+    tr_rec(&mut Vec::new(), e, &mut count, &mut next_id)
 }
 
 /// Convert a RawLambda to a string key for comparison purposes.
