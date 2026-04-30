@@ -368,7 +368,13 @@ pub struct Env {
     module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
 
     /// Summary of bindings.
-    summary: Arc<EnvSummary>,
+    ///
+    /// OCaml keeps `Env.summary` for paths that reconstruct environment
+    /// deltas. The Rust checker does not read summaries outside this module;
+    /// all semantic lookup state lives in the binding tables below. Keep the
+    /// public accessor stable but avoid building an unused persistent chain on
+    /// every binding addition.
+    summary: EnvSummary,
 
     /// Local constraints (for GADTs).
     local_constraints: im_rc::HashMap<Path, Arc<TypeDeclaration>>,
@@ -433,7 +439,7 @@ impl Env {
             modtypes: BindingTable::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
-            summary: Arc::new(EnvSummary::Empty),
+            summary: EnvSummary::Empty,
             local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
@@ -590,16 +596,14 @@ impl Env {
     pub fn add_value(&mut self, id: Ident, desc: ValueDescription) {
         self.bump_id();
         let desc = Arc::new(desc);
-        self.values.add(id.clone(), desc.clone());
-        self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
+        self.values.add(id, desc);
     }
 
     /// Add a value binding from an opened module (lower priority than local bindings).
     pub fn add_opened_value(&mut self, id: Ident, desc: ValueDescription) {
         self.bump_id();
         let desc = Arc::new(desc);
-        self.values.add_opened(id.clone(), desc.clone());
-        self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
+        self.values.add_opened(id, desc);
     }
 
     /// Find a value by name.
@@ -676,16 +680,14 @@ impl Env {
     pub fn add_type(&mut self, id: Ident, decl: TypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.types.add(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
+        self.types.add(id, decl);
     }
 
     /// Add a type binding from an opened module (lower priority than local bindings).
     pub fn add_opened_type(&mut self, id: Ident, decl: TypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.types.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
+        self.types.add_opened(id, decl);
     }
 
     /// Find a type by name.
@@ -896,9 +898,8 @@ impl Env {
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
-        self.modules.add(id.clone(), decl.clone());
+        self.modules.add(id.clone(), decl);
         self.module_components.add(id.clone(), stored_components);
-        self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
     }
 
     /// Add a module binding.
@@ -911,8 +912,7 @@ impl Env {
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
-        self.modules.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
+        self.modules.add_opened(id, decl);
     }
 
     /// Find a module by name.
@@ -1073,16 +1073,14 @@ impl Env {
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.modtypes.add(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
+        self.modtypes.add(id, decl);
     }
 
     /// Add a module type binding from an opened module (lower priority than local bindings).
     pub fn add_opened_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.modtypes.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
+        self.modtypes.add_opened(id, decl);
     }
 
     /// Find a module type by name.
