@@ -1387,9 +1387,7 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
-    let lambda_start_stamp = type_ctx
-        .current_stamp()
-        .max(max_lambda_input_stamp(&typed_structure));
+    let lambda_start_stamp = type_ctx.current_stamp();
 
     let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
     if options.dump_lambda && raw_trace {
@@ -3377,9 +3375,7 @@ pub fn compile_preprocessed_structure_in_process(
     };
 
     let t_lambda = phase_now();
-    let lambda_start_stamp = type_ctx
-        .current_stamp()
-        .max(max_lambda_input_stamp(&typed_structure));
+    let lambda_start_stamp = type_ctx.current_stamp();
 
     let unit_name = options
         .source_filename
