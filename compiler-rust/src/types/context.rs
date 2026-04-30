@@ -280,6 +280,15 @@ pub struct TypeContext<'a> {
         >,
     >,
 
+    /// Reconstructed record label descriptions keyed by type path.
+    /// OCaml installs one shared `lbl_all` array for a record declaration and
+    /// reuses it from record typing (`compiler/ml/typecore.ml:2802,2833-2842`).
+    /// Rust reconstructs fallback label descriptions from declarations, so cache
+    /// that reconstructed array per TypeContext instead of rebuilding large
+    /// records such as `JsxDOM.domProps` for every JSX literal.
+    record_label_descriptions_cache:
+        RefCell<ahash::AHashMap<String, Vec<super::decl::LabelDescription>>>,
+
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
     /// pattern field is resolved; we model that with an append-only side table.
@@ -357,6 +366,7 @@ impl<'a> TypeContext<'a> {
             predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
+            record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
@@ -954,6 +964,28 @@ impl<'a> TypeContext<'a> {
         )>,
     > {
         self.record_labels_cache
+            .borrow()
+            .get(type_path_name)
+            .cloned()
+    }
+
+    /// Cache reconstructed record label descriptions for a type path.
+    pub fn register_record_label_descriptions(
+        &self,
+        type_path_name: &str,
+        labels: Vec<super::decl::LabelDescription>,
+    ) {
+        self.record_label_descriptions_cache
+            .borrow_mut()
+            .insert(type_path_name.to_string(), labels);
+    }
+
+    /// Look up reconstructed record label descriptions for a type path.
+    pub fn get_record_label_descriptions(
+        &self,
+        type_path_name: &str,
+    ) -> Option<Vec<super::decl::LabelDescription>> {
+        self.record_label_descriptions_cache
             .borrow()
             .get(type_path_name)
             .cloned()

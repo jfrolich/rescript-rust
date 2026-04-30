@@ -19364,30 +19364,40 @@ fn build_record_label_descriptions<'a>(
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
     };
+    let cache_key = format!("{:?}", record_path);
+    if let Some(cached) = ctx.get_record_label_descriptions(&cache_key) {
+        return Some(cached);
+    }
+
     let shared_res = ctx.new_generic_constr(record_path, decl.type_params.clone());
-    Some(
-        labels
-            .iter()
-            .enumerate()
-            .map(|(pos, ld)| crate::types::LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
-                lbl_res: shared_res,
-                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                    ctx,
-                    ld.ld_type,
-                    &decl.type_params,
-                ),
-                lbl_mut: ld.ld_mutable,
-                lbl_optional: ld.ld_optional,
-                lbl_pos: pos as i32,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: repr.clone(),
-                lbl_private: decl.type_private,
-                lbl_loc: ld.ld_loc.clone(),
-                lbl_attributes: ld.ld_attributes.clone(),
-            })
-            .collect(),
-    )
+    // OCaml assigns `lbl_all` when label descriptions are installed in the
+    // environment, then reuses that array in `type_record`
+    // (compiler/ml/typecore.ml:2802,2840-2842). This fallback reconstructs
+    // descriptions for paths that did not come through the label environment;
+    // do not register a fresh array for every record literal.
+    let descriptions = labels
+        .iter()
+        .enumerate()
+        .map(|(pos, ld)| crate::types::LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: shared_res,
+            lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                ctx,
+                ld.ld_type,
+                &decl.type_params,
+            ),
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: crate::types::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: decl.type_private,
+            lbl_loc: ld.ld_loc.clone(),
+            lbl_attributes: ld.ld_attributes.clone(),
+        })
+        .collect::<Vec<_>>();
+    ctx.register_record_label_descriptions(&cache_key, descriptions.clone());
+    Some(descriptions)
 }
 
 fn specialize_label_for_record_ty<'a>(
