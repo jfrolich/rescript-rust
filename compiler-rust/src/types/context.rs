@@ -1553,7 +1553,7 @@ impl<'a> TypeContext<'a> {
         // Fast path: check if t is already a representative (no link).
         // This avoids any allocation for the common case.
         let first_next = {
-            let desc = self.get_desc(t);
+            let desc = self.types.get(t).desc();
             match &*desc {
                 TypeDesc::Tlink(next) => *next,
                 TypeDesc::Tfield {
@@ -1575,7 +1575,7 @@ impl<'a> TypeContext<'a> {
         let mut current = first_next;
         for _ in 0..10_000 {
             let next = {
-                let desc = self.get_desc(current);
+                let desc = self.types.get(current).desc();
                 match &*desc {
                     TypeDesc::Tlink(next) => Some(*next),
                     TypeDesc::Tfield {
