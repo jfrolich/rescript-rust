@@ -5059,9 +5059,6 @@ pub fn compute_variance_decl(
     decl: &super::decl::TypeDeclaration,
 ) -> Vec<Variance> {
     let params = &decl.type_params;
-    if params.is_empty() {
-        return vec![];
-    }
 
     // OCaml typedecl.ml compute_variance_decl:
     // abstract/open types with no manifest derive their semantic variance from
@@ -5097,6 +5094,10 @@ pub fn compute_variance_decl(
 
     // Map from TypeExprRef (repr of param) to accumulated variance
     let mut visited: HashMap<TypeExprRef, Variance> = HashMap::new();
+    // OCaml compiler/ml/typedecl.ml:1128-1143 still walks the body of a
+    // zero-parameter declaration to compute occurrences. That traversal has
+    // observable `Env.find_type` lazy-forcing effects for constructor payloads
+    // such as `Pervasives.ref`, so do not return early when `params` is empty.
     let param_reprs: Vec<TypeExprRef> = params.iter().map(|p| ctx.repr(*p)).collect();
 
     // Collect (is_mutable, type) pairs from the type body
@@ -5208,18 +5209,27 @@ fn compute_variance_rec(
                 let path = path.clone();
                 let args = args.clone();
                 drop(desc);
-                let variances = env
-                    .lookup_type(&path)
+                // OCaml compiler/ml/typedecl.ml:1064-1066 asks
+                // `Env.find_type` for constructor variance, which goes through
+                // compiler/ml/env.ml:800-813 path lookup and can force the
+                // same lazy persistent signature components that later stamps
+                // depend on. Use Rust's path-aware helper instead of the
+                // name fallback-only env lookup.
+                if matches!(
+                    &path,
+                    Path::Pdot(parent, _, _)
+                        if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives")
+                ) {
+                    // OCaml compiler/ml/env.ml:783-788 resolves the persistent
+                    // parent of `Pervasives.ref` while serving the
+                    // compiler/ml/typedecl.ml:1064-1066 variance lookup. Rust's
+                    // initial environment stores that root module eagerly, so
+                    // explicitly consume the corresponding lazy rename here.
+                    ctx.trigger_module_sig_rename("Pervasives");
+                }
+                let variances = lookup_type_decl_for_path(ctx, env, &path)
                     .map(|d| d.type_variance.clone())
-                    .unwrap_or_else(|_| {
-                        if let Path::Pdot(..) = &path {
-                            let path_name = path.name();
-                            if let Some(decl_ref) = ctx.find_type_decl_by_path(&path_name) {
-                                return decl_ref.type_variance.clone();
-                            }
-                        }
-                        vec![Variance::MAY_INV; args.len()]
-                    });
+                    .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
                 for (i, arg) in args.iter().enumerate() {
                     let var = variances.get(i).copied().unwrap_or(Variance::MAY_INV);
                     let cv = |f: VarianceFlag| var.mem(f);
