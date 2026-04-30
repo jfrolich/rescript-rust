@@ -1719,6 +1719,27 @@ fn normalize_path_full_inner<'a>(
         let parent_root_name = path_root_ident(parent).map(|id| id.name());
         let parent_is_implicit_root =
             matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"));
+        if parent_is_implicit_root
+            && let Ok((_, md, false)) = env.find_module_with_origin(module_name)
+            && md.md_path.as_ref().is_some_and(|md_path| md_path.same(path))
+            && let super::decl::ModuleType::MtyAlias(_, alias_path)
+                | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
+            && resolved_module_signature_has_submodules(ctx, alias_path)
+            && !alias_path.same(path)
+        {
+            // OCaml compiler/ml/env.ml:781-793 descends through opened
+            // `comp_components`, and env.ml:800-811 reads opened module
+            // aliases before `normalize_path` would recurse into the synthetic
+            // implicit Stdlib/Pervasives root from compiler/core/res_compmisc.ml:61-62.
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
+        }
         if !parent_is_implicit_root
             && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
             && !alias_path.same(path)
@@ -1902,6 +1923,14 @@ fn normalize_path_full_inner<'a>(
     }
 
     path
+}
+
+fn resolved_module_signature_has_submodules(ctx: &TypeContext<'_>, path: &Path) -> bool {
+    ctx.find_resolved_module_sig(&path.name())
+        .is_some_and(|(_, sig)| {
+            sig.iter()
+                .any(|item| matches!(item, super::decl::SignatureItem::SigModule(..)))
+        })
 }
 
 /// has a manifest (i.e., `type t = <body>`), expand it by substituting
