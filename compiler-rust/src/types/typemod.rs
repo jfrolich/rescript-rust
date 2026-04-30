@@ -2880,6 +2880,31 @@ fn touch_untagged_variant_well_formedness(
     }
 }
 
+fn touch_manifest_cyclic_abbrev_check(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    manifest: TypeExprRef,
+) {
+    // OCaml compiler/ml/typedecl.ml:734-739 calls `Ctype.cyclic_abbrev`
+    // after translating a manifest. That check is observational: ctype.ml
+    // 4155-4170 calls `expand_abbrev_opt`, whose normalize_path fallback can
+    // force a persistent module's `ps_sig` before the next local type is named.
+    // Keep the same force point even when the abbreviation is not cyclic.
+    let mut seen = Vec::new();
+    let mut current = manifest;
+    for _ in 0..20 {
+        let current_repr = ctx.repr(current);
+        if seen.contains(&current_repr) {
+            break;
+        }
+        seen.push(current_repr);
+        let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, current_repr) else {
+            break;
+        };
+        current = expanded;
+    }
+}
+
 fn touch_type_constraint_path(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
@@ -3490,14 +3515,35 @@ pub fn lookup_module_path_by_lid<'b>(
             // force the final child module's signature while merely building
             // the path.
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
-            crate::types::typecore::lookup_module_in_resolved_path(
+            crate::types::typecore::with_resolved_module_components_for_path(
                 &parent_path,
-                submod_name,
                 env,
                 pers_env,
                 ctx,
+                |components| {
+                components
+                    .lookup_module(submod_name)
+                    .map(|(runtime_pos, _, md)| {
+                        if components.access_path().head().is_persistent()
+                            || components.access_path().head().stamp() == 0
+                        {
+                            md.md_path.clone().unwrap_or_else(|| {
+                                Path::pdot(
+                                    components.access_path().clone(),
+                                    submod_name.to_string(),
+                                )
+                            })
+                        } else {
+                            Path::pdot_pos(
+                                components.access_path().clone(),
+                                submod_name.to_string(),
+                                runtime_pos as i32,
+                            )
+                        }
+                    })
+                },
             )
-            .map(|(_, child_path, _)| child_path)
+            .flatten()
         }
         Longident::Lapply(functor, arg) => {
             let functor_path = lookup_module_path_by_lid(functor, arena, env, pers_env, ctx)?;
@@ -3562,6 +3608,61 @@ pub fn lookup_modtype_path_by_lid<'b>(
     }
 }
 
+fn alias_of_module_type(
+    mty: &crate::types::decl::ModuleType,
+) -> Option<(crate::types::decl::AliasPresence, Path)> {
+    match mty {
+        crate::types::decl::ModuleType::MtyAlias(alias_presence, alias_path) => {
+            Some((*alias_presence, alias_path.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn lookup_module_alias_by_lid<'b>(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<(crate::types::decl::AliasPresence, Path)> {
+    use crate::parser::longident::Longident;
+
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            env.find_module(mod_name)
+                .ok()
+                .and_then(|md| alias_of_module_type(&md.md_type))
+        }
+        Longident::Ldot(prefix, submod_idx) => {
+            let submod_name = arena.get_string(*submod_idx);
+            if let Some((alias_presence, alias_path)) =
+                lookup_module_alias_by_lid(prefix, arena, env, pers_env, ctx)
+            {
+                return Some((
+                    alias_presence,
+                    Path::pdot(alias_path, submod_name.to_string()),
+                ));
+            }
+            crate::types::typecore::with_resolved_module_components_for_lid(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    components
+                        .lookup_module(submod_name)
+                        .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
+                },
+            )
+            .flatten()
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
 /// Look up the semantic module type for a longident by searching env and persistent env.
 /// Returns a `decl::ModuleType` (the semantic type), not the `typedtree::ModuleType` (the syntactic type tree).
 pub fn lookup_module_type_by_lid<'b>(
@@ -3573,16 +3674,6 @@ pub fn lookup_module_type_by_lid<'b>(
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::parser::longident::Longident;
     use crate::types::decl::ModuleType as DeclMty;
-    fn alias_of_module_type(
-        mty: &crate::types::decl::ModuleType,
-    ) -> Option<(crate::types::decl::AliasPresence, Path)> {
-        match mty {
-            crate::types::decl::ModuleType::MtyAlias(alias_presence, alias_path) => {
-                Some((*alias_presence, alias_path.clone()))
-            }
-            _ => None,
-        }
-    }
     fn local_parent_alias_by_lid(
         lid: &crate::parser::longident::Longident,
         arena: &ParseArena,
@@ -3605,6 +3696,12 @@ pub fn lookup_module_type_by_lid<'b>(
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<(crate::types::decl::AliasPresence, Path)> {
+        if let Longident::Lident(mod_idx) = lid {
+            let mod_name = arena.get_string(*mod_idx);
+            if env.find_module(mod_name).is_err() {
+                return None;
+            }
+        }
         local_parent_alias_by_lid(lid, arena, env).or_else(|| {
             // OCaml `type_module` wraps identifiers whose `Env.find_module`
             // result is `Mty_alias` (compiler/ml/typemod.ml:1242-1252).
@@ -3644,15 +3741,6 @@ pub fn lookup_module_type_by_lid<'b>(
         }
         Longident::Ldot(prefix, submod_idx) => {
             let submod_name = arena.get_string(*submod_idx);
-            // Keep alias identity for dotted module lookups through aliased parents.
-            // OCaml `Env.find_module` preserves this (Belt.Id.MakeComparable is an alias
-            // through Belt_Id.MakeComparable), which is required for implicit
-            // Tmod_constraint wrapping on Pmod_ident.
-            //
-            // Avoid recursively forcing a persistent parent module's `ps_sig`
-            // here. OCaml dotted lookup goes through `ps_comps` for the parent;
-            // `ps_sig` is only forced by `Env.find_module` on the final path.
-            let parent_alias = parent_alias_by_lid(prefix, arena, env, pers_env, ctx);
             if let Some(found) = crate::types::typecore::with_resolved_module_components_for_lid(
                 prefix,
                 arena,
@@ -3663,18 +3751,6 @@ pub fn lookup_module_type_by_lid<'b>(
                     if let Some((_, _, sub_md)) =
                         components.lookup_qualified_module(submod_name, ctx)
                     {
-                        if let Some((alias_presence, alias_path)) = parent_alias.clone() {
-                            if let DeclMty::MtyAlias(child_presence, child_path) = &sub_md.md_type {
-                                return Some(DeclMty::MtyAlias(
-                                    *child_presence,
-                                    child_path.clone(),
-                                ));
-                            }
-                            return Some(DeclMty::MtyAlias(
-                                alias_presence,
-                                Path::pdot(alias_path, submod_name.to_string()),
-                            ));
-                        }
                         return Some(sub_md.md_type.clone());
                     }
                     if let Some((_, mtd)) = components.lookup_qualified_modtype(submod_name, ctx) {
@@ -3686,6 +3762,23 @@ pub fn lookup_module_type_by_lid<'b>(
             )
             .flatten()
             {
+                if matches!(found, DeclMty::MtyAlias(..)) {
+                    return Some(found);
+                }
+                // OCaml compiler/ml/typemod.ml:1653-1659 obtains
+                // `module type of M.N` through Typetexp.find_module. That uses
+                // compiler/ml/typetexp.ml:150-152 and compiler/ml/env.ml:1000-1007,
+                // 865-880: dotted parents come from component tables (`ps_comps`)
+                // before any full persistent `ps_sig` force. Only fall back to a
+                // parent alias after the child component did not carry one itself.
+                if let Some((alias_presence, alias_path)) =
+                    parent_alias_by_lid(prefix, arena, env, pers_env, ctx)
+                {
+                    return Some(DeclMty::MtyAlias(
+                        alias_presence,
+                        Path::pdot(alias_path, submod_name.to_string()),
+                    ));
+                }
                 return Some(found);
             }
             let parent_path = lookup_module_path_by_lid(prefix, arena, env, pers_env, ctx)?;
@@ -3698,18 +3791,6 @@ pub fn lookup_module_type_by_lid<'b>(
                     if let Some((_, _, sub_md)) =
                         components.lookup_qualified_module(submod_name, ctx)
                     {
-                        if let Some((alias_presence, alias_path)) = parent_alias.clone() {
-                            if let DeclMty::MtyAlias(child_presence, child_path) = &sub_md.md_type {
-                                return Some(DeclMty::MtyAlias(
-                                    *child_presence,
-                                    child_path.clone(),
-                                ));
-                            }
-                            return Some(DeclMty::MtyAlias(
-                                alias_presence,
-                                Path::pdot(alias_path, submod_name.to_string()),
-                            ));
-                        }
                         return Some(sub_md.md_type.clone());
                     }
                     if let Some((_, mtd)) = components.lookup_qualified_modtype(submod_name, ctx) {
@@ -3720,6 +3801,20 @@ pub fn lookup_module_type_by_lid<'b>(
                 },
             )
             .flatten()
+            .map(|found| {
+                if matches!(found, DeclMty::MtyAlias(..)) {
+                    found
+                } else if let Some((alias_presence, alias_path)) =
+                    parent_alias_by_lid(prefix, arena, env, pers_env, ctx)
+                {
+                    DeclMty::MtyAlias(
+                        alias_presence,
+                        Path::pdot(alias_path, submod_name.to_string()),
+                    )
+                } else {
+                    found
+                }
+            })
         }
         _ => None,
     }
@@ -4501,10 +4596,6 @@ pub fn modtype_of_package<'b>(
         return None;
     }
 
-    if package_lids.is_empty() {
-        return Some(DeclMty::MtyIdent(package_path.clone()));
-    }
-
     let constraints: Vec<PackageConstraint> = package_lids
         .iter()
         .zip(package_args.iter())
@@ -4526,6 +4617,13 @@ pub fn modtype_of_package<'b>(
         }
         Path::Papply(_, _) => return None,
     };
+    if package_lids.is_empty() {
+        // OCaml compiler/ml/typemod.ml:1176-1183 calls Env.find_modtype
+        // before returning `Mty_ident p` for unconstrained packages. Preserve
+        // that force point so package unpacking observes local module-type
+        // signatures before `Env.enter_module`, not later through member lookup.
+        return Some(DeclMty::MtyIdent(package_path.clone()));
+    }
     let package_parent_path = parent_path_for_module_type(&base_mty);
     apply_package_constraints_to_module_type(
         env,
@@ -4544,6 +4642,59 @@ fn parent_path_for_module_type(mty: &crate::types::decl::ModuleType) -> Option<P
         DeclMty::MtyIdent(Path::Pdot(parent, _, _))
         | DeclMty::MtyAlias(_, Path::Pdot(parent, _, _)) => Some(parent.as_ref().clone()),
         _ => None,
+    }
+}
+
+pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    package_path: &Path,
+    package_lids: &[Longident],
+) {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    let Some(mut current_mty) = (match package_path {
+        Path::Pident(_) => env
+            .lookup_modtype(package_path)
+            .ok()
+            .and_then(|mtd| mtd.mtd_type.clone()),
+        Path::Pdot(parent, modtype_name, _) => {
+            crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                modtype_name,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .and_then(|(_, mtd)| mtd.mtd_type)
+            .or_else(|| {
+                env.lookup_modtype(package_path)
+                    .ok()
+                    .and_then(|mtd| mtd.mtd_type.clone())
+            })
+        }
+        Path::Papply(_, _) => None,
+    }) else {
+        return;
+    };
+
+    for lid in package_lids {
+        let _ = resolve_with_constraint_target(tctx, env, arena, Some(&current_mty), lid);
+        // OCaml compiler/ml/typetexp.ml:547-562 builds a fake package
+        // module type and calls `transl_modtype` before translating field
+        // types. Each nested `Pmty_with` reaches compiler/ml/typemod.ml:727-737,
+        // which returns `Mtype.freshen (Mty_signature final_sg)`;
+        // compiler/ml/mtype.ml:28 implements that as `Subst.modtype`.
+        if matches!(
+            current_mty,
+            DeclMty::MtySignature(_) | DeclMty::MtyFunctor { .. }
+        ) {
+            crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                &mut current_mty,
+                tctx.type_ctx,
+            );
+        }
     }
 }
 
@@ -5465,6 +5616,7 @@ fn scrape_alias_module_type<'b>(
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
         visiting: &mut HashSet<Path>,
+        force_component_subst: bool,
     ) -> Option<DeclMty> {
         fn anchored(owner_path: &Path, mty: &DeclMty) -> DeclMty {
             let mut mty = mty.clone();
@@ -5482,7 +5634,14 @@ fn scrape_alias_module_type<'b>(
                 if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
                     match &md.md_type {
                         DeclMty::MtyAlias(_, alias_path) | DeclMty::MtyIdent(alias_path) => {
-                            resolve_path(alias_path, env, pers_env, ctx, visiting)
+                            resolve_path(
+                                alias_path,
+                                env,
+                                pers_env,
+                                ctx,
+                                visiting,
+                                force_component_subst,
+                            )
                         }
                         other => Some(anchored(&Path::pident(id.clone()), other)),
                     }
@@ -5495,14 +5654,59 @@ fn scrape_alias_module_type<'b>(
                 }
             }
             Path::Pdot(parent, submod, _) => {
-                if let Some((_, owner_path, md)) =
+                let resolved_component = if force_component_subst {
+                    crate::types::typecore::with_resolved_module_components_for_path(
+                        parent,
+                        env,
+                        pers_env,
+                        ctx,
+                        |components| {
+                            let (runtime_pos, _, raw_md) =
+                                components.lookup_module(submod.as_str())?;
+                            let parent_access_path = components.access_path().clone();
+                            let mut md = raw_md.clone();
+                            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+                                &mut md,
+                                components.signature(),
+                                &parent_access_path,
+                                ctx,
+                            );
+                            let owner_path =
+                                if parent_access_path.head().is_persistent()
+                                    || parent_access_path.head().stamp() == 0
+                                {
+                                    md.md_path.clone().unwrap_or_else(|| {
+                                        Path::pdot(parent_access_path.clone(), submod.clone())
+                                    })
+                                } else {
+                                    Path::pdot_pos(
+                                        parent_access_path.clone(),
+                                        submod.clone(),
+                                        runtime_pos as i32,
+                                    )
+                                };
+                            Some((owner_path, md))
+                        },
+                    )
+                    .flatten()
+                } else {
                     crate::types::typecore::lookup_module_in_resolved_path(
                         parent, submod, env, pers_env, ctx,
                     )
-                {
+                    .map(|(_, owner_path, md)| (owner_path, md))
+                };
+
+                if let Some((owner_path, md)) = resolved_component {
                     match &md.md_type {
                         DeclMty::MtyAlias(_, alias_path) | DeclMty::MtyIdent(alias_path) => {
-                            resolve_path(alias_path, env, pers_env, ctx, visiting)
+                            resolve_path(
+                                alias_path,
+                                env,
+                                pers_env,
+                                ctx,
+                                visiting,
+                                force_component_subst,
+                            )
                         }
                         other => Some(anchored(&owner_path, other)),
                     }
@@ -5518,9 +5722,24 @@ fn scrape_alias_module_type<'b>(
     }
 
     match mty {
-        DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
+        DeclMty::MtyAlias(_, path) => {
             let mut visiting = HashSet::new();
-            resolve_path(path, env, pers_env, ctx, &mut visiting)
+            let resolved = resolve_path(path, env, pers_env, ctx, &mut visiting, true)?;
+            // OCaml compiler/ml/env.ml:1435-1449 strengthens the concrete
+            // module type found through an alias using the alias path, and
+            // compiler/ml/mtype.ml:365-385 then removes aliases recursively.
+            // Strengthening here turns child signatures into aliases such as
+            // `VariantSpreads.S`, so later scraping forces the same EnvLazy
+            // component thunks as OCaml.
+            let mut strengthened = crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                ctx, env, path, &resolved,
+            );
+            anchor_local_module_aliases_to_owner(&mut strengthened, path);
+            Some(strengthened)
+        }
+        DeclMty::MtyIdent(path) => {
+            let mut visiting = HashSet::new();
+            resolve_path(path, env, pers_env, ctx, &mut visiting, false)
         }
         other => Some(other.clone()),
     }
@@ -6208,6 +6427,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     let manifest = arena.get_core_type(*manifest_idx);
                                     let (_typed_manifest, manifest_ref) =
                                         transl_type(tctx, &sig_env, manifest)?;
+                                    touch_manifest_cyclic_abbrev_check(
+                                        tctx.type_ctx,
+                                        &sig_env,
+                                        manifest_ref,
+                                    );
                                     Some(manifest_ref)
                                 }
                                 None => None,
@@ -6560,11 +6784,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             )?;
             let type_constraints =
                 collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
-            if type_constraints.is_empty() {
-                Ok(base_mty)
+            let mut constrained_mty = if type_constraints.is_empty() {
+                base_mty
             } else {
                 let parent_path = parent_path_for_module_type(&base_mty);
-                Ok(apply_package_constraints_to_module_type(
+                apply_package_constraints_to_module_type(
                     env,
                     &base_mty,
                     &type_constraints,
@@ -6572,8 +6796,18 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or(base_mty))
-            }
+                .unwrap_or(base_mty)
+            };
+            // OCaml compiler/ml/typemod.ml:726-739 translates `Pmty_with` by
+            // merging constraints, then returning `Mtype.freshen (Mty_signature
+            // final_sg)`. compiler/ml/mtype.ml:28 implements `freshen` as
+            // `Subst.modtype Subst.identity`, so hidden constrained module-type
+            // binders must be renamed before recursive module bodies are typed.
+            crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                &mut constrained_mty,
+                tctx.type_ctx,
+            );
+            Ok(constrained_mty)
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
@@ -8480,13 +8714,31 @@ fn type_module_expr_with_alias<'a>(
             let mod_type = if alias {
                 None
             } else {
-                lookup_module_type_by_lid(
+                // OCaml compiler/ml/typemod.ml:1227-1255 keeps
+                // `Typetexp.lookup_module` path lookup separate from the later
+                // `Env.find_module` alias branch. For dotted aliases such as
+                // `Belt.Id.MakeComparable`, preserve the parent alias without
+                // forcing the final child module-declaration thunk; the actual
+                // expansion happens below when matching typemod.ml:1245-1255.
+                lookup_module_alias_by_lid(
                     &longident,
                     arena,
                     env,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
+                .map(|(alias_presence, alias_path)| {
+                    crate::types::decl::ModuleType::MtyAlias(alias_presence, alias_path)
+                })
+                .or_else(|| {
+                    lookup_module_type_by_lid(
+                        &longident,
+                        arena,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                })
             };
             let path_clone = path.clone();
             let env_ref = tctx.type_ctx.store_typed_env(env);
@@ -8513,7 +8765,20 @@ fn type_module_expr_with_alias<'a>(
                 crate::types::decl::AliasPresence::MtaAbsent,
                 semantic_alias_path,
             );
+            let wraps_alias = !alias
+                && matches!(
+                    mod_type,
+                    Some(crate::types::decl::ModuleType::MtyAlias(_, _))
+                );
             let semantic_mod_type = if alias {
+                alias_mod_type.clone()
+            } else if wraps_alias {
+                // OCaml compiler/ml/typemod.ml:1227-1255 builds the inner
+                // `Tmod_ident` with `Mty_alias(Mta_absent, path)`, then only
+                // expands and strengthens the normalized alias target for the
+                // outer implicit `Tmod_constraint`. Avoid strengthening this
+                // throwaway inner alias eagerly; that would force
+                // Subst.modtype work before typemod.ml:1245-1255 does.
                 alias_mod_type.clone()
             } else {
                 mod_type
@@ -8537,12 +8802,7 @@ fn type_module_expr_with_alias<'a>(
                 mod_attributes: mod_expr.pmod_attributes.clone(),
             };
 
-            if !alias
-                && matches!(
-                    mod_type,
-                    Some(crate::types::decl::ModuleType::MtyAlias(_, _))
-                )
-            {
+            if wraps_alias {
                 // OCaml (typemod.ml line 1245-1252): when the module type is an alias
                 // and we're not in alias mode, wrap with Tcoerce_alias(p1, Tcoerce_none)
                 // where p1 is the alias target path. The inner Tmod_ident should have
@@ -8626,45 +8886,43 @@ fn type_module_expr_with_alias<'a>(
             let structure_mty =
                 crate::types::decl::ModuleType::MtySignature(structure.str_type.clone());
 
-            // Like OCaml: if simplify_signature would shrink the signature
-            // (duplicate value names), wrap in Tmod_constraint implicit
-            let needs_constraint = simplified_structure_signature(&structure).is_some();
+            // Match compiler/ml/typemod.ml:1263-1282. OCaml first builds the
+            // raw `Tmod_structure`, then calls `simplify_signature`; if that
+            // shrinks the signature, `wrap_constraint` runs the inclusion
+            // check at compiler/ml/typemod.ml:1205-1217.
+            let simplified_structure_sig = simplified_structure_signature(&structure);
 
             let md = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_structure(structure),
                 mod_loc: loc,
                 mod_type: structure_mty.clone(),
                 mod_env: env_ref,
-                mod_attributes: Attributes::new(),
+                mod_attributes: mod_expr.pmod_attributes.clone(),
             };
 
-            if needs_constraint {
-                let simplified = crate::types::decl::ModuleType::MtySignature(match &md.mod_type {
-                    crate::types::decl::ModuleType::MtySignature(sig) => {
-                        crate::types::includemod::simplify_signature(sig)
-                    }
-                    _ => unreachable!("structure modules always produce signatures"),
-                });
+            if let Some(simplified_structure_sig) = simplified_structure_sig {
+                let simplified =
+                    crate::types::decl::ModuleType::MtySignature(simplified_structure_sig);
+                let coercion =
+                    crate::types::includemod::modtypes(tctx.type_ctx, env, &md.mod_type, &simplified)
+                        .map_err(|err| TypeModError::SignatureMismatch {
+                            expected: format!("{simplified:?}"),
+                            found: format!("{err:?}"),
+                        })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(md),
                         simplified.clone(),
                         crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
-                        ModuleCoercion::Tcoerce_none,
+                        coercion,
                     ),
                     mod_loc: loc,
                     mod_type: simplified,
                     mod_env: env_ref,
-                    mod_attributes: mod_expr.pmod_attributes.clone(),
+                    mod_attributes: Attributes::new(),
                 })
             } else {
-                Ok(ModuleExpr {
-                    mod_desc: md.mod_desc,
-                    mod_loc: loc,
-                    mod_type: md.mod_type,
-                    mod_env: env_ref,
-                    mod_attributes: mod_expr.pmod_attributes.clone(),
-                })
+                Ok(md)
             }
         }
 
@@ -8739,9 +8997,14 @@ fn type_module_expr_with_alias<'a>(
             // Functor application: F(M)
             let functor = arena.get_mod_expr(*functor_idx);
             let arg = arena.get_mod_expr(*arg_idx);
-            let typed_functor = type_module_expr_with_alias(tctx, env, arena, functor, false)?;
+            // OCaml compiler/ml/typemod.ml:1305-1307 types the argument
+            // before the functor, computes `path_of_module arg`, then types
+            // the functor. Keep that order because package/type-constraint
+            // forcing during argument typing must happen before functor
+            // substitution can allocate hidden identifiers.
             let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false)?;
             let arg_path = path_of_typed_module_expr(&typed_arg);
+            let typed_functor = type_module_expr_with_alias(tctx, env, arena, functor, false)?;
             let arg_mty = typed_arg.mod_type.clone();
             let functor_mty = typed_functor.mod_type.clone();
             let functor_mty = scrape_alias_module_type(
@@ -8779,12 +9042,14 @@ fn type_module_expr_with_alias<'a>(
                     result,
                 } => {
                     match arg_path.as_ref() {
-                        Some(path) => substitute_functor_param_in_module_type(
-                            result,
-                            param,
-                            path,
-                            tctx.type_ctx,
-                        ),
+                        Some(path) => {
+                            crate::cmi::persistent_env::substitute_functor_result_module_path(
+                                result,
+                                param,
+                                path,
+                                tctx.type_ctx,
+                            )
+                        }
                         None => {
                             // OCaml: Mtype.nondep_supertype
                             //   (Env.add_module ~arg:true param arg.mod_type env)
@@ -8840,7 +9105,7 @@ fn type_module_expr_with_alias<'a>(
                 parsed_mty,
                 Some(&typed_mty),
             )?;
-            wrap_constraint_with_decl_mty(
+            let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
                 typed_mod,
@@ -8851,7 +9116,8 @@ fn type_module_expr_with_alias<'a>(
                 )),
                 loc,
                 mod_expr.pmod_attributes.clone(),
-            )
+            )?;
+            Ok(constrained)
         }
 
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
@@ -10508,6 +10774,7 @@ fn type_structure_item<'a>(
                     Some(manifest) => {
                         let manifest_ct = arena.get_core_type(*manifest);
                         let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, manifest_ct)?;
+                        touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                         (Some(typed_manifest), Some(type_ref))
                     }
                     None => (None, None),
@@ -12602,7 +12869,6 @@ fn type_structure_item<'a>(
             // Match OCaml: for Pmod_constraint(expr, typ), type-check only expr (inner body),
             // then wrap in Tmod_constraint with mod_loc from the inner module (not the
             // constraint wrapper). OCaml does this in check_recmodule_inclusion.
-            let mut typed_bindings = Vec::new();
             let mut new_env = env.clone();
             for decl in &dcl2 {
                 new_env.add_module(
@@ -12611,11 +12877,62 @@ fn type_structure_item<'a>(
                 );
             }
 
+            let mut body_bindings = Vec::with_capacity(rec_bindings.len());
             for ((name, name_loc, inner_expr, _, attrs, mb_loc), decl) in
                 rec_bindings.iter().zip(dcl2.iter())
             {
                 let typed_inner =
                     type_module_expr(tctx, &rec_env, arena, arena.get_mod_expr(*inner_expr))?;
+                body_bindings.push((
+                    name.clone(),
+                    *name_loc,
+                    typed_inner,
+                    decl.clone(),
+                    attrs.clone(),
+                    *mb_loc,
+                ));
+            }
+
+            // OCaml compiler/ml/typemod.ml:1521-1548 types all recursive
+            // bodies before `check_recmodule_inclusion`. typemod.ml:1081-1100
+            // then renames every recursive module id once per recursive binding
+            // level and, after the first level, substitutes the actual module
+            // types while building the intermediate environment.
+            for depth in 0..body_bindings.len() {
+                for (_, _, _, decl, _, _) in &body_bindings {
+                    drop(tctx.type_ctx.rename_ident(&decl.md_id));
+                }
+                if depth > 0 {
+                    for (_, _, typed_inner, _, _, _) in &body_bindings {
+                        let mut actual_mty = typed_inner.mod_type.clone();
+                        crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                            &mut actual_mty,
+                            tctx.type_ctx,
+                        );
+                    }
+                }
+            }
+            for (_, _, typed_inner, decl, _, _) in &body_bindings {
+                // OCaml compiler/ml/typemod.ml:1113-1115 computes both
+                // `Subst.modtype s mty_decl.mty_type` and
+                // `subst_and_strengthen env s id mty_actual` before calling
+                // Includemod. compiler/ml/subst.ml:365-400 freshens the hidden
+                // module-type binders even though those clones are not emitted
+                // in the final typedtree.
+                let mut decl_mty = decl.md_type.mty_type.clone();
+                crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                    &mut decl_mty,
+                    tctx.type_ctx,
+                );
+                let mut actual_mty = typed_inner.mod_type.clone();
+                crate::cmi::persistent_env::freshen_module_type_bound_idents(
+                    &mut actual_mty,
+                    tctx.type_ctx,
+                );
+            }
+
+            let mut typed_bindings = Vec::with_capacity(body_bindings.len());
+            for (name, name_loc, typed_inner, decl, attrs, mb_loc) in body_bindings {
                 let inner_loc = typed_inner.mod_loc;
                 let typed_mod = wrap_constraint_with_decl_mty(
                     tctx,
@@ -12630,14 +12947,14 @@ fn type_structure_item<'a>(
                     Attributes::new(),
                 )?;
                 typed_bindings.push(ModuleBinding {
-                    mb_id: decl.md_id.clone(),
+                    mb_id: decl.md_id,
                     mb_name: Located {
-                        txt: name.clone(),
-                        loc: *name_loc,
+                        txt: name,
+                        loc: name_loc,
                     },
                     mb_expr: typed_mod,
-                    mb_attributes: attrs.clone(),
-                    mb_loc: *mb_loc,
+                    mb_attributes: attrs,
+                    mb_loc,
                 });
             }
             let item_sig = typed_bindings
@@ -13207,6 +13524,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 Some(manifest) => {
                     let (typed_manifest, manifest_ref) =
                         transl_type(tctx, env, arena.get_core_type(*manifest))?;
+                    touch_manifest_cyclic_abbrev_check(ctx, env, manifest_ref);
                     (Some(typed_manifest), Some(manifest_ref))
                 }
                 None => (None, None),

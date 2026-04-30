@@ -24,8 +24,8 @@ use crate::ident::Ident;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModuleDeclaration,
-    ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
+    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -363,6 +363,20 @@ impl PersistentEnv {
 
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
         self.alias_prefix_rewrites.get(flat_head).cloned()
+    }
+
+    pub fn has_known_module_without_loading(&self, name: &str) -> bool {
+        // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
+        // forcing its signature when `lookup_module ~load:false` only needs to
+        // know that the unit exists. Keep this as an availability probe so
+        // namespace alias resolution can avoid consuming `Subst.signature`
+        // stamps just to test a flattened compile-unit name.
+        self.cache.contains_key(name)
+            || self.portable_cache.contains_key(name)
+            || self.in_memory_modules.contains_key(name)
+            || self.source_fallback_paths.contains_key(name)
+            || (!self.in_process_mode
+                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
     /// Find and load a module by name.
@@ -1412,16 +1426,20 @@ fn freshen_module_type_bound_idents_with_maps(
             param_type,
             result,
         } => {
-            if let Some(param_type) = param_type.as_mut() {
-                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
-            }
             let old_param = param.clone();
+            // OCaml compiler/ml/subst.ml:352-355 renames the functor
+            // parameter, then observes `Mty_functor` argument evaluation by
+            // freshening the result before the argument module type. This
+            // stamp order is observable in strict typedtree identifiers.
             let new_param = ctx.rename_ident(&old_param);
             *param = new_param.clone();
             let mut param_maps = SubstMaps::default();
             insert_module_subst_path(&mut param_maps, &old_param, &new_param);
             let result_maps = merge_subst_maps(maps, &param_maps);
             freshen_module_type_bound_idents_with_maps(result, &result_maps, ctx);
+            if let Some(param_type) = param_type.as_mut() {
+                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
+            }
         }
     }
 }
@@ -1485,7 +1503,84 @@ pub(crate) fn freshen_signature_bound_idents(
     sig_items: &mut [SignatureItem],
     ctx: &TypeContext<'_>,
 ) {
+    // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
+    // then subst.ml:378-400 renames signature binders and applies that
+    // substitution to the copied components.
+    let copied = crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx);
+    for (target, source) in sig_items.iter_mut().zip(copied) {
+        *target = source;
+    }
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
+}
+
+pub(crate) fn freshen_module_type_bound_idents(
+    module_type: &mut ModuleType,
+    ctx: &TypeContext<'_>,
+) {
+    // OCaml compiler/ml/subst.ml:365-376 implements `Subst.modtype` by
+    // returning a fresh module type; for signatures it reaches subst.ml:378-400,
+    // where component types are copied before binder substitutions are applied.
+    *module_type = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    freshen_module_type_bound_idents_with_maps(module_type, &SubstMaps::default(), ctx);
+}
+
+pub(crate) fn substitute_functor_result_module_path(
+    module_type: &ModuleType,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &TypeContext<'_>,
+) -> ModuleType {
+    // OCaml compiler/ml/typemod.ml:1321-1325 applies
+    // `Subst.modtype (Subst.add_module param path ...) mty_res`.
+    // compiler/ml/subst.ml:351-364 handles `Mty_signature` by first
+    // renaming every signature binder and then applying the combined module
+    // substitution. Do both together here; a plain path rewrite skips the
+    // binder renames and creates later local identifiers too early.
+    let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    let mut maps = SubstMaps::default();
+    if old_param.stamp() != 0 {
+        maps.module_stamp_map
+            .insert(old_param.stamp(), arg_path.clone());
+    } else {
+        maps.module_name_map
+            .insert(old_param.name().to_string(), arg_path.clone());
+    }
+    freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
+    copied
+}
+
+pub(crate) fn freshen_component_modtype_declaration_bound_idents(
+    mtd: &mut ModtypeDeclaration,
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    if let Some(module_type) = mtd.mtd_type.as_mut() {
+        // OCaml compiler/ml/env.ml:1530 builds the component substitution with
+        // `prefix_idents`, then env.ml:1581-1585 stores
+        // `Subst.modtype_declaration sub decl` in the component modtype table.
+        // Rebuild and substitute with the parent signature maps here so outer
+        // references inside module types (for example Belt_Id.cmp) are rooted
+        // at the component access path before lookup observes them.
+        *module_type = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+        let maps = build_subst_maps(parent_sig, parent_module_path);
+        freshen_module_type_bound_idents_with_maps(module_type, &maps, ctx);
+    }
+}
+
+pub(crate) fn freshen_component_module_declaration_bound_idents(
+    md: &mut ModuleDeclaration,
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    // OCaml compiler/ml/env.ml:1568 stores child module declarations as
+    // EnvLazy thunks. Forcing them through env.ml:475 runs
+    // `Subst.modtype sub md.md_type`, with `sub` built by env.ml:1530.
+    // Subst.modtype freshens signature binders at compiler/ml/subst.ml:352-364.
+    md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
+    let maps = build_subst_maps(parent_sig, parent_module_path);
+    freshen_module_type_bound_idents_with_maps(&mut md.md_type, &maps, ctx);
 }
 
 fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {

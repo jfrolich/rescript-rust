@@ -240,7 +240,11 @@ fn lookup_type_decl_for_path(
     // Try direct env lookup. For qualified paths, only accept exact
     // identity matches (`Path.same`) to mirror OCaml's stamp-based lookup.
     // Name-only equality can pick declarations from different scopes.
-    if let Ok(decl) = env.lookup_type(path) {
+    let exact_env_decl = match path {
+        Path::Pident(id) => env.find_type_by_ident(id),
+        _ => env.lookup_type(path),
+    };
+    if let Ok(decl) = exact_env_decl {
         let exact_lookup = match path {
             Path::Pident(_) => true,
             _ => decl
@@ -253,11 +257,16 @@ fn lookup_type_decl_for_path(
         }
     }
 
-    if let Some(decl) = resolve_type_through_modules(ctx, path) {
+    // OCaml compiler/ml/ctype.ml:759-762 asks `Env.find_type` for
+    // constructor variances, and compiler/ml/env.ml:800-813 resolves dotted
+    // types through the existing module component tables before falling back to
+    // persistent structures. Prefer the env/component path here so lookups like
+    // `Js.Types.tagged_t` do not eagerly read `Js.cmi`.
+    if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
         return Some(decl);
     }
 
-    if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
+    if let Some(decl) = resolve_type_through_modules(ctx, path) {
         return Some(decl);
     }
 
@@ -982,12 +991,11 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     result
 }
 
-pub fn resolve_type_through_modules<'a>(
+pub(crate) fn resolve_type_item_through_modules<'a>(
     ctx: &'a TypeContext<'a>,
     path: &Path,
-) -> Option<super::decl::TypeDeclaration> {
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
-    use crate::types::type_expr::TypeDesc;
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
@@ -1000,7 +1008,7 @@ pub fn resolve_type_through_modules<'a>(
     }
 
     let mut visiting = HashSet::new();
-    let mut current_sig =
+    let current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
 
     // Register ALL types in the final signature by stamp for future lookups.
@@ -1030,12 +1038,19 @@ pub fn resolve_type_through_modules<'a>(
                 // Cache the target type in the path store
                 let path_name = path.name();
                 ctx.register_type_decl_by_path(&path_name, decl.clone());
-                result = Some(decl.clone());
+                result = Some((id.clone(), decl.clone()));
             }
         }
     }
 
     result
+}
+
+pub fn resolve_type_through_modules<'a>(
+    ctx: &'a TypeContext<'a>,
+    path: &Path,
+) -> Option<super::decl::TypeDeclaration> {
+    resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
 }
 
 /// Try to expand a type alias (type abbreviation).
@@ -1259,7 +1274,37 @@ fn strengthen_module_type_for_module_access_path<'a>(
 ) -> super::decl::ModuleType {
     use super::decl::ModuleType;
 
-    match mty {
+    fn scrape_modtype_ident_for_strengthen(
+        env: &super::env::Env,
+        mty: &super::decl::ModuleType,
+        visiting: &mut HashSet<Path>,
+    ) -> super::decl::ModuleType {
+        match mty {
+            super::decl::ModuleType::MtyIdent(path) => {
+                if !visiting.insert(path.clone()) {
+                    return mty.clone();
+                }
+                let expanded = env
+                    .lookup_modtype(path)
+                    .ok()
+                    .and_then(|mtd| mtd.mtd_type.as_ref())
+                    .map(|expanded| scrape_modtype_ident_for_strengthen(env, expanded, visiting));
+                visiting.remove(path);
+                expanded.unwrap_or_else(|| mty.clone())
+            }
+            _ => mty.clone(),
+        }
+    }
+
+    // Match OCaml compiler/ml/mtype.ml:22-32: `strengthen` calls `scrape`
+    // first, and `scrape` expands `Mty_ident` with Env.find_modtype_expansion
+    // before signature strengthening. This matters for strict typedtree parity
+    // because each expansion walks/freshens the module type at OCaml's exact
+    // inclusion points.
+    let mut visiting = HashSet::new();
+    let scraped = scrape_modtype_ident_for_strengthen(env, mty, &mut visiting);
+
+    match &scraped {
         ModuleType::MtySignature(sig) => {
             ModuleType::MtySignature(strengthen_signature_for_module_access_path(
                 ctx,
@@ -1270,7 +1315,7 @@ fn strengthen_module_type_for_module_access_path<'a>(
                 0,
             ))
         }
-        ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => mty.clone(),
+        ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => scraped,
         ModuleType::MtyFunctor {
             param,
             param_type,
@@ -1435,8 +1480,6 @@ fn resolve_type_item_through_env<'a>(
     path: &Path,
     strengthen_alias_types: bool,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
-    use super::decl::SignatureItem;
-
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
@@ -1506,8 +1549,11 @@ fn resolve_type_item_through_env<'a>(
 
     // Fall back to CMI-based resolution if local env-based lookup didn't find
     // the type item (e.g. when only the persistent path is available).
-    resolve_type_through_modules(ctx, path)
-        .map(|decl| (crate::ident::Ident::create_local(type_name), decl))
+    // OCaml compiler/ml/env.ml:800-813 returns the existing component-table
+    // entry, which compiler/ml/env.ml:1542-1552 built from the `Sig_type`
+    // item. Keep that item id here; allocating a fresh `t` would advance the
+    // global stamp clock at a lookup point where OCaml only inspects.
+    resolve_type_item_through_modules(ctx, path)
 }
 
 fn resolve_type_through_env<'a>(
@@ -1669,6 +1715,26 @@ fn normalize_path_full_inner<'a>(
         return path.clone();
     }
 
+    if let Path::Pdot(parent, module_name, _) = path
+        && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
+        && !alias_path.same(path)
+    {
+        // OCaml compiler/ml/env.ml:781-793 stores persistent child
+        // `comp_components` separately from env.ml:865-875's full `ps_sig`
+        // module declaration. When Rust already has the component table for a
+        // selected prefix, read the child alias from it before recursively
+        // normalizing the persistent root, so aliases like `Js.Json` do not
+        // force `Js.ps_sig` earlier than OCaml's component navigation.
+        return normalize_path_full_inner(
+            ctx,
+            env,
+            &alias_path,
+            depth + 1,
+            visiting,
+            allow_reverse_local_aliases,
+        );
+    }
+
     // First, recursively normalize the prefix for Pdot paths
     let path = match path {
         Path::Pdot(p, s, pos) => {
@@ -1747,23 +1813,32 @@ fn normalize_path_full_inner<'a>(
         }
     }
 
-    // Then check if the path itself is a module alias.
-    // First try the simple env lookup (handles Pident and some Pdot paths).
-    if let Ok(md) = env.lookup_module(&path) {
-        if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-            return normalize_path_full_inner(
-                ctx,
-                env,
-                alias_path,
-                depth + 1,
-                visiting,
-                allow_reverse_local_aliases,
-            );
-        }
+    if let Path::Pdot(parent, module_name, _) = &path
+        && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
+        && !alias_path.same(&path)
+    {
+        // OCaml compiler/ml/ctype.ml:1367-1372 falls back to
+        // `Env.normalize_path`, and compiler/ml/env.ml:865-882 implements that
+        // by reading the component module declaration with alias preservation.
+        // Use the same forward alias fact when Rust already has the qualified
+        // component table, so `expand_head` observes aliases such as
+        // `Js.File -> Js_file` without forcing the full persistent signature.
+        return normalize_path_full_inner(
+            ctx,
+            env,
+            &alias_path,
+            depth + 1,
+            visiting,
+            allow_reverse_local_aliases,
+        );
     }
 
-    // For Pdot paths not found in env, use the full module resolution machinery
-    // (navigates module signatures from env modules and CMI files).
+    // Then check if the path itself is a module alias. For dotted paths, use
+    // the side-effectful module resolution path first: OCaml
+    // compiler/ml/env.ml:876-882 reaches `comp_modules` and forces
+    // `EnvLazy.force subst_modtype_maker data` before seeing whether the
+    // module is an alias. A plain env lookup would inspect the declaration but
+    // skip the freshening side effects that determine later identifier stamps.
     if matches!(path, Path::Pdot(..)) {
         if !visiting.insert(path.clone()) {
             return path;
@@ -1782,6 +1857,17 @@ fn normalize_path_full_inner<'a>(
                     allow_reverse_local_aliases,
                 );
             }
+        }
+    } else if let Ok(md) = env.lookup_module(&path) {
+        if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
         }
     }
 
@@ -1913,7 +1999,18 @@ fn try_expand_head_with_mode<'a>(
             // hits to unrelated declarations.
             let mut forbid_fallback_manifest_expansion = false;
             let mut local_env_type_is_authoritative = false;
-            if let Ok(env_decl) = env.lookup_type(&path) {
+            let exact_env_decl = match &path {
+                Path::Pident(id) => {
+                    // OCaml compiler/ml/env.ml:800-813 uses
+                    // `IdTbl.find_same` for Pident paths, and ctype.ml:1367-1372
+                    // falls through to normalization only after that exact
+                    // expansion lookup fails. Do not let a same-name local type
+                    // suppress stamp-based expansion for imported aliases.
+                    env.find_type_by_ident(id)
+                }
+                _ => env.lookup_type(&path),
+            };
+            if let Ok(env_decl) = exact_env_decl {
                 let exact_lookup = match &path {
                     Path::Pident(_) => true,
                     _ => env_decl.type_path.as_ref().is_some_and(|decl_path| {
@@ -3556,8 +3653,14 @@ fn unify_types<'a>(
             drop(desc2);
 
             if let Some(env) = state.env() {
-                let exp1 = expand_head(ctx, env, t1);
-                let exp2 = expand_head(ctx, env, t2);
+                // OCaml compiler/ml/ctype.ml:2341-2344 expands constructor
+                // heads during unification with `expand_head_unif`, not the
+                // general safe `expand_head`. Keep the same mode here so
+                // persistent aliases such as `Stdlib.Lazy.t` do not repeatedly
+                // allocate normalized-but-still-abstract heads before argument
+                // unification.
+                let exp1 = expand_head_unif(ctx, env, t1);
+                let exp2 = expand_head_unif(ctx, env, t2);
                 if exp1 != t1 || exp2 != t2 {
                     return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                 }
@@ -6068,8 +6171,10 @@ pub fn instance_constructor_in_pattern(
             type_path: None,
         };
 
-        // Create path and add to environment
-        let path = super::path::Path::pident(crate::ident::Ident::create_local(&name));
+        // OCaml compiler/ml/ctype.ml:1111-1123 creates existential abstract
+        // type names with `Ident.create`, so they consume the same stamp
+        // stream as typedtree binders.
+        let path = super::path::Path::pident(ctx.create_ident(&name));
         env.add_local_constraint(path.clone(), decl);
 
         // Create Tconstr pointing to the abstract type

@@ -94,7 +94,27 @@ pub(crate) struct QualifiedModuleComponentsCacheKey {
 
 impl QualifiedModuleComponentsCacheKey {
     pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
-        Self { path, env_id }
+        Self {
+            path: normalize_component_cache_path(path),
+            env_id,
+        }
+    }
+}
+
+fn normalize_component_cache_path(path: Path) -> Path {
+    match path {
+        Path::Pident(_) => path,
+        Path::Pdot(parent, name, _) => {
+            // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
+            // `Path.same`; component lookup in env.ml:781-793 keys module
+            // identity by that path equality while still carrying positions in
+            // the selected access path. Mirror that only for Rust's cache key.
+            Path::pdot(normalize_component_cache_path(*parent), name)
+        }
+        Path::Papply(functor, arg) => Path::papply(
+            normalize_component_cache_path(*functor),
+            normalize_component_cache_path(*arg),
+        ),
     }
 }
 
@@ -205,6 +225,11 @@ pub struct TypeContext<'a> {
             super::env_lazy::QualifiedModuleComponents,
         >,
     >,
+
+    /// Flattened persistent aliases discovered while building component tables.
+    /// OCaml keeps this relationship in `comp_components`; Rust needs an
+    /// explicit side table for paths that later appear without `PersistentEnv`.
+    flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache:
@@ -330,6 +355,7 @@ impl<'a> TypeContext<'a> {
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
+            flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -501,6 +527,39 @@ impl<'a> TypeContext<'a> {
             cache.get(key)?.clone()
         };
         Some(f(&components))
+    }
+
+    pub(crate) fn has_qualified_module_components(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+    ) -> bool {
+        // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr` reuse
+        // `ps_comps` without forcing `ps_sig`; Rust stores that selected
+        // component view explicitly, so later normalization can observe that
+        // the component table is already available.
+        self.qualified_module_components_cache.borrow().contains_key(key)
+    }
+
+    pub(crate) fn register_flattened_alias_component_path(
+        &self,
+        flat_head: &str,
+        component_path: Path,
+    ) {
+        // OCaml compiler/ml/env.ml:1530 builds `prefix_idents`, and
+        // env.ml:1573-1578 stores child `comp_components` under that prefixed
+        // path. Keep the same alias-to-component-path fact available even
+        // when Rust reaches a later helper without `PersistentEnv`.
+        self.flattened_alias_component_paths
+            .borrow_mut()
+            .entry(flat_head.to_string())
+            .or_insert(component_path);
+    }
+
+    pub(crate) fn find_flattened_alias_component_path(&self, flat_head: &str) -> Option<Path> {
+        self.flattened_alias_component_paths
+            .borrow()
+            .get(flat_head)
+            .cloned()
     }
 
     /// Look up a module alias target from the qualified module components cache.
