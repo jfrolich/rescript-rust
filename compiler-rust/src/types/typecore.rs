@@ -20093,16 +20093,20 @@ fn with_resolved_child_module_components<'a, R>(
     // through `comp_components` only, and explicit opens keep that lazy order.
     // The implicit Stdlib/Pervasives open from compiler/core/res_compmisc.ml:61-62
     // and compiler/ml/env.ml:1874-1877 exposes dotted component paths such as
-    // `Stdlib.JsError.RangeError`; those can observe the env.ml:1568 module
-    // thunk before child components, so force that thunk only for dotted
-    // Stdlib/Pervasives component parents.
+    // `Stdlib.JsError.RangeError`. When the child signature contains only
+    // values, OCaml observes the env.ml:1568-1569 module thunk before value
+    // lookup; children with nested components should keep following
+    // env.ml:781-793 and env.ml:1000-1007 through `comp_components` only.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
         let parent_head_name = parent_components.access_path().head().name();
         let parent_is_implicit_stdlib_component_path = matches!(
             parent_components.access_path(),
             Path::Pdot(_, _, _)
         ) && (parent_head_name == "Stdlib" || parent_head_name == "Pervasives");
-        if parent_is_implicit_stdlib_component_path {
+        let child_module_has_only_values = parent_components
+            .lookup_module(child_name)
+            .is_some_and(|(_, _, md)| module_type_has_only_values(&md.md_type));
+        if parent_is_implicit_stdlib_component_path && child_module_has_only_values {
             let _ = parent_components.lookup_qualified_module(child_name, ctx);
         }
         let access_path = if parent_components.access_path().head().is_persistent()
@@ -20170,6 +20174,17 @@ fn with_resolved_child_module_components<'a, R>(
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
+}
+
+fn module_type_has_only_values(module_type: &crate::types::decl::ModuleType) -> bool {
+    matches!(
+        module_type,
+        crate::types::decl::ModuleType::MtySignature(sig)
+            if sig.iter().all(|item| matches!(
+                item,
+                crate::types::decl::SignatureItem::SigValue(..)
+            ))
+    )
 }
 
 fn with_resolved_module_components_for_lid_inner<'a, R>(
