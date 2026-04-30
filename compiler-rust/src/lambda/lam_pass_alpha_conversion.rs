@@ -17,8 +17,18 @@ use crate::lambda::{
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
 pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
+    alpha_conversion_owned(meta, lam.clone())
+}
+
+/// Owned entry point for the same OCaml pass
+/// (`compiler/core/lam_pass_alpha_conversion.ml:25-129`).
+///
+/// OCaml rebuilds the immutable Lambda tree. Rust can consume the previous
+/// pass result in the backend pipeline, preserving the same case behavior while
+/// avoiding an eager clone of the whole tree before the rebuild.
+pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
     let alpha = Alpha { meta };
-    alpha.simpl(lam)
+    alpha.simpl_owned(lam)
 }
 
 struct Alpha<'a> {
@@ -84,6 +94,64 @@ impl<'a> Alpha<'a> {
                     let inner = Lambda::apply(self.simpl(fn_), first, infer_full, false);
                     Lambda::apply(inner, rest, ap_info.clone(), ap_transformed_jsx)
                 }
+            }
+        }
+    }
+
+    /// Owned form of `populate_apply_info`
+    /// (`compiler/core/lam_pass_alpha_conversion.ml:26-49`).
+    fn populate_apply_info_owned(
+        &self,
+        ap_transformed_jsx: bool,
+        args_arity: &[i32],
+        len: i32,
+        fn_: Lambda,
+        args: Vec<Lambda>,
+        ap_info: ApInfo,
+    ) -> Lambda {
+        match args_arity.first().copied() {
+            None | Some(0) => Lambda::apply(
+                self.simpl_owned(fn_),
+                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
+                ap_info,
+                ap_transformed_jsx,
+            ),
+            Some(x) if x == len => {
+                let new_info = ApInfo {
+                    status: ApplyStatus::InferFull,
+                    ..ap_info
+                };
+                Lambda::apply(
+                    self.simpl_owned(fn_),
+                    args.into_iter().map(|a| self.simpl_owned(a)).collect(),
+                    new_info,
+                    ap_transformed_jsx,
+                )
+            }
+            Some(x) if x > len => {
+                let fn_ = self.simpl_owned(fn_);
+                let args = args.into_iter().map(|a| self.simpl_owned(a)).collect();
+                let new_info = ApInfo {
+                    status: ApplyStatus::InferFull,
+                    ..ap_info
+                };
+                transform_under_supply(x - len, &new_info, fn_, args)
+            }
+            Some(x) => {
+                let split = x as usize;
+                let mut args = args.into_iter();
+                let first: Vec<Lambda> = args
+                    .by_ref()
+                    .take(split)
+                    .map(|a| self.simpl_owned(a))
+                    .collect();
+                let rest: Vec<Lambda> = args.map(|a| self.simpl_owned(a)).collect();
+                let infer_full = ApInfo {
+                    status: ApplyStatus::InferFull,
+                    ..ap_info.clone()
+                };
+                let inner = Lambda::apply(self.simpl_owned(fn_), first, infer_full, false);
+                Lambda::apply(inner, rest, ap_info, ap_transformed_jsx)
             }
         }
     }
@@ -274,6 +342,152 @@ impl<'a> Alpha<'a> {
 
             // lam_pass_alpha_conversion.ml:122-125
             Lambda::Lassign(v, l) => Lambda::assign(v.clone(), self.simpl(l)),
+        }
+    }
+
+    /// Owned form of `simpl` (`compiler/core/lam_pass_alpha_conversion.ml:50-126`).
+    fn simpl_owned(&self, lam: Lambda) -> Lambda {
+        match lam {
+            Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => lam,
+            Lambda::Lapply(Apply {
+                ap_func,
+                ap_args,
+                ap_info,
+                ap_transformed_jsx,
+            }) => {
+                let args_arity = get_arity(self.meta, &ap_func).extract_arity();
+                let len = ap_args.len() as i32;
+                self.populate_apply_info_owned(
+                    ap_transformed_jsx,
+                    &args_arity,
+                    len,
+                    *ap_func,
+                    ap_args,
+                    ap_info,
+                )
+            }
+            Lambda::Llet(str, v, l1, l2) => {
+                Lambda::let_(str, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+            Lambda::Lletrec(bindings, body) => {
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(id, e)| (id, self.simpl_owned(e)))
+                    .collect();
+                Lambda::letrec(bindings, self.simpl_owned(*body))
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMake(len),
+                mut args,
+                loc,
+            }) if args.len() == 1 => {
+                let arg = args.pop().expect("checked single PjsFnMake arg");
+                match get_arity(self.meta, &arg).get_first_arity() {
+                    Some(x) => {
+                        let arg = self.simpl_owned(arg);
+                        unsafe_adjust_to_arity(loc, len, Some(x), arg)
+                    }
+                    None => Lambda::prim(Primitive::PjsFnMake(len), vec![self.simpl_owned(arg)], loc),
+                }
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsFnMakeUnit,
+                mut args,
+                loc: _,
+            }) if args.len() == 1 => {
+                let arg = args.pop().expect("checked single PjsFnMakeUnit arg");
+                let new_arg = match arg {
+                    Lambda::Lfunction(f)
+                        if f.arity == 1 && f.params.len() == 1 && f.params[0].name() == "param" =>
+                    {
+                        Lambda::function_(
+                            1,
+                            f.params,
+                            *f.body,
+                            FunctionAttribute {
+                                one_unit_arg: true,
+                                ..f.attr
+                            },
+                        )
+                    }
+                    other => other,
+                };
+                self.simpl_owned(new_arg)
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive,
+                args,
+                loc,
+            }) => Lambda::prim(
+                primitive,
+                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
+                loc,
+            ),
+            Lambda::Lfunction(f) => {
+                Lambda::function_(f.arity, f.params, self.simpl_owned(*f.body), f.attr)
+            }
+            Lambda::Lswitch(scrut, switch) => Lambda::switch(
+                self.simpl_owned(*scrut),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(k, l)| (k, self.simpl_owned(l)))
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(k, l)| (k, self.simpl_owned(l)))
+                        .collect(),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .map(|f| Box::new(self.simpl_owned(*f))),
+                    sw_names: switch.sw_names,
+                },
+            ),
+            Lambda::LstringSwitch(scrut, sw, d) => Lambda::string_switch(
+                self.simpl_owned(*scrut),
+                sw.into_iter()
+                    .map(|(k, v)| (k, self.simpl_owned(v)))
+                    .collect(),
+                d.map(|d| Box::new(self.simpl_owned(*d))),
+            ),
+            Lambda::LstaticRaise(i, ls) => {
+                Lambda::static_raise(i, ls.into_iter().map(|l| self.simpl_owned(l)).collect())
+            }
+            Lambda::LstaticCatch(l1, ids, l2) => {
+                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
+            }
+            Lambda::LtryWith(l1, v, l2) => {
+                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
+            }
+            Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
+                self.simpl_owned(*l1),
+                self.simpl_owned(*l2),
+                self.simpl_owned(*l3),
+            ),
+            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+            Lambda::Lwhile(l1, l2) => {
+                Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
+                var,
+                self.simpl_owned(*l1),
+                self.simpl_owned(*l2),
+                dir,
+                self.simpl_owned(*l3),
+            ),
+            Lambda::Lfor_of(var, l1, l2) => {
+                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+            Lambda::Lfor_await_of(var, l1, l2) => {
+                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+            Lambda::Lbreak => Lambda::break_(),
+            Lambda::Lcontinue => Lambda::continue_(),
+            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
         }
     }
 }

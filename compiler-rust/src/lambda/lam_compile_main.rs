@@ -9,7 +9,7 @@
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
-use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
+use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_owned;
 use crate::lambda::lam_pass_collect::collect_info;
 use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
@@ -93,7 +93,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:180 — alpha_conversion.
-    let lam = alpha_conversion(&meta, &lam);
+    let lam = alpha_conversion_owned(&meta, lam);
 
     // lam_compile_main.ml:182 — simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
@@ -105,7 +105,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve
     let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:190 — alpha_conversion.
-    let lam = alpha_conversion(&meta, &lam);
+    let lam = alpha_conversion_owned(&meta, lam);
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets(&lam);
