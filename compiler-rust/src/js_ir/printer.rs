@@ -335,7 +335,7 @@ impl JsPrinter {
     }
 
     /// Print statements
-    pub fn print_statements(&mut self, stmts: &Block, top_level: bool) {
+    pub fn print_statements(&mut self, stmts: &[Statement], top_level: bool) {
         for (index, stmt) in stmts.iter().enumerate() {
             if index > 0 {
                 if top_level {
@@ -3137,7 +3137,7 @@ fn try_unit_function_body_single_clean_negative_guard_merge(stmts: &Block) -> Op
     )))
 }
 
-fn try_function_body_shared_return_guard_chain_merge(stmts: &Block) -> Option<Statement> {
+fn try_function_body_shared_return_guard_chain_merge(stmts: &[Statement]) -> Option<Statement> {
     let (last, prefix) = stmts.split_last()?;
     if prefix.is_empty() {
         return None;
@@ -3175,8 +3175,8 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
-        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(&suffix) {
+        let suffix = &stmts[start..];
+        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(suffix) {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(merged);
             return Some(rewritten);
@@ -3186,8 +3186,8 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     None
 }
 
-fn try_function_body_guard_return_fallthrough_else_merge(stmts: &Block) -> Option<Statement> {
-    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+fn try_function_body_guard_return_fallthrough_else_merge(stmts: &[Statement]) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts else {
         return None;
     };
 
@@ -3220,8 +3220,8 @@ fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block)
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
-        if let Some(merged) = try_function_body_guard_return_fallthrough_else_merge(&suffix) {
+        let suffix = &stmts[start..];
+        if let Some(merged) = try_function_body_guard_return_fallthrough_else_merge(suffix) {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(merged);
             return Some(rewritten);
@@ -3231,8 +3231,10 @@ fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block)
     None
 }
 
-fn try_function_body_positive_strict_undefined_tail_if_rewrite(stmts: &Block) -> Option<Statement> {
-    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+fn try_function_body_positive_strict_undefined_tail_if_rewrite(
+    stmts: &[Statement],
+) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts else {
         return None;
     };
 
@@ -3272,9 +3274,9 @@ fn try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts: &Block
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
+        let suffix = &stmts[start..];
         if let Some(rewritten_stmt) =
-            try_function_body_positive_strict_undefined_tail_if_rewrite(&suffix)
+            try_function_body_positive_strict_undefined_tail_if_rewrite(suffix)
         {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(rewritten_stmt);
