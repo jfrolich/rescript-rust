@@ -7171,19 +7171,23 @@ fn type_application(
     }
 
     fn extract_label_index(
-        remaining_args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+        args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+        remaining_args: &[usize],
         label_name: &str,
         arena: &ParseArena,
     ) -> Option<usize> {
         remaining_args
             .iter()
-            .position(|(label, _)| parser_arg_label_name(label, arena) == label_name)
+            .position(|&idx| parser_arg_label_name(&args[idx].0, arena) == label_name)
     }
 
-    fn has_nolabel_arg(remaining_args: &[(ArgLabel, crate::parse_arena::ExprIdx)]) -> bool {
+    fn has_nolabel_arg(
+        args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+        remaining_args: &[usize],
+    ) -> bool {
         remaining_args
             .iter()
-            .any(|(label, _)| matches!(label, ArgLabel::Nolabel))
+            .any(|&idx| matches!(args[idx].0, ArgLabel::Nolabel))
     }
 
     fn apply_arg_label_for_param(
@@ -7296,10 +7300,11 @@ fn type_application(
 
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
-    let mut remaining_args: Vec<(ArgLabel, crate::parse_arena::ExprIdx)> = args
-        .iter()
-        .map(|(label, expr_idx)| (label.clone(), *expr_idx))
-        .collect();
+    // OCaml's `extract_label` returns the remaining syntax-arg list without
+    // copying argument payloads (`compiler/ml/typecore.ml:4155-4164`). Keep the
+    // same logical list here as indices into `args` so each application avoids
+    // cloning parser labels.
+    let mut remaining_args: Vec<usize> = (0..args.len()).collect();
     let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
     let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut consumed_optional_count = 0usize;
@@ -7336,7 +7341,8 @@ fn type_application(
                     )
                 };
                 if !param_is_unit {
-                    if let (ArgLabel::Nolabel, arg_expr_idx) = &remaining_args[0] {
+                    let arg_index = remaining_args[0];
+                    if let (ArgLabel::Nolabel, arg_expr_idx) = &args[arg_index] {
                         let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
                         if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
                             &*arg_expr.pexp_desc
@@ -7350,10 +7356,12 @@ fn type_application(
             }
 
             let fn_label_name = fn_label.label_name().unwrap_or("");
-            if let Some(match_idx) = extract_label_index(&remaining_args, fn_label_name, tctx.arena)
+            if let Some(match_idx) =
+                extract_label_index(args, &remaining_args, fn_label_name, tctx.arena)
             {
-                let (call_label, arg_expr_idx) = remaining_args.remove(match_idx);
-                let arg_expr = tctx.arena.get_expr(arg_expr_idx);
+                let arg_index = remaining_args.remove(match_idx);
+                let (call_label, arg_expr_idx) = &args[arg_index];
+                let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
                 let call_is_optional = call_label.is_optional();
                 let effective_arg_ty = if fn_label.is_optional() && !call_is_optional {
                     crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
@@ -7367,7 +7375,7 @@ fn type_application(
                 };
 
                 pending_args.push(PendingApplyArg::Provided {
-                    label: apply_arg_label_for_param(&fn_label, &call_label, tctx.arena),
+                    label: apply_arg_label_for_param(&fn_label, call_label, tctx.arena),
                     expr: arg_expr,
                     expected_ty: effective_arg_ty,
                     unify_ty: effective_arg_ty0,
@@ -7379,7 +7387,7 @@ fn type_application(
                 continue;
             }
 
-            if fn_label.is_optional() && (total_app || has_nolabel_arg(&remaining_args)) {
+            if fn_label.is_optional() && (total_app || has_nolabel_arg(args, &remaining_args)) {
                 consumed_optional_count += 1;
                 let option_ty = crate::types::instance(ctx, arg_ty);
                 // OCaml type_application: consumed omitted optional labels still appear
@@ -7407,8 +7415,9 @@ fn type_application(
             continue;
         }
 
-        let (label, arg_expr_idx) = remaining_args.remove(0);
-        let arg_expr = tctx.arena.get_expr(arg_expr_idx);
+        let arg_index = remaining_args.remove(0);
+        let (label, arg_expr_idx) = &args[arg_index];
+        let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
 
         // OCaml special case: if all supplied args were optional defaults and
         // the final argument is `()`, treat it as an empty application.
@@ -7430,13 +7439,13 @@ fn type_application(
         // type_unknown_args fallback: build an arrow from call-site label if needed.
         let arg_ty = ctx.new_var(None);
         let ret_ty = ctx.new_var(None);
-        let ctx_label = convert_arg_label_for_ctx(&label, tctx.arena);
+        let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
         let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
         unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
         top_arity = None;
 
         pending_args.push(PendingApplyArg::Provided {
-            label: convert_arg_label_for_ctx(&label, tctx.arena),
+            label: convert_arg_label_for_ctx(label, tctx.arena),
             expr: arg_expr,
             expected_ty: arg_ty,
             unify_ty: arg_ty,
