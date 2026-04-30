@@ -34,128 +34,141 @@ fn incr_exit(exits: &mut Collection, i: i32) {
 /// handler if the body has no occurrences of its label
 /// (lam_exit_count.ml:58-60).
 pub fn count_helper(lam: &Lambda) -> Collection {
-    let mut exits: Collection = HashMap::new();
-    count(&mut exits, lam);
-    exits
+    count_helper_with_catches(lam).exits
 }
 
-fn count(exits: &mut Collection, lam: &Lambda) {
+struct CountResult {
+    exits: Collection,
+    has_static_catch: bool,
+}
+
+fn count_helper_with_catches(lam: &Lambda) -> CountResult {
+    let mut result = CountResult {
+        exits: HashMap::new(),
+        has_static_catch: false,
+    };
+    count(&mut result, lam);
+    result
+}
+
+fn count(result: &mut CountResult, lam: &Lambda) {
     match lam {
         // lam_exit_count.ml:55-57
         Lambda::LstaticRaise(i, ls) => {
-            incr_exit(exits, *i);
+            incr_exit(&mut result.exits, *i);
             for l in ls {
-                count(exits, l);
+                count(result, l);
             }
         }
         // lam_exit_count.ml:58-60
         Lambda::LstaticCatch(l1, (i, _), l2) => {
-            count(exits, l1);
-            if count_exit(exits, *i) > 0 {
-                count(exits, l2);
+            result.has_static_catch = true;
+            count(result, l1);
+            if count_exit(&result.exits, *i) > 0 {
+                count(result, l2);
             }
         }
         // lam_exit_count.ml:61-64
         Lambda::LstringSwitch(l, sw, d) => {
-            count(exits, l);
+            count(result, l);
             for (_, body) in sw {
-                count(exits, body);
+                count(result, body);
             }
             if let Some(d) = d {
-                count(exits, d);
+                count(result, d);
             }
         }
         // lam_exit_count.ml:65
         Lambda::LglobalModule(_, _) | Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         // lam_exit_count.ml:66-68
         Lambda::Lapply(apply) => {
-            count(exits, &apply.ap_func);
+            count(result, &apply.ap_func);
             for arg in &apply.ap_args {
-                count(exits, arg);
+                count(result, arg);
             }
         }
         // lam_exit_count.ml:69
-        Lambda::Lfunction(func) => count(exits, &func.body),
+        Lambda::Lfunction(func) => count(result, &func.body),
         // lam_exit_count.ml:70-72: count body before value (matches OCaml
         // ordering, which only matters for hash-collision iteration order).
         Lambda::Llet(_, _, l1, l2) => {
-            count(exits, l2);
-            count(exits, l1);
+            count(result, l2);
+            count(result, l1);
         }
         // lam_exit_count.ml:73-75
         Lambda::Lletrec(bindings, body) => {
             for (_, expr) in bindings {
-                count(exits, expr);
+                count(result, expr);
             }
-            count(exits, body);
+            count(result, body);
         }
         // lam_exit_count.ml:76
         Lambda::Lprim(info) => {
             for arg in &info.args {
-                count(exits, arg);
+                count(result, arg);
             }
         }
         // lam_exit_count.ml:77-81 + count_default (lam_exit_count.ml:100-107)
         Lambda::Lswitch(l, sw) => {
-            count_default(exits, sw);
-            count(exits, l);
+            count_default(result, sw);
+            count(result, l);
             for (_, body) in &sw.sw_consts {
-                count(exits, body);
+                count(result, body);
             }
             for (_, body) in &sw.sw_blocks {
-                count(exits, body);
+                count(result, body);
             }
         }
         // lam_exit_count.ml:82-84
         Lambda::LtryWith(l1, _, l2) => {
-            count(exits, l1);
-            count(exits, l2);
+            count(result, l1);
+            count(result, l2);
         }
         // lam_exit_count.ml:85-88
         Lambda::LifThenElse(l1, l2, l3) => {
-            count(exits, l1);
-            count(exits, l2);
-            count(exits, l3);
+            count(result, l1);
+            count(result, l2);
+            count(result, l3);
         }
         // lam_exit_count.ml:89-91
         Lambda::Lsequence(l1, l2) => {
-            count(exits, l1);
-            count(exits, l2);
+            count(result, l1);
+            count(result, l2);
         }
         // lam_exit_count.ml:92-94
         Lambda::Lwhile(l1, l2) => {
-            count(exits, l1);
-            count(exits, l2);
+            count(result, l1);
+            count(result, l2);
         }
         // lam_exit_count.ml:95-98
         Lambda::Lfor(_, l1, l2, _, l3) => {
-            count(exits, l1);
-            count(exits, l2);
-            count(exits, l3);
+            count(result, l1);
+            count(result, l2);
+            count(result, l3);
         }
         // lam_exit_count.ml after #7887: Lfor_of / Lfor_await_of.
         Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
-            count(exits, l1);
-            count(exits, l2);
+            count(result, l1);
+            count(result, l2);
         }
         // lam_exit_count.ml:99
-        Lambda::Lassign(_, l) => count(exits, l),
+        Lambda::Lassign(_, l) => count(result, l),
         // OCaml `Lam_exit_count.count_helper` after #8348:
         // `Lbreak | Lcontinue -> ()`.
         Lambda::Lbreak | Lambda::Lcontinue => {}
     }
 }
 
-fn count_default(exits: &mut Collection, sw: &LambdaSwitch) {
+fn count_default(result: &mut CountResult, sw: &LambdaSwitch) {
     if let Some(failaction) = sw.sw_failaction.as_deref() {
         // lam_exit_count.ml:104-107: when the switch is not exhaustive, the
         // default is reached via either the consts or the blocks predicate,
         // so it gets counted twice.
         if !sw.sw_consts_full && !sw.sw_blocks_full {
-            count(exits, failaction);
-            count(exits, failaction);
+            count(result, failaction);
+            count(result, failaction);
         } else {
-            count(exits, failaction);
+            count(result, failaction);
         }
     }
 }
@@ -225,70 +238,6 @@ pub fn no_bounded_variables(l: &Lambda) -> bool {
 /// Substitution table value: bound vars + handler lambda.
 /// (`subst_tbl = (Ident.t list * lam_subst) Hash_int.t` lam_pass_exits.ml:86)
 type SubstTbl = HashMap<i32, (Vec<Ident>, Lambda)>;
-
-fn contains_static_catch(lam: &Lambda) -> bool {
-    match lam {
-        Lambda::LstaticCatch(_, _, _) => true,
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => false,
-        Lambda::Lapply(apply) => {
-            contains_static_catch(&apply.ap_func)
-                || apply.ap_args.iter().any(contains_static_catch)
-        }
-        Lambda::Lfunction(func) => contains_static_catch(&func.body),
-        Lambda::Llet(_, _, value, body) => {
-            contains_static_catch(value) || contains_static_catch(body)
-        }
-        Lambda::Lletrec(bindings, body) => {
-            bindings
-                .iter()
-                .any(|(_, expr)| contains_static_catch(expr))
-                || contains_static_catch(body)
-        }
-        Lambda::Lprim(info) => info.args.iter().any(contains_static_catch),
-        Lambda::Lswitch(arg, sw) => {
-            contains_static_catch(arg)
-                || sw
-                    .sw_consts
-                    .iter()
-                    .any(|(_, body)| contains_static_catch(body))
-                || sw
-                    .sw_blocks
-                    .iter()
-                    .any(|(_, body)| contains_static_catch(body))
-                || sw
-                    .sw_failaction
-                    .as_deref()
-                    .is_some_and(contains_static_catch)
-        }
-        Lambda::LstringSwitch(arg, cases, default) => {
-            contains_static_catch(arg)
-                || cases.iter().any(|(_, body)| contains_static_catch(body))
-                || default.as_deref().is_some_and(contains_static_catch)
-        }
-        Lambda::LstaticRaise(_, args) => args.iter().any(contains_static_catch),
-        Lambda::LtryWith(body, _, handler) => {
-            contains_static_catch(body) || contains_static_catch(handler)
-        }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            contains_static_catch(cond)
-                || contains_static_catch(then_)
-                || contains_static_catch(else_)
-        }
-        Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
-            contains_static_catch(first) || contains_static_catch(second)
-        }
-        Lambda::Lfor(_, start, end, _, body) => {
-            contains_static_catch(start)
-                || contains_static_catch(end)
-                || contains_static_catch(body)
-        }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            contains_static_catch(iterable) || contains_static_catch(body)
-        }
-        Lambda::Lassign(_, value) => contains_static_catch(value),
-        Lambda::Lbreak | Lambda::Lcontinue => false,
-    }
-}
 
 /// `Lam_pass_exits.subst_helper` (compiler/core/lam_pass_exits.ml:153-239).
 ///
@@ -530,12 +479,20 @@ pub fn simplify_exits(lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
 /// 184-239). Returning the owned input in that case is therefore the same
 /// transformation without a full-tree clone.
 pub fn simplify_exits_owned(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-    if !contains_static_catch(&lam) {
+    // OCaml always starts with `Lam_exit_count.count_helper` and then
+    // `subst_helper` (lam_pass_exits.ml:241-243). Rust keeps the owned
+    // no-catch fast path, but records that invariant while doing the same
+    // counting walk (lam_exit_count.ml:51-110) instead of running a separate
+    // pre-scan that OCaml does not have.
+    let CountResult {
+        exits,
+        has_static_catch,
+    } = count_helper_with_catches(&lam);
+    if !has_static_catch {
         return lam;
     }
-    let counts = count_helper(&lam);
     let mut subst: SubstTbl = HashMap::new();
-    subst_helper_owned(&mut subst, &counts, id_gen, lam)
+    subst_helper_owned(&mut subst, &exits, id_gen, lam)
 }
 
 /// Standalone entry point that seeds its own `IdGenerator` from the lambda's
