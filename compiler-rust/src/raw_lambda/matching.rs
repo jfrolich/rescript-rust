@@ -2273,83 +2273,76 @@ pub fn simplify_cases(
     fn simplify(
         ctx_ref: Option<&TypeContext<'_>>,
         arg: &RawLambda,
-        mut cls: Vec<Clause>,
+        cls: Vec<Clause>,
     ) -> Vec<Clause> {
-        if cls.is_empty() {
-            return Vec::new();
-        }
+        let mut pending: VecDeque<Clause> = cls.into();
+        let mut result = Vec::with_capacity(pending.len());
+        while let Some((pats, action)) = pending.pop_front() {
+            assert!(!pats.is_empty(), "simplify_cases: empty pattern row");
 
-        let (pats, action) = cls.remove(0);
-        assert!(!pats.is_empty(), "simplify_cases: empty pattern row");
+            let pat = &pats[0];
+            let patl = &pats[1..];
 
-        let pat = &pats[0];
-        let patl = &pats[1..];
-
-        match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) => {
-                let new_action = MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
-                let mut row = vec![omega()];
-                row.extend(patl.iter().cloned());
-                let mut result = vec![(row, new_action)];
-                result.extend(simplify(ctx_ref, arg, cls));
-                result
-            }
-            PatternDesc::Tpat_any => {
-                let mut result = vec![(pats, action)];
-                result.extend(simplify(ctx_ref, arg, cls));
-                result
-            }
-            PatternDesc::Tpat_alias(p, id, _) => {
-                let new_action = MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
-                let mut new_pats = vec![(**p).clone()];
-                new_pats.extend(patl.iter().cloned());
-                cls.insert(0, (new_pats, new_action));
-                simplify(ctx_ref, arg, cls)
-            }
-            PatternDesc::Tpat_record(lbls, _) if lbls.is_empty() => {
-                let mut row = vec![omega()];
-                row.extend(patl.iter().cloned());
-                let mut result = vec![(row, action)];
-                result.extend(simplify(ctx_ref, arg, cls));
-                result
-            }
-            PatternDesc::Tpat_record(lbls, closed) => {
-                let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
-                let full_pat = Pattern {
-                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
-                    ..pat.clone()
-                };
-                let mut row = vec![full_pat];
-                row.extend(patl.iter().cloned());
-                let mut result = vec![(row, action)];
-                result.extend(simplify(ctx_ref, arg, cls));
-                result
-            }
-            PatternDesc::Tpat_or(..) => {
-                let pat_simple = simplify_or(ctx_ref, pat);
-                match &pat_simple.pat_desc {
-                    PatternDesc::Tpat_or(..) => {
-                        let mut row = vec![pat_simple];
-                        row.extend(patl.iter().cloned());
-                        let mut result = vec![(row, action)];
-                        result.extend(simplify(ctx_ref, arg, cls));
-                        result
-                    }
-                    _ => {
-                        // Simplified away the or — re-process
-                        let mut new_pats = vec![pat_simple];
-                        new_pats.extend(patl.iter().cloned());
-                        cls.insert(0, (new_pats, action));
-                        simplify(ctx_ref, arg, cls)
+            match &pat.pat_desc {
+                PatternDesc::Tpat_var(id, _) => {
+                    let new_action =
+                        MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
+                    let mut row = vec![omega()];
+                    row.extend(patl.iter().cloned());
+                    result.push((row, new_action));
+                }
+                PatternDesc::Tpat_any => {
+                    result.push((pats, action));
+                }
+                PatternDesc::Tpat_alias(p, id, _) => {
+                    let new_action =
+                        MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
+                    let mut new_pats = vec![(**p).clone()];
+                    new_pats.extend(patl.iter().cloned());
+                    // OCaml `compiler/ml/matching.ml:565-566` immediately
+                    // reprocesses the peeled alias row by recursing on
+                    // `(p :: patl, bind Alias id arg action) :: rem`. A deque
+                    // keeps that same order without shifting the whole Rust Vec.
+                    pending.push_front((new_pats, new_action));
+                }
+                PatternDesc::Tpat_record(lbls, _) if lbls.is_empty() => {
+                    let mut row = vec![omega()];
+                    row.extend(patl.iter().cloned());
+                    result.push((row, action));
+                }
+                PatternDesc::Tpat_record(lbls, closed) => {
+                    let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
+                    let full_pat = Pattern {
+                        pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
+                        ..pat.clone()
+                    };
+                    let mut row = vec![full_pat];
+                    row.extend(patl.iter().cloned());
+                    result.push((row, action));
+                }
+                PatternDesc::Tpat_or(..) => {
+                    let pat_simple = simplify_or(ctx_ref, pat);
+                    match &pat_simple.pat_desc {
+                        PatternDesc::Tpat_or(..) => {
+                            let mut row = vec![pat_simple];
+                            row.extend(patl.iter().cloned());
+                            result.push((row, action));
+                        }
+                        _ => {
+                            // OCaml `compiler/ml/matching.ml:577-580` also
+                            // reprocesses an or-pattern that simplified away.
+                            let mut new_pats = vec![pat_simple];
+                            new_pats.extend(patl.iter().cloned());
+                            pending.push_front((new_pats, action));
+                        }
                     }
                 }
-            }
-            _ => {
-                let mut result = vec![(pats, action)];
-                result.extend(simplify(ctx_ref, arg, cls));
-                result
+                _ => {
+                    result.push((pats, action));
+                }
             }
         }
+        result
     }
 
     simplify(ctx_ref, arg, cls)
