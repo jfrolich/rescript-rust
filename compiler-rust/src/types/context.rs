@@ -516,18 +516,25 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Borrow a cached qualified module-components view.
-    /// Clones the components before calling `f` to avoid holding the borrow
-    /// across the callback (which may re-enter and register new components).
+    /// OCaml stores lazy module components once and reads the cached component
+    /// tables directly (compiler/ml/env.ml:1513-1514,1516-1588). Move the
+    /// cached value out while running `f` so recursive lookups can still mutate
+    /// this cache without cloning the full signature/component graph.
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        let components = {
-            let cache = self.qualified_module_components_cache.borrow();
-            cache.get(key)?.clone()
-        };
-        Some(f(&components))
+        let components = self
+            .qualified_module_components_cache
+            .borrow_mut()
+            .remove(key)?;
+        let result = f(&components);
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .entry(key.clone())
+            .or_insert(components);
+        Some(result)
     }
 
     /// Look up a module alias target from the qualified module components cache.
