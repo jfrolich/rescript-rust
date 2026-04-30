@@ -2857,6 +2857,28 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
     }
 }
 
+/// Boolean form of `extract_vars IdentSet.empty p |> IdentSet.is_empty`.
+/// Mirrors OCaml's `extract_vars` branches (compiler/ml/matching.ml:613-624)
+/// but avoids allocating an IdentSet for the hot no-variable test in
+/// `insert_or_append` (compiler/ml/matching.ml:738-740).
+fn pattern_binds_vars(p: &Pattern) -> bool {
+    match &p.pat_desc {
+        PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
+        PatternDesc::Tpat_tuple(pats)
+        | PatternDesc::Tpat_construct(_, _, pats)
+        | PatternDesc::Tpat_array(pats) => pats.iter().any(pattern_binds_vars),
+        PatternDesc::Tpat_record(lpats, _) => {
+            lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
+        }
+        PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_or(p, _, _) => {
+            pattern_binds_vars(p)
+        }
+        PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_any
+        | PatternDesc::Tpat_variant(_, None, _) => false,
+    }
+}
+
 /// Error raised when an or-pattern cannot be flattened because
 /// an aliased variable needs a binding but no argument is available.
 /// Equivalent to OCaml's `Cannot_flatten` exception.
@@ -3360,7 +3382,6 @@ fn insert_or_append(
 
     let ors_len = ors.len();
     let ors_slice = ors.make_contiguous();
-    let mut seen: VecDeque<Clause> = VecDeque::new();
 
     for index in 0..ors_len {
         let cl = &ors_slice[index];
@@ -3372,21 +3393,23 @@ fn insert_or_append(
         let act_q = &cl.1;
 
         if is_or(q_head) && may_compat(p, q_head) {
-            if extract_vars(BTreeSet::new(), p).is_empty()
-                && extract_vars(BTreeSet::new(), q_head).is_empty()
-                && equiv_pat(p, q_head)
-            {
+            if !pattern_binds_vars(p) && !pattern_binds_vars(q_head) && equiv_pat(p, q_head) {
                 // OCaml compiler/ml/matching.ml:743-756 keeps `seen` in
                 // reversed cons order and reconstructs with `List.rev_append`.
                 let (_, not_e) = get_equiv(q_head, rem);
                 if or_ok(p, ps, &not_e)
-                    && seen.iter().all(|seen_cl| match seen_cl.0.first() {
-                        Some(q) => !may_compat(p, q),
-                        None => panic!("insert_or_append: empty seen row"),
-                    })
+                    && ors_slice[..index]
+                        .iter()
+                        .all(|seen_cl| match seen_cl.0.first() {
+                            Some(q) => !may_compat(p, q),
+                            None => panic!("insert_or_append: empty seen row"),
+                        })
                 {
-                    let mut result = VecDeque::with_capacity(seen.len() + 2 + rem.len());
-                    result.extend(seen.into_iter().rev());
+                    // OCaml compiler/ml/matching.ml:733-756 builds `seen` as a
+                    // shared list prefix. Keep the Rust equivalent as a slice
+                    // prefix and only clone rows when reconstructing the result.
+                    let mut result = VecDeque::with_capacity(index + 2 + rem.len());
+                    result.extend(ors_slice[..index].iter().cloned());
                     result.push_back(clause_from_head(p, ps, act));
                     result.push_back(cl.clone());
                     result.extend(rem.iter().cloned());
@@ -3403,7 +3426,9 @@ fn insert_or_append(
             }
         }
 
-        seen.push_front(cl.clone());
+        // OCaml's recursive `attempt (cl :: seen) rem` shares `cl`
+        // (compiler/ml/matching.ml:733-734,768). The current index is the
+        // logical `seen` prefix for subsequent iterations.
     }
 
     // OCaml compiler/ml/matching.ml:768-773 returns `((p :: ps, act) :: ors, no)`.
