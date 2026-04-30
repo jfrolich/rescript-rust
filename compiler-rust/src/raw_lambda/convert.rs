@@ -905,6 +905,27 @@ impl<'a> RawLambdaConverter<'a> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
+    fn sync_local_stamp_generators(&mut self) {
+        let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
+        self.type_ctx.set_current_time(shared_stamp);
+        self.id_gen.set_current_stamp(shared_stamp);
+        self.lowered.set_current_stamp(shared_stamp);
+    }
+
+    fn fresh_ident(&mut self, name: &str) -> Ident {
+        // OCaml uses one global `Ident.currentstamp` for both Translcore and
+        // Translmod (`compiler/ml/translcore.ml:1250-1271`,
+        // `compiler/ml/translmod.ml:422-448`). Rust has separate raw and
+        // lowered converters, so synchronize before and after minting a raw
+        // identifier to preserve OCaml's physical stamp ordering.
+        self.sync_local_stamp_generators();
+        let id = self.id_gen.create(name);
+        let stamp = id.stamp();
+        self.type_ctx.set_current_time(stamp);
+        self.lowered.set_current_stamp(stamp);
+        id
+    }
+
     fn note_possible_required_module(&mut self, id: &Ident, dynamic_import: bool) {
         self.possible_required_modules.insert(ModuleId {
             id: id.clone(),
@@ -1061,10 +1082,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn sync_matching_stamps(&mut self) {
-        let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
-        self.type_ctx.set_current_time(shared_stamp);
-        self.id_gen.set_current_stamp(shared_stamp);
-        self.lowered.set_current_stamp(shared_stamp);
+        self.sync_local_stamp_generators();
     }
 
     fn compile_matching_with_synced_stamps(
@@ -1184,7 +1202,7 @@ impl<'a> RawLambdaConverter<'a> {
         cases
             .iter()
             .find_map(|case| self.id_of_pattern(&case.c_lhs))
-            .unwrap_or_else(|| self.id_gen.create(default))
+            .unwrap_or_else(|| self.fresh_ident(default))
     }
 
     fn fresh_name_from_cases(&self, default: &str, cases: &[Case]) -> String {
@@ -2839,10 +2857,10 @@ impl<'a> RawLambdaConverter<'a> {
 
         // Create parameter idents matching OCaml's naming
         let params: Vec<Ident> = if prim_arity == 1 {
-            vec![self.id_gen.create("prim")]
+            vec![self.fresh_ident("prim")]
         } else {
             (0..prim_arity)
-                .map(|i| self.id_gen.create(&format!("prim{}", i)))
+                .map(|i| self.fresh_ident(&format!("prim{}", i)))
                 .collect()
         };
 
@@ -3186,7 +3204,7 @@ impl<'a> RawLambdaConverter<'a> {
         if build_direct {
             // OCaml wraps the init expression in a let binding when there's a
             // base expression, so field accesses use Lvar(init_id) not the expr.
-            let init_id = base_lam.as_ref().map(|_| self.id_gen.create("init"));
+            let init_id = base_lam.as_ref().map(|_| self.fresh_ident("init"));
             let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
 
             let mut elems = Vec::with_capacity(fields.len());
@@ -3340,7 +3358,7 @@ impl<'a> RawLambdaConverter<'a> {
             return RawLambda::unit();
         };
 
-        let copy_id = self.id_gen.create("newrecord");
+        let copy_id = self.fresh_ident("newrecord");
         let mut body = RawLambda::var(copy_id.clone());
         // OCaml uses Array.fold_left which processes fields left-to-right.
         // Each Lsequence(upd, cont) wraps the update around the continuation,
@@ -3439,7 +3457,7 @@ impl<'a> RawLambdaConverter<'a> {
         match arg {
             RawLambda::Lvar(id) => f(self, id),
             _ => {
-                let id = self.id_gen.create("let");
+                let id = self.fresh_ident("let");
                 let body = f(self, id.clone());
                 RawLambda::let_(strict, id, arg, body)
             }
@@ -3929,7 +3947,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         for (id, pos, coercion) in id_pos_list {
             if fv.contains(id) {
-                let rebound = self.id_gen.create(id.name());
+                let rebound = self.fresh_ident(id.name());
                 let field = get_field(self, id.name(), *pos);
                 let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
                 lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
@@ -4058,7 +4076,7 @@ impl<'a> RawLambdaConverter<'a> {
                 {
                     return arg;
                 }
-                let param = self.id_gen.create("funarg");
+                let param = self.fresh_ident("funarg");
                 let carg = self.apply_coercion_raw(
                     loc.clone(),
                     LetKind::Alias,
@@ -5042,10 +5060,10 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 let old_len = fields.len();
                 fields.extend(ids.iter().map(|(id, _)| id.clone()));
+                let mid = self.fresh_ident("include");
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
-                let mid = self.id_gen.create("include");
                 let body =
                     self.rebind_included_idents_raw(&mid, &ids, body, self.loc(incl.incl_loc));
                 let result = RawLambda::let_(
@@ -5788,7 +5806,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             Lambda::Lvar(id) => (id.clone(), Lambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create("match");
+                let scrut_id = self.fresh_ident("match");
                 (
                     scrut_id.clone(),
                     Lambda::var(scrut_id.clone()),
@@ -5927,7 +5945,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create(&scrut_name);
+                let scrut_id = self.fresh_ident(&scrut_name);
                 (
                     scrut_id.clone(),
                     RawLambda::var(scrut_id.clone()),
@@ -6220,7 +6238,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {
                 // Non-variable scrutinee with complex pattern (record, tuple, etc.)
                 // OCaml's compile_matching binds with Strict via arg_to_var
-                let match_id = self.id_gen.create("match");
+                let match_id = self.fresh_ident("match");
                 let bound = self.bind_irrefutable_pattern_raw(
                     &cases[0].c_lhs,
                     RawLambda::Lvar(match_id.clone()),
@@ -6266,7 +6284,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {
                 let id = self
                     .id_of_pattern(pat)
-                    .unwrap_or_else(|| self.id_gen.create("match"));
+                    .unwrap_or_else(|| self.fresh_ident("match"));
                 let bound =
                     self.bind_irrefutable_pattern_raw(pat, RawLambda::var(id.clone()), body);
                 RawLambda::let_(LetKind::Alias, id, arg, bound)
@@ -6467,7 +6485,7 @@ impl<'a> RawLambdaConverter<'a> {
         act: RawLambda,
         fallback: RawLambda,
     ) -> RawLambda {
-        let tag_id = self.id_gen.create("tag");
+        let tag_id = self.fresh_ident("tag");
         let cond = RawLambda::prim(
             Primitive::PextensionSlotEq,
             vec![
@@ -6534,7 +6552,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
                 // For Tpat_any, OCaml's matching.ml still creates a binding
                 if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, payload, result);
                 } else {
                     // OCaml's matching.ml (line 2433): eliminates
@@ -6585,7 +6603,7 @@ impl<'a> RawLambdaConverter<'a> {
             // For Tpat_any, OCaml's matching.ml still creates a binding
             // (let (match/N =a (field:var/K scrut)) body). Match this behavior.
             if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
-                let match_id = self.id_gen.create("match");
+                let match_id = self.fresh_ident("match");
                 result = RawLambda::let_(LetKind::Alias, match_id, field, result);
             } else {
                 result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
@@ -6999,7 +7017,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create(&scrut_name);
+                let scrut_id = self.fresh_ident(&scrut_name);
                 (
                     scrut_id.clone(),
                     RawLambda::var(scrut_id.clone()),
@@ -7502,7 +7520,7 @@ impl<'a> RawLambdaConverter<'a> {
         body: Lambda,
     ) -> Lambda {
         let pat_loc = self.loc(pat.pat_loc);
-        let tmp = self.id_gen.create("ctor");
+        let tmp = self.fresh_ident("ctor");
         let mut result = body;
 
         for (idx, arg_pat) in args.iter().enumerate().rev() {
@@ -7566,7 +7584,7 @@ impl<'a> RawLambdaConverter<'a> {
                             }
                         })
                     })
-                    .unwrap_or_else(|| self.id_gen.create("match"))
+                    .unwrap_or_else(|| self.fresh_ident("match"))
             })
             .collect();
 
@@ -7944,7 +7962,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 })
             })
-            .unwrap_or_else(|| self.id_gen.create("match"));
+            .unwrap_or_else(|| self.fresh_ident("match"));
 
         let from_option = sub_cases
             .first()
@@ -8064,7 +8082,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 PatternDesc::Tpat_any => {
                     // OCaml's make_constr_matching still creates a binding for wildcards
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, field_read, result);
                 }
                 _ => {
@@ -8176,7 +8194,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, id.clone(), scrut, inner)
             }
             PatternDesc::Tpat_tuple(items) => {
-                let tmp = self.id_gen.create("tuple");
+                let tmp = self.fresh_ident("tuple");
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate().rev() {
@@ -8190,7 +8208,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
             PatternDesc::Tpat_record(fields, _) => {
-                let tmp = self.id_gen.create("match");
+                let tmp = self.fresh_ident("match");
                 let mut result = body;
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
                     let field = Lambda::prim(
@@ -8209,7 +8227,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
             PatternDesc::Tpat_array(items) => {
-                let tmp = self.id_gen.create("array");
+                let tmp = self.fresh_ident("array");
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate().rev() {
@@ -8285,7 +8303,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("match");
+                        let tmp = self.fresh_ident("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8301,7 +8319,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // for ALL positions, even wildcards. The wildcard gets a
                     // fresh "match" ident that's never used.
                     if matches!(item.pat_desc, PatternDesc::Tpat_any) {
-                        let match_id = self.id_gen.create("match");
+                        let match_id = self.fresh_ident("match");
                         result = RawLambda::let_(LetKind::Alias, match_id, field, result);
                     } else {
                         result = self.bind_irrefutable_pattern_raw(item, field, result);
@@ -8326,7 +8344,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("match");
+                        let tmp = self.fresh_ident("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8467,7 +8485,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 }
                             } else {
                                 // Not mentioned: bind to a fresh match/N variable (OCaml's omega pattern)
-                                let fresh = self.id_gen.create("match");
+                                let fresh = self.fresh_ident("match");
                                 result = RawLambda::let_(field_let_kind, fresh, field, result);
                             }
                         }
@@ -8510,7 +8528,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("array");
+                        let tmp = self.fresh_ident("array");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8567,7 +8585,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (scrut_id, wrap_let) = match &scrut {
                     RawLambda::Lvar(id) => (id.clone(), None),
                     _ => {
-                        let id = self.id_gen.create("match");
+                        let id = self.fresh_ident("match");
                         (id.clone(), Some((id, scrut)))
                     }
                 };
@@ -8604,7 +8622,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => match param {
                 RawLambda::Lvar(_) => self.bind_irrefutable_pattern_raw(pat, param, body),
                 _ => {
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     let body = self.bind_irrefutable_pattern_raw(
                         pat,
                         RawLambda::var(match_id.clone()),
@@ -8668,7 +8686,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let ids = (0..arity)
-            .map(|idx| self.id_gen.create(&format!("match{idx}")))
+            .map(|idx| self.fresh_ident(&format!("match{idx}")))
             .collect::<Vec<_>>();
         let states = expanded
             .into_iter()
@@ -8688,7 +8706,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Lambda::let_(LetKind::Strict, id.clone(), self.convert_expr(item), acc)
                 }),
             _ => {
-                let tuple_id = self.id_gen.create("tuple");
+                let tuple_id = self.fresh_ident("tuple");
                 let tuple_var = Lambda::var(tuple_id.clone());
                 let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
                     let field = Lambda::prim(
@@ -8724,7 +8742,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let ids = (0..arity)
-            .map(|_| self.id_gen.create("match"))
+            .map(|_| self.fresh_ident("match"))
             .collect::<Vec<_>>();
         let states = expanded
             .into_iter()
@@ -8749,7 +8767,7 @@ impl<'a> RawLambdaConverter<'a> {
                     )
                 }),
             _ => {
-                let tuple_id = self.id_gen.create("tuple");
+                let tuple_id = self.fresh_ident("tuple");
                 let tuple_var = RawLambda::var(tuple_id.clone());
                 let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
                     let field = RawLambda::prim(
@@ -9775,7 +9793,7 @@ impl<'a> RawLambdaConverter<'a> {
             let id = match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => id.clone(),
                 PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                _ => self.id_gen.create(&format!("param{idx}")),
+                _ => self.fresh_ident(&format!("param{idx}")),
             };
             param_ids.push(id);
         }
@@ -10025,7 +10043,7 @@ impl<'a> RawLambdaConverter<'a> {
                             if is_simple(&lam) {
                                 lam
                             } else {
-                                let id = conv.id_gen.create(name);
+                                let id = conv.fresh_ident(name);
                                 defs.push((id.clone(), lam));
                                 Lambda::var(id)
                             }
@@ -10058,7 +10076,7 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let id_arg = conv.id_gen.create("param");
+                    let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
                     next_args_rev.push((Lambda::var(id_arg.clone()), *optional));
                     next_args_rev.extend(remaining_args);
@@ -10165,7 +10183,7 @@ impl<'a> RawLambdaConverter<'a> {
                             if is_simple(&lam) {
                                 lam
                             } else {
-                                let id = conv.id_gen.create(name);
+                                let id = conv.fresh_ident(name);
                                 defs.push((id.clone(), lam));
                                 RawLambda::var(id)
                             }
@@ -10198,7 +10216,7 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let id_arg = conv.id_gen.create("param");
+                    let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
                     next_args_rev.push((RawLambda::var(id_arg.clone()), *optional));
                     next_args_rev.extend(remaining_args);
@@ -10248,14 +10266,14 @@ impl<'a> RawLambdaConverter<'a> {
                     .filter_map(|arg| match &arg.expression {
                         Some(expr) => Some(self.convert_expr_raw(expr)),
                         None => {
-                            let id = self.id_gen.create("none");
+                            let id = self.fresh_ident("none");
                             none_ids.push(id.clone());
                             Some(RawLambda::var(id))
                         }
                     })
                     .collect::<Vec<_>>();
                 let extra_ids = (0..extra_arity)
-                    .map(|_| self.id_gen.create("extra"))
+                    .map(|_| self.fresh_ident("extra"))
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
@@ -10304,7 +10322,7 @@ impl<'a> RawLambdaConverter<'a> {
             return match prim.prim_arity {
                 0 => lam,
                 1 => {
-                    let param = self.id_gen.create("prim");
+                    let param = self.fresh_ident("prim");
                     RawLambda::function_(
                         1,
                         vec![param.clone()],
@@ -10351,11 +10369,11 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::prim(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {
-                vec![self.id_gen.create("prim")]
+                vec![self.fresh_ident("prim")]
             } else {
                 let mut params = (0..prim.prim_arity)
                     .rev()
-                    .map(|i| self.id_gen.create(&format!("prim{i}")))
+                    .map(|i| self.fresh_ident(&format!("prim{i}")))
                     .collect::<Vec<_>>();
                 params.reverse();
                 params
@@ -10391,11 +10409,11 @@ impl<'a> RawLambdaConverter<'a> {
             Lambda::prim(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {
-                vec![self.id_gen.create("prim")]
+                vec![self.fresh_ident("prim")]
             } else {
                 let mut params = (0..prim.prim_arity)
                     .rev()
-                    .map(|i| self.id_gen.create(&format!("prim{i}")))
+                    .map(|i| self.fresh_ident(&format!("prim{i}")))
                     .collect::<Vec<_>>();
                 params.reverse();
                 params
@@ -11247,6 +11265,27 @@ mod tests {
 
         let post_match_raw = converter.id_gen.create("raw_post");
         assert_eq!(post_match_raw.stamp(), 203);
+    }
+
+    #[test]
+    fn fresh_ident_advances_past_lowered_converter_allocations() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::with_start_stamp(100);
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
+
+        converter.lowered.set_current_stamp(200);
+        let include_id = converter.fresh_ident("include");
+        assert_eq!(include_id.stamp(), 201);
+        assert_eq!(converter.current_stamp(), 201);
+        assert_eq!(ctx.current_stamp(), 201);
+
+        converter.lowered.set_current_stamp(250);
+        let match_id = converter.fresh_ident("match");
+        assert_eq!(match_id.stamp(), 251);
+        assert_eq!(converter.id_gen.current_stamp(), 251);
+        assert_eq!(ctx.current_stamp(), 251);
     }
 
     #[test]
