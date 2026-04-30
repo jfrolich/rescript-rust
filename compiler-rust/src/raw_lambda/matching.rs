@@ -50,32 +50,77 @@ use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 /// pointer. Rust's derived `RawLambda::clone` recursively copied whole branch
 /// bodies here, which made large matches quadratic in raw-lambda size. Keep
 /// the same functional model as OCaml by sharing the action while the matrix is
-/// being transformed, and clone the raw lambda only when final code needs
+/// being transformed, and materialize the raw lambda only when final code needs
 /// ownership.
 #[derive(Clone)]
-struct MatchAction {
-    raw: Arc<RawLambda>,
-    normalized_key: Arc<OnceLock<Option<String>>>,
+struct MatchAction(Arc<MatchActionData>);
+
+struct MatchActionData {
+    kind: MatchActionKind,
+    normalized_key: OnceLock<Option<String>>,
+}
+
+enum MatchActionKind {
+    Raw(RawLambda),
+    Bind {
+        kind: LetKind,
+        id: Ident,
+        arg: RawLambda,
+        action: MatchAction,
+    },
 }
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
-        Self {
-            raw: Arc::new(action),
-            normalized_key: Arc::new(OnceLock::new()),
+        Self::from_kind(MatchActionKind::Raw(action))
+    }
+
+    fn from_kind(kind: MatchActionKind) -> Self {
+        Self(Arc::new(MatchActionData {
+            kind,
+            normalized_key: OnceLock::new(),
+        }))
+    }
+
+    fn bind(self, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
+        // OCaml `compiler/ml/matching.ml:556-566` calls
+        // `Lambda.bind Alias id arg action`, and `compiler/ml/lambda.ml:560-565`
+        // shares the immutable action below the new `Llet`. Store the wrapper
+        // as a node so Rust does not deep-clone a shared action while
+        // normalizing match matrices.
+        match &arg {
+            RawLambda::Lvar(v) if v.same(&id) => self,
+            _ => Self::from_kind(MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action: self,
+            }),
         }
     }
 
-    fn as_raw(&self) -> &RawLambda {
-        self.raw.as_ref()
-    }
-
     fn to_raw(&self) -> RawLambda {
-        self.raw.as_ref().clone()
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => raw.clone(),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(
+                *kind,
+                id.clone(),
+                Box::new(arg.clone()),
+                Box::new(action.to_raw()),
+            ),
+        }
     }
 
     fn into_raw(self) -> RawLambda {
-        Arc::try_unwrap(self.raw).unwrap_or_else(|shared| shared.as_ref().clone())
+        match Arc::try_unwrap(self.0) {
+            Ok(data) => data.into_raw(),
+            Err(shared) => MatchAction(shared).to_raw(),
+        }
     }
 
     fn normalized_key(&self) -> Option<&str> {
@@ -84,9 +129,62 @@ impl MatchAction {
         // shuffling the same immutable actions through match matrices. Cache the
         // key beside the shared action so Rust preserves the same result without
         // repeatedly cloning the raw lambda to rebuild the normalized key.
-        self.normalized_key
-            .get_or_init(|| make_key_string(self.as_raw()))
+        self.0
+            .normalized_key
+            .get_or_init(|| make_key_string(&self.to_raw()))
             .as_deref()
+    }
+
+    fn is_guarded(&self) -> bool {
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => is_guarded(raw),
+            MatchActionKind::Bind { action, .. } => action.is_guarded(),
+        }
+    }
+
+    fn free_variables(&self) -> IdentSet {
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => raw_lambda_free_variables(raw),
+            MatchActionKind::Bind {
+                id, arg, action, ..
+            } => {
+                let mut fv = raw_lambda_free_variables(arg);
+                fv.extend(action.free_variables());
+                fv.remove(id);
+                fv
+            }
+        }
+    }
+
+    fn patch_guarded(&self, patch: RawLambda) -> RawLambda {
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => patch_guarded(patch, raw),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(
+                *kind,
+                id.clone(),
+                Box::new(arg.clone()),
+                Box::new(action.patch_guarded(patch)),
+            ),
+        }
+    }
+}
+
+impl MatchActionData {
+    fn into_raw(self) -> RawLambda {
+        match self.kind {
+            MatchActionKind::Raw(raw) => raw,
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(kind, id, Box::new(arg), Box::new(action.into_raw())),
+        }
     }
 }
 
@@ -2285,8 +2383,7 @@ pub fn simplify_cases(
 
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => {
-                    let new_action =
-                        MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
+                    let new_action = action.bind(LetKind::Alias, id.clone(), arg.clone());
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, new_action));
@@ -2295,8 +2392,7 @@ pub fn simplify_cases(
                     result.push((pats, action));
                 }
                 PatternDesc::Tpat_alias(p, id, _) => {
-                    let new_action =
-                        MatchAction::new(bind(LetKind::Alias, id, arg, action.into_raw()));
+                    let new_action = action.bind(LetKind::Alias, id.clone(), arg.clone());
                     let mut new_pats = vec![(**p).clone()];
                     new_pats.extend(patl.iter().cloned());
                     // OCaml `compiler/ml/matching.ml:565-566` immediately
@@ -2647,7 +2743,7 @@ pub fn pm_free_variables(pm: &PatternMatching) -> IdentSet {
         .iter()
         .rev()
         .fold(BTreeSet::new(), |mut r, (_, act)| {
-            let fv = raw_lambda_free_variables(act.as_raw());
+            let fv = act.free_variables();
             r.extend(fv);
             r
         })
@@ -2893,7 +2989,7 @@ fn conda(p: &Pattern, q: &Pattern) -> bool {
 /// Condition (b) for appending: action is not guarded and qs <= ps.
 /// Equivalent to OCaml's `condb`.
 fn condb(act: &MatchAction, ps: &[Pattern], qs: &[Pattern]) -> bool {
-    !is_guarded(act.as_raw()) && le_pats(qs, ps)
+    !act.is_guarded() && le_pats(qs, ps)
 }
 
 /// Check if p can be appended/inserted into the or-matrix l, given
@@ -7684,7 +7780,7 @@ fn compile_match(
     match (m.cases.as_slice(), m.args.as_slice()) {
         ([], []) => comp_exit(ctx, m),
         ([(pats, action), rem @ ..], _) if pats.is_empty() => {
-            if is_guarded(action.as_raw()) {
+            if action.is_guarded() {
                 let remaining = PatternMatching {
                     cases: rem.to_vec(),
                     args: m.args.clone(),
@@ -7699,7 +7795,7 @@ fn compile_match(
                     &remaining,
                     next_raise_count,
                 )?;
-                Ok((patch_guarded(lambda, action.as_raw()), total))
+                Ok((action.patch_guarded(lambda), total))
             } else {
                 Ok((action.to_raw(), jumps_empty()))
             }
@@ -7735,7 +7831,7 @@ fn compile_match(
             // Cases exist but no args — shouldn't happen normally.
             // Return the first non-guarded action if available.
             for (_, act) in cases {
-                if !is_guarded(act.as_raw()) {
+                if !act.is_guarded() {
                     return Ok((act.to_raw(), jumps_empty()));
                 }
             }
@@ -8686,7 +8782,7 @@ fn check_partial_list(pat_act_list: &[Clause], partial: Partial) -> Partial {
         Partial::Total => {
             if pat_act_list.is_empty()
                 || pat_act_list.iter().any(|(pats, lam)| {
-                    pats.iter().any(|p| is_mutable(p)) && is_guarded(lam.as_raw())
+                    pats.iter().any(|p| is_mutable(p)) && lam.is_guarded()
                 })
             {
                 Partial::Partial
