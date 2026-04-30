@@ -41,6 +41,7 @@ use crate::types::{
     Env, Path, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState, ValueDescription,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
@@ -12365,12 +12366,15 @@ fn find_record_qual(
     None
 }
 
-fn qualify_unqualified_record_fields(
+fn qualify_unqualified_record_fields<'a>(
     tctx: &mut TypeCheckContext<'_>,
-    fields: &[crate::parser::ast::ExpressionRecordField],
-) -> Vec<crate::parser::ast::ExpressionRecordField> {
+    fields: &'a [crate::parser::ast::ExpressionRecordField],
+) -> Cow<'a, [crate::parser::ast::ExpressionRecordField]> {
     let Some(module_qualifier) = find_record_qual(tctx.arena, fields) else {
-        return fields.to_vec();
+        // OCaml keeps the original `record_elem_list` when no qualifier is
+        // present (`compiler/ml/typecore.ml:1178-1180`). Borrow the parser
+        // slice in the same common case instead of cloning every record field.
+        return Cow::Borrowed(fields);
     };
 
     let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
@@ -12387,7 +12391,7 @@ fn qualify_unqualified_record_fields(
         }
         rewritten.push(field);
     }
-    rewritten
+    Cow::Owned(rewritten)
 }
 
 /// Type check record expression.
