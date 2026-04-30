@@ -95,7 +95,27 @@ pub(crate) struct QualifiedModuleComponentsCacheKey {
 
 impl QualifiedModuleComponentsCacheKey {
     pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
-        Self { path, env_id }
+        Self {
+            path: normalize_component_cache_path(path),
+            env_id,
+        }
+    }
+}
+
+fn normalize_component_cache_path(path: Path) -> Path {
+    match path {
+        Path::Pident(_) => path,
+        Path::Pdot(parent, name, _) => {
+            // OCaml compiler/ml/path.ml:20-24 ignores `Pdot` positions in
+            // `Path.same`; component lookup in env.ml:781-793 keys module
+            // identity by that path equality while still carrying positions in
+            // the selected access path. Mirror that only for Rust's cache key.
+            Path::pdot(normalize_component_cache_path(*parent), name)
+        }
+        Path::Papply(functor, arg) => Path::papply(
+            normalize_component_cache_path(*functor),
+            normalize_component_cache_path(*arg),
+        ),
     }
 }
 
@@ -206,6 +226,11 @@ pub struct TypeContext<'a> {
             super::env_lazy::QualifiedModuleComponents,
         >,
     >,
+
+    /// Flattened persistent aliases discovered while building component tables.
+    /// OCaml keeps this relationship in `comp_components`; Rust needs an
+    /// explicit side table for paths that later appear without `PersistentEnv`.
+    flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache:
@@ -353,6 +378,7 @@ impl<'a> TypeContext<'a> {
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
+            flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -561,6 +587,39 @@ impl<'a> TypeContext<'a> {
             .entry(key.clone())
             .or_insert(components);
         Some(result)
+    }
+
+    pub(crate) fn has_qualified_module_components(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+    ) -> bool {
+        // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr` reuse
+        // `ps_comps` without forcing `ps_sig`; Rust stores that selected
+        // component view explicitly, so later normalization can observe that
+        // the component table is already available.
+        self.qualified_module_components_cache.borrow().contains_key(key)
+    }
+
+    pub(crate) fn register_flattened_alias_component_path(
+        &self,
+        flat_head: &str,
+        component_path: Path,
+    ) {
+        // OCaml compiler/ml/env.ml:1530 builds `prefix_idents`, and
+        // env.ml:1573-1578 stores child `comp_components` under that prefixed
+        // path. Keep the same alias-to-component-path fact available even
+        // when Rust reaches a later helper without `PersistentEnv`.
+        self.flattened_alias_component_paths
+            .borrow_mut()
+            .entry(flat_head.to_string())
+            .or_insert(component_path);
+    }
+
+    pub(crate) fn find_flattened_alias_component_path(&self, flat_head: &str) -> Option<Path> {
+        self.flattened_alias_component_paths
+            .borrow()
+            .get(flat_head)
+            .cloned()
     }
 
     /// Look up a module alias target from the qualified module components cache.
@@ -914,6 +973,15 @@ impl<'a> TypeContext<'a> {
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
         TypeDescSnapshot(self.types.get(r).desc().clone())
+    }
+
+    /// Borrow the descriptor of a type without cloning it.
+    ///
+    /// Prefer this in short read-only hot paths. Use `get_desc()` when the
+    /// descriptor must be held across code that may mutate the same type node.
+    #[inline]
+    pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
+        self.types.get(r).desc()
     }
 
     /// Get the level of a type.
@@ -1449,6 +1517,10 @@ impl<'a> TypeContext<'a> {
             .insert(name.to_string(), sig);
     }
 
+    pub fn has_raw_module_sig(&self, name: &str) -> bool {
+        self.raw_module_sigs.borrow().contains_key(name)
+    }
+
     /// Trigger module signature renaming for a persistent module.
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
@@ -1481,48 +1553,58 @@ impl<'a> TypeContext<'a> {
         let raw_sig = {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
-        };
+        }
+        .or_else(|| self.load_lazy_raw_module_sig_for_rename(module_name));
         if let Some(sig) = raw_sig {
-            let renamed: super::decl::Signature = sig
-                .iter()
-                .map(|item| match item {
-                    super::decl::SignatureItem::SigValue(id, desc) => {
-                        super::decl::SignatureItem::SigValue(self.rename_ident(id), desc.clone())
-                    }
-                    super::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                        super::decl::SignatureItem::SigType(
-                            self.rename_ident(id),
-                            decl.clone(),
-                            *rec_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                        super::decl::SignatureItem::SigTypext(
-                            self.rename_ident(id),
-                            ext.clone(),
-                            *ext_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                        super::decl::SignatureItem::SigModule(
-                            self.rename_ident(id),
-                            md.clone(),
-                            *rec_status,
-                        )
-                    }
-                    super::decl::SignatureItem::SigModtype(id, mtd) => {
-                        super::decl::SignatureItem::SigModtype(self.rename_ident(id), mtd.clone())
-                    }
-                    super::decl::SignatureItem::SigClass => super::decl::SignatureItem::SigClass,
-                    super::decl::SignatureItem::SigClassType => {
-                        super::decl::SignatureItem::SigClassType
-                    }
-                })
-                .collect();
+            self.raw_module_sigs
+                .borrow_mut()
+                .entry(module_name.to_string())
+                .or_insert_with(|| sig.clone());
+            let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&sig, self);
+            crate::cmi::persistent_env::freshen_signature_bound_idents(&mut renamed, self);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
         }
+    }
+
+    fn load_lazy_raw_module_sig_for_rename(
+        &self,
+        module_name: &str,
+    ) -> Option<super::decl::Signature> {
+        let cmi_path = {
+            let load_paths = self.load_paths.borrow();
+            let cmi_filename = format!("{module_name}.cmi");
+            load_paths.iter().find_map(|dir| {
+                let exact = dir.join(&cmi_filename);
+                if exact.exists() {
+                    return Some(exact);
+                }
+
+                let first = module_name.chars().next()?;
+                if !first.is_ascii_uppercase() {
+                    return None;
+                }
+                let uncap_name =
+                    format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
+                let uncap = dir.join(format!("{uncap_name}.cmi"));
+                uncap.exists().then_some(uncap)
+            })
+        };
+        let cmi_path = cmi_path?;
+        let cmi = crate::cmi::cmi_format::read_cmi(&cmi_path.to_string_lossy()).ok()?;
+        let mut sig_ctx = crate::cmi::sig_reader::SigReadContext::new(self);
+        let mut sig = sig_ctx.read_signature(&cmi.cmi_sign);
+        let module_path = Path::Pident(Ident::create_persistent(module_name));
+        // OCaml compiler/ml/env.ml:1000-1007 reaches `lookup_module_descr`
+        // for dotted accesses, and env.ml:568-571/1516-1605 forces the
+        // persistent structure's component lazy. Loading whichever CMI the
+        // force requested lets the Rust force point consume the same
+        // `Subst.signature` stamps instead of special-casing one module family.
+        crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
+        crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
+        crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, &module_path, self);
+        Some(sig)
     }
 
     /// Create a new identifier using the typing context's shared stamp source.
@@ -1632,7 +1714,7 @@ impl<'a> TypeContext<'a> {
         // Fast path: check if t is already a representative (no link).
         // This avoids any allocation for the common case.
         let first_next = {
-            let desc = self.types.get(t).desc();
+            let desc = self.borrow_desc(t);
             match &*desc {
                 TypeDesc::Tlink(next) => *next,
                 TypeDesc::Tfield {
@@ -1654,7 +1736,7 @@ impl<'a> TypeContext<'a> {
         let mut current = first_next;
         for _ in 0..10_000 {
             let next = {
-                let desc = self.types.get(current).desc();
+                let desc = self.borrow_desc(current);
                 match &*desc {
                     TypeDesc::Tlink(next) => Some(*next),
                     TypeDesc::Tfield {

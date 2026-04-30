@@ -56,7 +56,7 @@ const STAMP_NONE: i32 = 36;
 const STAMP_SOME: i32 = 37;
 const STAMP_CTOR_UNKNOWN: i32 = 38;
 
-// Rust-only comptime type reflection predefs continue after OCaml predefs.
+// Comptime type reflection types
 const STAMP_TYPE_INFO: i32 = 39;
 const STAMP_FIELD_INFO: i32 = 40;
 const STAMP_CONSTRUCTOR_INFO: i32 = 41;

@@ -2,6 +2,25 @@
 
 Please read and follow the instructions in [AGENTS.md](./AGENTS.md).
 
+## ⚠️ CRITICAL: Reference the OCaml Implementation
+
+This repository is a 1:1 Rust port of the OCaml compiler implementation.
+
+For every compiler source change that changes Rust behavior, allocation order,
+sharing, traversal order, or typechecker semantics, include a concrete reference
+to the matching OCaml reference implementation.
+
+Required format:
+- Prefer a nearby code comment with `compiler/ml/<file>.ml:<line>` or a short
+  line range, explaining which OCaml behavior the Rust code is matching.
+- If a code comment would be noisy, include the same concrete reference in the
+  commit message.
+- If there is no direct OCaml counterpart, state that explicitly and explain why
+  the Rust-only change is necessary.
+
+Do not make parity or performance changes from intuition alone. Read the OCaml
+source first, cite the relevant spot, and make the Rust code match that behavior.
+
 ## ⚠️ CRITICAL: COMMIT YOUR CHANGES
 
 **You MUST commit after completing any meaningful work.** This is non-negotiable.

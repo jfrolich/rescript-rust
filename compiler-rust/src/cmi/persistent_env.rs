@@ -504,6 +504,10 @@ pub struct PersistentEnv {
     hidden_modules: HashSet<String>,
 }
 
+fn should_register_lazy_raw_sig(name: &str) -> bool {
+    name.contains('_')
+}
+
 impl PersistentEnv {
     /// Create a new persistent environment with no load paths.
     pub fn new() -> Self {
@@ -712,6 +716,20 @@ impl PersistentEnv {
         self.alias_prefix_rewrites.get(flat_head)
     }
 
+    pub fn has_known_module_without_loading(&self, name: &str) -> bool {
+        // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
+        // forcing its signature when `lookup_module ~load:false` only needs to
+        // know that the unit exists. Keep this as an availability probe so
+        // namespace alias resolution can avoid consuming `Subst.signature`
+        // stamps just to test a flattened compile-unit name.
+        self.cache_contains_key(name)
+            || self.portable_cache.contains_key(name)
+            || self.in_memory_modules.contains_key(name)
+            || self.source_fallback_paths.contains_key(name)
+            || (!self.in_process_mode
+                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
+    }
+
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
     pub fn find_pers_struct<'a>(
@@ -721,6 +739,11 @@ impl PersistentEnv {
     ) -> Option<Arc<PersStruct>> {
         // Check cache first (already internalized)
         if let Some(cached) = self.cache_lookup(name) {
+            if let Some(ps) = cached.as_ref() {
+                if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
+                    ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+                }
+            }
             return cached;
         }
 
@@ -748,6 +771,10 @@ impl PersistentEnv {
             register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+            }
+            register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
+            if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
+                ctx.register_raw_module_sig(name, ps.ps_sig.clone());
             }
             self.cache_insert(portable_key, Some(ps.clone()));
             return Some(ps);
@@ -802,6 +829,9 @@ impl PersistentEnv {
             &mut self.alias_prefix_rewrites,
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
+        if should_register_lazy_raw_sig(name) {
+            ctx.register_raw_module_sig(name, signature.clone());
+        }
 
         PersStruct {
             ps_name,
@@ -1297,9 +1327,12 @@ impl PersistentEnv {
             return Some(());
         }
 
-        let ps_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
-        let module_path = Path::Pident(Ident::create_persistent(name));
-        let renamed = rename_bound_idents_in_sig(&ps_sig, ctx, Some(&module_path));
+        // OCaml's `ps_sig` lazy is `Subst.signature Subst.identity sign`: it
+        // first copies the signature graph, then freshens all bound identifiers
+        // and rewrites declaration references through the fresh identifiers.
+        let raw_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
+        let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&raw_sig, ctx);
+        freshen_signature_bound_idents(&mut renamed, ctx);
         Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
@@ -1461,159 +1494,6 @@ impl PersistentEnv {
         self.in_memory_info(name)
             .map(|info| info.is_runtime)
             .unwrap_or(false)
-    }
-}
-
-/// Recursively register all type declarations from a signature
-/// into the type context's global store for alias expansion.
-///
-/// Rename all bound idents in a signature, matching OCaml's
-/// `Subst.signature Subst.identity` which calls `rename_bound_idents`.
-/// This gives each signature item a fresh stamp even with identity substitution.
-fn rename_bound_idents_in_sig<'a>(
-    sig_items: &Signature,
-    ctx: &'a TypeContext<'a>,
-    signature_path: Option<&Path>,
-) -> Signature {
-    rename_package_manifest_modtypes(sig_items, ctx, signature_path);
-
-    sig_items
-        .iter()
-        .map(|item| match item {
-            SignatureItem::SigValue(id, _)
-            | SignatureItem::SigType(id, _, _)
-            | SignatureItem::SigTypext(id, _, _)
-            | SignatureItem::SigModule(id, _, _)
-            | SignatureItem::SigModtype(id, _) => Some(ctx.rename_ident(id)),
-            SignatureItem::SigClass | SignatureItem::SigClassType => None,
-        })
-        .zip(sig_items.iter())
-        .map(|(renamed_id, item)| match item {
-            SignatureItem::SigValue(_, desc) => {
-                SignatureItem::SigValue(renamed_id.expect("value id"), desc.clone())
-            }
-            SignatureItem::SigType(_, decl, rec_status) => {
-                SignatureItem::SigType(renamed_id.expect("type id"), decl.clone(), *rec_status)
-            }
-            SignatureItem::SigTypext(_, ext, ext_status) => SignatureItem::SigTypext(
-                renamed_id.expect("type extension id"),
-                ext.clone(),
-                *ext_status,
-            ),
-            SignatureItem::SigModule(id, md, rec_status) => {
-                let nested_path = signature_path.map(|path| Path::pdot(path.clone(), id.name()));
-                SignatureItem::SigModule(
-                    renamed_id.expect("module id"),
-                    rename_bound_idents_in_module_declaration(md, ctx, nested_path.as_ref()),
-                    *rec_status,
-                )
-            }
-            SignatureItem::SigModtype(id, mtd) => {
-                let nested_path = signature_path.map(|path| Path::pdot(path.clone(), id.name()));
-                SignatureItem::SigModtype(
-                    renamed_id.expect("module type id"),
-                    rename_bound_idents_in_modtype_declaration(mtd, ctx, nested_path.as_ref()),
-                )
-            }
-            SignatureItem::SigClass => SignatureItem::SigClass,
-            SignatureItem::SigClassType => SignatureItem::SigClassType,
-        })
-        .collect()
-}
-
-fn rename_bound_idents_in_module_declaration<'a>(
-    md: &ModuleDeclaration,
-    ctx: &'a TypeContext<'a>,
-    module_path: Option<&Path>,
-) -> ModuleDeclaration {
-    ModuleDeclaration {
-        md_type: rename_bound_idents_in_module_type(&md.md_type, ctx, module_path),
-        md_attributes: md.md_attributes.clone(),
-        md_loc: md.md_loc,
-        md_path: md.md_path.clone(),
-    }
-}
-
-fn rename_bound_idents_in_modtype_declaration<'a>(
-    mtd: &ModtypeDeclaration,
-    ctx: &'a TypeContext<'a>,
-    modtype_path: Option<&Path>,
-) -> ModtypeDeclaration {
-    ModtypeDeclaration {
-        mtd_type: mtd
-            .mtd_type
-            .as_ref()
-            .map(|mty| rename_bound_idents_in_module_type(mty, ctx, modtype_path)),
-        mtd_attributes: mtd.mtd_attributes.clone(),
-        mtd_loc: mtd.mtd_loc,
-    }
-}
-
-fn rename_bound_idents_in_module_type<'a>(
-    mty: &ModuleType,
-    ctx: &'a TypeContext<'a>,
-    module_path: Option<&Path>,
-) -> ModuleType {
-    match mty {
-        ModuleType::MtyIdent(path) => ModuleType::MtyIdent(path.clone()),
-        ModuleType::MtySignature(sig) => {
-            ModuleType::MtySignature(rename_bound_idents_in_sig(sig, ctx, module_path))
-        }
-        ModuleType::MtyFunctor {
-            param,
-            param_type,
-            result,
-        } => ModuleType::MtyFunctor {
-            param: ctx.rename_ident(param),
-            param_type: param_type
-                .as_ref()
-                .map(|mty| Box::new(rename_bound_idents_in_module_type(mty, ctx, None))),
-            result: Box::new(rename_bound_idents_in_module_type(result, ctx, None)),
-        },
-        ModuleType::MtyAlias(alias, path) => ModuleType::MtyAlias(*alias, path.clone()),
-    }
-}
-
-fn rename_package_manifest_modtypes<'a>(
-    sig_items: &Signature,
-    ctx: &'a TypeContext<'a>,
-    signature_path: Option<&Path>,
-) {
-    for item in sig_items {
-        let SignatureItem::SigType(_, decl, _) = item else {
-            continue;
-        };
-        let Some(manifest) = decl.type_manifest else {
-            continue;
-        };
-        let manifest = ctx.repr(manifest);
-        let desc = ctx.get_desc(manifest);
-        let TypeDesc::Tpackage { path, .. } = &*desc else {
-            continue;
-        };
-        let Some(modtype_name) = package_modtype_name_in_signature(path, signature_path) else {
-            continue;
-        };
-        if let Some(mtd) = sig_items.iter().find_map(|item| match item {
-            SignatureItem::SigModtype(id, mtd) if id.name() == modtype_name => Some(mtd),
-            _ => None,
-        }) {
-            let nested_path = signature_path.map(|path| Path::pdot(path.clone(), modtype_name));
-            let _ = rename_bound_idents_in_modtype_declaration(mtd, ctx, nested_path.as_ref());
-        }
-    }
-}
-
-fn package_modtype_name_in_signature<'a>(
-    path: &'a Path,
-    signature_path: Option<&Path>,
-) -> Option<&'a str> {
-    match (path, signature_path) {
-        (Path::Pident(id), _) => Some(id.name()),
-        (Path::Pdot(parent, name, _), Some(signature_path)) if parent.same(signature_path) => {
-            Some(name)
-        }
-        _ => None,
     }
 }
 
@@ -2013,16 +1893,20 @@ fn freshen_module_type_bound_idents_with_maps(
             param_type,
             result,
         } => {
-            if let Some(param_type) = param_type.as_mut() {
-                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
-            }
             let old_param = param.clone();
+            // OCaml compiler/ml/subst.ml:352-355 renames the functor
+            // parameter, then observes `Mty_functor` argument evaluation by
+            // freshening the result before the argument module type. This
+            // stamp order is observable in strict typedtree identifiers.
             let new_param = ctx.rename_ident(&old_param);
             *param = new_param.clone();
             let mut param_maps = SubstMaps::default();
             insert_module_subst_path(&mut param_maps, &old_param, &new_param);
             let result_maps = merge_subst_maps(maps, &param_maps);
             freshen_module_type_bound_idents_with_maps(result, &result_maps, ctx);
+            if let Some(param_type) = param_type.as_mut() {
+                freshen_module_type_bound_idents_with_maps(param_type, maps, ctx);
+            }
         }
     }
 }
@@ -2086,30 +1970,90 @@ pub(crate) fn freshen_signature_bound_idents(
     sig_items: &mut [SignatureItem],
     ctx: &TypeContext<'_>,
 ) {
+    // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
+    // then subst.ml:378-400 renames signature binders and applies that
+    // substitution to the copied components.
+    let copied = crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx);
+    for (target, source) in sig_items.iter_mut().zip(copied) {
+        *target = source;
+    }
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 
-fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
-    let mut maps = build_subst_maps(sig_items, module_path);
+pub(crate) fn freshen_module_type_bound_idents(
+    module_type: &mut ModuleType,
+    ctx: &TypeContext<'_>,
+) {
+    // OCaml compiler/ml/subst.ml:365-376 implements `Subst.modtype` by
+    // returning a fresh module type; for signatures it reaches subst.ml:378-400,
+    // where component types are copied before binder substitutions are applied.
+    *module_type = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    freshen_module_type_bound_idents_with_maps(module_type, &SubstMaps::default(), ctx);
+}
 
-    // Nested persistent modules are often materialized in CMIs with flattened
-    // names (for example `Stdlib.JSON` appears as `Stdlib_JSON`). Add an
-    // explicit mapping from that flattened head name back to the qualified
-    // module access path so substitution can normalize those references.
-    if let Ok((head, components)) = module_path.flatten() {
-        if !components.is_empty() {
-            let mut flat_name = head.name().to_string();
-            for component in components {
-                flat_name.push('_');
-                flat_name.push_str(component);
-            }
-            maps.module_name_map
-                .entry(flat_name)
-                .or_insert_with(|| module_path.clone());
-        }
+pub(crate) fn substitute_functor_result_module_path(
+    module_type: &ModuleType,
+    old_param: &Ident,
+    arg_path: &Path,
+    ctx: &TypeContext<'_>,
+) -> ModuleType {
+    // OCaml compiler/ml/typemod.ml:1321-1325 applies
+    // `Subst.modtype (Subst.add_module param path ...) mty_res`.
+    // compiler/ml/subst.ml:351-364 handles `Mty_signature` by first
+    // renaming every signature binder and then applying the combined module
+    // substitution. Do both together here; a plain path rewrite skips the
+    // binder renames and creates later local identifiers too early.
+    let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    let mut maps = SubstMaps::default();
+    if old_param.stamp() != 0 {
+        insert_module_stamp_subst(&mut maps.module_stamp_map, old_param, arg_path.clone());
+    } else {
+        maps.module_name_map
+            .insert(old_param.name().to_string(), arg_path.clone());
     }
+    freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
+    copied
+}
 
-    maps
+pub(crate) fn freshen_component_modtype_declaration_bound_idents(
+    mtd: &mut ModtypeDeclaration,
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    if let Some(module_type) = mtd.mtd_type.as_mut() {
+        // OCaml compiler/ml/env.ml:1530 builds the component substitution with
+        // `prefix_idents`, then env.ml:1581-1585 stores
+        // `Subst.modtype_declaration sub decl` in the component modtype table.
+        // Rebuild and substitute with the parent signature maps here so outer
+        // references inside module types (for example Belt_Id.cmp) are rooted
+        // at the component access path before lookup observes them.
+        *module_type = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+        let maps = build_subst_maps(parent_sig, parent_module_path);
+        freshen_module_type_bound_idents_with_maps(module_type, &maps, ctx);
+    }
+}
+
+pub(crate) fn freshen_component_module_declaration_bound_idents(
+    md: &mut ModuleDeclaration,
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    // OCaml compiler/ml/env.ml:1568 stores child module declarations as
+    // EnvLazy thunks. Forcing them through env.ml:475 runs
+    // `Subst.modtype sub md.md_type`, with `sub` built by env.ml:1530.
+    // Subst.modtype freshens signature binders at compiler/ml/subst.ml:352-364.
+    md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
+    let maps = build_subst_maps(parent_sig, parent_module_path);
+    freshen_module_type_bound_idents_with_maps(&mut md.md_type, &maps, ctx);
+}
+
+fn build_subst_maps_for_module(sig_items: &[SignatureItem], module_path: &Path) -> SubstMaps {
+    // OCaml compiler/ml/env.ml:1530-1538 builds substitution maps from the
+    // component signature with `prefix_idents`, and compiler/ml/subst.ml:69-95
+    // rewrites module paths only through those explicit maps.
+    build_subst_maps(sig_items, module_path)
 }
 
 pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path: &Path) -> Path {

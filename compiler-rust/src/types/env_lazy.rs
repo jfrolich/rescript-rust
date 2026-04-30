@@ -13,38 +13,236 @@ use std::sync::Arc;
 use crate::ident::Ident;
 
 use super::decl::{
-    ModtypeDeclaration, ModuleDeclaration, Signature, SignatureItem, TypeDeclaration,
-    ValueDescription, ValueKind,
+    ConstructorDescription, ConstructorTag, ModtypeDeclaration, ModuleDeclaration, Signature,
+    SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
 };
 use super::path::Path;
+
+fn add_type_constructors(
+    constructors: &mut HashMap<String, Vec<ConstructorDescription>>,
+    access_path: &Path,
+    type_name: &str,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext<'_>,
+) {
+    let super::decl::TypeKind::TypeVariant(cstrs) = &decl.type_kind else {
+        return;
+    };
+
+    let type_path = Path::pdot(access_path.clone(), type_name);
+    let num_consts = cstrs
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.cd_args,
+                super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+            )
+        })
+        .count() as i32;
+    let num_nonconsts = cstrs.len() as i32 - num_consts;
+    let mut const_idx = 0i32;
+    let mut block_idx = 0i32;
+
+    for cd in cstrs {
+        let is_constant = matches!(
+            cd.cd_args,
+            super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+        );
+        let tag = if decl.type_unboxed.unboxed {
+            ConstructorTag::CstrUnboxed
+        } else if is_constant {
+            ConstructorTag::CstrConstant(const_idx)
+        } else {
+            ConstructorTag::CstrBlock(block_idx)
+        };
+
+        let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
+            super::decl::ConstructorArguments::CstrTuple(args) => {
+                (args.clone(), args.len() as i32, None)
+            }
+            super::decl::ConstructorArguments::CstrRecord(labels) => {
+                let inline_params =
+                    super::typecore::inline_record_type_params(ctx, &decl.type_params, labels);
+                let inline_path = Path::pdot(type_path.clone(), cd.cd_id.name());
+                let inline_constr = ctx.new_generic_constr(inline_path, inline_params.clone());
+                let inline_decl = TypeDeclaration {
+                    type_params: inline_params.clone(),
+                    type_arity: inline_params.len() as i32,
+                    type_kind: super::decl::TypeKind::TypeRecord(
+                        labels.clone(),
+                        if decl.type_unboxed.unboxed {
+                            super::decl::RecordRepresentation::RecordUnboxed(false)
+                        } else {
+                            super::decl::RecordRepresentation::RecordInlined {
+                                tag: block_idx,
+                                name: cd.cd_id.name().to_string(),
+                                num_nonconsts,
+                                attrs: cd.cd_attributes.clone(),
+                            }
+                        },
+                    ),
+                    type_private: decl.type_private,
+                    type_manifest: None,
+                    type_variance: inline_params
+                        .iter()
+                        .map(|_| super::variance::Variance::full())
+                        .collect(),
+                    type_newtype_level: None,
+                    type_loc: cd.cd_loc,
+                    type_attributes: vec![],
+                    type_immediate: false,
+                    type_unboxed: super::decl::UnboxedStatus::default(),
+                    type_inlined_types: vec![],
+                    type_path: None,
+                };
+                (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+            }
+        };
+        let cstr_res = if let Some(res_ty) = cd.cd_res {
+            let desc = ctx.get_desc(res_ty);
+            match &*desc {
+                super::type_expr::TypeDesc::Tconstr { args, .. } => {
+                    let args = args.clone();
+                    drop(desc);
+                    ctx.new_generic_constr(type_path.clone(), args)
+                }
+                _ => {
+                    drop(desc);
+                    res_ty
+                }
+            }
+        } else {
+            ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
+        };
+        constructors
+            .entry(cd.cd_id.name().to_string())
+            .or_insert_with(Vec::new)
+            .insert(
+                0,
+                ConstructorDescription {
+                    cstr_name: cd.cd_id.name().to_string(),
+                    cstr_res,
+                    cstr_existentials: vec![],
+                    cstr_args,
+                    cstr_arity,
+                    cstr_tag: tag,
+                    cstr_consts: num_consts,
+                    cstr_nonconsts: num_nonconsts,
+                    cstr_generalized: cd.cd_res.is_some(),
+                    cstr_private: decl.type_private,
+                    cstr_loc: cd.cd_loc,
+                    cstr_attributes: super::decl::constructor_description_attrs_for_variant(
+                        cstrs, cd,
+                    ),
+                    cstr_inlined,
+                },
+            );
+        if is_constant {
+            const_idx += 1;
+        } else {
+            block_idx += 1;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
     values: Arc<HashMap<String, (usize, usize)>>,
+    constructors: Arc<HashMap<String, Vec<ConstructorDescription>>>,
     types: Arc<HashMap<String, usize>>,
     modules: Arc<HashMap<String, (usize, usize)>>,
     modtypes: Arc<HashMap<String, usize>>,
+    component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     qualified_modules: RefCell<HashMap<String, (Ident, ModuleDeclaration)>>,
     qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
     child_components: Arc<HashMap<String, (usize, Arc<StoredModuleComponents>)>>,
 }
 
+fn build_child_components_from_signature(
+    access_path: &Path,
+    signature: &Signature,
+) -> HashMap<String, (usize, Arc<StoredModuleComponents>)> {
+    let mut child_components = HashMap::new();
+    let mut working_env = super::env::Env::empty();
+    let parent_sig = Arc::new(signature.clone());
+    let mut runtime_pos = 0usize;
+
+    // OCaml compiler/ml/env.ml:1530-1578 computes component paths once,
+    // stores module declarations in `comp_modules` at env.ml:1568-1569, and
+    // separately stores child component thunks in `comp_components` at
+    // env.ml:1573-1578. Persistent signatures need the same split so
+    // qualified value lookup can descend through child components without
+    // forcing `Subst.modtype` on the module declaration thunk.
+    for item in signature {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigType(id, decl, _) => {
+                working_env.add_type(id.clone(), decl.clone());
+            }
+            SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                let child_access_path =
+                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, md);
+                working_env.add_module_with_component_context(
+                    id.clone(),
+                    md.clone(),
+                    md.clone(),
+                    child_access_path,
+                    Some((access_path.clone(), parent_sig.clone())),
+                );
+                if let Some(stored) = working_env
+                    .with_local_module_components(&Path::pident(id.clone()), |stored| {
+                        Arc::new(stored.clone())
+                    })
+                {
+                    child_components.insert(id.name().to_string(), (runtime_pos, stored));
+                }
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                working_env.add_modtype(id.clone(), mtd.clone());
+            }
+            SignatureItem::SigClassType => {}
+        }
+    }
+
+    child_components
+}
+
 impl QualifiedModuleComponents {
-    pub(crate) fn new(access_path: Path, signature: Signature) -> Self {
-        Self::new_with_child_components(access_path, signature, HashMap::new())
+    pub(crate) fn new(
+        access_path: Path,
+        signature: Signature,
+        ctx: &super::context::TypeContext<'_>,
+    ) -> Self {
+        Self::new_with_child_components(access_path, signature, HashMap::new(), ctx)
     }
 
     pub(crate) fn new_with_child_components(
         access_path: Path,
         signature: Signature,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        ctx: &super::context::TypeContext<'_>,
     ) -> Self {
+        let child_components = if child_components.is_empty() {
+            build_child_components_from_signature(&access_path, &signature)
+        } else {
+            child_components
+        };
         let mut values = HashMap::new();
+        let mut constructors = HashMap::new();
         let mut types = HashMap::new();
         let mut modules = HashMap::new();
         let mut modtypes = HashMap::new();
+        let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
         for (idx, item) in signature.iter().enumerate() {
@@ -63,12 +261,145 @@ impl QualifiedModuleComponents {
                 }
                 SignatureItem::SigModule(id, _, _) => {
                     modules.insert(id.name().to_string(), (idx, runtime_pos));
+                    if let SignatureItem::SigModule(_, md, _) = item {
+                        if let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+                        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
+                        {
+                            let component_path =
+                                Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
+                            // OCaml compiler/ml/env.ml:1530 prefixes child
+                            // identifiers with the selected component path,
+                            // then env.ml:1573-1578 stores that same path in
+                            // `comp_components`. Remember flattened backing
+                            // units here so later Rust-only paths like
+                            // `Js_types` can return to `Js.Types`.
+                            ctx.register_flattened_alias_component_path(
+                                alias_id.name(),
+                                component_path,
+                            );
+                        }
+                    }
                     runtime_pos += 1;
                 }
-                SignatureItem::SigModtype(id, _) => {
+                SignatureItem::SigModtype(id, mtd) => {
                     modtypes.insert(id.name().to_string(), idx);
+                    let mut component_mtd = mtd.clone();
+                    // OCaml compiler/ml/env.ml:1530 and 1581-1585 apply the
+                    // `prefix_idents` substitution to component modtypes while
+                    // keeping the original declaration in the evolving env.
+                    // Keep that split so forced components consume the same
+                    // fresh identifiers without changing the raw signature used
+                    // by package/include checks.
+                    crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
+                        &mut component_mtd,
+                        &signature,
+                        &access_path,
+                        ctx,
+                    );
+                    component_modtypes
+                        .insert(id.name().to_string(), (id.clone(), component_mtd));
                 }
                 SignatureItem::SigClassType => {}
+            }
+        }
+
+        // OCaml compiler/ml/env.ml:1542-1556 builds `comp_constrs`
+        // while forcing module components, using the selected component
+        // path from env.ml:1530-1538. Later env.ml:1132-1137 reads this
+        // table directly for qualified constructor lookup.
+        let mut runtime_pos = 0i32;
+        for item in &signature {
+            match item {
+                SignatureItem::SigValue(_, desc) => {
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigType(id, decl, _) => {
+                    add_type_constructors(
+                        &mut constructors,
+                        &access_path,
+                        id.name(),
+                        decl,
+                        ctx,
+                    );
+                }
+                SignatureItem::SigTypext(id, ext, _) => {
+                    let ext_slot = runtime_pos;
+                    runtime_pos += 1;
+                    let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
+                    let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
+                        super::decl::ConstructorArguments::CstrTuple(args) => {
+                            (args.clone(), args.len() as i32, None)
+                        }
+                        super::decl::ConstructorArguments::CstrRecord(labels) => {
+                            let inline_params = super::typecore::inline_record_type_params(
+                                ctx,
+                                &ext.ext_type_params,
+                                labels,
+                            );
+                            let inline_constr =
+                                ctx.new_generic_constr(ext_path.clone(), inline_params.clone());
+                            let inline_decl = TypeDeclaration {
+                                type_params: inline_params.clone(),
+                                type_arity: inline_params.len() as i32,
+                                type_kind: super::decl::TypeKind::TypeRecord(
+                                    labels.clone(),
+                                    super::decl::RecordRepresentation::RecordExtension,
+                                ),
+                                type_private: ext.ext_private,
+                                type_manifest: None,
+                                type_variance: inline_params
+                                    .iter()
+                                    .map(|_| super::variance::Variance::full())
+                                    .collect(),
+                                type_newtype_level: None,
+                                type_loc: ext.ext_loc,
+                                type_attributes: vec![],
+                                type_immediate: false,
+                                type_unboxed: super::decl::UnboxedStatus::default(),
+                                type_inlined_types: vec![],
+                                type_path: None,
+                            };
+                            (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+                        }
+                    };
+                    let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
+                        &ext.ext_type_path,
+                        &signature,
+                        &access_path,
+                    );
+                    let cstr_res =
+                        ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
+                    constructors
+                        .entry(id.name().to_string())
+                        .or_insert_with(Vec::new)
+                        .insert(
+                            0,
+                            ConstructorDescription {
+                                cstr_name: id.name().to_string(),
+                                cstr_res,
+                                cstr_existentials: vec![],
+                                cstr_args,
+                                cstr_arity,
+                                cstr_tag: ConstructorTag::CstrExtension(ext_path),
+                                cstr_consts: -1,
+                                cstr_nonconsts: -1,
+                                cstr_generalized: ext.ext_ret_type.is_some(),
+                                cstr_private: ext.ext_private,
+                                cstr_loc: ext.ext_loc,
+                                cstr_attributes: ext.ext_attributes.clone(),
+                                cstr_inlined,
+                            },
+                        );
+                }
+                SignatureItem::SigModule(_, _, _) => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
+                SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
             }
         }
 
@@ -76,9 +407,11 @@ impl QualifiedModuleComponents {
             access_path: Arc::new(access_path),
             signature: Arc::new(signature),
             values: Arc::new(values),
+            constructors: Arc::new(constructors),
             types: Arc::new(types),
             modules: Arc::new(modules),
             modtypes: Arc::new(modtypes),
+            component_modtypes: Arc::new(component_modtypes),
             qualified_modules: RefCell::new(HashMap::new()),
             qualified_modtypes: RefCell::new(HashMap::new()),
             child_components: Arc::new(child_components),
@@ -103,6 +436,10 @@ impl QualifiedModuleComponents {
             SignatureItem::SigValue(id, desc) => Some((runtime_pos, id, desc)),
             _ => None,
         }
+    }
+
+    pub(crate) fn lookup_constructors(&self, name: &str) -> Option<&[ConstructorDescription]> {
+        self.constructors.get(name).map(Vec::as_slice)
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {
@@ -144,8 +481,13 @@ impl QualifiedModuleComponents {
             SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
             _ => return None,
         };
-        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-            &mut md.md_type,
+        // OCaml compiler/ml/env.ml:1568 stores component modules as
+        // EnvLazy thunks, and forcing them through env.ml:475 applies
+        // `Subst.modtype sub md.md_type`. For `Mty_signature`, that reaches
+        // compiler/ml/subst.ml:378-400 and renames the child signature's bound
+        // identifiers before lookup observes them.
+        crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+            &mut md,
             &self.signature,
             &self.access_path,
             ctx,
@@ -157,35 +499,26 @@ impl QualifiedModuleComponents {
     }
 
     pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {
-        let idx = *self.modtypes.get(name)?;
-        match &self.signature[idx] {
-            SignatureItem::SigModtype(id, mtd) => Some((id, mtd)),
-            _ => None,
-        }
+        self.component_modtypes
+            .get(name)
+            .map(|(id, mtd)| (id, mtd))
     }
 
     pub(crate) fn lookup_qualified_modtype(
         &self,
         name: &str,
-        ctx: &super::context::TypeContext<'_>,
+        _ctx: &super::context::TypeContext<'_>,
     ) -> Option<(Ident, ModtypeDeclaration)> {
-        let idx = *self.modtypes.get(name)?;
         if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
             return Some((id, mtd));
         }
 
-        let (id, mut mtd) = match &self.signature[idx] {
-            SignatureItem::SigModtype(id, mtd) => (id.clone(), mtd.clone()),
-            _ => return None,
-        };
-        if let Some(mty) = mtd.mtd_type.as_mut() {
-            crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                mty,
-                &self.signature,
-                &self.access_path,
-                ctx,
-            );
-        }
+        // OCaml compiler/ml/env.ml:1581-1585 computes the component-table
+        // modtype declaration once with `Subst.modtype_declaration` and later
+        // lookup reads that cached declaration. Do not run the child-module
+        // substitution pass again here; it would double-substitute package
+        // identities that were already handled while building the component.
+        let (id, mtd) = self.component_modtypes.get(name).cloned()?;
         self.qualified_modtypes
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), mtd.clone()));
@@ -219,6 +552,23 @@ fn build_local_module_components<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext<'a>,
 ) -> Option<QualifiedModuleComponents> {
+    if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+        // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
+        // component tables, and env.ml:1441-1444 implements the `Mty_alias`
+        // case by forcing `find_module path env`. Preserve that alias-target
+        // module-declaration force separately from resolving the alias
+        // signature, because the force consumes identifier-renaming side
+        // effects that later typedtree stamps observe.
+        if let Path::Pdot(parent, name, _) = alias_path {
+            let _ = crate::types::typecore::lookup_module_in_resolved_path(
+                parent,
+                name,
+                env,
+                pers_env,
+                ctx,
+            );
+        }
+    }
     let (raw_sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
     let qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
         access_path,
@@ -264,10 +614,21 @@ fn build_local_module_components<'a>(
             (SignatureItem::SigModule(id, child_md, _), SignatureItem::SigModule(_, qmd, _)) => {
                 let child_access_path =
                     qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
+                // OCaml compiler/ml/env.ml:1573-1575 builds child
+                // `comp_components` from the original `md.md_type`; the
+                // selected component path comes from env.ml:1530's
+                // `prefix_idents`, not by replacing the child declaration with
+                // an alias back to that selected path.
+                let component_decl = child_md.clone();
                 working_env.add_module_with_component_context(
                     id.clone(),
                     child_md.clone(),
-                    qmd.clone(),
+                    // OCaml compiler/ml/env.ml:1573-1578 stores
+                    // `comp_components` as its own lazy over the child module
+                    // declaration. It shares the persistent-alias force point
+                    // above, but otherwise keeps the child declaration separate
+                    // from env.ml:1568's `comp_modules` thunk.
+                    component_decl,
                     child_access_path,
                     Some((access_path.clone(), qualified_sig_for_children.clone())),
                 );
@@ -293,6 +654,7 @@ fn build_local_module_components<'a>(
         access_path.clone(),
         qualified_sig,
         child_components,
+        ctx,
     ))
 }
 

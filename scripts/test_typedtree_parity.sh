@@ -12,7 +12,7 @@
 #
 # OPTIONS:
 #   -q, --quick       Stop on first failure (useful for quick iteration)
-#   -j, --parallel N  Run N tests in parallel (default: 16)
+#   -j, --parallel N  Run N tests in parallel (default: 8)
 #   -v, --verbose     Show progress for each file
 #   --tella           Test tella-fusion, skipping large JSX-heavy files
 #   --tella-jsx       Test only large JSX-heavy tella files
@@ -32,7 +32,7 @@
 #   # Run all tests, stop on first failure:
 #   ./scripts/test_typedtree_parity.sh --quick
 #
-#   # Run all tests in parallel (default 16 jobs):
+#   # Run all tests in parallel (default 8 jobs):
 #   ./scripts/test_typedtree_parity.sh
 #
 #   # Test tella-fusion project:
@@ -51,7 +51,7 @@ set -e
 
 # Parse command line arguments
 QUICK_MODE=false
-PARALLEL_JOBS=16
+PARALLEL_JOBS=8
 VERBOSE=false
 FILE_ARG=""
 TELLA_MODE=false

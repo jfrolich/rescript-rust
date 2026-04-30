@@ -721,8 +721,14 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
-    pub(crate) fn lookup_type_ident_exact(&self, id: &Ident) -> Option<&TypeDeclaration> {
-        self.types.find_by_ident(id).map(|t| t.as_ref())
+    pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
+        // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
+        // `IdTbl.find_same`, so same-name bindings must not be treated as an
+        // exact hit when expanding a constructor path by identifier.
+        self.types
+            .find_by_ident(id)
+            .map(|t| t.as_ref())
+            .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string()))
     }
 
     /// Find a type by path.
@@ -950,6 +956,10 @@ impl Env {
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
+        self.modules.find_by_ident(id).is_some()
     }
 
     pub(crate) fn with_local_module_components<R>(

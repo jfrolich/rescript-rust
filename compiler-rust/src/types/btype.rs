@@ -16,7 +16,7 @@ use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
-    TypeDesc, TypeExprRef,
+    RowFieldRef, TypeDesc, TypeExprRef,
 };
 use std::borrow::Cow;
 
@@ -41,19 +41,19 @@ pub fn is_unmarked(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 /// Check if a type is a type variable (Tvar).
 pub fn is_tvar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(_))
 }
 
 /// Check if a type is a universal type variable (Tunivar).
 pub fn is_tunivar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tunivar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(_))
 }
 
 /// Check if a type is a type constructor (Tconstr).
 pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.get_desc(t), TypeDesc::Tconstr { .. })
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tconstr { .. })
 }
 
 // ============================================================================
@@ -65,6 +65,39 @@ pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 /// This follows the `link` chain in `Reither` fields.
 pub fn row_field_repr(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
     row_field_repr_aux(ctx, &[], field)
+}
+
+pub fn row_field_is_absent(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+    match field {
+        RowField::Reither { link, .. } => ctx
+            .get_row_field(*link)
+            .is_some_and(|linked| row_field_is_absent(ctx, &linked)),
+        RowField::Rabsent => true,
+        _ => false,
+    }
+}
+
+pub fn row_field_is_reither(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+    match field {
+        RowField::Reither { link, .. } => ctx
+            .get_row_field(*link)
+            .map_or(true, |linked| row_field_is_reither(ctx, &linked)),
+        _ => false,
+    }
+}
+
+pub fn row_field_unmatched_reither_link(
+    ctx: &TypeContext<'_>,
+    field: &RowField,
+) -> Option<RowFieldRef> {
+    match field {
+        RowField::Reither { matched, link, .. } => match ctx.get_row_field(*link) {
+            Some(linked) => row_field_unmatched_reither_link(ctx, &linked),
+            None if !*matched => Some(*link),
+            None => None,
+        },
+        _ => None,
+    }
 }
 
 fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowField) -> RowField {
@@ -100,7 +133,7 @@ fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowFiel
 /// This follows variant type chains to find the underlying type variable.
 pub fn row_more(ctx: &TypeContext<'_>, row: &RowDesc) -> TypeExprRef {
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_more(ctx, inner_row),
         _ => more,
     }
@@ -113,9 +146,9 @@ pub fn row_repr(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
     row_repr_aux(ctx, &[], row)
 }
 
-pub fn row_repr_ref<'a>(ctx: &'a TypeContext<'a>, row: &'a RowDesc) -> Cow<'a, RowDesc> {
+pub fn row_repr_ref<'row>(ctx: &TypeContext<'_>, row: &'row RowDesc) -> Cow<'row, RowDesc> {
     let more = ctx.repr(row.row_more);
-    let desc = ctx.get_desc(more);
+    let desc = ctx.borrow_desc(more);
     if matches!(&*desc, TypeDesc::Tvariant(_)) {
         drop(desc);
         Cow::Owned(row_repr(ctx, row))
@@ -130,7 +163,7 @@ fn row_repr_aux(
     row: &RowDesc,
 ) -> RowDesc {
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => {
             let f = &row.row_fields;
             let new_ll: Vec<Vec<(crate::types::asttypes::Label, RowField)>> = if f.is_empty() {
@@ -176,7 +209,7 @@ pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
 
     // Check nested variant
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_field(ctx, tag, inner_row),
         _ => RowField::Rabsent,
     }
@@ -189,7 +222,7 @@ pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
     }
 
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
+    match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_fixed(ctx, inner_row),
         TypeDesc::Tvar(_) | TypeDesc::Tnil => false,
         TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => true,
@@ -204,7 +237,7 @@ pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
         && row
             .row_fields
             .iter()
-            .all(|(_, f)| !matches!(row_field_repr(ctx, f), RowField::Reither { .. }))
+            .all(|(_, f)| !row_field_is_reither(ctx, f))
 }
 
 // ============================================================================
@@ -228,21 +261,36 @@ where
         }
     }
 
+    enum MoreAction {
+        Variant(RowDesc),
+        RowNameTypes,
+        None,
+    }
+
     let more = ctx.repr(row.row_more);
-    match &*ctx.get_desc(more) {
-        TypeDesc::Tvariant(inner_row) => iter_row(ctx, inner_row, f),
-        TypeDesc::Tvar(_)
-        | TypeDesc::Tunivar(_)
-        | TypeDesc::Tsubst(_)
-        | TypeDesc::Tconstr { .. }
-        | TypeDesc::Tnil => {
+    let action = {
+        let desc = ctx.borrow_desc(more);
+        match &*desc {
+            TypeDesc::Tvariant(inner_row) => MoreAction::Variant(inner_row.clone()),
+            TypeDesc::Tvar(_)
+            | TypeDesc::Tunivar(_)
+            | TypeDesc::Tsubst(_)
+            | TypeDesc::Tconstr { .. }
+            | TypeDesc::Tnil => MoreAction::RowNameTypes,
+            _ => MoreAction::None,
+        }
+    };
+
+    match action {
+        MoreAction::Variant(inner_row) => iter_row(ctx, &inner_row, f),
+        MoreAction::RowNameTypes => {
             if let Some((_, types)) = &row.row_name {
                 for ty in types {
                     f(*ty);
                 }
             }
         }
-        _ => {}
+        MoreAction::None => {}
     }
 }
 
@@ -263,7 +311,7 @@ where
     }
 
     let children = {
-        let desc = ctx.get_desc(ty);
+        let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tvar(_) => Children::None,
             TypeDesc::Tarrow { arg, ret, .. } => Children::Two(arg.typ, *ret),
@@ -450,7 +498,7 @@ pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     }
 
     let action = {
-        let desc = ctx.get_desc(ty0);
+        let desc = ctx.borrow_desc(ty0);
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 // Clone the row to check static_row outside the borrow
@@ -475,7 +523,7 @@ pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 }
 
 fn proxy_obj(ctx: &TypeContext<'_>, ty: TypeExprRef, original: TypeExprRef) -> TypeExprRef {
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
@@ -505,7 +553,7 @@ pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
     }
 
     let action = {
-        let desc = ctx.get_desc(t);
+        let desc = ctx.borrow_desc(t);
         match &*desc {
             TypeDesc::Tobject { fields, .. } => RowAction::ObjectFields(*fields),
             TypeDesc::Tvariant(row) => RowAction::VariantRow(row.clone()),
@@ -522,7 +570,7 @@ pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
 
 fn get_row(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
     let t = ctx.repr(t);
-    let desc = ctx.get_desc(t);
+    let desc = ctx.borrow_desc(t);
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
             let rest = *rest;
@@ -545,7 +593,7 @@ pub fn is_row_name(s: &str) -> bool {
 
 /// Check if a type is a constructor row type.
 pub fn is_constr_row(ctx: &TypeContext<'_>, t: TypeExprRef, allow_ident: bool) -> bool {
-    let desc = ctx.get_desc(t);
+    let desc = ctx.borrow_desc(t);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => match path {
             Path::Pident(id) if allow_ident => is_row_name(id.name()),
