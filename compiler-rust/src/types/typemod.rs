@@ -5661,30 +5661,30 @@ fn scrape_alias_module_type<'b>(
                         pers_env,
                         ctx,
                         |components| {
-                            let (runtime_pos, _, raw_md) =
-                                components.lookup_module(submod.as_str())?;
+                            // OCaml compiler/ml/env.ml:91-99 caches
+                            // EnvLazy.force, env.ml:1568-1569 stores component
+                            // modules as EnvLazy declarations, and
+                            // env.ml:876-880 forces them through that cache.
+                            // Force through lookup_qualified_module so alias
+                            // scraping shares the same cached Subst.modtype
+                            // result as later component lookups instead of
+                            // freshening the child signature twice.
+                            let (runtime_pos, _, md) =
+                                components.lookup_qualified_module(submod.as_str(), ctx)?;
                             let parent_access_path = components.access_path().clone();
-                            let mut md = raw_md.clone();
-                            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-                                &mut md,
-                                components.signature(),
-                                &parent_access_path,
-                                ctx,
-                            );
-                            let owner_path =
-                                if parent_access_path.head().is_persistent()
-                                    || parent_access_path.head().stamp() == 0
-                                {
-                                    md.md_path.clone().unwrap_or_else(|| {
-                                        Path::pdot(parent_access_path.clone(), submod.clone())
-                                    })
-                                } else {
-                                    Path::pdot_pos(
-                                        parent_access_path.clone(),
-                                        submod.clone(),
-                                        runtime_pos as i32,
-                                    )
-                                };
+                            let owner_path = if parent_access_path.head().is_persistent()
+                                || parent_access_path.head().stamp() == 0
+                            {
+                                md.md_path.clone().unwrap_or_else(|| {
+                                    Path::pdot(parent_access_path.clone(), submod.clone())
+                                })
+                            } else {
+                                Path::pdot_pos(
+                                    parent_access_path.clone(),
+                                    submod.clone(),
+                                    runtime_pos as i32,
+                                )
+                            };
                             Some((owner_path, md))
                         },
                     )
