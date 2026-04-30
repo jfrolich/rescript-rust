@@ -14,7 +14,7 @@ use crate::lambda::lam_pass_collect::collect_info;
 use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets_owned;
-use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx;
+use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx_owned;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Lambda, PrimInfo};
@@ -75,7 +75,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_owned(&mut meta, lam, jsx_preserve);
 
     // lam_compile_main.ml:169 — deep_flatten.
     let lam = deep_flatten_owned(lam);
@@ -84,7 +84,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_owned(&mut meta, lam, jsx_preserve);
 
     // lam_compile_main.ml:175 — deep_flatten.
     let lam = deep_flatten_owned(lam);
@@ -102,7 +102,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_owned(&mut meta, lam, jsx_preserve);
 
     // lam_compile_main.ml:190 — alpha_conversion.
     let lam = alpha_conversion_owned(&meta, lam);
