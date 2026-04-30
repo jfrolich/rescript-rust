@@ -20086,12 +20086,25 @@ fn with_resolved_child_module_components<'a, R>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
-    // OCaml compiler/ml/env.ml:1573-1578 stores child `comp_components`
-    // separately from `comp_modules`. Navigating to a child's component table
-    // must not force the module declaration thunk from env.ml:1568, because
-    // `Subst.modtype` would freshen the child's signature binders before
-    // OCaml observes them.
+    // OCaml compiler/ml/env.ml:1454-1491 builds dotted component paths with
+    // `prefix_idents`, then env.ml:1568 and env.ml:1573-1578 store a child
+    // module's `comp_modules` and `comp_components` as separate thunks. Direct
+    // persistent-unit descent such as `Inner_define.N` follows env.ml:1000-1007
+    // through `comp_components` only, and explicit opens keep that lazy order.
+    // The implicit Stdlib/Pervasives open from compiler/core/res_compmisc.ml:61-62
+    // and compiler/ml/env.ml:1874-1877 exposes dotted component paths such as
+    // `Stdlib.JsError.RangeError`; those can observe the env.ml:1568 module
+    // thunk before child components, so force that thunk only for dotted
+    // Stdlib/Pervasives component parents.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
+        let parent_head_name = parent_components.access_path().head().name();
+        let parent_is_implicit_stdlib_component_path = matches!(
+            parent_components.access_path(),
+            Path::Pdot(_, _, _)
+        ) && (parent_head_name == "Stdlib" || parent_head_name == "Pervasives");
+        if parent_is_implicit_stdlib_component_path {
+            let _ = parent_components.lookup_qualified_module(child_name, ctx);
+        }
         let access_path = if parent_components.access_path().head().is_persistent()
             || parent_components.access_path().head().stamp() == 0
         {
