@@ -93,18 +93,27 @@ impl TailcallInlineState {
         }
     }
 
-    fn transform_block(&mut self, mut block: Block) -> Block {
-        if block.len() == 1 {
-            let stmt = block.pop().expect("checked block length");
-            match self.try_inline_single_return_statement(stmt) {
-                Ok(inlined) => return inlined,
-                Err(stmt) => block.push(stmt),
+    fn transform_block(&mut self, block: Block) -> Block {
+        let len = block.len();
+        let mut transformed = Vec::with_capacity(len);
+        for (index, stmt) in block.into_iter().enumerate() {
+            // OCaml recurses as `x :: xs -> self.statement x :: self.block xs`
+            // before matching the one-statement tail-call inline case
+            // (`compiler/core/js_pass_tailcall_inline.ml:130-159,232`).
+            // Check the final suffix after preceding declarations have updated
+            // `inline_decls`, so `let aux; return aux(...)` can inline.
+            if index + 1 == len {
+                match self.try_inline_single_return_statement(stmt) {
+                    Ok(inlined) => {
+                        transformed.extend(inlined);
+                    }
+                    Err(stmt) => {
+                        transformed.extend(self.transform_statement(stmt));
+                    }
+                }
+            } else {
+                transformed.extend(self.transform_statement(stmt));
             }
-        }
-
-        let mut transformed = Vec::with_capacity(block.len());
-        for stmt in block {
-            transformed.extend(self.transform_statement(stmt));
         }
         transformed
     }
