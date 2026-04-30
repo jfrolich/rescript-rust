@@ -4554,6 +4554,40 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
+    fn selected_value_module_alias_target<'a>(
+        path: &Path,
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'a TypeContext<'a>,
+    ) -> Option<Path> {
+        match path {
+            Path::Pident(_) => alias_target_for_module_path(path, env, pers_env, ctx),
+            Path::Pdot(parent, module_name, _) => {
+                // OCaml compiler/ml/env.ml:781-793 descends through
+                // `comp_components`, env.ml:1091-1099 reads `comp_values`, and
+                // env.ml:1530-1578 builds `comp_components` separately from the
+                // env.ml:1568 `comp_modules` thunk. For alias recovery while
+                // typing a qualified value, inspect the raw module component;
+                // forcing `lookup_qualified_module` would run
+                // compiler/ml/subst.ml:330-364 and freshen child binders
+                // before OCaml's value lookup observes them.
+                with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                    components
+                        .lookup_module(module_name.as_str())
+                        .and_then(|(_, _, md)| match &md.md_type {
+                            crate::types::decl::ModuleType::MtyAlias(_, target)
+                            | crate::types::decl::ModuleType::MtyIdent(target) => {
+                                Some(target.clone())
+                            }
+                            _ => None,
+                        })
+                })
+                .flatten()
+            }
+            Path::Papply(_, _) => None,
+        }
+    }
+
     fn persistent_nested_type_path(
         ctx: &TypeContext<'_>,
         env: &Env,
@@ -5055,7 +5089,9 @@ fn force_qualified_value_type_paths<'a>(
         // `Subst.modtype` renames too early.
         selected_module_path
             .as_ref()
-            .and_then(|path| alias_target_for_module_path(path, env, &mut tctx.persistent_env, ctx))
+            .and_then(|path| {
+                selected_value_module_alias_target(path, env, &mut tctx.persistent_env, ctx)
+            })
             .map(|target| {
                 let mut targets = vec![target.clone()];
                 let normalized = env.normalize_path(&target);
