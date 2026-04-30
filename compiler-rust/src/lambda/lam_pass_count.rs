@@ -69,13 +69,33 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     }
 
     // Equivalent of `bind_var` (lam_pass_count.ml:69-73): create a fresh cell,
-    // add it to both `occ` and the local scope, return the updated `bv`.
-    fn bind_var(occ: &mut OccTbl, bv: &LocalTbl, ident: &Ident) -> LocalTbl {
+    // add it to both `occ` and the local scope. OCaml's `Map_ident.add` returns
+    // a persistent map cheaply; Rust mutates the local table and restores the
+    // previous binding after the scoped body so we do not clone the whole map at
+    // every `Llet`.
+    fn bind_var(
+        occ: &mut OccTbl,
+        bv: &mut LocalTbl,
+        ident: &Ident,
+    ) -> Option<Rc<std::cell::RefCell<UsedInfo>>> {
         let cell = Rc::new(std::cell::RefCell::new(dummy_info()));
         occ.insert(ident.clone(), Rc::clone(&cell));
-        let mut next = bv.clone();
-        next.insert(ident.clone(), cell);
-        next
+        bv.insert(ident.clone(), cell)
+    }
+
+    fn restore_var(
+        bv: &mut LocalTbl,
+        ident: &Ident,
+        previous: Option<Rc<std::cell::RefCell<UsedInfo>>>,
+    ) {
+        match previous {
+            Some(previous) => {
+                bv.insert(ident.clone(), previous);
+            }
+            None => {
+                bv.remove(ident);
+            }
+        }
     }
 
     // Equivalent of `add_one_use` (lam_pass_count.ml:76-89).
@@ -118,14 +138,14 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
 
     // The main traversal. The structure mirrors OCaml's `count` function
     // (lam_pass_count.ml:110-201).
-    fn count(occ: &mut OccTbl, bv: &LocalTbl, lam: &Lambda) {
+    fn count(occ: &mut OccTbl, bv: &mut LocalTbl, lam: &Lambda) {
         match lam {
             // Lfunction: clear local scope. Closure variables can not be
             // carried over because parameters are never rebound
             // (lam_pass_count.ml:112-117).
             Lambda::Lfunction(LFunction { body, .. }) => {
-                let empty = LocalTbl::new();
-                count(occ, &empty, body);
+                let mut empty = LocalTbl::new();
+                count(occ, &mut empty, body);
             }
 
             // Lfor (lam_pass_count.ml:118-121): bounds counted with `bv`,
@@ -133,24 +153,24 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             Lambda::Lfor(_, l1, l2, _, l3) => {
                 count(occ, bv, l1);
                 count(occ, bv, l2);
-                let empty = LocalTbl::new();
-                count(occ, &empty, l3);
+                let mut empty = LocalTbl::new();
+                count(occ, &mut empty, l3);
             }
 
             // Lfor_of / Lfor_await_of (lam_pass_count.ml after #7887):
             // iterable counted with `bv`, body counted with empty local scope.
             Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
                 count(occ, bv, l1);
-                let empty = LocalTbl::new();
-                count(occ, &empty, l2);
+                let mut empty = LocalTbl::new();
+                count(occ, &mut empty, l2);
             }
 
             // Lwhile (lam_pass_count.ml:122-124): both arms counted with empty
             // local scope.
             Lambda::Lwhile(l1, l2) => {
-                let empty = LocalTbl::new();
-                count(occ, &empty, l1);
-                count(occ, &empty, l2);
+                let mut empty = LocalTbl::new();
+                count(occ, &mut empty, l1);
+                count(occ, &mut empty, l2);
             }
 
             // Lvar (lam_pass_count.ml:125): one use of `v`.
@@ -164,8 +184,9 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
                     Lambda::Lvar(w) => w.clone(),
                     _ => unreachable!(),
                 };
-                let new_bv = bind_var(occ, bv, v);
-                count(occ, &new_bv, l2);
+                let previous = bind_var(occ, bv, v);
+                count(occ, bv, l2);
+                restore_var(bv, v, previous);
                 inherit_use(occ, bv, &w, v);
             }
 
@@ -174,8 +195,9 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
             // used (otherwise the binding will be dropped and we must not
             // attribute usage to its dead initializer).
             Lambda::Llet(kind, v, l1, l2) => {
-                let new_bv = bind_var(occ, bv, v);
-                count(occ, &new_bv, l2);
+                let previous = bind_var(occ, bv, v);
+                count(occ, bv, l2);
+                restore_var(bv, v, previous);
                 if matches!(kind, LetKind::Strict) || used(occ, v) {
                     count(occ, bv, l1);
                 }
@@ -296,7 +318,7 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
     // count_default (lam_pass_count.ml:189-200): the default action runs twice
     // in the native backend when neither the const nor block table is full,
     // so its inner uses are counted twice.
-    fn count_default(occ: &mut OccTbl, bv: &LocalTbl, sw: &LambdaSwitch) {
+    fn count_default(occ: &mut OccTbl, bv: &mut LocalTbl, sw: &LambdaSwitch) {
         let Some(failaction) = sw.sw_failaction.as_deref() else {
             return;
         };
@@ -310,8 +332,8 @@ pub fn collect_occurs(lam: &Lambda) -> OccTbl {
         }
     }
 
-    let bv = LocalTbl::new();
-    count(&mut occ, &bv, lam);
+    let mut bv = LocalTbl::new();
+    count(&mut occ, &mut bv, lam);
     occ
 }
 
