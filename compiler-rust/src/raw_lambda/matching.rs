@@ -1887,31 +1887,33 @@ impl StoreExp {
     /// Actions that were stored multiple times or marked as must-share
     /// are wrapped in `Shared`; others are `Single`.
     /// Equivalent to OCaml's `act_get_shared`.
-    pub fn act_get_shared(&self) -> Vec<SharedAction> {
-        // Build initial array from acts list (reversed in OCaml via List.rev_map)
-        let mut result: Vec<SharedAction> = self
-            .acts
-            .iter()
-            .map(|(shared, act)| {
-                if *shared {
-                    SharedAction::Shared(act.clone())
-                } else {
-                    SharedAction::Single(act.clone())
-                }
-            })
-            .collect();
+    pub fn act_get_shared(self) -> Vec<SharedAction> {
+        // OCaml's store closes over the action list and returns those actions
+        // directly when `act_get_shared` is called (compiler/ml/switch.ml:55-67).
+        // Rust callers consume the store at the same point, so move the raw
+        // lambda actions into the result instead of recursively cloning them.
+        let StoreExp { map, acts, .. } = self;
+        let mut share_flags: Vec<bool> = acts.iter().map(|(shared, _)| *shared).collect();
 
         // Mark any action that was found in the map as shared (even if not must_share)
-        for (_, &(shared, i)) in self.map.iter() {
+        for (_, (shared, i)) in map {
             if shared {
-                if let Some(SharedAction::Single(act)) = result.get(i) {
-                    let act = act.clone();
-                    result[i] = SharedAction::Shared(act);
+                if let Some(flag) = share_flags.get_mut(i) {
+                    *flag = true;
                 }
             }
         }
 
-        result
+        acts.into_iter()
+            .zip(share_flags)
+            .map(|((_, act), shared)| {
+                if shared {
+                    SharedAction::Shared(act)
+                } else {
+                    SharedAction::Single(act)
+                }
+            })
+            .collect()
     }
 }
 
@@ -5150,10 +5152,7 @@ fn share_actions_tree(
     let mut store = StoreExp::mk_store();
 
     // Default action is always shared
-    let d_idx = match &d {
-        None => None,
-        Some(d) => Some(store.act_store_shared(d.clone())),
-    };
+    let d_idx = d.map(|d| store.act_store_shared(d));
 
     // Store all other actions
     let sw_indices: Vec<(Constant, usize)> = sw
@@ -5540,21 +5539,27 @@ pub fn share_actions_sw(
     let mut store = StoreExp::mk_store();
 
     // Store fail action as shared
-    let fail_idx = match &sw.sw_failaction {
-        None => None,
-        Some(fail) => Some(store.act_store_shared(*fail.clone())),
-    };
+    let RawLambdaSwitch {
+        sw_numconsts,
+        sw_consts_full,
+        sw_consts,
+        sw_numblocks,
+        sw_blocks_full,
+        sw_blocks,
+        sw_failaction,
+        sw_names,
+    } = sw;
+
+    let fail_idx = sw_failaction.map(|fail| store.act_store_shared(*fail));
 
     // Store const and block actions
-    let consts: Vec<(i32, usize)> = sw
-        .sw_consts
-        .iter()
-        .map(|(i, e)| (*i, store.act_store(e.clone())))
+    let consts: Vec<(i32, usize)> = sw_consts
+        .into_iter()
+        .map(|(i, e)| (i, store.act_store(e)))
         .collect();
-    let blocks: Vec<(i32, usize)> = sw
-        .sw_blocks
-        .iter()
-        .map(|(i, e)| (*i, store.act_store(e.clone())))
+    let blocks: Vec<(i32, usize)> = sw_blocks
+        .into_iter()
+        .map(|(i, e)| (i, store.act_store(e)))
         .collect();
 
     // Get shared actions
@@ -5567,7 +5572,7 @@ pub fn share_actions_sw(
         .map(|act| match act {
             SharedAction::Single(a) => a,
             SharedAction::Shared(a) => {
-                let (i, h) = make_catch_delayed(a.clone(), next_raise_count);
+                let (i, h) = make_catch_delayed(a, next_raise_count);
                 // Extract handler body from the wrapper function
                 let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
                 let wrapped = h(dummy);
@@ -5594,20 +5599,20 @@ pub fn share_actions_sw(
     };
 
     let new_sw = RawLambdaSwitch {
-        sw_numconsts: sw.sw_numconsts,
-        sw_consts_full: sw.sw_consts_full,
+        sw_numconsts,
+        sw_consts_full,
         sw_consts: consts
             .into_iter()
             .map(|(i, j)| (i, resolved_acts[j].clone()))
             .collect(),
-        sw_numblocks: sw.sw_numblocks,
-        sw_blocks_full: sw.sw_blocks_full,
+        sw_numblocks,
+        sw_blocks_full,
         sw_blocks: blocks
             .into_iter()
             .map(|(i, j)| (i, resolved_acts[j].clone()))
             .collect(),
         sw_failaction: fail,
-        sw_names: sw.sw_names,
+        sw_names,
     };
 
     (handlers, new_sw)
@@ -6365,10 +6370,7 @@ fn share_actions_tree_string(
 ) {
     let mut store = StoreExp::mk_store();
 
-    let d_idx = match &d {
-        None => None,
-        Some(d) => Some(store.act_store_shared(d.clone())),
-    };
+    let d_idx = d.map(|d| store.act_store_shared(d));
 
     let sw_indices: Vec<(String, usize)> = sw
         .into_iter()
