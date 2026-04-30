@@ -2918,9 +2918,18 @@ fn touch_type_constraint_path(
             // constructor args/results, and manifests. For Pdot paths this
             // reaches Env.find_type/env.ml:800-807 and can force a persistent
             // signature after all label ids have been created.
-            let _ = crate::types::typecore::lookup_type_in_resolved_path(
+            let resolved = crate::types::typecore::lookup_type_in_resolved_path(
                 parent, type_name, env, pers_env, ctx,
             );
+            if let Some((_, _, decl)) = resolved
+                && let Some(manifest) = decl.type_manifest
+            {
+                // OCaml compiler/ml/typedecl.ml:773-780 runs
+                // `Ctype.matches` after `enforce_constraints`; when
+                // compiler/ml/ctype.ml:2341-2344 expands an alias to a package,
+                // compiler/ml/ctype.ml:2497-2500 reaches `unify_package`.
+                touch_package_constraint_match_side_effects(ctx, env, manifest);
+            }
         }
     }
 
@@ -2929,6 +2938,40 @@ fn touch_type_constraint_path(
     for child in children {
         touch_type_constraint_path(ctx, env, pers_env, child, visited);
     }
+}
+
+fn touch_package_constraint_match_side_effects(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    let crate::types::type_expr::TypeDesc::Tpackage { path, lids, .. } = &*desc else {
+        return;
+    };
+    let path = path.clone();
+    let lids = lids.clone();
+    drop(desc);
+
+    // OCaml compiler/ml/typedecl.ml:767-779 calls `Ctype.matches` after
+    // expanding declaration constraints. When the expansion is a package,
+    // compiler/ml/ctype.ml:2237-2238 calls `complete_type_list` twice, and
+    // compiler/ml/ctype.ml:2199-2201 allocates a hidden `Pkg` for each call.
+    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+        ctx,
+        Some(env),
+        crate::types::decl::ModuleType::MtyIdent(path.clone()),
+        &lids,
+        &lids,
+    );
+    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+        ctx,
+        Some(env),
+        crate::types::decl::ModuleType::MtyIdent(path),
+        &lids,
+        &lids,
+    );
 }
 
 fn path_root_is_named(path: &Path, root_name: &str) -> bool {

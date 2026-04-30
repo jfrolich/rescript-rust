@@ -2658,7 +2658,7 @@ fn subst_with_memo(
 // Core Unification
 // ============================================================================
 
-fn package_type_lists_have_ocaml_same_label_completion_side_effect(
+pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
     ctx: &TypeContext<'_>,
     env: Option<&Env>,
     mty: super::decl::ModuleType,
