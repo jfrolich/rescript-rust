@@ -8118,17 +8118,26 @@ fn type_match_cases_sequential(
     body_ty: TypeExprRef,
     erase_either: bool,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
-    let mut typed_cases = Vec::with_capacity(cases.len());
+    // OCaml compiler/ml/typecore.ml:4420-4438 builds `pat_env_list` for all
+    // cases before typecore.ml:4473-4505 types any case body. Keep the same
+    // two-phase order for the GADT fallback path; otherwise constructors in
+    // later patterns are forced after binders in earlier bodies, shifting
+    // strict typedtree stamps.
+    let mut pending_cases = Vec::with_capacity(cases.len());
     for case in cases {
-        typed_cases.push(type_case(
+        pending_cases.push(type_case_pattern(
             tctx,
             env,
             case,
             scrutinee_ty,
             generic_scrutinee_ty,
-            body_ty,
             erase_either,
         )?);
+    }
+
+    let mut typed_cases = Vec::with_capacity(pending_cases.len());
+    for pending in pending_cases {
+        typed_cases.push(type_pending_case_body(tctx, env, pending, body_ty)?);
     }
     Ok(typed_cases)
 }
@@ -8138,6 +8147,14 @@ struct PendingMatchCase<'a> {
     typed_pat: Pattern,
     case_env: Env,
     unpacks: Vec<PatternVariable>,
+}
+
+struct PendingSequentialMatchCase<'a> {
+    parsed_case: &'a crate::parser::ast::Case,
+    typed_pat: Pattern,
+    case_env: Env,
+    unpacks: Vec<PatternVariable>,
+    case_has_gadt: bool,
 }
 
 fn pressure_matrix_omega_pat() -> Pattern {
@@ -9366,7 +9383,31 @@ fn type_match(
     } else {
         env
     };
-    let mut typed_val_cases = if has_generalized_value_patterns {
+
+    let mut gadt_match_env = None;
+    let mut gadt_scope_open = false;
+    let mut gadt_lev = ctx.current_level();
+    let val_case_env = if has_generalized_value_patterns {
+        // OCaml compiler/ml/typecore.ml:4387-4403 calls `init_env` before
+        // pattern typing when `has_gadts`, and keeps that begin_def scope open
+        // until typecore.ml:4511-4535 finishes body typing, exhaustiveness, and
+        // the escaping-result check. Keep the raised level live while Rust
+        // types case bodies so nested matches allocate binders after the same
+        // `Ident.set_current_time (get_current_level ())` reservation.
+        ctx.begin_def();
+        gadt_scope_open = true;
+        ctx.set_current_time(ctx.current_level());
+        gadt_lev = ctx.current_stamp();
+        ctx.init_def(gadt_lev + 1000);
+        let mut scoped_env = val_case_env.clone();
+        scoped_env.add_gadt_instance_level(gadt_lev, Vec::new());
+        gadt_match_env = Some(scoped_env);
+        gadt_match_env.as_ref().unwrap()
+    } else {
+        val_case_env
+    };
+
+    let typed_val_cases_result = if has_generalized_value_patterns {
         type_match_cases_sequential(
             tctx,
             val_case_env,
@@ -9375,7 +9416,7 @@ fn type_match(
             generic_scrutinee_ty,
             ty_res,
             erase_either,
-        )?
+        )
     } else {
         match type_match_cases_batch_non_gadt(
             tctx,
@@ -9386,7 +9427,7 @@ fn type_match(
             ty_res,
             erase_either,
         ) {
-            Ok(cases) => cases,
+            Ok(cases) => Ok(cases),
             // Preserve existing recovery behavior for non-GADT patterns.
             Err(TypeCoreError::PatternTypeClash(_)) => type_match_cases_sequential(
                 tctx,
@@ -9396,8 +9437,17 @@ fn type_match(
                 generic_scrutinee_ty,
                 ty_res,
                 erase_either,
-            )?,
-            Err(err) => return Err(err),
+            ),
+            Err(err) => Err(err),
+        }
+    };
+    let mut typed_val_cases = match typed_val_cases_result {
+        Ok(cases) => cases,
+        Err(err) => {
+            if gadt_scope_open {
+                ctx.end_def();
+            }
+            return Err(err);
         }
     };
 
@@ -9471,8 +9521,18 @@ fn type_match(
         val_caselist.as_slice(),
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
-    let do_init = has_generalized_value_patterns || needs_exhaust_check;
-    let partial = if do_init {
+    let partial = if has_generalized_value_patterns {
+        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+        ctx.end_def();
+        unify_expression_types(
+            tctx,
+            loc,
+            crate::types::instance(ctx, ty_res),
+            ctx.new_var(None),
+            None,
+        )?;
+        partial
+    } else if needs_exhaust_check {
         // OCaml compiler/ml/typecore.ml:4387-4399 computes
         // `needs_exhaust_check` and defines `init_env`, then
         // typecore.ml:4511-4535 runs that init before `check_partial`
@@ -10119,29 +10179,15 @@ fn type_case(
     body_ty: TypeExprRef,
     erase_either: bool,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
-    match type_case_impl(
+    let pending = type_case_pattern(
         tctx,
         env,
         case,
         scrutinee_ty,
         generic_scrutinee_ty,
-        body_ty,
         erase_either,
-        false,
-    ) {
-        Ok(case) => Ok(case),
-        Err(TypeCoreError::PatternTypeClash(_)) => type_case_impl(
-            tctx,
-            env,
-            case,
-            scrutinee_ty,
-            generic_scrutinee_ty,
-            body_ty,
-            erase_either,
-            true,
-        ),
-        Err(err) => Err(err),
-    }
+    )?;
+    type_pending_case_body(tctx, env, pending, body_ty)
 }
 
 fn shallow_copy_pattern_binding_type(
@@ -10256,16 +10302,46 @@ fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) ->
     crate::types::ctype::instance_partial(ctx, ty, false)
 }
 
-fn type_case_impl(
+fn type_case_pattern<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    case: &crate::parser::ast::Case,
+    case: &'a crate::parser::ast::Case,
     scrutinee_ty: TypeExprRef,
     generic_scrutinee_ty: TypeExprRef,
-    body_ty: TypeExprRef,
+    erase_either: bool,
+) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
+    match type_case_pattern_impl(
+        tctx,
+        env,
+        case,
+        scrutinee_ty,
+        generic_scrutinee_ty,
+        erase_either,
+        false,
+    ) {
+        Ok(case) => Ok(case),
+        Err(TypeCoreError::PatternTypeClash(_)) => type_case_pattern_impl(
+            tctx,
+            env,
+            case,
+            scrutinee_ty,
+            generic_scrutinee_ty,
+            erase_either,
+            true,
+        ),
+        Err(err) => Err(err),
+    }
+}
+
+fn type_case_pattern_impl<'a>(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    case: &'a crate::parser::ast::Case,
+    scrutinee_ty: TypeExprRef,
+    generic_scrutinee_ty: TypeExprRef,
     erase_either: bool,
     force_case_local_constraints: bool,
-) -> TypeCoreResult<crate::types::typedtree::Case> {
+) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
     let mut case_env = env.clone();
     let case_has_gadt =
         pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs));
@@ -10288,10 +10364,11 @@ fn type_case_impl(
         None
     };
     tctx.type_ctx.begin_def();
-    // Match OCaml type_cases: instance the GENERIC scrutinee type inside begin_def.
-    // This creates fresh copies at the elevated level (L+1). After end_def +
-    // generalize, pattern types become GENERIC, preventing body unification
-    // from contaminating pattern types (e.g., string → Js.String.t).
+    // OCaml compiler/ml/typecore.ml:4430-4433 instances the generic
+    // scrutinee type while the propagation begin_def is active. This creates
+    // fresh copies at the elevated level (L+1). After typecore.ml:4465-4470
+    // closes propagation and generalizes, pattern types become GENERIC,
+    // preventing body unification from contaminating pattern types.
     let case_scrutinee_ty = if erase_either {
         instance_for_erase_either_patterns(tctx.type_ctx, scrutinee_ty)
     } else {
@@ -10306,7 +10383,15 @@ fn type_case_impl(
         &mut state,
     );
     tctx.type_ctx.end_def();
-    let typed_pat = typed_pat_result?;
+    let typed_pat = match typed_pat_result {
+        Ok(typed_pat) => typed_pat,
+        Err(err) => {
+            if let Some(old_env) = saved_unify_env {
+                tctx.unify_state.set_env(&old_env);
+            }
+            return Err(err);
+        }
+    };
     iter_typed_pattern(&typed_pat, &mut |pat| {
         crate::types::generalize(tctx.type_ctx, pat.pat_type);
     });
@@ -10352,26 +10437,54 @@ fn type_case_impl(
         }
     }
 
-    // Type check the guard if present
-    let typed_guard = if let Some(guard) = &case.pc_guard {
+    Ok(PendingSequentialMatchCase {
+        parsed_case: case,
+        typed_pat,
+        case_env,
+        unpacks,
+        case_has_gadt,
+    })
+}
+
+fn type_pending_case_body(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pending: PendingSequentialMatchCase<'_>,
+    body_ty: TypeExprRef,
+) -> TypeCoreResult<crate::types::typedtree::Case> {
+    // OCaml compiler/ml/typecore.ml:4473-4505 types guards and bodies only
+    // after every pattern in `pat_env_list` has been built.
+    // Type check the guard if present.
+    let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
         let guard_expr = tctx.arena.get_expr(*guard);
         Some(type_expect_with_module_unpacks(
-            tctx, &case_env, guard_expr, bool_ty, &unpacks, None,
+            tctx,
+            &pending.case_env,
+            guard_expr,
+            bool_ty,
+            &pending.unpacks,
+            None,
         )?)
     } else {
         None
     };
 
     // Type check the body
-    let case_body_ty = if case_has_gadt {
+    let case_body_ty = if pending.case_has_gadt {
         crate::types::ctype::subst_identity_copy(tctx.type_ctx, body_ty)
     } else {
         body_ty
     };
-    let body_expr = tctx.arena.get_expr(case.pc_rhs);
-    let typed_body =
-        type_expect_with_module_unpacks(tctx, &case_env, body_expr, case_body_ty, &unpacks, None)?;
+    let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+    let typed_body = type_expect_with_module_unpacks(
+        tctx,
+        &pending.case_env,
+        body_expr,
+        case_body_ty,
+        &pending.unpacks,
+        None,
+    )?;
     let case_exp_ty = crate::types::instance(tctx.type_ctx, case_body_ty);
     let typed_body = Expression {
         exp_type: case_exp_ty,
@@ -10379,7 +10492,7 @@ fn type_case_impl(
     };
 
     Ok(crate::types::typedtree::Case {
-        c_lhs: typed_pat,
+        c_lhs: pending.typed_pat,
         c_guard: typed_guard,
         c_rhs: typed_body,
     })
