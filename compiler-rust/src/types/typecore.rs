@@ -10762,9 +10762,19 @@ fn type_try(
     // which includes the propagation cycle (begin_def/end_def/generalize on
     // all pattern types). This ensures as-bound variables (e.g. `| exn as e`)
     // get generalized types so instance() creates fresh copies at use sites.
+    let handler_refs: Vec<&crate::parser::ast::Case> = handlers.iter().collect();
+    // OCaml compiler/ml/typecore.ml:2657-2661 routes try handlers through
+    // type_cases, and typecore.ml:4370-4373 scans all patterns for GADTs before
+    // typecore.ml:4420-4434 types any pattern. That scan performs constructor
+    // lookup, so qualified exception patterns such as Js.Exn.Error force their
+    // module before binders in earlier cases are allocated.
+    for case in &handler_refs {
+        if pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs)) {
+            break;
+        }
+    }
     let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
     let generic_exn_ty = ctx.predef_exn();
-    let handler_refs: Vec<&crate::parser::ast::Case> = handlers.iter().collect();
     let typed_handlers = type_match_cases_batch_non_gadt(
         tctx,
         env,
