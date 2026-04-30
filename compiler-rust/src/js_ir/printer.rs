@@ -69,6 +69,13 @@ impl JsPrinter {
         }
     }
 
+    /// Create a new printer with a preallocated output buffer.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut printer = Self::new();
+        printer.output = String::with_capacity(capacity);
+        printer
+    }
+
     /// Create a new printer with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
@@ -88,7 +95,20 @@ impl JsPrinter {
         debug: bool,
         jsx_preserve: bool,
     ) -> Self {
-        let mut printer = Self::new();
+        let mut printer = Self::with_capacity(0);
+        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.debug = debug;
+        printer.jsx_preserve = jsx_preserve;
+        printer
+    }
+
+    pub(crate) fn with_module_path_resolver_options_and_capacity(
+        module_path_resolver: Option<&ModulePathResolver>,
+        debug: bool,
+        jsx_preserve: bool,
+        capacity: usize,
+    ) -> Self {
+        let mut printer = Self::with_capacity(capacity);
         printer.module_path_resolver = module_path_resolver.cloned();
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;

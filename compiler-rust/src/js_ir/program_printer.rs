@@ -246,9 +246,50 @@ fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
 
 /// Print a program to a string
 pub fn print_program(program: &Program) -> String {
-    let mut printer = JsPrinter::new();
+    let mut printer = JsPrinter::with_capacity(estimated_block_output_capacity(
+        program.block.len(),
+        program.exports.len(),
+        0,
+        0,
+        true,
+    ));
     printer.print_program(program);
     printer.into_output()
+}
+
+fn estimated_block_output_capacity(
+    statement_count: usize,
+    export_count: usize,
+    module_count: usize,
+    directive_bytes: usize,
+    emit_header: bool,
+) -> usize {
+    let header_bytes = if emit_header { 128 } else { 0 };
+    let estimate = 256usize
+        .saturating_add(header_bytes)
+        .saturating_add(directive_bytes)
+        .saturating_add(statement_count.saturating_mul(384))
+        .saturating_add(export_count.saturating_mul(48))
+        .saturating_add(module_count.saturating_mul(96));
+    estimate.min(4 * 1024 * 1024)
+}
+
+fn estimated_deps_program_output_capacity(
+    program: &DepsProgram,
+    directives: &[String],
+    emit_header: bool,
+) -> usize {
+    let directive_bytes = directives
+        .iter()
+        .map(|directive| directive.len() + 1)
+        .sum();
+    estimated_block_output_capacity(
+        program.program.block.len(),
+        program.program.exports.len(),
+        program.modules.len(),
+        directive_bytes,
+        emit_header,
+    )
 }
 
 /// Print a module-level program to a string.
@@ -266,8 +307,13 @@ pub fn print_deps_program_with_directives(
     debug: bool,
     jsx_preserve: bool,
 ) -> String {
-    let mut printer =
-        JsPrinter::with_module_path_resolver_and_options(module_path_resolver, debug, jsx_preserve);
+    let capacity = estimated_deps_program_output_capacity(program, directives, true);
+    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        module_path_resolver,
+        debug,
+        jsx_preserve,
+        capacity,
+    );
     printer.print_deps_program_with_directives(program, directives);
     printer.into_output()
 }
@@ -280,8 +326,13 @@ pub fn print_deps_program_with_directives_and_options(
     jsx_preserve: bool,
     emit_header: bool,
 ) -> String {
-    let mut printer =
-        JsPrinter::with_module_path_resolver_and_options(module_path_resolver, debug, jsx_preserve);
+    let capacity = estimated_deps_program_output_capacity(program, directives, emit_header);
+    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        module_path_resolver,
+        debug,
+        jsx_preserve,
+        capacity,
+    );
     printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
     printer.into_output()
 }
