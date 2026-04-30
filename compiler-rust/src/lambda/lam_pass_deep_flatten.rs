@@ -13,7 +13,6 @@ use crate::lambda::lam_util::refine_let;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 
-#[derive(Clone)]
 enum FlattenGroup {
     Single(LetKind, Ident, Lambda),
     Recursive(Vec<(Ident, Lambda)>),
@@ -33,13 +32,18 @@ pub fn deep_flatten(lam: &Lambda) -> Lambda {
 /// consumes the Rust tree when the caller is done with it, avoiding a full
 /// recursive clone before rebuilding the pass output.
 pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
-    fn lambda_of_groups(rev_bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
+    fn lambda_of_groups(bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
         // lam_pass_deep_flatten.ml:108 — fold each Single back through
         // `Lam_util.refine_let` so Strict bindings whose RHS is safe to alias
         // (e.g. module field reads) are downgraded to Alias. Without this the
         // later `simplify_lets` Alias arm cannot inline single-use bindings.
-        rev_bindings
+        // OCaml prepends groups while scanning and then folds left over the
+        // reversed list (compiler/core/lam_pass_deep_flatten.ml:108,126-145).
+        // Keep the observed order but store groups chronologically so long
+        // top-level chains do not repeatedly copy the accumulator.
+        bindings
             .into_iter()
+            .rev()
             .fold(result, |acc, group| match group {
                 FlattenGroup::Single(kind, ident, lam) => refine_let(kind, ident, lam, acc),
                 FlattenGroup::Recursive(bindings) => Lambda::letrec(bindings, acc),
@@ -151,7 +155,7 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
         }
     }
 
-    fn flatten(acc: Vec<FlattenGroup>, lam: Lambda) -> (Lambda, Vec<FlattenGroup>) {
+    fn flatten(acc: &mut Vec<FlattenGroup>, lam: Lambda) -> Lambda {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
                 let value = match *value {
@@ -172,10 +176,8 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                                 args: vec![arg],
                                 loc,
                             }));
-                            let mut next_acc = Vec::with_capacity(acc.len() + 1);
-                            next_acc.push(FlattenGroup::Single(kind, id, res));
-                            next_acc.extend(acc);
-                            return flatten(next_acc, *body);
+                            acc.push(FlattenGroup::Single(kind, id, res));
+                            return flatten(acc, *body);
                         } else {
                             // lam_pass_deep_flatten.ml:122-131 — introduce the
                             // same intermediate binding before flattening a
@@ -203,7 +205,7 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                     value => value,
                 };
 
-                let (res, accux) = flatten(acc, value);
+                let res = flatten(acc, value);
                 let flatten_named_module_block = matches!(
                     (id.name(), kind, &res),
                     (
@@ -231,49 +233,41 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                                     None => FlattenGroup::Nop(arg),
                                 })
                                 .collect::<Vec<_>>();
-                            flattened_args.reverse();
-                            flattened_args.extend(accux);
-                            return flatten(flattened_args, stripped_body);
+                            acc.append(&mut flattened_args);
+                            return flatten(acc, stripped_body);
                         }
                         Err(body) => {
-                            let mut next_acc = Vec::with_capacity(accux.len() + 1);
-                            next_acc.push(FlattenGroup::Single(kind, id, res));
-                            next_acc.extend(accux);
-                            return flatten(next_acc, body);
+                            acc.push(FlattenGroup::Single(kind, id, res));
+                            return flatten(acc, body);
                         }
                     }
                 }
 
-                let mut next_acc = Vec::with_capacity(accux.len() + 1);
-                next_acc.push(FlattenGroup::Single(kind, id, res));
-                next_acc.extend(accux);
-                flatten(next_acc, *body)
+                acc.push(FlattenGroup::Single(kind, id, res));
+                flatten(acc, *body)
             }
             Lambda::Lletrec(bindings, body) => {
                 let bindings = bindings
                     .into_iter()
                     .map(|(id, expr)| (id, aux(expr)))
                     .collect();
-                let mut next_acc = Vec::with_capacity(acc.len() + 1);
-                next_acc.push(FlattenGroup::Recursive(bindings));
-                next_acc.extend(acc);
-                flatten(next_acc, *body)
+                acc.push(FlattenGroup::Recursive(bindings));
+                flatten(acc, *body)
             }
             Lambda::Lsequence(first, second) => {
-                let (res, first_acc) = flatten(acc, *first);
-                let mut next_acc = Vec::with_capacity(first_acc.len() + 1);
-                next_acc.push(FlattenGroup::Nop(res));
-                next_acc.extend(first_acc);
-                flatten(next_acc, *second)
+                let res = flatten(acc, *first);
+                acc.push(FlattenGroup::Nop(res));
+                flatten(acc, *second)
             }
-            _ => (aux(lam), acc),
+            _ => aux(lam),
         }
     }
 
     fn aux(lam: Lambda) -> Lambda {
         match lam {
             Lambda::Llet(_, _, _, _) => {
-                let (result, groups) = flatten(Vec::new(), lam);
+                let mut groups = Vec::new();
+                let result = flatten(&mut groups, lam);
                 lambda_of_groups(groups, result)
             }
             Lambda::Lletrec(bindings, body) => Lambda::letrec(
