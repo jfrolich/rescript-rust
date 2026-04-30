@@ -1715,29 +1715,14 @@ fn normalize_path_full_inner<'a>(
         return path.clone();
     }
 
-    if let Path::Pdot(parent, module_name, _) = path
-        && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
-        && !alias_path.same(path)
-    {
-        // OCaml compiler/ml/env.ml:781-793 stores persistent child
-        // `comp_components` separately from env.ml:865-875's full `ps_sig`
-        // module declaration. When Rust already has the component table for a
-        // selected prefix, read the child alias from it before recursively
-        // normalizing the persistent root, so aliases like `Js.Json` do not
-        // force `Js.ps_sig` earlier than OCaml's component navigation.
-        return normalize_path_full_inner(
-            ctx,
-            env,
-            &alias_path,
-            depth + 1,
-            visiting,
-            allow_reverse_local_aliases,
-        );
-    }
-
     // First, recursively normalize the prefix for Pdot paths
     let path = match path {
         Path::Pdot(p, s, pos) => {
+            // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
+            // prefix before `find_module ~alias:true` inspects the path at
+            // env.ml:865-882. Keep component-alias shortcuts below this point
+            // so persistent roots still force `ps_sig` at env.ml:872-874 when
+            // `expand_abbrev_gen` reaches `Env.normalize_path`.
             let p_norm = normalize_path_full_inner(
                 ctx,
                 env,
@@ -1759,11 +1744,12 @@ fn normalize_path_full_inner<'a>(
     // compiler/ml/env.ml:865-875/env.ml:903-914: `normalize_path` calls
     // `find_module ~alias:true`, which forces a persistent structure's
     // `ps_sig` unless the exact module id is already present in `env.modules`.
-    // Rust keeps a root `Pervasives` module binding for qualified lookup even
-    // though OCaml's implicit open in compiler/core/res_compmisc.ml:56-62 and
-    // compiler/ml/env.ml:1874-1877 only adds signature components. Ignore that
-    // Rust-only root binding for Pervasives so expanding paths like
-    // `Pervasives.ref` consumes the same lazy `Subst.signature` stamps.
+    // Rust keeps root `Pervasives`/`Stdlib` module bindings for qualified
+    // lookup even though OCaml's implicit open in
+    // compiler/core/res_compmisc.ml:61-62 and compiler/ml/env.ml:1874-1877
+    // only adds signature components. Ignore those Rust-only root bindings so
+    // expanding paths like `Pervasives.ref` and `Stdlib.Iterator.result`
+    // consumes the same lazy `Subst.signature` stamps.
     if let Path::Pident(id) = &path {
         let has_component_cache = {
             let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
@@ -1781,7 +1767,9 @@ fn normalize_path_full_inner<'a>(
         let should_force_persistent_sig =
             id.is_persistent()
                 && !(id.name() == "Belt" && has_component_cache)
-                && (!env.has_module_ident(id) || id.name() == "Pervasives");
+                && (!env.has_module_ident(id)
+                    || id.name() == "Pervasives"
+                    || id.name() == "Stdlib");
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
