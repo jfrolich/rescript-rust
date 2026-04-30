@@ -1715,14 +1715,43 @@ fn normalize_path_full_inner<'a>(
         return path.clone();
     }
 
+    if let Path::Pdot(parent, module_name, _) = path {
+        let parent_root_name = path_root_ident(parent).map(|id| id.name());
+        let parent_is_implicit_root =
+            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"));
+        if !parent_is_implicit_root
+            && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
+            && !alias_path.same(path)
+        {
+            // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr`
+            // navigate persistent components through `ps_comps`, and
+            // env.ml:876-880 reads a dotted module from those components before
+            // alias normalization continues. Preserve that component-level
+            // alias for roots such as `Js.Json`, while leaving
+            // `Pervasives`/`Stdlib` to the recursive path below because Rust's
+            // qualified-lookup root bindings are not present in OCaml's
+            // implicit opens at compiler/core/res_compmisc.ml:61-62 and
+            // compiler/ml/env.ml:1874-1877.
+            return normalize_path_full_inner(
+                ctx,
+                env,
+                &alias_path,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+            );
+        }
+    }
+
     // First, recursively normalize the prefix for Pdot paths
     let path = match path {
         Path::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
             // prefix before `find_module ~alias:true` inspects the path at
-            // env.ml:865-882. Keep component-alias shortcuts below this point
-            // so persistent roots still force `ps_sig` at env.ml:872-874 when
-            // `expand_abbrev_gen` reaches `Env.normalize_path`.
+            // env.ml:865-882. For implicit `Pervasives`/`Stdlib` roots, keep
+            // component-alias shortcuts below this point so persistent roots
+            // still force `ps_sig` at env.ml:872-874 when `expand_abbrev_gen`
+            // reaches `Env.normalize_path`.
             let p_norm = normalize_path_full_inner(
                 ctx,
                 env,
