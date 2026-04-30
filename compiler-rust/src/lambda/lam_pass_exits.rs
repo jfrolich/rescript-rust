@@ -10,10 +10,11 @@ use std::collections::HashMap;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
-use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::subst as lam_subst;
 use crate::lambda::{LFunction, Lambda, LambdaSwitch};
+#[cfg(test)]
+use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
 /// (lam_exit_count.ml:25).
@@ -289,20 +290,24 @@ fn contains_static_catch(lam: &Lambda) -> bool {
     }
 }
 
-/// `Lam_pass_exits.subst_helper` (lam_pass_exits.ml:153-239).
-fn subst_helper(
+/// `Lam_pass_exits.subst_helper` (compiler/core/lam_pass_exits.ml:153-239).
+///
+/// OCaml rebuilds from immutable lambda blocks. The Rust pipeline reaches this
+/// pass with owned lambda input, so mirror the same recursive cases while
+/// moving unchanged children instead of cloning the whole tree first.
+fn subst_helper_owned(
     subst: &mut SubstTbl,
     counts: &Collection,
     id_gen: &IdGenerator,
-    lam: &Lambda,
+    lam: Lambda,
 ) -> Lambda {
     match lam {
         // lam_pass_exits.ml:157-183: Lstaticcatch (l1, (i, xs), l2)
         Lambda::LstaticCatch(l1, (i, xs), l2) => {
-            let i_occur = count_exit(counts, *i);
+            let i_occur = count_exit(counts, i);
             // (0, _) -> simplif l1 (lam_pass_exits.ml:160)
             if i_occur == 0 {
-                return subst_helper(subst, counts, id_gen, l1);
+                return subst_helper_owned(subst, counts, id_gen, *l1);
             }
             // (_, Lvar _) | (_, Lconst _) (lam_pass_exits.ml:161)
             // when i >= 0 (#2316). i is always >= 0 in OCaml since negative
@@ -310,53 +315,53 @@ fn subst_helper(
             // labels in this backend; the comment in OCaml notes the predicate
             // is implicit in this branch.
             if matches!(l2.as_ref(), Lambda::Lvar(_) | Lambda::Lconst(_)) {
-                let simplified_l2 = subst_helper(subst, counts, id_gen, l2);
-                subst.insert(*i, (xs.clone(), simplified_l2));
-                return subst_helper(subst, counts, id_gen, l1);
+                let simplified_l2 = subst_helper_owned(subst, counts, id_gen, *l2);
+                subst.insert(i, (xs, simplified_l2));
+                return subst_helper_owned(subst, counts, id_gen, *l1);
             }
             // (1, _) when i >= 0 (lam_pass_exits.ml:164-167)
-            if i_occur == 1 && *i >= 0 {
-                let simplified_l2 = subst_helper(subst, counts, id_gen, l2);
-                subst.insert(*i, (xs.clone(), simplified_l2));
-                return subst_helper(subst, counts, id_gen, l1);
+            if i_occur == 1 && i >= 0 {
+                let simplified_l2 = subst_helper_owned(subst, counts, id_gen, *l2);
+                subst.insert(i, (xs, simplified_l2));
+                return subst_helper_owned(subst, counts, id_gen, *l1);
             }
             // Otherwise: simplify l2 first then maybe inline
             // (lam_pass_exits.ml:168-183).
-            let simplified_l2 = subst_helper(subst, counts, id_gen, l2);
+            let simplified_l2 = subst_helper_owned(subst, counts, id_gen, *l2);
             // ok_to_inline (lam_pass_exits.ml:173-179)
-            let ok_to_inline = if *i >= 0 && no_bounded_variables(&simplified_l2) {
+            let ok_to_inline = if i >= 0 && no_bounded_variables(&simplified_l2) {
                 let lam_size = size(&simplified_l2);
                 (i_occur <= 2 && lam_size < EXIT_INLINE_SIZE) || lam_size < 5
             } else {
                 false
             };
             if ok_to_inline {
-                subst.insert(*i, (xs.clone(), simplified_l2));
-                subst_helper(subst, counts, id_gen, l1)
+                subst.insert(i, (xs, simplified_l2));
+                subst_helper_owned(subst, counts, id_gen, *l1)
             } else {
                 Lambda::static_catch(
-                    subst_helper(subst, counts, id_gen, l1),
-                    *i,
-                    xs.clone(),
+                    subst_helper_owned(subst, counts, id_gen, *l1),
+                    i,
+                    xs,
                     simplified_l2,
                 )
             }
         }
         // lam_pass_exits.ml:184-187: Lstaticraise (i, [])
         Lambda::LstaticRaise(i, ls) if ls.is_empty() => {
-            if let Some((_, handler)) = subst.get(i) {
+            if let Some((_, handler)) = subst.get(&i) {
                 handler.clone()
             } else {
-                lam.clone()
+                Lambda::LstaticRaise(i, ls)
             }
         }
         // lam_pass_exits.ml:188-200: Lstaticraise (i, ls)
         Lambda::LstaticRaise(i, ls) => {
             let ls: Vec<Lambda> = ls
-                .iter()
-                .map(|l| subst_helper(subst, counts, id_gen, l))
+                .into_iter()
+                .map(|l| subst_helper_owned(subst, counts, id_gen, l))
                 .collect();
-            if let Some((xs, handler)) = subst.get(i).cloned() {
+            if let Some((xs, handler)) = subst.get(&i).cloned() {
                 // Rename xs to fresh ys to keep bound variables unique
                 // (lam_pass_exits.ml:193).
                 let ys: Vec<Ident> = xs.iter().map(|x| x.rename(id_gen)).collect();
@@ -376,130 +381,130 @@ fn subst_helper(
                 }
                 result
             } else {
-                Lambda::static_raise(*i, ls)
+                Lambda::static_raise(i, ls)
             }
         }
         // lam_pass_exits.ml:201
-        Lambda::Lvar(_) | Lambda::Lconst(_) => lam.clone(),
+        Lambda::Lvar(_) | Lambda::Lconst(_) => lam,
         // lam_pass_exits.ml:202-205
         Lambda::Lapply(apply) => Lambda::apply(
-            subst_helper(subst, counts, id_gen, &apply.ap_func),
+            subst_helper_owned(subst, counts, id_gen, *apply.ap_func),
             apply
                 .ap_args
-                .iter()
-                .map(|arg| subst_helper(subst, counts, id_gen, arg))
+                .into_iter()
+                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
                 .collect(),
-            apply.ap_info.clone(),
+            apply.ap_info,
             apply.ap_transformed_jsx,
         ),
         // lam_pass_exits.ml:206-207
         Lambda::Lfunction(func) => Lambda::Lfunction(LFunction {
             arity: func.arity,
-            params: func.params.clone(),
-            body: Box::new(subst_helper(subst, counts, id_gen, &func.body)),
-            attr: func.attr.clone(),
+            params: func.params,
+            body: Box::new(subst_helper_owned(subst, counts, id_gen, *func.body)),
+            attr: func.attr,
         }),
         // lam_pass_exits.ml:208
         Lambda::Llet(kind, v, l1, l2) => Lambda::let_(
-            *kind,
-            v.clone(),
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
+            kind,
+            v,
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:209-210
         Lambda::Lletrec(bindings, body) => Lambda::letrec(
             bindings
-                .iter()
-                .map(|(id, e)| (id.clone(), subst_helper(subst, counts, id_gen, e)))
+                .into_iter()
+                .map(|(id, e)| (id, subst_helper_owned(subst, counts, id_gen, e)))
                 .collect(),
-            subst_helper(subst, counts, id_gen, body),
+            subst_helper_owned(subst, counts, id_gen, *body),
         ),
         // lam_pass_exits.ml:211
-        Lambda::LglobalModule(_, _) => lam.clone(),
+        Lambda::LglobalModule(_, _) => lam,
         // lam_pass_exits.ml:212-214
         Lambda::Lprim(info) => Lambda::prim(
-            info.primitive.clone(),
+            info.primitive,
             info.args
-                .iter()
-                .map(|arg| subst_helper(subst, counts, id_gen, arg))
+                .into_iter()
+                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
                 .collect(),
-            info.loc.clone(),
+            info.loc,
         ),
         // lam_pass_exits.ml:215-226
         Lambda::Lswitch(l, sw) => Lambda::switch(
-            subst_helper(subst, counts, id_gen, l),
+            subst_helper_owned(subst, counts, id_gen, *l),
             LambdaSwitch {
                 sw_consts_full: sw.sw_consts_full,
                 sw_consts: sw
                     .sw_consts
-                    .iter()
-                    .map(|(t, b)| (*t, subst_helper(subst, counts, id_gen, b)))
+                    .into_iter()
+                    .map(|(t, b)| (t, subst_helper_owned(subst, counts, id_gen, b)))
                     .collect(),
                 sw_blocks_full: sw.sw_blocks_full,
                 sw_blocks: sw
                     .sw_blocks
-                    .iter()
-                    .map(|(t, b)| (*t, subst_helper(subst, counts, id_gen, b)))
+                    .into_iter()
+                    .map(|(t, b)| (t, subst_helper_owned(subst, counts, id_gen, b)))
                     .collect(),
                 sw_failaction: sw
                     .sw_failaction
-                    .as_deref()
-                    .map(|a| Box::new(subst_helper(subst, counts, id_gen, a))),
-                sw_names: sw.sw_names.clone(),
+                    .map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
+                sw_names: sw.sw_names,
             },
         ),
         // lam_pass_exits.ml:227-230
         Lambda::LstringSwitch(l, sw, d) => Lambda::string_switch(
-            subst_helper(subst, counts, id_gen, l),
-            sw.iter()
-                .map(|(s, b)| (s.clone(), subst_helper(subst, counts, id_gen, b)))
+            subst_helper_owned(subst, counts, id_gen, *l),
+            sw.into_iter()
+                .map(|(s, b)| (s, subst_helper_owned(subst, counts, id_gen, b)))
                 .collect(),
-            d.as_deref()
-                .map(|a| Box::new(subst_helper(subst, counts, id_gen, a))),
+            d.map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
         ),
         // lam_pass_exits.ml:231
         Lambda::LtryWith(l1, v, l2) => Lambda::try_(
-            subst_helper(subst, counts, id_gen, l1),
-            v.clone(),
-            subst_helper(subst, counts, id_gen, l2),
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            v,
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:232
         Lambda::LifThenElse(l1, l2, l3) => Lambda::if_(
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
-            subst_helper(subst, counts, id_gen, l3),
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
+            subst_helper_owned(subst, counts, id_gen, *l3),
         ),
         // lam_pass_exits.ml:233
         Lambda::Lsequence(l1, l2) => Lambda::seq(
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:234
         Lambda::Lwhile(l1, l2) => Lambda::while_(
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:235-236
         Lambda::Lfor(v, l1, l2, dir, l3) => Lambda::for_(
-            v.clone(),
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
-            *dir,
-            subst_helper(subst, counts, id_gen, l3),
+            v,
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
+            dir,
+            subst_helper_owned(subst, counts, id_gen, *l3),
         ),
         // lam_pass_exits.ml after #7887: Lfor_of / Lfor_await_of.
         Lambda::Lfor_of(v, l1, l2) => Lambda::for_of(
-            v.clone(),
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
+            v,
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         Lambda::Lfor_await_of(v, l1, l2) => Lambda::for_await_of(
-            v.clone(),
-            subst_helper(subst, counts, id_gen, l1),
-            subst_helper(subst, counts, id_gen, l2),
+            v,
+            subst_helper_owned(subst, counts, id_gen, *l1),
+            subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:237
-        Lambda::Lassign(v, l) => Lambda::assign(v.clone(), subst_helper(subst, counts, id_gen, l)),
+        Lambda::Lassign(v, l) => {
+            Lambda::assign(v, subst_helper_owned(subst, counts, id_gen, *l))
+        }
         // OCaml `Lam_pass_exits.subst_helper` after #8348:
         // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
         Lambda::Lbreak => Lambda::break_(),
@@ -530,7 +535,7 @@ pub fn simplify_exits_owned(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
     }
     let counts = count_helper(&lam);
     let mut subst: SubstTbl = HashMap::new();
-    subst_helper(&mut subst, &counts, id_gen, &lam)
+    subst_helper_owned(&mut subst, &counts, id_gen, lam)
 }
 
 /// Standalone entry point that seeds its own `IdGenerator` from the lambda's
