@@ -8245,6 +8245,50 @@ fn check_partial_simple<'a>(
     Partial::Partial
 }
 
+fn finish_non_gadt_type_cases<'a>(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    ty_res: TypeExprRef,
+    parsed_cases: &[&'a crate::parser::ast::Case],
+    typed_cases: &[crate::types::typedtree::Case],
+    partial_flag: bool,
+) -> TypeCoreResult<crate::types::typedtree::Partial> {
+    let ctx = tctx.type_ctx;
+    let needs_exhaust_check = !matches!(
+        parsed_cases,
+        [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
+    );
+    if needs_exhaust_check {
+        // OCaml compiler/ml/typecore.ml:4511-4535 runs init_env after
+        // type_cases body typing, even when partial_flag is false (for try
+        // handlers from typecore.ml:2681-2685). Ident.set_current_time reserves
+        // stamps before later binders are named.
+        ctx.begin_def();
+        ctx.set_current_time(ctx.current_level());
+        let lev = ctx.current_stamp();
+        ctx.init_def(lev + 1000);
+        let partial = if partial_flag {
+            check_partial_simple(ctx, env, typed_cases)
+        } else {
+            crate::types::typedtree::Partial::Partial
+        };
+        ctx.end_def();
+        unify_expression_types(
+            tctx,
+            loc,
+            crate::types::instance(ctx, ty_res),
+            ctx.new_var(None),
+            None,
+        )?;
+        Ok(partial)
+    } else if partial_flag {
+        Ok(check_partial_simple(ctx, env, typed_cases))
+    } else {
+        Ok(crate::types::typedtree::Partial::Partial)
+    }
+}
+
 /// Collect poly variant tag names from top-level patterns, handling or-patterns
 fn collect_variant_tags(pat: &Pattern, tags: &mut HashSet<String>, all_variant: &mut bool) {
     match &pat.pat_desc {
@@ -10728,6 +10772,15 @@ fn type_try(
         exn_ty,
         generic_exn_ty,
         expected_ty,
+        false,
+    )?;
+    let _ = finish_non_gadt_type_cases(
+        tctx,
+        env,
+        loc,
+        expected_ty,
+        &handler_refs,
+        &typed_handlers,
         false,
     )?;
 
