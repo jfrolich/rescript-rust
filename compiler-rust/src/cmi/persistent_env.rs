@@ -14,7 +14,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
@@ -53,10 +53,7 @@ fn first_char_case_variant(name: &str) -> Option<String> {
     }
 }
 
-fn resolve_first_char_case_key<'a, V>(
-    map: &'a HashMap<String, V>,
-    name: &str,
-) -> Option<&'a str> {
+fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a str> {
     if let Some((key, _)) = map.get_key_value(name) {
         return Some(key.as_str());
     }
@@ -64,10 +61,7 @@ fn resolve_first_char_case_key<'a, V>(
     map.get_key_value(&variant).map(|(key, _)| key.as_str())
 }
 
-fn resolve_first_char_case_value<'a, V>(
-    map: &'a HashMap<String, V>,
-    name: &str,
-) -> Option<&'a V> {
+fn resolve_first_char_case_value<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
     if let Some(value) = map.get(name) {
         return Some(value);
     }
@@ -313,17 +307,21 @@ impl ModuleRegistry {
 /// Persistent environment for module loading.
 #[derive(Clone)]
 pub struct PersistentEnv {
-    /// Cache of loaded modules: module_name -> PersStruct (or None if loading failed)
-    cache: HashMap<String, Option<PersStruct>>,
+    /// Cache of loaded modules: module_name -> PersStruct (or None if loading failed).
+    /// OCaml keeps persistent structures in a mutable table
+    /// (`compiler/ml/env.ml:711-746`); make PersistentEnv clones share this
+    /// table so TypeContext lookups do not re-internalize and re-copy
+    /// signatures on every persistent-module access.
+    cache: Arc<Mutex<HashMap<String, Option<Arc<PersStruct>>>>>,
     /// Load path: list of directories to search for .cmi files
-    load_path: Vec<PathBuf>,
+    load_path: Arc<Vec<PathBuf>>,
     /// Alias prefix rewrites: flattened_name -> qualified_path.
     /// Populated when loading a CMI that has MtyAlias submodules
     /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
     /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
     alias_prefix_rewrites: AliasPrefixRewrites,
     /// Additional modules opened implicitly from `-open` flags.
-    open_modules: Vec<String>,
+    open_modules: Arc<Vec<String>>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
     /// Whether the current compilation uses `-nopervasives`.
@@ -332,7 +330,7 @@ pub struct PersistentEnv {
     compiling_module: Option<String>,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
-    renamed_sig_cache: HashMap<String, Signature>,
+    renamed_sig_cache: Arc<HashMap<String, Signature>>,
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
@@ -353,25 +351,30 @@ pub struct PersistentEnv {
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
     portable_cache: Arc<HashMap<String, Arc<PortablePersStruct>>>,
+    /// Modules hidden from this worker environment. Used when the current
+    /// module's transient signature must be removed before raw/JS compilation
+    /// without copy-on-writing the shared in-process registry maps.
+    hidden_modules: HashSet<String>,
 }
 
 impl PersistentEnv {
     /// Create a new persistent environment with no load paths.
     pub fn new() -> Self {
         PersistentEnv {
-            cache: HashMap::new(),
-            load_path: Vec::new(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            load_path: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::new(),
-            open_modules: Vec::new(),
+            open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             nopervasives: false,
             compiling_module: None,
-            renamed_sig_cache: HashMap::new(),
+            renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: Arc::new(HashMap::new()),
             in_process_mode: false,
             source_fallback_paths: Arc::new(HashMap::new()),
             source_fallback_depth: 0,
             portable_cache: Arc::new(HashMap::new()),
+            hidden_modules: HashSet::new(),
         }
     }
 
@@ -386,20 +389,51 @@ impl PersistentEnv {
         // deserialized into the current TypeContext on first access via
         // find_pers_struct, which has a TypeContext parameter.
         PersistentEnv {
-            cache: HashMap::new(),
-            load_path: Vec::new(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            load_path: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::from_base(registry.alias_rewrites.clone()),
-            open_modules: Vec::new(),
+            open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             nopervasives: false,
             compiling_module: None,
-            renamed_sig_cache: HashMap::new(),
+            renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
             in_process_mode: true,
             source_fallback_paths: registry.source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
+            hidden_modules: HashSet::new(),
         }
+    }
+
+    fn cache_lookup(&self, name: &str) -> Option<Option<Arc<PersStruct>>> {
+        if self.hidden_modules.contains(name) {
+            return Some(None);
+        }
+        let cache = self.cache.lock().unwrap();
+        let cache_key = resolve_first_char_case_key(&cache, name)?;
+        cache.get(cache_key).cloned()
+    }
+
+    fn cache_contains_key(&self, name: &str) -> bool {
+        let cache = self.cache.lock().unwrap();
+        resolve_first_char_case_key(&cache, name).is_some()
+    }
+
+    fn cache_insert(&self, name: String, value: Option<Arc<PersStruct>>) {
+        self.cache.lock().unwrap().insert(name, value);
+    }
+
+    fn cache_remove(&self, name: &str) {
+        self.cache.lock().unwrap().remove(name);
+    }
+
+    fn in_memory_info(&self, name: &str) -> Option<&InMemoryModuleInfo> {
+        let key = resolve_first_char_case_key(&self.in_memory_modules, name)?;
+        if self.hidden_modules.contains(key) {
+            return None;
+        }
+        self.in_memory_modules.get(key)
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
@@ -417,10 +451,9 @@ impl PersistentEnv {
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
         let portable = self
-            .cache
-            .get(module_name)
-            .and_then(|opt| opt.as_ref())
-            .map(|ps| portable_types::serialize_pers_struct(ps, ctx, arena));
+            .cache_lookup(module_name)
+            .and_then(|opt| opt)
+            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena));
         (portable, self.alias_prefix_rewrites.local_clone())
     }
 
@@ -435,6 +468,8 @@ impl PersistentEnv {
     ) -> (HashMap<String, PortablePersStruct>, HashMap<String, Path>) {
         let portables: HashMap<String, PortablePersStruct> = self
             .cache
+            .lock()
+            .unwrap()
             .iter()
             .filter_map(|(name, opt)| {
                 opt.as_ref().map(|ps| {
@@ -450,11 +485,11 @@ impl PersistentEnv {
 
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
-        self.load_path = paths;
+        self.load_path = Arc::new(paths);
     }
 
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
-        self.open_modules = open_modules;
+        self.open_modules = Arc::new(open_modules);
     }
 
     pub fn set_jsx_version(&mut self, jsx_version: Option<i32>) {
@@ -472,7 +507,7 @@ impl PersistentEnv {
     /// Add a directory to the load path.
     pub fn add_load_path(&mut self, path: PathBuf) {
         if !self.load_path.contains(&path) {
-            self.load_path.push(path);
+            Arc::make_mut(&mut self.load_path).push(path);
         }
     }
 
@@ -499,10 +534,10 @@ impl PersistentEnv {
         &mut self,
         name: &str,
         ctx: &'a TypeContext<'a>,
-    ) -> Option<&PersStruct> {
+    ) -> Option<Arc<PersStruct>> {
         // Check cache first (already internalized)
-        if let Some(cache_key) = resolve_first_char_case_key(&self.cache, name).map(str::to_owned) {
-            return self.cache.get(&cache_key).and_then(|opt| opt.as_ref());
+        if let Some(cached) = self.cache_lookup(name) {
+            return cached;
         }
 
         // Check portable cache (from ModuleRegistry, needs internalization).
@@ -513,8 +548,11 @@ impl PersistentEnv {
         // 3. Register types by stamp (without cascading alias resolution)
         if let Some(portable_key) = resolve_first_char_case_key(&self.portable_cache, name) {
             let portable_key = portable_key.to_string();
+            if self.hidden_modules.contains(&portable_key) {
+                return None;
+            }
             let portable = self.portable_cache.get(&portable_key).cloned()?;
-            let ps = portable_types::internalize_pers_struct(&portable, ctx);
+            let ps = Arc::new(portable_types::internalize_pers_struct(&portable, ctx));
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .alias_prefix_rewrites
@@ -530,8 +568,8 @@ impl PersistentEnv {
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
             }
-            self.cache.insert(portable_key.clone(), Some(ps));
-            return self.cache.get(&portable_key).and_then(|opt| opt.as_ref());
+            self.cache_insert(portable_key, Some(ps.clone()));
+            return Some(ps);
         }
 
         // Insert a placeholder before loading so recursive lookups of the same
@@ -539,12 +577,12 @@ impl PersistentEnv {
         let load_name = resolve_first_char_case_key(&self.source_fallback_paths, name)
             .map(str::to_owned)
             .unwrap_or_else(|| name.to_string());
-        self.cache.insert(load_name.clone(), None);
+        self.cache_insert(load_name.clone(), None);
 
         // Try to load from disk
-        let result = self.load_module(&load_name, ctx);
-        self.cache.insert(load_name.clone(), result);
-        self.cache.get(&load_name).and_then(|opt| opt.as_ref())
+        let result = self.load_module(&load_name, ctx).map(Arc::new);
+        self.cache_insert(load_name, result.clone());
+        result
     }
 
     fn finalize_loaded_signature<'a>(
@@ -623,7 +661,7 @@ impl PersistentEnv {
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
+        if let Some(info) = self.in_memory_info(name) {
             return Some(info.source_path.clone());
         }
 
@@ -641,16 +679,15 @@ impl PersistentEnv {
             }
         }
 
-        self.cache
-            .get(name)
-            .and_then(|loaded| loaded.as_ref())
-            .and_then(|ps| {
+        self.cache_lookup(name).and_then(|loaded| {
+            loaded.and_then(|ps| {
                 let path = PathBuf::from(&ps.ps_filename);
                 match path.extension().and_then(|ext| ext.to_str()) {
                     Some("res" | "resi" | "ml" | "mli") => Some(path),
                     _ => None,
                 }
             })
+        })
     }
 
     /// Resolve a module name to its companion `.cmj` path when present.
@@ -663,7 +700,7 @@ impl PersistentEnv {
     /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
+        if let Some(info) = self.in_memory_info(name) {
             return Some(info.is_pure);
         }
 
@@ -687,7 +724,7 @@ impl PersistentEnv {
         name: &str,
     ) -> Option<HashMap<String, CmjExportConstant>> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
+        if let Some(info) = self.in_memory_info(name) {
             return Some(info.cmj_export_constants.clone());
         }
 
@@ -732,26 +769,29 @@ impl PersistentEnv {
         // Create a lightweight fallback env instead of cloning the entire PersistentEnv.
         // Share the read-only maps but start with an empty cache (deps loaded on demand).
         // Copy only the current cache placeholders (None entries that prevent infinite recursion).
-        let placeholders: HashMap<String, Option<PersStruct>> = self
+        let placeholders: HashMap<String, Option<Arc<PersStruct>>> = self
             .cache
+            .lock()
+            .unwrap()
             .iter()
             .filter(|(_, v)| v.is_none())
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, _)| (k.clone(), None))
             .collect();
         let mut fallback_pers = PersistentEnv {
-            cache: placeholders,
+            cache: Arc::new(Mutex::new(placeholders)),
             load_path: self.load_path.clone(),
             alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
             nopervasives: self.nopervasives,
             compiling_module: self.compiling_module.clone(),
-            renamed_sig_cache: HashMap::new(),
+            renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
             in_process_mode: self.in_process_mode,
             source_fallback_paths: self.source_fallback_paths.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
+            hidden_modules: self.hidden_modules.clone(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
@@ -809,7 +849,7 @@ impl PersistentEnv {
         }
 
         let options = CompilerOptions {
-            open_modules: self.open_modules.clone(),
+            open_modules: self.open_modules.as_ref().clone(),
             jsx_version: self.jsx_version,
             ..CompilerOptions::default()
         };
@@ -831,6 +871,7 @@ impl PersistentEnv {
             .extension()
             .and_then(|s| s.to_str())
             .is_some_and(|ext| ext == "res")
+            && !self.in_process_mode
             && FsPath::new(&format!("{}i", filename)).exists();
         if !has_resi {
             normalize_signature_types(ctx, &typed_structure, &final_env);
@@ -875,9 +916,17 @@ impl PersistentEnv {
         let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
         self.alias_prefix_rewrites
             .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
-        for (module_name, loaded) in fallback_pers.cache {
-            if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
-                self.cache.insert(module_name, loaded);
+        let fallback_entries = fallback_pers
+            .cache
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(module_name, loaded)| module_name.as_str() != name && loaded.is_some())
+            .map(|(module_name, loaded)| (module_name.clone(), loaded.clone()))
+            .collect::<Vec<_>>();
+        for (module_name, loaded) in fallback_entries {
+            if !self.cache_contains_key(&module_name) {
+                self.cache_insert(module_name, loaded);
             }
         }
 
@@ -897,8 +946,8 @@ impl PersistentEnv {
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
         if self.in_process_mode {
-            if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name)
-                .map(str::to_owned)
+            if let Some(source_key) =
+                resolve_first_char_case_key(&self.source_fallback_paths, name).map(str::to_owned)
             {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
@@ -953,9 +1002,17 @@ impl PersistentEnv {
         // Merge any modules the fallback discovered
         self.alias_prefix_rewrites
             .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
-        for (module_name, loaded) in fallback_pers.cache {
-            if module_name != name && loaded.is_some() && !self.cache.contains_key(&module_name) {
-                self.cache.insert(module_name, loaded);
+        let fallback_entries = fallback_pers
+            .cache
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(module_name, loaded)| module_name.as_str() != name && loaded.is_some())
+            .map(|(module_name, loaded)| (module_name.clone(), loaded.clone()))
+            .collect::<Vec<_>>();
+        for (module_name, loaded) in fallback_entries {
+            if !self.cache_contains_key(&module_name) {
+                self.cache_insert(module_name, loaded);
             }
         }
 
@@ -975,8 +1032,8 @@ impl PersistentEnv {
     /// lazily in components_of_module_maker, not on ps_sig.
     pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
         if self.in_process_mode {
-            if let Some(loaded) = self.cache.get(name).and_then(|loaded| loaded.as_ref()) {
-                return Some(loaded.ps_sig.clone());
+            if let Some(cached) = self.cache_lookup(name) {
+                return cached.map(|loaded| loaded.ps_sig.clone());
             }
 
             let loaded = self.find_pers_struct(name, ctx)?;
@@ -993,7 +1050,7 @@ impl PersistentEnv {
     /// Search the load path for a file (case-insensitive on first char).
     /// Returns the full path if found.
     fn find_in_path_uncap(&self, filename: &str) -> Option<String> {
-        for dir in &self.load_path {
+        for dir in self.load_path.iter() {
             // Try exact case first
             let exact = dir.join(filename);
             if exact.exists() {
@@ -1061,8 +1118,7 @@ impl PersistentEnv {
         let ps_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
         let module_path = Path::Pident(Ident::create_persistent(name));
         let renamed = rename_bound_idents_in_sig(&ps_sig, ctx, Some(&module_path));
-        self.renamed_sig_cache
-            .insert(name.to_string(), renamed.clone());
+        Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
             .insert(name.to_string(), renamed.clone());
@@ -1103,6 +1159,7 @@ impl PersistentEnv {
     /// `resolve_module_source_path`, `module_cmj_is_pure`, and runtime
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
+        self.hidden_modules.remove(name);
         Arc::make_mut(&mut self.in_memory_modules).insert(name.to_string(), info);
     }
 
@@ -1125,9 +1182,23 @@ impl PersistentEnv {
             source_filename.to_string(),
             ctx,
         );
-        self.cache.insert(name.to_string(), Some(ps));
+        self.hidden_modules.remove(name);
+        self.cache_insert(name.to_string(), Some(Arc::new(ps)));
         // Invalidate any cached renamed sig so it gets re-derived
-        self.renamed_sig_cache.remove(name);
+        Arc::make_mut(&mut self.renamed_sig_cache).remove(name);
+    }
+
+    /// Remove a transient in-memory signature from this worker's local cache.
+    ///
+    /// In-process implementation compilation serializes the inferred signature
+    /// before Lambda lowering, matching OCaml's save-before-translation order
+    /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
+    /// The current module is then removed from the worker env so later raw/JS
+    /// probing sees only dependency modules, just like the reference compiler.
+    pub fn unregister_in_memory_signature(&mut self, name: &str) {
+        self.cache_remove(name);
+        Arc::make_mut(&mut self.renamed_sig_cache).remove(name);
+        self.hidden_modules.insert(name.to_string());
     }
 
     /// Register a namespace module's alias signature directly into the cache
@@ -1177,18 +1248,19 @@ impl PersistentEnv {
             ps_sig: sig_items,
             ps_filename: format!("{}.mlmap", namespace_name),
         };
-        self.cache.insert(namespace_name.to_string(), Some(ps));
-        self.renamed_sig_cache.remove(namespace_name);
+        self.hidden_modules.remove(namespace_name);
+        self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
+        Arc::make_mut(&mut self.renamed_sig_cache).remove(namespace_name);
     }
 
     /// Look up in-memory module info by name.
     pub fn get_in_memory_module(&self, name: &str) -> Option<&InMemoryModuleInfo> {
-        self.in_memory_modules.get(name)
+        self.in_memory_info(name)
     }
 
     /// Check whether a module is registered in the in-memory registry.
     pub fn has_in_memory_module(&self, name: &str) -> bool {
-        self.in_memory_modules.contains_key(name)
+        self.in_memory_info(name).is_some()
     }
 
     /// Enable in-process mode: all module resolution uses the in-memory
@@ -1203,7 +1275,7 @@ impl PersistentEnv {
     }
 
     pub fn module_is_runtime(&self, name: &str) -> bool {
-        resolve_first_char_case_value(&self.in_memory_modules, name)
+        self.in_memory_info(name)
             .map(|info| info.is_runtime)
             .unwrap_or(false)
     }
@@ -2158,6 +2230,63 @@ pub fn substitute_type_paths_in_child_sig(
 ) {
     let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
+    restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
+}
+
+fn restore_child_self_manifests_from_parent_scope(
+    child_sig: &[SignatureItem],
+    parent_sig: &[SignatureItem],
+    parent_module_path: &Path,
+    ctx: &TypeContext<'_>,
+) {
+    for child_item in child_sig {
+        let SignatureItem::SigType(child_id, child_decl, _) = child_item else {
+            continue;
+        };
+        let Some(manifest) = child_decl.type_manifest else {
+            continue;
+        };
+        let manifest = ctx.repr(manifest);
+        let desc = ctx.get_desc(manifest).clone();
+        let TypeDesc::Tconstr { path, args, abbrev } = desc else {
+            continue;
+        };
+        let Path::Pident(manifest_id) = &path else {
+            continue;
+        };
+        if !manifest_id.same(child_id) {
+            continue;
+        }
+        let has_parent_type = parent_sig.iter().any(|parent_item| {
+            matches!(
+                parent_item,
+                SignatureItem::SigType(parent_id, parent_decl, _)
+                    if parent_id.name() == child_id.name()
+                        && !parent_id.same(child_id)
+                        && parent_decl.type_params.len() == args.len()
+            )
+        });
+        if !has_parent_type {
+            continue;
+        }
+
+        // OCaml's `Subst.signature` first carries the incoming parent
+        // substitution into nested signatures, then renames the child binders
+        // by identifier identity only (compiler/ml/subst.ml:358-364,
+        // compiler/ml/subst.ml:327-339, compiler/ml/subst.ml:87-95). If Rust
+        // sees a direct child self-manifest here, it came from a non-recursive
+        // alias that originally resolved to the parent scope; restore that
+        // parent path before child-local qualification can preserve the wrong
+        // self alias.
+        ctx.set_desc(
+            manifest,
+            TypeDesc::Tconstr {
+                path: Path::pdot(parent_module_path.clone(), child_id.name()),
+                args,
+                abbrev,
+            },
+        );
+    }
 }
 
 /// Apply parent-scope substitutions to an entire child module type.
@@ -2236,7 +2365,7 @@ pub fn substitute_type_paths_in_sig(
                     &mut visited,
                 );
             }
-            SignatureItem::SigType(_id, decl, _) => {
+            SignatureItem::SigType(id, decl, _) => {
                 // Substitute in type params
                 for &param in &decl.type_params {
                     substitute_type_expr_path(
@@ -2252,16 +2381,34 @@ pub fn substitute_type_paths_in_sig(
                 }
                 // Substitute in manifest
                 if let Some(manifest) = decl.type_manifest {
-                    substitute_type_expr_path(
+                    // OCaml `Subst` rewrites by `Ident` identity, not by a
+                    // bare name. If anchoring would turn a direct manifest into
+                    // this type's own qualified path, keep the manifest as-is;
+                    // parent-scope substitution handles outer aliases when a
+                    // child module is later viewed through its enclosing path
+                    // (compiler/ml/subst.ml:129, compiler/ml/ctype.ml:4389-4407).
+                    if !direct_manifest_substitution_would_self_alias(
+                        ctx,
+                        id,
                         manifest,
+                        module_path,
                         &type_stamp_map,
                         &type_name_map,
                         &module_stamp_map,
                         &module_name_map,
                         protected_module_head,
-                        ctx,
-                        &mut visited,
-                    );
+                    ) {
+                        substitute_type_expr_path(
+                            manifest,
+                            &type_stamp_map,
+                            &type_name_map,
+                            &module_stamp_map,
+                            &module_name_map,
+                            protected_module_head,
+                            ctx,
+                            &mut visited,
+                        );
+                    }
                 }
                 // Substitute in constructor/label types
                 match &decl.type_kind {
@@ -2582,6 +2729,37 @@ fn substitute_type_expr_path(
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
     }
+}
+
+fn direct_manifest_substitution_would_self_alias(
+    ctx: &TypeContext<'_>,
+    id: &Ident,
+    manifest: TypeExprRef,
+    module_path: &Path,
+    type_stamp_map: &HashMap<i32, Path>,
+    type_name_map: &HashMap<String, Path>,
+    module_stamp_map: &ModuleStampSubstMap,
+    module_name_map: &HashMap<String, Path>,
+    protected_module_head: Option<&(i32, String)>,
+) -> bool {
+    let manifest = ctx.repr(manifest);
+    let desc = ctx.get_desc(manifest);
+    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
+    }
+
+    let substituted = substitute_type_path(
+        path,
+        type_stamp_map,
+        type_name_map,
+        module_stamp_map,
+        module_name_map,
+        protected_module_head,
+    );
+    substituted.same(&Path::pdot(module_path.clone(), id.name()))
 }
 
 fn substitute_type_path(
@@ -3332,6 +3510,12 @@ fn substitute_submodule_paths(
             let sub_path = Path::pdot(module_path.clone(), id.name());
             if let ModuleType::MtySignature(sub_sig) = &md.md_type {
                 substitute_type_paths_in_sig_with_maps(sub_sig, &parent_maps, ctx);
+                restore_child_self_manifests_from_parent_scope(
+                    sub_sig,
+                    sig_items,
+                    module_path,
+                    ctx,
+                );
                 substitute_type_paths_in_sig(sub_sig, &sub_path, ctx);
                 substitute_submodule_paths(sub_sig, &sub_path, ctx);
             }
