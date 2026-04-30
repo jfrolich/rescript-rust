@@ -3955,14 +3955,19 @@ fn type_pattern_record(
         expected_ty
     };
 
-    // Type check each field pattern
-    let mut typed_fields = Vec::new();
+    struct PendingRecordPatternField {
+        lid: Located<LidentIdx>,
+        pat: crate::parse_arena::PatIdx,
+        opt: bool,
+        field_name: String,
+        source_pos: i32,
+        label: Option<crate::types::LabelDescription>,
+    }
+
+    let mut pending_fields = Vec::new();
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
         let field_name = tctx.longident_last_name(&resolved_lid);
-
-        // Create fresh type variable for the field
-        let field_ty = ctx.new_var(None);
 
         // Try to look up the label from the environment for type info
         let disambiguated = lookup_label_by_lid(
@@ -3975,12 +3980,45 @@ fn type_pattern_record(
         )
         .or_else(|| disambiguate_label(&field_name, record_ty, env, &mut tctx.persistent_env, ctx));
 
-        let label_desc = if let Some(env_label) = disambiguated {
-            let env_label = if has_dict_pattern_attr {
+        let label = disambiguated.map(|env_label| {
+            if has_dict_pattern_attr {
                 materialize_dict_pattern_label(ctx, &env_label, &field_name)
             } else {
                 env_label
-            };
+            }
+        });
+
+        pending_fields.push(PendingRecordPatternField {
+            lid: field.lid.clone(),
+            pat: field.pat,
+            opt: field.opt,
+            field_name,
+            source_pos: idx as i32,
+            label,
+        });
+    }
+
+    // OCaml compiler/ml/typecore.ml:1163-1200 resolves record labels, sorts
+    // `lbl_a_list` by `lbl_pos`, then `map_fold_cont type_lbl_a` types the
+    // field patterns. Allocate field variables and bind subpatterns in that
+    // sorted order so identifier stamps follow declaration order rather than
+    // source field order.
+    pending_fields.sort_by_key(|field| {
+        field
+            .label
+            .as_ref()
+            .map(|label| label.lbl_pos)
+            .unwrap_or(field.source_pos)
+    });
+
+    let mut typed_fields = Vec::new();
+    for field in pending_fields {
+        // Create fresh type variable for the field after sorting, matching
+        // OCaml compiler/ml/typecore.ml:1623-1627's `type_label_pat` /
+        // `instance_label` point.
+        let field_ty = ctx.new_var(None);
+
+        let label_desc = if let Some(env_label) = field.label {
             let (_poly_vars, ty_arg, ty_res) =
                 crate::types::ctype::instance_label(ctx, false, &env_label);
             // Best-effort unification to propagate type info
@@ -4001,12 +4039,12 @@ fn type_pattern_record(
             }
         } else {
             crate::types::LabelDescription {
-                lbl_name: field_name,
+                lbl_name: field.field_name,
                 lbl_res: record_ty,
                 lbl_arg: field_ty,
                 lbl_mut: crate::types::MutableFlag::Immutable,
                 lbl_optional: field.opt,
-                lbl_pos: idx as i32,
+                lbl_pos: field.source_pos,
                 lbl_all: crate::types::LabelArrayRef(0),
                 lbl_repres: crate::types::RecordRepresentation::RecordRegular,
                 lbl_private: crate::types::PrivateFlag::Public,
@@ -4040,7 +4078,7 @@ fn type_pattern_record(
         } else {
             type_pattern_inner(tctx, env, parsed_pat, field_ty, mode, state, 0)?
         };
-        typed_fields.push((field.lid.clone(), label_desc, typed_pat, field.opt));
+        typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
     }
 
     // OCaml unifies the inferred record type with the pattern expected type.
