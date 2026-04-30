@@ -4,7 +4,7 @@
 //! of named module-block bindings so downstream passes see a flat sequence of
 //! single bindings. Mirrors `Lam_pass_deep_flatten.deep_flatten`.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
@@ -132,19 +132,14 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                     eliminate_tuple_owned(id, *body, tuple_mapping)
                 }
                 value => {
-                    let lam = Lambda::Llet(
-                        LetKind::Alias,
-                        projected,
-                        Box::new(value),
-                        body,
-                    );
+                    let lam = Lambda::Llet(LetKind::Alias, projected, Box::new(value), body);
                     if hit_variable(id, &lam) {
                         Err(lam)
                     } else {
                         Ok((tuple_mapping, lam))
                     }
                 }
-            }
+            },
             _ => {
                 if hit_variable(id, &lam) {
                     Err(lam)
@@ -285,7 +280,9 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
             }),
-            Lambda::Lfunction(func) => Lambda::function_(func.arity, func.params, aux(*func.body), func.attr),
+            Lambda::Lfunction(func) => {
+                Lambda::function_(func.arity, func.params, aux(*func.body), func.attr)
+            }
             Lambda::Lprim(info) => Lambda::prim(
                 info.primitive,
                 info.args.into_iter().map(aux).collect(),
@@ -312,7 +309,10 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
             ),
             Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
                 Box::new(aux(*scrutinee)),
-                cases.into_iter().map(|(tag, lam)| (tag, aux(lam))).collect(),
+                cases
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, aux(lam)))
+                    .collect(),
                 default.map(|lam| Box::new(aux(*lam))),
             ),
             Lambda::LstaticRaise(id, args) => {
@@ -327,7 +327,9 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
             Lambda::LifThenElse(cond, then_, else_) => {
                 Lambda::if_(aux(*cond), aux(*then_), aux(*else_))
             }
-            Lambda::Lwhile(cond, body) => Lambda::Lwhile(Box::new(aux(*cond)), Box::new(aux(*body))),
+            Lambda::Lwhile(cond, body) => {
+                Lambda::Lwhile(Box::new(aux(*cond)), Box::new(aux(*body)))
+            }
             Lambda::Lfor(id, start, end, direction, body) => Lambda::Lfor(
                 id,
                 Box::new(aux(*start)),
@@ -335,9 +337,7 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                 direction,
                 Box::new(aux(*body)),
             ),
-            Lambda::Lfor_of(id, iterable, body) => {
-                Lambda::for_of(id, aux(*iterable), aux(*body))
-            }
+            Lambda::Lfor_of(id, iterable, body) => Lambda::for_of(id, aux(*iterable), aux(*body)),
             Lambda::Lfor_await_of(id, iterable, body) => {
                 Lambda::for_await_of(id, aux(*iterable), aux(*body))
             }

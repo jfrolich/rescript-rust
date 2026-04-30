@@ -427,7 +427,7 @@ impl BuildCommandState {
     /// Take a snapshot of the module registry for use during a compilation wave.
     /// Each worker in a parallel wave gets a clone of this snapshot.
     pub fn snapshot_module_registry(&self) -> ModuleRegistry {
-        self.module_registry.lock().unwrap().clone()
+        self.module_registry.lock().unwrap().for_worker_snapshot()
     }
 
     /// Update the module registry with a compiled module's portable PersStruct.
@@ -469,18 +469,16 @@ impl BuildCommandState {
             cmj_export_constants,
             is_runtime,
         };
-        self.module_registry
-            .lock()
-            .unwrap()
-            .register_module_arc(module_name, pers_struct, info, new_alias_rewrites);
+        self.module_registry.lock().unwrap().register_module_arc(
+            module_name,
+            pers_struct,
+            info,
+            new_alias_rewrites,
+        );
     }
 
     /// Register a namespace in the module registry.
-    pub fn register_namespace_in_registry(
-        &self,
-        namespace_name: &str,
-        module_aliases: &[(String, String)],
-    ) {
+    pub fn register_namespace_in_registry(&self, namespace_name: &str, module_aliases: &[(String, String)]) {
         self.module_registry
             .lock()
             .unwrap()

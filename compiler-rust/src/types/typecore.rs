@@ -800,6 +800,7 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Set the persistent environment for module loading.
     pub fn set_persistent_env(&mut self, env: crate::cmi::persistent_env::PersistentEnv) {
+        self.type_ctx.set_persistent_env(env.clone());
         self.persistent_env = Some(env);
     }
 
@@ -2424,9 +2425,7 @@ fn build_or_pat(
     // the arguments (for example `#...Shadow.t` where `t` has arity 1).
     let (path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
         (path, Some(type_decl)) => (path, type_decl),
-        _ => {
-            return Err(TypeCoreError::NotAVariantType(lid_txt));
-        }
+        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
     };
     let ctx = tctx.type_ctx;
     let args: Vec<_> = type_decl
@@ -2445,9 +2444,7 @@ fn build_or_pat(
         TypeDesc::Tvariant(row) if crate::types::btype::static_row(ctx, row) => {
             crate::types::btype::row_repr(ctx, row)
         }
-        _ => {
-            return Err(TypeCoreError::NotAVariantType(lid_txt));
-        }
+        _ => return Err(TypeCoreError::NotAVariantType(lid_txt)),
     };
     drop(expanded_desc);
 
@@ -7488,7 +7485,7 @@ fn type_application(
     }
 
     let mut typed_args = Vec::with_capacity(pending_args.len());
-    for (arg_index, pending_arg) in pending_args.into_iter().enumerate() {
+    for pending_arg in pending_args.into_iter() {
         match pending_arg {
             PendingApplyArg::Provided {
                 label,
@@ -11975,9 +11972,7 @@ fn type_construct(
                         Path::pident(Ident::create_persistent(lid_name.clone())),
                         desc.clone(),
                     ),
-                    Err(_) => {
-                        return Err(TypeCoreError::NotAVariantType(longident));
-                    }
+                    Err(_) => return Err(TypeCoreError::NotAVariantType(longident)),
                 },
             }
         }
@@ -12001,9 +11996,7 @@ fn type_construct(
                     Some(expected_ty),
                 ) {
                     Some((path, desc)) => (path, desc),
-                    None => {
-                        return Err(TypeCoreError::NotAVariantType(longident));
-                    }
+                    None => return Err(TypeCoreError::NotAVariantType(longident)),
                 }
             }
         }
@@ -12252,10 +12245,7 @@ fn record_labels_match_ids(
     field_names: &[String],
     closed_record: bool,
 ) -> bool {
-    let label_names: HashSet<&str> = labels
-        .iter()
-        .map(|ld| ld.ld_id.name())
-        .collect();
+    let label_names: HashSet<&str> = labels.iter().map(|ld| ld.ld_id.name()).collect();
     if !field_names
         .iter()
         .all(|name| label_names.contains(name.as_str()))
@@ -12294,8 +12284,8 @@ fn select_record_type_for_fields<'a>(
     }
 
     let first_name = field_names.first()?;
-    let candidates = env.find_all_labels(first_name);
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
+    let candidates = env.find_all_labels(first_name);
     for label in candidates.into_iter().rev() {
         if let Some(labels) = get_record_labels(ctx, env, pers_env, label.lbl_res) {
             if record_labels_match_ids(&labels, field_names, closed_record) {
@@ -12419,24 +12409,6 @@ fn type_record(
     use crate::types::typedtree::RecordLabelDefinition;
 
     let ctx = tctx.type_ctx;
-    let summarize_ty = |ty: TypeExprRef| -> String {
-        let r = ctx.repr(ty);
-        let desc = ctx.get_desc(r);
-        let head = match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                let args = args
-                    .iter()
-                    .map(|a| ctx.repr(*a).0.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("{}({})", path.name(), args)
-            }
-            TypeDesc::Tvar(_) => "Tvar".to_string(),
-            TypeDesc::Tunivar(_) => "Tunivar".to_string(),
-            _ => "other".to_string(),
-        };
-        format!("{}@{}:{}", r.0, ctx.get_level(r), head)
-    };
     // Most callers should protect generic expected types from record typing
     // side effects, but constraint bodies must type against the shared generic
     // node so unification side effects match OCaml.
@@ -12576,8 +12548,7 @@ fn type_record(
         bool,
     );
 
-    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> =
-        Vec::with_capacity(fields.len());
+    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> = Vec::with_capacity(fields.len());
     let mut explicit_overrides: HashMap<i32, usize> = HashMap::with_capacity(fields.len());
     let mut explicit_overrides_by_name: HashMap<String, usize> =
         HashMap::with_capacity(fields.len());
@@ -12595,43 +12566,40 @@ fn type_record(
     // Match OCaml typecore.ml type_record_elem_list:
     // 1) disambiguate labels
     // 2) sort by lbl_pos before typing each field
-    let mut explicit_fields: Vec<ExplicitField<'_>> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
-            let field_name = tctx.longident_last_name(&resolved_lid);
-            let disambiguated = lookup_label_by_lid(
-                &resolved_lid,
-                tctx.arena,
+    let mut explicit_fields: Vec<ExplicitField<'_>> = Vec::with_capacity(fields.len());
+    for (idx, field) in fields.iter().enumerate() {
+        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
+        let field_name = tctx.longident_last_name(&resolved_lid);
+        let disambiguated = lookup_label_by_lid(
+            &resolved_lid,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            Some(disambiguation_ty),
+        )
+        .or_else(|| {
+            disambiguation_labels_by_name
+                .as_ref()
+                .and_then(|labels| labels.get(&field_name).cloned())
+        })
+        .or_else(|| {
+            disambiguate_label(
+                &field_name,
+                disambiguation_ty,
                 env,
                 &mut tctx.persistent_env,
                 ctx,
-                Some(disambiguation_ty),
             )
-            .or_else(|| {
-                disambiguation_labels_by_name
-                    .as_ref()
-                    .and_then(|labels| labels.get(&field_name).cloned())
-            })
-            .or_else(|| {
-                disambiguate_label(
-                    &field_name,
-                    disambiguation_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
-            });
-            ExplicitField {
-                original_index: idx,
-                field,
-                resolved_lid,
-                field_name,
-                disambiguated,
-            }
-        })
-        .collect();
+        });
+        explicit_fields.push(ExplicitField {
+            original_index: idx,
+            field,
+            resolved_lid,
+            field_name,
+            disambiguated,
+        });
+    }
     explicit_fields.sort_by_key(|entry| {
         entry
             .disambiguated
@@ -12696,8 +12664,7 @@ fn type_record(
             //   let ty_arg = instance_def ty_arg
             let ty_res = crate::types::ctype::instance(ctx, ty_res0);
             let expected_record_ty = crate::types::ctype::instance(ctx, expected_ty);
-            let unify_res =
-                crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty);
+            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty);
             let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
 
             let input_ty = if env_label.lbl_optional && !field.opt {
@@ -13026,11 +12993,12 @@ fn type_record(
                 let label_lid_idx = ctx
                     .get_synthesized_record_lident(&label_name)
                     .unwrap_or_else(|| {
-                        let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                            .unwrap_or_else(|| {
+                        let lid = find_existing_lident_idx(tctx.arena, &label_name).unwrap_or_else(
+                            || {
                                 let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
                                 unsafe { (*arena_ptr).push_lident(&label_name) }
-                            });
+                            },
+                        );
                         ctx.cache_synthesized_record_lident(label_name.clone(), lid);
                         lid
                     });
@@ -13120,10 +13088,11 @@ fn type_record(
         // Match OCaml unify_kept: iterate one generic label family for the
         // concrete record path so each `instance_label false` call gets its own
         // fresh copy window while still staying in the right record family.
-        let all_labels_for_unify =
+        let all_labels_for_unify = all_label_descriptions.clone().or_else(|| {
             build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
                 || build_record_label_descriptions(ty_exp, env, &mut tctx.persistent_env, ctx),
-            );
+            )
+        });
 
         if let Some(labels) = all_labels_for_unify {
             for (idx, env_label) in labels.iter().enumerate() {
@@ -20055,12 +20024,13 @@ fn lookup_constructor_by_expected_type<'b>(
     // Prefer declaration-carried canonical path (e.g. opened `t` -> `J.t`)
     // unless an in-process signature lookup reached the type through a
     // non-local path while the declaration still carries a local one.
-    let stored_path_is_stale_local = concrete_type_decl
-        .type_path
-        .as_ref()
-        .is_some_and(|stored_path| {
-            is_local_module_access_path(stored_path) && !is_local_module_access_path(&type_path)
-        });
+    let stored_path_is_stale_local =
+        concrete_type_decl
+            .type_path
+            .as_ref()
+            .is_some_and(|stored_path| {
+                is_local_module_access_path(stored_path) && !is_local_module_access_path(&type_path)
+            });
     let concrete_type_path = if stored_path_is_stale_local {
         type_path.clone()
     } else {
@@ -20765,6 +20735,28 @@ fn with_resolved_child_module_components<'a, R>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
+    let mut f = Some(f);
+
+    // OCaml's `components_of_module_maker` stores both `comp_modules` and
+    // `comp_components` for child modules while threading the same substitution
+    // and evolving environment through the signature
+    // (compiler/ml/env.ml:1530-1531,1567-1579). Prefer that cached child view so
+    // self type paths inside the child signature are qualified under
+    // `parent.child`, not left as same-name local `Pident`s.
+    if let Some((_runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
+        if let Some(result) = stored.with_components(pers_env, ctx, |child| {
+            ctx.register_resolved_child_module_path(
+                parent_components.access_path(),
+                child_name,
+                child.access_path().clone(),
+            );
+            (f.take()
+                .expect("qualified child module components callback reused"))(child)
+        }) {
+            return Some(result);
+        }
+    }
+
     let (runtime_pos, _, md) = parent_components.lookup_qualified_module(child_name, ctx)?;
     let access_path = qualified_submodule_access_path(
         parent_components.access_path(),
@@ -20779,7 +20771,6 @@ fn with_resolved_child_module_components<'a, R>(
     );
 
     let module_key = module_components_cache_key(&access_path, env);
-    let mut f = Some(f);
     if let Some(module_key) = module_key.as_ref() {
         if let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
             (f.take()
@@ -21473,6 +21464,10 @@ fn build_module_signature_for_path<'a>(
         return None;
     }
 
+    if ctx.persistent_env_is_in_process() {
+        return None;
+    }
+
     let load_paths = ctx.load_paths();
     if load_paths.is_empty() {
         return None;
@@ -21596,20 +21591,22 @@ fn lookup_type_decl_for_path<'a>(
         .flatten()
     }
 
-    // Only use env.lookup_type directly for simple identifiers. For qualified
-    // paths, env.lookup_type currently resolves by leaf name and can return an
-    // unrelated declaration with the same type name.
-    if let Path::Pident(_) = type_path {
-        if let Ok(decl) = env.lookup_type(type_path) {
-            return Some(decl.clone());
-        }
-    }
-
-    // Try stamp-based lookup only for regular type identifiers. Constructor-like
-    // paths such as local exception inline-record paths (`C`) share the `Path`
-    // representation but are not type bindings, and imported CMI type stamps can
-    // collide with local constructor stamps.
+    // OCaml's `Env.find_type` resolves `Pident` through `IdTbl.find_same`,
+    // i.e. by identifier identity before any visible-name lookup
+    // (compiler/ml/env.ml:800-813,862). This matters for generated React
+    // `props` records: nested components commonly share the leaf name `props`,
+    // but their stamps identify distinct record declarations.
     if let Path::Pident(id) = type_path {
+        if id.stamp() != 0 {
+            if let Some(decl) = env.lookup_type_ident_exact(id) {
+                return Some(decl.clone());
+            }
+        }
+
+        // Try stamp-based lookup only for regular type identifiers.
+        // Constructor-like paths such as local exception inline-record paths
+        // (`C`) share the `Path` representation but are not type bindings, and
+        // imported CMI type stamps can collide with local constructor stamps.
         if id.stamp() != 0
             && matches!(
                 type_path.constructor_typath(),
@@ -21619,6 +21616,15 @@ fn lookup_type_decl_for_path<'a>(
             if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
                 return Some(decl.clone());
             }
+        }
+    }
+
+    // Only use env.lookup_type directly for simple identifiers after exact/stamp
+    // lookup. For qualified paths, env.lookup_type currently resolves by leaf
+    // name and can return an unrelated declaration with the same type name.
+    if let Path::Pident(_) = type_path {
+        if let Ok(decl) = env.lookup_type(type_path) {
+            return Some(decl.clone());
         }
     }
 
@@ -21789,6 +21795,27 @@ fn lookup_type_decl_for_path<'a>(
             })
         {
             return Some(decl);
+        }
+
+        // OCaml `Env.find_type` resolves a dotted type by first resolving the
+        // parent module descriptor and then reading the component table
+        // (compiler/ml/env.ml:800-813). If that parent is itself a module alias,
+        // `find_module ~alias:true` exposes the alias target
+        // (compiler/ml/env.ml:865-913). Mirror that for nested aliases such as
+        // `Belt_SetInt.I.value` before falling back to a strengthened
+        // self-manifest declaration.
+        if let Some(alias_path) = alias_target_for_module_path(parent, env, pers_env, ctx)
+            .filter(|alias_path| !alias_path.same(parent))
+        {
+            let resolved_path = Path::pdot(alias_path, type_name.as_str());
+            if let Some(decl) = lookup_type_decl_for_path(&resolved_path, env, pers_env, ctx) {
+                return Some(decl);
+            }
+            if let Some(decl) =
+                crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
+            {
+                return Some(decl);
+            }
         }
 
         // Try resolving the module alias: Pdot(Pident(Nullable/9), "t")

@@ -1535,12 +1535,8 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let already_registered = {
         let registry = build_state.module_registry.lock().unwrap();
         runtime_modules.iter().all(|module| {
-            registry
-                .module_info
-                .get(&module.module_name)
-                .map(|info| info.is_runtime)
-                .unwrap_or(false)
-                && registry.cached_modules.contains_key(&module.module_name)
+            registry.module_info_is_runtime(&module.module_name)
+                && registry.has_cached_module(&module.module_name)
         })
     };
     if already_registered {
@@ -1566,7 +1562,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
 }
 
 fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[RuntimeModuleSource]) {
-    let mut registry = build_state.snapshot_module_registry();
+    let mut registry = build_state.module_registry.lock().unwrap();
     for module in runtime_modules {
         let fallback_path = module
             .resi
@@ -1589,9 +1585,6 @@ fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[Run
             },
         );
     }
-
-    let mut shared_registry = build_state.module_registry.lock().unwrap();
-    *shared_registry = registry;
 }
 
 fn compile_runtime_modules_parallel(

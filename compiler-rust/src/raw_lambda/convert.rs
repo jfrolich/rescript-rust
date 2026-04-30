@@ -1337,13 +1337,18 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         module_path: &crate::types::Path,
         module_type: &crate::types::decl::ModuleType,
+        visited_module_paths: &mut HashSet<String>,
     ) {
         match module_type {
             crate::types::decl::ModuleType::MtySignature(sig) => {
-                self.register_signature_type_paths(Some(module_path), sig);
+                self.register_signature_type_paths_inner(
+                    Some(module_path),
+                    sig,
+                    visited_module_paths,
+                );
             }
             crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
-                self.register_module_type_paths(module_path, result);
+                self.register_module_type_paths(module_path, result, visited_module_paths);
             }
             crate::types::decl::ModuleType::MtyIdent(_)
             | crate::types::decl::ModuleType::MtyAlias(_, _) => {}
@@ -1354,6 +1359,27 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         prefix: Option<&crate::types::Path>,
         sig: &[SignatureItem],
+    ) {
+        let mut visited_module_paths = HashSet::new();
+        self.register_signature_type_paths_inner(prefix, sig, &mut visited_module_paths);
+    }
+
+    fn should_register_nested_module_type_paths(&self, module_path: &crate::types::Path) -> bool {
+        let Ok((head, _)) = module_path.flatten() else {
+            // OCaml `Path.head` asserts on functor applications and callers use
+            // `Path.flatten` when they need a safe dotted-path test
+            // (compiler/ml/path.ml:58-69). Registration is only a side-table
+            // seed for current/local modules, so functor applications stay out.
+            return false;
+        };
+        !head.is_persistent() && !head.is_global() || head.name() == self.unit_name
+    }
+
+    fn register_signature_type_paths_inner(
+        &self,
+        prefix: Option<&crate::types::Path>,
+        sig: &[SignatureItem],
+        visited_module_paths: &mut HashSet<String>,
     ) {
         for item in sig {
             match item {
@@ -1375,7 +1401,20 @@ impl<'a> RawLambdaConverter<'a> {
                             |prefix| crate::types::Path::pdot(prefix.clone(), id.name()),
                         )
                     });
-                    self.register_module_type_paths(&module_path, &md.md_type);
+                    // OCaml raw translation walks the current structure and
+                    // coercion (compiler/ml/translmod.ml:290-451), not the full
+                    // signatures of already-compiled dependency modules. Keep
+                    // this Rust side-table seeding to local/current-module
+                    // paths so dependency cycles stay in PersistentEnv lookups.
+                    if self.should_register_nested_module_type_paths(&module_path)
+                        && visited_module_paths.insert(module_path.name())
+                    {
+                        self.register_module_type_paths(
+                            &module_path,
+                            &md.md_type,
+                            visited_module_paths,
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -2051,66 +2090,40 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_immediate_type_with_env(&self, ty: TypeExprRef, env: &crate::types::env::Env) -> bool {
-        self.is_base_type_with_env(ty, "int", env)
-            || self.is_base_type_with_env(ty, "char", env)
-            || self.is_base_type_with_env(ty, "bool", env)
-            || self.is_base_type_with_env(ty, "unit", env)
-            || self.is_immediate_poly_variant_with_env(ty, env)
-    }
-
-    /// Check if a type is "immediate" (not a pointer), matching OCaml's
-    /// maybe_pointer_type. Checks type_immediate on type declarations,
-    /// all-constant variant types, and closed poly variant rows without payloads.
-    fn is_immediate_poly_variant(&self, ty: TypeExprRef) -> bool {
-        self.is_immediate_poly_variant_with_env(ty, self.env)
-    }
-
-    fn is_immediate_poly_variant_with_env(
-        &self,
-        ty: TypeExprRef,
-        env: &crate::types::env::Env,
-    ) -> bool {
         use crate::types::btype;
         use crate::types::type_expr::TypeDesc;
-        // Try expand_head first to resolve type aliases
-        let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
-        let ty = self.type_ctx.repr(expanded);
+
+        // Match OCaml `Ctype.maybe_pointer_type`: for `Tconstr`, inspect only
+        // `Env.find_type p env` and its `type_immediate` bit; do not chase the
+        // manifest here (compiler/ml/ctype.ml:4492-4512). `Translcore`
+        // chooses integer comparison when that result is `Immediate`
+        // (compiler/ml/translcore.ml:407-415).
+        let ty = self.type_ctx.repr(ty);
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
                     crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
                 {
-                    if decl.type_immediate {
-                        return true;
-                    }
-                    // Variant types with all constant constructors are immediate
-                    if let crate::types::decl::TypeKind::TypeVariant(cdecls) = &decl.type_kind {
-                        return cdecls.iter().all(|cd| {
-                            matches!(&cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty())
-                        });
-                    }
-                    // For abstract types with a manifest, check the manifest
-                    if let Some(manifest) = decl.type_manifest {
-                        return self.is_immediate_poly_variant_with_env(manifest, env);
-                    }
+                    return decl.type_immediate;
                 }
                 false
             }
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.type_ctx, row);
-                if !row.row_closed {
-                    return false;
-                }
-                !row.row_fields.iter().any(|(_, f)| {
-                    matches!(
-                        btype::row_field_repr(self.type_ctx, f),
-                        crate::types::type_expr::RowField::Rpresent(Some(_))
-                            | crate::types::type_expr::RowField::Reither {
-                                constant: false,
-                                ..
-                            }
-                    )
-                })
+                row.row_closed
+                    && !row.row_fields.iter().any(|(_, f)| {
+                        matches!(
+                            btype::row_field_repr(self.type_ctx, f),
+                            crate::types::type_expr::RowField::Rpresent(Some(_))
+                                | crate::types::type_expr::RowField::Reither {
+                                    constant: false,
+                                    ..
+                                }
+                        )
+                    })
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                self.is_immediate_type_with_env(*next, env)
             }
             _ => false,
         }
@@ -3400,14 +3413,15 @@ impl<'a> RawLambdaConverter<'a> {
         }
         self.register_signature_type_paths(None, &structure.str_type);
         let mut fields = Vec::new();
-        self.convert_structure_items_raw(
+        let result = self.convert_structure_items_raw(
             &mut fields,
             &structure.str_items,
             true,
             &self.global_path(),
             cc,
             Location::none(),
-        )
+        );
+        result
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -3530,7 +3544,12 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn path_may_follow_mty_ident(path: &crate::types::Path) -> bool {
-        let head = path.head();
+        // OCaml `Path.head` asserts on functor applications, while
+        // `Path.flatten` reports `Contains_apply` (compiler/ml/path.ml:58-69).
+        // Alias following here is only valid for paths with a stable head.
+        let Ok((head, _)) = path.flatten() else {
+            return false;
+        };
         head.is_persistent() || head.is_global()
     }
 
@@ -4947,7 +4966,8 @@ impl<'a> RawLambdaConverter<'a> {
             StructureItemDesc::Tstr_eval(expr, _) => {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
-                RawLambda::seq(self.convert_expr_raw(expr), body)
+                let expr = self.convert_expr_raw(expr);
+                RawLambda::seq(expr, body)
             }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
@@ -4978,12 +4998,13 @@ impl<'a> RawLambdaConverter<'a> {
                 let inline_attr =
                     Self::get_inline_attribute_from(&binding.mb_attributes, self.arena);
                 module_body = Self::apply_inline_attribute_raw(module_body, inline_attr);
-                RawLambda::let_(
+                let result = RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
                     binding.mb_id.clone(),
                     module_body,
                     body,
-                )
+                );
+                result
             }
             StructureItemDesc::Tstr_typext(tyext) => {
                 let old_len = fields.len();
@@ -5027,12 +5048,13 @@ impl<'a> RawLambdaConverter<'a> {
                 let mid = self.id_gen.create("include");
                 let body =
                     self.rebind_included_idents_raw(&mid, &ids, body, self.loc(incl.incl_loc));
-                RawLambda::let_(
+                let result = RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
                     mid,
                     self.convert_module_expr_raw(&incl.incl_mod, &None),
                     body,
-                )
+                );
+                result
             }
             StructureItemDesc::Tstr_recmodule(bindings) => {
                 // OCaml: add all recursive module idents to fields, then generate letrec
@@ -6037,7 +6059,9 @@ impl<'a> RawLambdaConverter<'a> {
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
+        if std::env::var_os("RUST_SKIP_FOR_MULTIPLE_MATCH").is_none()
+            && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
+        {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
             return self.for_multiple_match_with_synced_stamps(loc, paraml, pat_act_list, partial);
         }

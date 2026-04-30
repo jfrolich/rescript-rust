@@ -323,13 +323,8 @@ pub fn incremental_build(
     // A fresh --in-process build has no disk-backed .cmi cache to consult.
     // Seed the in-memory registry by parsing and compiling every module once;
     // watch-mode rebuilds can then keep using the retained registry.
-    let needs_in_process_seed = build_state.build_mode().is_in_process()
-        && build_state
-            .module_registry
-            .lock()
-            .unwrap()
-            .cached_modules
-            .is_empty();
+    let needs_in_process_seed =
+        build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
     if needs_in_process_seed {
         mark_all_modules_dirty(build_state);
     }

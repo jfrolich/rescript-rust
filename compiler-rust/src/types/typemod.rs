@@ -614,6 +614,25 @@ fn rewrite_included_path_to_local(
     }
 }
 
+fn included_path_is_direct_child(
+    path: &Path,
+    include_root_path: Option<&Path>,
+    include_flat_name: Option<&str>,
+    child_name: &str,
+) -> bool {
+    match path {
+        Path::Pdot(prefix, name, _) if name == child_name => {
+            include_root_path.is_some_and(|root| prefix.as_ref().same(root))
+                || matches!(
+                    prefix.as_ref(),
+                    Path::Pident(prefix_id)
+                        if include_flat_name.is_some_and(|flat| prefix_id.name() == flat)
+                )
+        }
+        _ => false,
+    }
+}
+
 fn rewrite_included_type_paths_to_local(
     ctx: &crate::types::context::TypeContext<'_>,
     ty_ref: TypeExprRef,
@@ -1103,16 +1122,37 @@ fn rewrite_included_signature_paths_to_local(
                 if md.md_path.is_none() {
                     md.md_path = Some(Path::Pident(id.clone()));
                 }
-                rewrite_included_module_type_paths_to_local(
-                    ctx,
-                    &mut md.md_type,
-                    include_root_path,
-                    include_flat_name,
-                    local_type_ids,
-                    local_module_ids,
-                    local_modtype_ids,
-                    visited,
-                );
+                let keep_strengthened_alias_target = match &md.md_type {
+                    crate::types::decl::ModuleType::MtyAlias(_, path)
+                    | crate::types::decl::ModuleType::MtyIdent(path) => {
+                        // OCaml keeps the strengthened alias target from the
+                        // included module path: `type_module` strengthens child
+                        // modules to `Mty_alias` (compiler/ml/mtype.ml:98-102),
+                        // then include only freshens bound ids with
+                        // `Subst.signature` (compiler/ml/typemod.ml:1569-1590).
+                        // Rewriting `Included.Child` to the fresh local `Child`
+                        // would create a self-alias that cannot be expanded.
+                        included_path_is_direct_child(
+                            path,
+                            include_root_path,
+                            include_flat_name,
+                            id.name(),
+                        )
+                    }
+                    _ => false,
+                };
+                if !keep_strengthened_alias_target {
+                    rewrite_included_module_type_paths_to_local(
+                        ctx,
+                        &mut md.md_type,
+                        include_root_path,
+                        include_flat_name,
+                        local_type_ids,
+                        local_module_ids,
+                        local_modtype_ids,
+                        visited,
+                    );
+                }
             }
             crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
                 if let Some(mty) = mtd.mtd_type.as_mut() {
@@ -4171,14 +4211,14 @@ fn apply_package_constraints_to_module_type<'b>(
                         env,
                         pers_env,
                         ctx,
-                    |components| {
-                        rewrite_package_constraints_over_sig(
-                            components.signature(),
-                            constraints,
-                            ctx,
-                        )
-                    },
-                )
+                        |components| {
+                            rewrite_package_constraints_over_sig(
+                                components.signature(),
+                                constraints,
+                                ctx,
+                            )
+                        },
+                    )
                 {
                     finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
                 } else if let Some((_, mtd)) =
@@ -4479,15 +4519,22 @@ fn apply_with_type_constraints_to_module_type<'b>(
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
     ) -> Option<crate::types::decl::Signature> {
+        // OCaml builds a new constrained signature, then returns
+        // `Mtype.freshen (Mty_signature final_sg)` without mutating the source
+        // signature (compiler/ml/typemod.ml:727-738). Rust type expressions are
+        // arena nodes, so detach the source graph before applying constraints or
+        // later `Subst.signature`-style freshening can rewrite shared modtype
+        // components (compiler/ml/subst.ml:358-364).
+        let source_sig = crate::types::typecore::copy_lookup_signature_for_subst(sig, ctx);
         let mut rewritten_sig = Vec::with_capacity(sig.len());
         let mut type_substs = HashMap::new();
 
-        for item in sig {
+        for item in &source_sig {
             match item {
                 SignatureItem::SigType(id, td, rec_status) => {
-                    let direct = constraints
-                        .iter()
-                        .find(|constraint| constraint.path.len() == 1 && constraint.path[0] == id.name());
+                    let direct = constraints.iter().find(|constraint| {
+                        constraint.path.len() == 1 && constraint.path[0] == id.name()
+                    });
                     match direct {
                         Some(constraint)
                             if constraint.kind == WithTypeConstraintKind::Substitute =>
@@ -4499,11 +4546,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
                             if td.type_params.is_empty() {
                                 td.type_manifest = Some(constraint.manifest);
                             }
-                            rewritten_sig.push(SignatureItem::SigType(
-                                id.clone(),
-                                td,
-                                *rec_status,
-                            ));
+                            rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
                         }
                         None => rewritten_sig.push(item.clone()),
                     }
@@ -4544,14 +4587,10 @@ fn apply_with_type_constraints_to_module_type<'b>(
         visiting: &mut HashSet<Path>,
     ) -> Option<DeclMty> {
         match mty {
-            DeclMty::MtySignature(sig) => rewrite_signature_with_constraints(
-                env,
-                sig,
-                constraints,
-                pers_env,
-                ctx,
-            )
-            .map(DeclMty::MtySignature),
+            DeclMty::MtySignature(sig) => {
+                rewrite_signature_with_constraints(env, sig, constraints, pers_env, ctx)
+                    .map(DeclMty::MtySignature)
+            }
             DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
                 if !visiting.insert(path.clone()) {
                     return None;
@@ -6571,10 +6610,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 )?;
                                 freshened_signature_from_module_type(tctx, &sig_env, &include_mty)
                                     .ok_or_else(|| {
-                                        TypeModError::ModuleNotFound(
-                                            "included signature".to_string(),
-                                        )
-                                    })?
+                                    TypeModError::ModuleNotFound("included signature".to_string())
+                                })?
                             }
                         };
                         add_signature_items_to_env(&include_sig, &mut sig_env);
@@ -9195,12 +9232,11 @@ pub fn transl_signature<'a>(
             PSigDesc::Psig_include(incl) => {
                 let typed_mty =
                     transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(incl.pincl_mod))?;
-                let include_sig = freshened_signature_from_module_type(
-                    tctx,
-                    &sig_env,
-                    &typed_mty.mty_type,
-                )
-                .ok_or_else(|| TypeModError::ModuleNotFound("included signature".to_string()))?;
+                let include_sig =
+                    freshened_signature_from_module_type(tctx, &sig_env, &typed_mty.mty_type)
+                        .ok_or_else(|| {
+                            TypeModError::ModuleNotFound("included signature".to_string())
+                        })?;
                 add_signature_items_to_env(&include_sig, &mut sig_env);
                 TSigDesc::Tsig_include(IncludeDescription {
                     incl_mod: typed_mty,
@@ -11575,7 +11611,7 @@ fn type_structure_item<'a>(
                             lbl_mut: ld.ld_mutable.clone(),
                             lbl_optional: ld.ld_optional,
                             lbl_pos: pos as i32,
-                            lbl_all: crate::types::LabelArrayRef(0), // Placeholder for now
+                            lbl_all: crate::types::LabelArrayRef(0),
                             lbl_repres: repres.clone(),
                             lbl_private: crate::types::PrivateFlag::Public,
                             lbl_loc: ld.ld_loc.clone(),

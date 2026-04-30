@@ -721,6 +721,10 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
+    pub(crate) fn lookup_type_ident_exact(&self, id: &Ident) -> Option<&TypeDeclaration> {
+        self.types.find_by_ident(id).map(|t| t.as_ref())
+    }
+
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
         match path {
@@ -728,7 +732,12 @@ impl Env {
                 .types
                 .find_by_ident(id)
                 .or_else(|| {
-                    // Fallback: try name-based lookup for stamp mismatches
+                    // Some in-process callers still pass copied signature ids
+                    // whose stamp does not match the current table entry. Keep
+                    // the existing recovery here; expansion paths that must
+                    // mirror OCaml `IdTbl.find_same` use
+                    // `lookup_type_ident_exact` instead
+                    // (compiler/ml/env.ml:800-813,862).
                     self.types.find_by_name(id.name())
                 })
                 .map(|t| t.as_ref())

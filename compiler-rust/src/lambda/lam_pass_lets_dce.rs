@@ -7,7 +7,7 @@
 //! Each match arm cites the OCaml line in `lam_pass_lets_dce.ml` that
 //! justifies it. Do not introduce Rust-only logic.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, no_side_effects};

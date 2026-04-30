@@ -7,8 +7,9 @@
 //! Every match arm and helper here corresponds to a specific line in
 //! `lam_pass_count.ml`. Do not add Rust-only logic.
 
-use std::collections::HashMap;
 use std::rc::Rc;
+
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;

@@ -4,7 +4,8 @@
 //! projections, collapses sync component make aliases, rebinds materialized
 //! local module field aliases, and marks dead code for elimination.
 
-use std::collections::{HashMap, HashSet};
+use ahash::AHashMap as HashMap;
+use std::collections::HashSet;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;

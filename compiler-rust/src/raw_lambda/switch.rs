@@ -1074,15 +1074,7 @@ pub fn zyva(
     assert!(!cases.is_empty());
 
     let shared_actions = store.act_get_shared();
-    zyva_with_shared_actions(
-        loc,
-        edges,
-        arg,
-        cases,
-        shared_actions,
-        sw_names,
-        next_raise,
-    )
+    zyva_with_shared_actions(loc, edges, arg, cases, shared_actions, sw_names, next_raise)
 }
 
 /// Main entry point when the caller already owns the action array.

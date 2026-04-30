@@ -4,7 +4,7 @@
 //! sites, eliminating the intermediate function wrapper. Also tracks used/dead
 //! status for variable declarations.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, UsedStats};

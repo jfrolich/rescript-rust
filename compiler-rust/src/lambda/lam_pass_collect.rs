@@ -14,7 +14,7 @@
 
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{
-    lfunction_can_be_inlined, no_side_effects, size, SMALL_INLINE_SIZE,
+    SMALL_INLINE_SIZE, lfunction_can_be_inlined, no_side_effects, size,
 };
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;

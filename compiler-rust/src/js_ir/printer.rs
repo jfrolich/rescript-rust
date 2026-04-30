@@ -2361,6 +2361,43 @@ impl JsPrinter {
 
     /// Print a string literal
     pub(super) fn print_string(&mut self, s: &str) {
+        if s.is_ascii() {
+            self.write_char('"');
+            let bytes = s.as_bytes();
+            let mut chunk_start = 0;
+            for (index, byte) in bytes.iter().copied().enumerate() {
+                let escaped = match byte {
+                    b'"' => Some("\\\""),
+                    b'\\' => Some("\\\\"),
+                    b'\n' => Some("\\n"),
+                    b'\r' => Some("\\r"),
+                    b'\t' => Some("\\t"),
+                    0..=31 => {
+                        if chunk_start < index {
+                            self.write(&s[chunk_start..index]);
+                        }
+                        write!(self.output, "\\x{byte:02x}").unwrap();
+                        self.last_new_line = false;
+                        chunk_start = index + 1;
+                        continue;
+                    }
+                    _ => None,
+                };
+                if let Some(escaped) = escaped {
+                    if chunk_start < index {
+                        self.write(&s[chunk_start..index]);
+                    }
+                    self.write(escaped);
+                    chunk_start = index + 1;
+                }
+            }
+            if chunk_start < s.len() {
+                self.write(&s[chunk_start..]);
+            }
+            self.write_char('"');
+            return;
+        }
+
         let decoded = decode_internal_utf8_string(s);
         self.write_char('"');
         for c in decoded.chars() {

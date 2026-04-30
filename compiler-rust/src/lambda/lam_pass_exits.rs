@@ -5,16 +5,16 @@
 //! OCaml's `Lam_pass_exits.simplify_exits` exactly. Each clause cites the
 //! OCaml file and line number that justifies it.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
+#[cfg(test)]
+use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::subst as lam_subst;
 use crate::lambda::{LFunction, Lambda, LambdaSwitch};
-#[cfg(test)]
-use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
 /// (lam_exit_count.ml:25).
@@ -451,9 +451,7 @@ fn subst_helper_owned(
             subst_helper_owned(subst, counts, id_gen, *l2),
         ),
         // lam_pass_exits.ml:237
-        Lambda::Lassign(v, l) => {
-            Lambda::assign(v, subst_helper_owned(subst, counts, id_gen, *l))
-        }
+        Lambda::Lassign(v, l) => Lambda::assign(v, subst_helper_owned(subst, counts, id_gen, *l)),
         // OCaml `Lam_pass_exits.subst_helper` after #8348:
         // `Lbreak -> Lam.break | Lcontinue -> Lam.continue`.
         Lambda::Lbreak => Lambda::break_(),

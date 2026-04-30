@@ -14,9 +14,9 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
 use crate::ident::{Ident, IdentFlags};
+use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
-use crate::lambda::LetKind;
 use crate::lambda::{
     Comparison, FieldDbgInfo, Primitive, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchNames,
     SwitchTag, TagInfo,
@@ -283,11 +283,7 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn normalize_bigint_digits(digits: &str) -> &str {
         let trimmed = digits.trim_start_matches('0');
-        if trimmed.is_empty() {
-            "0"
-        } else {
-            trimmed
-        }
+        if trimmed.is_empty() { "0" } else { trimmed }
     }
 
     fn compare_bigint(positive1: bool, digits1: &str, positive2: bool, digits2: &str) -> Ordering {
@@ -2064,15 +2060,7 @@ fn make_key_string_action(action: &MatchAction) -> Option<String> {
                     id,
                     arg,
                     action,
-                } => tr_let(
-                    env,
-                    *kind,
-                    id,
-                    arg,
-                    KeyBody::Action(action),
-                    count,
-                    next_id,
-                ),
+                } => tr_let(env, *kind, id, arg, KeyBody::Action(action), count, next_id),
             }
         }
 
@@ -2097,8 +2085,7 @@ fn make_key_string_action(action: &MatchAction) -> Option<String> {
         ) -> Option<RawLambda> {
             match e {
                 RawLambda::Lvar(id) => {
-                    if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id))
-                    {
+                    if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id)) {
                         Some(replacement.clone())
                     } else {
                         Some(e.clone())
@@ -2120,15 +2107,9 @@ fn make_key_string_action(action: &MatchAction) -> Option<String> {
                         ap_transformed_jsx: ap.ap_transformed_jsx,
                     }))
                 }
-                RawLambda::Llet(kind, x, ex, body) => tr_let(
-                    env,
-                    *kind,
-                    x,
-                    ex,
-                    KeyBody::Raw(body),
-                    count,
-                    next_id,
-                ),
+                RawLambda::Llet(kind, x, ex, body) => {
+                    tr_let(env, *kind, x, ex, KeyBody::Raw(body), count, next_id)
+                }
                 RawLambda::Lprim(info) => {
                     let args = tr_recs(env, &info.args, count, next_id)?;
                     Some(RawLambda::Lprim(RawPrimInfo {
@@ -5374,12 +5355,7 @@ fn matcher_array(len: usize, p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern
 
 /// Make an array matching cell.
 /// Equivalent to OCaml's `make_array_matching`.
-fn make_array_matching(
-    p: &Pattern,
-    def: &DefaultEnv,
-    ctx: &[Ctx],
-    args: &MatchArgs,
-) -> MatchCell {
+fn make_array_matching(p: &Pattern, def: &DefaultEnv, ctx: &[Ctx], args: &MatchArgs) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_array_matching"),
         Some(((arg, _mut), _)) => {
@@ -9109,9 +9085,9 @@ fn check_partial_list(pat_act_list: &[Clause], partial: Partial) -> Partial {
         Partial::Partial => Partial::Partial,
         Partial::Total => {
             if pat_act_list.is_empty()
-                || pat_act_list.iter().any(|(pats, lam)| {
-                    pats.iter().any(|p| is_mutable(p)) && lam.is_guarded()
-                })
+                || pat_act_list
+                    .iter()
+                    .any(|(pats, lam)| pats.iter().any(|p| is_mutable(p)) && lam.is_guarded())
             {
                 Partial::Partial
             } else {

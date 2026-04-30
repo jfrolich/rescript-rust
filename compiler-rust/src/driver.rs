@@ -35,25 +35,6 @@ use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature,
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
-/// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
-/// (Instant::now panics on WASM since time isn't implemented there).
-#[inline]
-fn phase_now() -> Option<std::time::Instant> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Some(std::time::Instant::now())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-}
-
-#[inline]
-fn phase_elapsed_ms(t: Option<std::time::Instant>) -> u128 {
-    t.map(|t| t.elapsed().as_millis()).unwrap_or(0)
-}
-
 pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
@@ -1321,7 +1302,7 @@ pub fn compile_source_to_js_with_options(
     let mut pers_env = PersistentEnv::new();
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path(load_path.clone());
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(
@@ -1343,7 +1324,7 @@ pub fn compile_source_to_js_with_options(
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, None);
 
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
@@ -1398,8 +1379,14 @@ pub fn compile_source_to_js_with_options(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let implementation_coercion =
-        compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
+    let implementation_coercion = compute_raw_implementation_coercion(
+        &mut tctx,
+        &type_ctx,
+        &env,
+        &typed_structure,
+        options,
+        None,
+    );
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -1633,7 +1620,11 @@ fn build_inferred_signature_coercion(
         if let SignatureItem::SigModule(id, _, _) = item {
             // OCaml builds id_pos_list by consing during a left fold, so the
             // final list is reverse module order. See compiler/ml/includemod.ml:288-293.
-            id_pos_list.push((id.clone(), current_runtime_pos, ModuleCoercion::Tcoerce_none));
+            id_pos_list.push((
+                id.clone(),
+                current_runtime_pos,
+                ModuleCoercion::Tcoerce_none,
+            ));
         }
         if is_runtime_component(item) {
             runtime_pos += 1;
@@ -1686,6 +1677,7 @@ fn compute_raw_implementation_coercion(
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
+    known_has_interface: Option<bool>,
 ) -> crate::types::typedtree::ModuleCoercion {
     let Some(source_file) = &options.source_filename else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
@@ -1695,7 +1687,8 @@ fn compute_raw_implementation_coercion(
     }
 
     let impl_sig = &typed_structure.str_type;
-    let has_resi = std::path::Path::new(&format!("{source_file}i")).exists();
+    let has_resi = known_has_interface
+        .unwrap_or_else(|| std::path::Path::new(&format!("{source_file}i")).exists());
     if !has_resi {
         return build_inferred_signature_coercion(impl_sig);
     }
@@ -1777,7 +1770,7 @@ pub fn typecheck_interface_source(
     let mut pers_env = PersistentEnv::new();
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path(load_path.clone());
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     load_pervasives(
@@ -2095,7 +2088,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             type_structure(&mut tctx, &env, parser.arena(), &structure)
                 .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
 
-        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, None);
 
         print_typed_structure_with_locs(parser.arena(), &type_ctx, &typed_structure, writer)
             .map_err(|e| anyhow!("Failed to write sexp: {e}"))?;
@@ -2117,6 +2110,7 @@ fn apply_moregen_constraints(
     type_ctx: &TypeContext<'_>,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
+    known_has_interface: Option<bool>,
 ) {
     use crate::types::decl::SignatureItem;
     use crate::types::type_expr::TypeExprRef;
@@ -2130,8 +2124,11 @@ fn apply_moregen_constraints(
     if !source_file.ends_with(".res") {
         return;
     }
-    let resi_file = format!("{}i", source_file);
-    if !std::path::Path::new(&resi_file).exists() {
+    let has_resi = known_has_interface.unwrap_or_else(|| {
+        let resi_file = format!("{}i", source_file);
+        std::path::Path::new(&resi_file).exists()
+    });
+    if !has_resi {
         return;
     }
 
@@ -3145,6 +3142,22 @@ pub struct InProcessCompileResult {
     pub lambda_sexp: String,
 }
 
+/// Signature payload produced after in-process implementation typechecking but
+/// before Lambda/JS compilation. Rewatch uses this to unblock dependent
+/// typechecking while preserving OCaml's save-before-translation order
+/// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
+pub struct InProcessSignatureReady {
+    pub signature: crate::types::decl::Signature,
+    pub pers_struct: Option<PortablePersStruct>,
+    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+}
+
+pub type InProcessSignatureReadyHook<'a> =
+    dyn FnMut(InProcessSignatureReady) -> Result<Option<ModuleRegistry>> + 'a;
+
+pub type InProcessBeforeJsHook<'a> =
+    dyn FnMut(&std::collections::HashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
+
 /// Result of an in-process `.resi` interface type-check.
 pub struct InProcessInterfaceResult {
     pub signature: crate::types::decl::Signature,
@@ -3300,7 +3313,31 @@ pub fn compile_preprocessed_structure_in_process(
     registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessCompileResult> {
-    let original_alias_count = registry.alias_rewrites.len();
+    compile_preprocessed_structure_in_process_with_signature_hook(
+        arena,
+        structure,
+        filename,
+        module_name,
+        options,
+        registry,
+        has_interface,
+        None,
+        None,
+    )
+}
+
+pub fn compile_preprocessed_structure_in_process_with_signature_hook(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    mut before_js: Option<&mut InProcessBeforeJsHook<'_>>,
+) -> Result<InProcessCompileResult> {
+    let original_alias_count = registry.alias_rewrite_len();
     let file_directives = extract_file_directives_from_structure(structure, arena)?;
     let debug = debug_for_structure(structure, options, arena);
     let jsx_preserve = jsx_preserve_for_structure(structure, options, arena);
@@ -3316,11 +3353,10 @@ pub fn compile_preprocessed_structure_in_process(
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     let mut env = initial_env(&type_ctx);
 
-    let t_env = phase_now();
     let mut pers_env = PersistentEnv::from_registry(registry);
     let load_path = build_load_path(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path(load_path.clone());
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -3333,17 +3369,20 @@ pub fn compile_preprocessed_structure_in_process(
         options.nopervasives,
         options.module_name.as_deref(),
     );
-    let env_ms = phase_elapsed_ms(t_env);
 
     tctx.set_persistent_env(pers_env);
 
-    let t_tc = phase_now();
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, arena, structure)
         .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
-    let tc_ms = phase_elapsed_ms(t_tc);
 
     if has_interface {
-        apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options);
+        apply_moregen_constraints(
+            &mut tctx,
+            &type_ctx,
+            &typed_structure,
+            options,
+            Some(has_interface),
+        );
     }
 
     if !has_interface {
@@ -3360,6 +3399,40 @@ pub fn compile_preprocessed_structure_in_process(
     let published_signature =
         crate::types::includemod::simplify_signature(&typed_structure.str_type);
 
+    // OCaml saves the inferred `.cmi` before Lambda translation mutates any
+    // shared type nodes (compiler/ml/typemod.ml:1779-1788; translmod.ml:267).
+    // In-process builds keep the same ordering by serializing the signature
+    // before raw-lambda conversion, then removing the current module from this
+    // worker env so raw/JS probes only resolve already-published dependencies.
+    let mut internal_env = tctx
+        .persistent_env
+        .take()
+        .unwrap_or_else(PersistentEnv::new);
+
+    internal_env.register_in_memory_signature(
+        module_name,
+        published_signature.clone(),
+        filename,
+        &type_ctx,
+    );
+
+    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
+        module_name,
+        original_alias_count,
+        &type_ctx,
+        Some(arena),
+    );
+    internal_env.unregister_in_memory_signature(module_name);
+    let persistent_env_after_signature = internal_env;
+    if let Some(hook) = signature_ready.as_deref_mut() {
+        let _ = hook(InProcessSignatureReady {
+            signature: published_signature.clone(),
+            pers_struct: pers_struct.clone(),
+            new_alias_rewrites: new_alias_rewrites.clone(),
+        })?;
+    }
+    tctx.persistent_env = Some(persistent_env_after_signature);
+
     // Capture typed tree sexp for the playground (only if requested).
     let typed_tree_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -3374,7 +3447,6 @@ pub fn compile_preprocessed_structure_in_process(
         String::new()
     };
 
-    let t_lambda = phase_now();
     let lambda_start_stamp = type_ctx.current_stamp();
 
     let unit_name = options
@@ -3382,8 +3454,14 @@ pub fn compile_preprocessed_structure_in_process(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let implementation_coercion =
-        compute_raw_implementation_coercion(&mut tctx, &type_ctx, &env, &typed_structure, options);
+    let implementation_coercion = compute_raw_implementation_coercion(
+        &mut tctx,
+        &type_ctx,
+        &env,
+        &typed_structure,
+        options,
+        Some(has_interface),
+    );
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             arena,
@@ -3400,6 +3478,18 @@ pub fn compile_preprocessed_structure_in_process(
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
+    if let Some(hook) = before_js.as_deref_mut()
+        && let Some(refreshed_registry) = hook(&possible_required_modules)?
+    {
+        let mut refreshed_env = PersistentEnv::from_registry(&refreshed_registry);
+        refreshed_env.set_load_path(load_path.clone());
+        refreshed_env.set_open_modules(options.open_modules.clone());
+        refreshed_env.set_jsx_version(options.jsx_version);
+        refreshed_env.set_nopervasives(options.nopervasives);
+        refreshed_env.set_compiling_module(options.module_name.clone());
+        refreshed_env.unregister_in_memory_signature(module_name);
+        tctx.persistent_env = Some(refreshed_env);
+    }
 
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
@@ -3414,7 +3504,6 @@ pub fn compile_preprocessed_structure_in_process(
         raw_lambda,
         raw_lambda_current_stamp,
     );
-    let raw_lambda_ms = phase_elapsed_ms(t_lambda);
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -3425,7 +3514,6 @@ pub fn compile_preprocessed_structure_in_process(
         String::new()
     };
 
-    let t_jsir = phase_now();
     let persistent_env_for_js = tctx.persistent_env.clone();
     let js_targets = effective_js_output_targets(options);
     let primary_target = js_targets.first();
@@ -3488,14 +3576,12 @@ pub fn compile_preprocessed_structure_in_process(
         }
         rendered_programs
     };
-    let jsir_ms = phase_elapsed_ms(t_jsir);
 
-    let t_js = phase_now();
     let (js, js_outputs) = if options.skip_js_render {
         (String::new(), Vec::new())
     } else {
         let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
-        let js = print_deps_program_with_directives_and_options(
+        let mut primary_js = print_deps_program_with_directives_and_options(
             &primary_program,
             Some(&primary_resolver),
             &file_directives,
@@ -3504,12 +3590,15 @@ pub fn compile_preprocessed_structure_in_process(
             !options.no_version_header,
         );
         let mut js_outputs = Vec::new();
-        if let Some(path) = primary_path {
+        let js = if let Some(path) = primary_path {
             js_outputs.push(JsOutput {
                 path,
-                code: js.clone(),
+                code: std::mem::take(&mut primary_js),
             });
-        }
+            String::new()
+        } else {
+            primary_js
+        };
         for (path, program, module_path_resolver) in rendered_programs {
             let Some(path) = path else {
                 continue;
@@ -3526,34 +3615,6 @@ pub fn compile_preprocessed_structure_in_process(
         }
         (js, js_outputs)
     };
-    let js_ms = phase_elapsed_ms(t_js);
-
-    let total_ms = env_ms + tc_ms + raw_lambda_ms + jsir_ms + js_ms;
-    if std::env::var_os("RUST_IN_PROCESS_PHASES").is_some() && total_ms > 100 {
-        eprintln!(
-            "[phases] {} env={}ms tc={}ms raw={}ms jsir={}ms js={}ms total={}ms",
-            module_name, env_ms, tc_ms, raw_lambda_ms, jsir_ms, js_ms, total_ms
-        );
-    }
-
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
-
-    internal_env.register_in_memory_signature(
-        module_name,
-        published_signature.clone(),
-        filename,
-        &type_ctx,
-    );
-
-    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-        module_name,
-        original_alias_count,
-        &type_ctx,
-        Some(arena),
-    );
 
     Ok(InProcessCompileResult {
         js_output: js,
@@ -3651,7 +3712,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
 ) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrites.len();
+    let original_alias_count = registry.alias_rewrite_len();
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -3740,7 +3801,7 @@ pub fn typecheck_implementation_in_process(
     registry: &ModuleRegistry,
     has_interface: bool,
 ) -> Result<InProcessInterfaceResult> {
-    let original_alias_count = registry.alias_rewrites.len();
+    let original_alias_count = registry.alias_rewrite_len();
 
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);

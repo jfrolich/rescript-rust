@@ -8,17 +8,17 @@ use std::collections::{HashMap, HashSet};
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
 use crate::js_ir::{
-    ocaml_eq_expression, BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc,
-    VIdent, VariableDeclaration,
+    BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
+    VariableDeclaration, ocaml_eq_expression,
 };
+use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
 use crate::lambda::js_shake::{
-    flatten_toplevel_block_owned, flatten_toplevel_block_refs, resolve_tail_move_initializer_kind,
-    resolve_tail_move_replacement_expression, statement_mentions_ident_anywhere,
-    tail_move_materialized_root_ident, TailMoveInitializerKind,
+    TailMoveInitializerKind, flatten_toplevel_block_owned, flatten_toplevel_block_refs,
+    resolve_tail_move_initializer_kind, resolve_tail_move_replacement_expression,
+    statement_mentions_ident_anywhere, tail_move_materialized_root_ident,
 };
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::TagInfo;
 
 pub(crate) fn resolve_export_aliases(block: &Block, exports: Vec<Ident>) -> Vec<Ident> {
     let mut declared = HashSet::new();

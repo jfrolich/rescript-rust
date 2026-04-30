@@ -387,7 +387,9 @@ impl<'a> Alpha<'a> {
                         let arg = self.simpl_owned(arg);
                         unsafe_adjust_to_arity(loc, len, Some(x), arg)
                     }
-                    None => Lambda::prim(Primitive::PjsFnMake(len), vec![self.simpl_owned(arg)], loc),
+                    None => {
+                        Lambda::prim(Primitive::PjsFnMake(len), vec![self.simpl_owned(arg)], loc)
+                    }
                 }
             }
             Lambda::Lprim(PrimInfo {
@@ -441,9 +443,7 @@ impl<'a> Alpha<'a> {
                         .into_iter()
                         .map(|(k, l)| (k, self.simpl_owned(l)))
                         .collect(),
-                    sw_failaction: switch
-                        .sw_failaction
-                        .map(|f| Box::new(self.simpl_owned(*f))),
+                    sw_failaction: switch.sw_failaction.map(|f| Box::new(self.simpl_owned(*f))),
                     sw_names: switch.sw_names,
                 },
             ),
@@ -469,9 +469,7 @@ impl<'a> Alpha<'a> {
                 self.simpl_owned(*l3),
             ),
             Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
-            Lambda::Lwhile(l1, l2) => {
-                Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2))
-            }
+            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
             Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
                 var,
                 self.simpl_owned(*l1),

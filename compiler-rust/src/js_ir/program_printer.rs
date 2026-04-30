@@ -70,8 +70,7 @@ impl JsPrinter {
         }
         let _printed_imports = self.print_module_imports(&program.modules);
         self.at_least_two_lines();
-        let remaining_block = program.program.block[block_start..].to_vec();
-        self.print_statements(&remaining_block, true);
+        self.print_statements(&program.program.block[block_start..], true);
 
         self.at_least_two_lines();
         if !program.program.exports.is_empty() {
@@ -279,10 +278,7 @@ fn estimated_deps_program_output_capacity(
     directives: &[String],
     emit_header: bool,
 ) -> usize {
-    let directive_bytes = directives
-        .iter()
-        .map(|directive| directive.len() + 1)
-        .sum();
+    let directive_bytes = directives.iter().map(|directive| directive.len() + 1).sum();
     estimated_block_output_capacity(
         program.program.block.len(),
         program.program.exports.len(),

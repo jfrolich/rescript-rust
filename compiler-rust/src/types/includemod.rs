@@ -1007,15 +1007,13 @@ fn value_descriptions<'a>(
                 expand_expected_manifest_aliases(type_ctx, env, row.row_more, seen, active_constrs);
                 for (_, field) in row.row_fields {
                     match field {
-                        RowField::Rpresent(Some(arg)) => {
-                            expand_expected_manifest_aliases(
-                                type_ctx,
-                                env,
-                                arg,
-                                seen,
-                                active_constrs,
-                            )
-                        }
+                        RowField::Rpresent(Some(arg)) => expand_expected_manifest_aliases(
+                            type_ctx,
+                            env,
+                            arg,
+                            seen,
+                            active_constrs,
+                        ),
                         RowField::Reither { types, .. } => {
                             for arg in types {
                                 expand_expected_manifest_aliases(

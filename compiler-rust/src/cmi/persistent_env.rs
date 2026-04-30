@@ -14,7 +14,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::fs;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
@@ -69,6 +69,89 @@ fn resolve_first_char_case_value<'a, V>(map: &'a HashMap<String, V>, name: &str)
     map.get(&variant)
 }
 
+#[derive(Debug)]
+struct SharedRegistryMap<V> {
+    inner: Arc<RwLock<HashMap<String, V>>>,
+}
+
+impl<V> Clone for SharedRegistryMap<V> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<V> Default for SharedRegistryMap<V> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl<V> SharedRegistryMap<V> {
+    fn insert(&self, key: String, value: V) {
+        self.inner.write().unwrap().insert(key, value);
+    }
+
+    fn remove(&self, key: &str) {
+        self.inner.write().unwrap().remove(key);
+    }
+
+    fn retain(&self, mut keep: impl FnMut(&String, &mut V) -> bool) {
+        self.inner
+            .write()
+            .unwrap()
+            .retain(|key, value| keep(key, value));
+    }
+
+    fn replace(&self, values: HashMap<String, V>) {
+        *self.inner.write().unwrap() = values;
+    }
+
+    fn len(&self) -> usize {
+        self.inner.read().unwrap().len()
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.inner.read().unwrap().contains_key(key)
+    }
+}
+
+impl<V: Clone> SharedRegistryMap<V> {
+    fn get_cloned(&self, key: &str) -> Option<V> {
+        self.inner.read().unwrap().get(key).cloned()
+    }
+
+    fn get_case_cloned(&self, name: &str) -> Option<(String, V)> {
+        let map = self.inner.read().unwrap();
+        if let Some((key, value)) = map.get_key_value(name) {
+            return Some((key.clone(), value.clone()));
+        }
+        let variant = first_char_case_variant(name)?;
+        map.get_key_value(&variant)
+            .map(|(key, value)| (key.clone(), value.clone()))
+    }
+
+    fn extend(&self, values: HashMap<String, V>) {
+        self.inner.write().unwrap().extend(values);
+    }
+
+    fn iter_cloned(&self) -> Vec<(String, V)> {
+        self.inner
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn clone_map(&self) -> HashMap<String, V> {
+        self.inner.read().unwrap().clone()
+    }
+}
+
 /// A cached persistent module structure.
 #[derive(Debug, Clone)]
 pub struct PersStruct {
@@ -112,27 +195,27 @@ pub struct InMemoryModuleInfo {
 
 #[derive(Clone)]
 struct AliasPrefixRewrites {
-    base: Arc<HashMap<String, Path>>,
+    base: SharedRegistryMap<Path>,
     local: HashMap<String, Path>,
 }
 
 impl AliasPrefixRewrites {
     fn new() -> Self {
         Self {
-            base: Arc::new(HashMap::new()),
+            base: SharedRegistryMap::default(),
             local: HashMap::new(),
         }
     }
 
-    fn from_base(base: Arc<HashMap<String, Path>>) -> Self {
-        Self {
-            base,
-            local: HashMap::new(),
-        }
+    fn from_base(base: SharedRegistryMap<Path>, local: HashMap<String, Path>) -> Self {
+        Self { base, local }
     }
 
-    fn get(&self, key: &str) -> Option<&Path> {
-        self.local.get(key).or_else(|| self.base.get(key))
+    fn get(&self, key: &str) -> Option<Path> {
+        self.local
+            .get(key)
+            .cloned()
+            .or_else(|| self.base.get_cloned(key))
     }
 
     fn insert_if_absent(&mut self, key: String, value: Path) {
@@ -152,16 +235,16 @@ impl AliasPrefixRewrites {
     }
 
     fn to_hash_map(&self) -> HashMap<String, Path> {
-        let mut rewrites = self.base.as_ref().clone();
+        let mut rewrites = self.base.clone_map();
         rewrites.extend(self.local.clone());
         rewrites
     }
 
     fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
         let mut heads = Vec::new();
-        for (flat_head, qualified) in self.base.iter() {
-            if !self.local.contains_key(flat_head) && qualified.same(qualified_path) {
-                heads.push(flat_head.clone());
+        for (flat_head, qualified) in self.base.iter_cloned() {
+            if !self.local.contains_key(&flat_head) && qualified.same(qualified_path) {
+                heads.push(flat_head);
             }
         }
         for (flat_head, qualified) in self.local.iter() {
@@ -185,21 +268,56 @@ pub struct ModuleRegistry {
     /// Values are shared so per-worker registry snapshots do not deep-clone
     /// published signatures and type graphs.
     /// Keyed by module name.
-    pub cached_modules: Arc<HashMap<String, Arc<PortablePersStruct>>>,
+    cached_modules: SharedRegistryMap<Arc<PortablePersStruct>>,
     /// Module metadata (source paths, purity, runtime status).
-    pub module_info: Arc<HashMap<String, InMemoryModuleInfo>>,
+    module_info: SharedRegistryMap<InMemoryModuleInfo>,
     /// Alias prefix rewrites (flattened_name -> qualified_path).
-    pub alias_rewrites: Arc<HashMap<String, Path>>,
+    alias_rewrites: SharedRegistryMap<Path>,
     /// Source file paths for ALL modules, including those not yet compiled.
     /// Used for on-demand source-based type checking when a module is needed
     /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
     /// been compiled yet in the current wave.
-    pub source_fallback_paths: Arc<HashMap<String, PathBuf>>,
+    source_fallback_paths: SharedRegistryMap<PathBuf>,
+    local_cached_modules: HashMap<String, Arc<PortablePersStruct>>,
+    local_module_info: HashMap<String, InMemoryModuleInfo>,
+    local_alias_rewrites: HashMap<String, Path>,
+    local_source_fallback_paths: HashMap<String, PathBuf>,
+    write_to_local: bool,
 }
 
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn for_worker_snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.write_to_local = true;
+        snapshot
+    }
+
+    pub fn alias_rewrite_len(&self) -> usize {
+        self.alias_rewrites.len() + self.local_alias_rewrites.len()
+    }
+
+    pub fn has_cached_module(&self, name: &str) -> bool {
+        self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.local_cached_modules.is_empty() && self.cached_modules.len() == 0
+    }
+
+    pub fn module_info_is_runtime(&self, name: &str) -> bool {
+        self.local_module_info
+            .get(name)
+            .map(|info| info.is_runtime)
+            .or_else(|| {
+                self.module_info
+                    .get_cloned(name)
+                    .map(|info| info.is_runtime)
+            })
+            .unwrap_or(false)
     }
 
     /// Register a namespace module's alias signature directly.
@@ -228,11 +346,9 @@ impl ModuleRegistry {
 
         // Record alias rewrites
         let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(
-            &sig_items,
-            &module_path,
-            Arc::make_mut(&mut self.alias_rewrites),
-        );
+        let mut new_alias_rewrites = HashMap::new();
+        collect_alias_rewrites(&sig_items, &module_path, &mut new_alias_rewrites);
+        self.extend_alias_rewrites(new_alias_rewrites);
 
         // Namespace signatures contain only MtyAlias entries (no TypeExprRefs),
         // so the portable type graph is empty.
@@ -247,19 +363,22 @@ impl ModuleRegistry {
             },
             fingerprint,
         };
-        Arc::make_mut(&mut self.cached_modules)
-            .insert(namespace_name.to_string(), Arc::new(portable));
+        self.insert_cached_module(namespace_name.to_string(), Arc::new(portable));
     }
 
     /// Remove a module from the registry (for deleted/renamed modules).
     /// Purges cached signature, module info, source fallback, and any alias
     /// rewrites that reference this module.
     pub fn purge_module(&mut self, name: &str) {
-        Arc::make_mut(&mut self.cached_modules).remove(name);
-        Arc::make_mut(&mut self.module_info).remove(name);
-        Arc::make_mut(&mut self.source_fallback_paths).remove(name);
+        self.cached_modules.remove(name);
+        self.local_cached_modules.remove(name);
+        self.module_info.remove(name);
+        self.local_module_info.remove(name);
+        self.source_fallback_paths.remove(name);
+        self.local_source_fallback_paths.remove(name);
         // Remove alias rewrites that point to this module
-        Arc::make_mut(&mut self.alias_rewrites).retain(|key, _| key != name);
+        self.alias_rewrites.retain(|key, _| key != name);
+        self.local_alias_rewrites.retain(|key, _| key != name);
     }
 
     /// Store a compiled module's finalized PersStruct and metadata.
@@ -282,25 +401,50 @@ impl ModuleRegistry {
         info: InMemoryModuleInfo,
         new_alias_rewrites: HashMap<String, Path>,
     ) {
-        Arc::make_mut(&mut self.cached_modules).insert(name.to_string(), portable);
+        self.insert_cached_module(name.to_string(), portable);
         self.insert_module_info(name.to_string(), info);
         self.extend_alias_rewrites(new_alias_rewrites);
     }
 
+    fn insert_cached_module(&mut self, name: String, portable: Arc<PortablePersStruct>) {
+        if self.write_to_local {
+            self.local_cached_modules.insert(name, portable);
+        } else {
+            self.cached_modules.insert(name, portable);
+        }
+    }
+
     pub fn insert_module_info(&mut self, name: String, info: InMemoryModuleInfo) {
-        Arc::make_mut(&mut self.module_info).insert(name, info);
+        if self.write_to_local {
+            self.local_module_info.insert(name, info);
+        } else {
+            self.module_info.insert(name, info);
+        }
     }
 
     pub fn extend_alias_rewrites(&mut self, new_alias_rewrites: HashMap<String, Path>) {
-        Arc::make_mut(&mut self.alias_rewrites).extend(new_alias_rewrites);
+        if self.write_to_local {
+            self.local_alias_rewrites.extend(new_alias_rewrites);
+        } else {
+            self.alias_rewrites.extend(new_alias_rewrites);
+        }
     }
 
     pub fn insert_source_fallback_path(&mut self, name: String, path: PathBuf) {
-        Arc::make_mut(&mut self.source_fallback_paths).insert(name, path);
+        if self.write_to_local {
+            self.local_source_fallback_paths.insert(name, path);
+        } else {
+            self.source_fallback_paths.insert(name, path);
+        }
     }
 
     pub fn set_source_fallback_paths(&mut self, paths: HashMap<String, PathBuf>) {
-        self.source_fallback_paths = Arc::new(paths);
+        if self.write_to_local {
+            self.local_source_fallback_paths = paths;
+        } else {
+            self.source_fallback_paths.replace(paths);
+            self.local_source_fallback_paths.clear();
+        }
     }
 }
 
@@ -334,23 +478,26 @@ pub struct PersistentEnv {
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
-    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
-    in_memory_modules: Arc<HashMap<String, InMemoryModuleInfo>>,
+    /// Shared through the build registry so worker snapshots do not clone it.
+    in_memory_modules: SharedRegistryMap<InMemoryModuleInfo>,
+    in_memory_module_overrides: HashMap<String, InMemoryModuleInfo>,
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
     /// Source file paths for on-demand lazy type checking in `--in-process` mode.
     /// When `find_pers_struct` can't find a module in the cache and this map
     /// has its source path, the module is type-checked from source on the fly.
-    /// Wrapped in Arc for cheap cloning during source-fallback recursion.
-    source_fallback_paths: Arc<HashMap<String, PathBuf>>,
+    /// Shared through the build registry so worker snapshots do not clone it.
+    source_fallback_paths: SharedRegistryMap<PathBuf>,
+    source_fallback_path_overrides: HashMap<String, PathBuf>,
     /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
     /// call increments this. Used to prevent stack overflow from deep dependency chains.
     source_fallback_depth: usize,
     /// Portable module cache for `--in-process` builds. These contain self-contained
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
-    portable_cache: Arc<HashMap<String, Arc<PortablePersStruct>>>,
+    portable_cache: SharedRegistryMap<Arc<PortablePersStruct>>,
+    portable_cache_overrides: HashMap<String, Arc<PortablePersStruct>>,
     /// Modules hidden from this worker environment. Used when the current
     /// module's transient signature must be removed before raw/JS compilation
     /// without copy-on-writing the shared in-process registry maps.
@@ -369,11 +516,14 @@ impl PersistentEnv {
             nopervasives: false,
             compiling_module: None,
             renamed_sig_cache: Arc::new(HashMap::new()),
-            in_memory_modules: Arc::new(HashMap::new()),
+            in_memory_modules: SharedRegistryMap::default(),
+            in_memory_module_overrides: HashMap::new(),
             in_process_mode: false,
-            source_fallback_paths: Arc::new(HashMap::new()),
+            source_fallback_paths: SharedRegistryMap::default(),
+            source_fallback_path_overrides: HashMap::new(),
             source_fallback_depth: 0,
-            portable_cache: Arc::new(HashMap::new()),
+            portable_cache: SharedRegistryMap::default(),
+            portable_cache_overrides: HashMap::new(),
             hidden_modules: HashSet::new(),
         }
     }
@@ -391,17 +541,23 @@ impl PersistentEnv {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
-            alias_prefix_rewrites: AliasPrefixRewrites::from_base(registry.alias_rewrites.clone()),
+            alias_prefix_rewrites: AliasPrefixRewrites::from_base(
+                registry.alias_rewrites.clone(),
+                registry.local_alias_rewrites.clone(),
+            ),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             nopervasives: false,
             compiling_module: None,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
+            in_memory_module_overrides: registry.local_module_info.clone(),
             in_process_mode: true,
             source_fallback_paths: registry.source_fallback_paths.clone(),
+            source_fallback_path_overrides: registry.local_source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
+            portable_cache_overrides: registry.local_cached_modules.clone(),
             hidden_modules: HashSet::new(),
         }
     }
@@ -428,12 +584,40 @@ impl PersistentEnv {
         self.cache.lock().unwrap().remove(name);
     }
 
-    fn in_memory_info(&self, name: &str) -> Option<&InMemoryModuleInfo> {
-        let key = resolve_first_char_case_key(&self.in_memory_modules, name)?;
-        if self.hidden_modules.contains(key) {
+    fn in_memory_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
+        if let Some(key) = resolve_first_char_case_key(&self.in_memory_module_overrides, name) {
+            if self.hidden_modules.contains(key) {
+                return None;
+            }
+            return self.in_memory_module_overrides.get(key).cloned();
+        }
+        let (key, info) = self.in_memory_modules.get_case_cloned(name)?;
+        if self.hidden_modules.contains(&key) {
             return None;
         }
-        self.in_memory_modules.get(key)
+        Some(info)
+    }
+
+    fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
+        if let Some(key) = resolve_first_char_case_key(&self.portable_cache_overrides, name) {
+            return self
+                .portable_cache_overrides
+                .get(key)
+                .cloned()
+                .map(|portable| (key.to_string(), portable));
+        }
+        self.portable_cache.get_case_cloned(name)
+    }
+
+    fn source_fallback_path_entry(&self, name: &str) -> Option<(String, PathBuf)> {
+        if let Some(key) = resolve_first_char_case_key(&self.source_fallback_path_overrides, name) {
+            return self
+                .source_fallback_path_overrides
+                .get(key)
+                .cloned()
+                .map(|path| (key.to_string(), path));
+        }
+        self.source_fallback_paths.get_case_cloned(name)
     }
 
     /// Extract the diff produced by this compilation: the newly-registered
@@ -525,7 +709,7 @@ impl PersistentEnv {
     }
 
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
-        self.alias_prefix_rewrites.get(flat_head).cloned()
+        self.alias_prefix_rewrites.get(flat_head)
     }
 
     /// Find and load a module by name.
@@ -546,18 +730,15 @@ impl PersistentEnv {
         // 1. Internalize types into the current TypeContext
         // 2. Collect alias rewrites
         // 3. Register types by stamp (without cascading alias resolution)
-        if let Some(portable_key) = resolve_first_char_case_key(&self.portable_cache, name) {
-            let portable_key = portable_key.to_string();
+        if let Some((portable_key, portable)) = self.portable_cache_entry(name) {
             if self.hidden_modules.contains(&portable_key) {
                 return None;
             }
-            let portable = self.portable_cache.get(&portable_key).cloned()?;
             let ps = Arc::new(portable_types::internalize_pers_struct(&portable, ctx));
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .alias_prefix_rewrites
                 .get(&portable_key)
-                .cloned()
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
                 &ps.ps_sig,
@@ -574,8 +755,9 @@ impl PersistentEnv {
 
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
-        let load_name = resolve_first_char_case_key(&self.source_fallback_paths, name)
-            .map(str::to_owned)
+        let load_name = self
+            .source_fallback_path_entry(name)
+            .map(|(key, _)| key)
             .unwrap_or_else(|| name.to_string());
         self.cache_insert(load_name.clone(), None);
 
@@ -604,7 +786,7 @@ impl PersistentEnv {
         substitute_submodule_paths(&signature, &module_path, ctx);
 
         // Keep the existing deep-prefix rewrite for flattened alias heads.
-        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name).cloned() {
+        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name) {
             if !name.contains('-') {
                 rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
             }
@@ -613,7 +795,6 @@ impl PersistentEnv {
         let effective_module_path = self
             .alias_prefix_rewrites
             .get(name)
-            .cloned()
             .unwrap_or_else(|| module_path.clone());
         collect_alias_rewrites(
             &signature,
@@ -787,10 +968,13 @@ impl PersistentEnv {
             compiling_module: self.compiling_module.clone(),
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
+            in_memory_module_overrides: self.in_memory_module_overrides.clone(),
             in_process_mode: self.in_process_mode,
             source_fallback_paths: self.source_fallback_paths.clone(),
+            source_fallback_path_overrides: self.source_fallback_path_overrides.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
+            portable_cache_overrides: self.portable_cache_overrides.clone(),
             hidden_modules: self.hidden_modules.clone(),
         };
         let mut env = initial_env(ctx);
@@ -946,9 +1130,7 @@ impl PersistentEnv {
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
         if self.in_process_mode {
-            if let Some(source_key) =
-                resolve_first_char_case_key(&self.source_fallback_paths, name).map(str::to_owned)
-            {
+            if let Some((source_key, _)) = self.source_fallback_path_entry(name) {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
             log::debug!(
@@ -992,7 +1174,7 @@ impl PersistentEnv {
         name: &str,
         ctx: &'a TypeContext<'a>,
     ) -> Option<PersStruct> {
-        let source_path = self.source_fallback_paths.get(name)?.clone();
+        let source_path = self.source_fallback_path_entry(name)?.1;
 
         // The source_fallback_paths already points to the preferred file
         // (.resi if it exists, .res otherwise), set by rewatch when
@@ -1160,7 +1342,8 @@ impl PersistentEnv {
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
         self.hidden_modules.remove(name);
-        Arc::make_mut(&mut self.in_memory_modules).insert(name.to_string(), info);
+        self.in_memory_module_overrides
+            .insert(name.to_string(), info);
     }
 
     /// Register a module's signature directly into the cache for
@@ -1254,7 +1437,7 @@ impl PersistentEnv {
     }
 
     /// Look up in-memory module info by name.
-    pub fn get_in_memory_module(&self, name: &str) -> Option<&InMemoryModuleInfo> {
+    pub fn get_in_memory_module(&self, name: &str) -> Option<InMemoryModuleInfo> {
         self.in_memory_info(name)
     }
 
@@ -1539,7 +1722,8 @@ mod tests {
         env.set_in_process_mode(true);
         env.set_nopervasives(true);
         env.add_load_path(load_path);
-        Arc::make_mut(&mut env.source_fallback_paths).insert("Foo".to_string(), source_path);
+        env.source_fallback_path_overrides
+            .insert("Foo".to_string(), source_path);
 
         let loaded = env
             .find_pers_struct("Foo", &type_ctx)

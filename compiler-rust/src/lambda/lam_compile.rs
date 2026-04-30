@@ -469,16 +469,15 @@ impl LambdaCompiler {
         let exports = resolve_export_aliases(&block, exports);
         let side_effect = module_side_effect_reason(&simplified);
 
-        let mut deps = apply_js_flatten_and_mark_dead_pass(
-            apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
-                DepsProgram {
-                    program: Program::new(block, exports),
-                    modules: vec![],
-                    side_effect,
-                },
-            ))),
-            self.jsx_preserve,
-        );
+        let mut deps = DepsProgram {
+            program: Program::new(block, exports),
+            modules: vec![],
+            side_effect,
+        };
+        deps = apply_js_flatten_pass(deps);
+        deps = apply_external_shadow_pass(deps);
+        deps = apply_js_tailcall_inline_pass(deps);
+        deps = apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve);
         deps = apply_js_shake_pass(deps);
         let mut required_modules = self.collect_required_module_set(&deps.program.block);
         populate_required_modules(
@@ -6220,81 +6219,88 @@ fn populate_required_modules(
     }
 }
 
-#[derive(Debug, Clone)]
-enum TopLevelEffectGroup {
-    Single(LetKind, Ident, Lambda),
-    Recursive(Vec<(Ident, Lambda)>),
-    Nop(Lambda),
+#[derive(Debug, Clone, Copy)]
+enum TopLevelEffectGroupRef<'a> {
+    Single(LetKind, &'a Ident, &'a Lambda),
+    Recursive(&'a [(Ident, Lambda)]),
+    Nop(&'a Lambda),
 }
 
-fn top_level_effect_group_single(kind: LetKind, ident: Ident, body: Lambda) -> TopLevelEffectGroup {
-    match (kind, &body) {
+fn top_level_effect_group_single_ref<'a>(
+    kind: LetKind,
+    ident: &'a Ident,
+    body: &'a Lambda,
+) -> TopLevelEffectGroupRef<'a> {
+    match (kind, body) {
         (LetKind::Strict | LetKind::StrictOpt, Lambda::Lvar(_) | Lambda::Lconst(_)) => {
-            TopLevelEffectGroup::Single(LetKind::Alias, ident, body)
+            TopLevelEffectGroupRef::Single(LetKind::Alias, ident, body)
         }
-        _ => TopLevelEffectGroup::Single(kind, ident, body),
+        _ => TopLevelEffectGroupRef::Single(kind, ident, body),
     }
 }
 
-fn push_top_level_effect_nop(lam: Lambda, groups: &mut Vec<TopLevelEffectGroup>) {
+fn push_top_level_effect_nop_ref<'a>(
+    lam: &'a Lambda,
+    groups: &mut Vec<TopLevelEffectGroupRef<'a>>,
+) {
     if !matches!(
         lam,
         Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)
     ) {
-        groups.push(TopLevelEffectGroup::Nop(lam));
+        groups.push(TopLevelEffectGroupRef::Nop(lam));
     }
 }
 
-fn flatten_top_level_effect_groups(
-    acc: Vec<TopLevelEffectGroup>,
-    lam: &Lambda,
-) -> (Lambda, Vec<TopLevelEffectGroup>) {
+fn collect_top_level_effect_group_refs<'a>(
+    lam: &'a Lambda,
+    groups: &mut Vec<TopLevelEffectGroupRef<'a>>,
+) -> &'a Lambda {
     match lam {
         Lambda::Llet(kind, id, value, body) => {
-            let (result, groups) = flatten_top_level_effect_groups(acc, value);
-            let mut next = Vec::with_capacity(groups.len() + 1);
-            next.push(top_level_effect_group_single(*kind, id.clone(), result));
-            next.extend(groups);
-            flatten_top_level_effect_groups(next, body)
+            let result = collect_top_level_effect_group_refs(value, groups);
+            groups.push(top_level_effect_group_single_ref(*kind, id, result));
+            collect_top_level_effect_group_refs(body, groups)
         }
         Lambda::Lletrec(bindings, body) => {
-            let mut next = Vec::with_capacity(acc.len() + 1);
-            next.push(TopLevelEffectGroup::Recursive(bindings.clone()));
-            next.extend(acc);
-            flatten_top_level_effect_groups(next, body)
+            groups.push(TopLevelEffectGroupRef::Recursive(bindings));
+            collect_top_level_effect_group_refs(body, groups)
         }
         Lambda::Lsequence(first, second) => {
-            let (result, groups) = flatten_top_level_effect_groups(acc, first);
-            let mut next = Vec::with_capacity(groups.len() + 1);
-            push_top_level_effect_nop(result, &mut next);
-            next.extend(groups);
-            flatten_top_level_effect_groups(next, second)
+            let result = collect_top_level_effect_group_refs(first, groups);
+            push_top_level_effect_nop_ref(result, groups);
+            collect_top_level_effect_group_refs(second, groups)
         }
-        _ => (lam.clone(), acc),
+        _ => lam,
     }
 }
 
 fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
-    let (result, groups) = flatten_top_level_effect_groups(Vec::new(), lam);
+    // OCaml `Lam_coercion.flatten` builds top-level groups in source order
+    // before `Lam_compile_main.compile_lambda` asks `Lam_compile.no_side_effect`
+    // for each group (compiler/core/lam_coercion.ml:179-199,
+    // compiler/core/lam_compile_main.ml:210-236). The Rust Lambda backend walks
+    // one tree rather than OCaml's grouped list, so keep borrowed group refs in
+    // the same order and avoid cloning each top-level body just to inspect it.
+    let mut groups = Vec::new();
+    let result = collect_top_level_effect_group_refs(lam, &mut groups);
     groups
-        .into_iter()
-        .rev()
+        .iter()
         .find_map(|group| match group {
-            TopLevelEffectGroup::Single(kind, id, body) => {
-                (matches!(kind, LetKind::Strict | LetKind::Variable)
-                    && !lam_analysis::no_side_effects(&body))
+            TopLevelEffectGroupRef::Single(kind, id, body) => {
+                (matches!(*kind, LetKind::Strict | LetKind::Variable)
+                    && !lam_analysis::no_side_effects(body))
                 .then(|| id.name().to_string())
             }
-            TopLevelEffectGroup::Recursive(bindings) => {
-                bindings.into_iter().find_map(|(id, body)| {
-                    (!lam_analysis::no_side_effects(&body)).then(|| id.name().to_string())
+            TopLevelEffectGroupRef::Recursive(bindings) => {
+                bindings.iter().find_map(|(id, body)| {
+                    (!lam_analysis::no_side_effects(body)).then(|| id.name().to_string())
                 })
             }
-            TopLevelEffectGroup::Nop(body) => {
-                (!lam_analysis::no_side_effects(&body)).then(String::new)
+            TopLevelEffectGroupRef::Nop(body) => {
+                (!lam_analysis::no_side_effects(body)).then(String::new)
             }
         })
-        .or_else(|| (!lam_analysis::no_side_effects(&result)).then(String::new))
+        .or_else(|| (!lam_analysis::no_side_effects(result)).then(String::new))
 }
 
 fn required_module_side_effect_reason(

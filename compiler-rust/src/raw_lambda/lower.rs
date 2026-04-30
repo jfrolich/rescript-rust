@@ -1476,19 +1476,22 @@ fn rebuild_component_groups(
         }
     }
 
-    groups.into_iter().rev().fold(body, |acc, group| match group {
-        RecursiveComponentGroup::Strict(index) => {
-            let (id, bind) = bindings[index].clone();
-            Lambda::let_(LetKind::Strict, id, bind, acc)
-        }
-        RecursiveComponentGroup::Recursive(indices) => {
-            let group = indices
-                .into_iter()
-                .map(|index| bindings[index].clone())
-                .collect::<Vec<_>>();
-            Lambda::letrec(group, acc)
-        }
-    })
+    groups
+        .into_iter()
+        .rev()
+        .fold(body, |acc, group| match group {
+            RecursiveComponentGroup::Strict(index) => {
+                let (id, bind) = bindings[index].clone();
+                Lambda::let_(LetKind::Strict, id, bind, acc)
+            }
+            RecursiveComponentGroup::Recursive(indices) => {
+                let group = indices
+                    .into_iter()
+                    .map(|index| bindings[index].clone())
+                    .collect::<Vec<_>>();
+                Lambda::letrec(group, acc)
+            }
+        })
 }
 
 fn has_incoming_dependency(target: usize, deps: &[Vec<usize>]) -> bool {

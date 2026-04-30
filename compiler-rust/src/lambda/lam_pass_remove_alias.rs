@@ -147,7 +147,7 @@ pub fn simplify_alias_with_jsx_owned(
 
 struct Simplifier<'a> {
     ident_tbl: &'a mut crate::lambda::lam_compile_context::IdentTable,
-    export_idents: &'a std::collections::HashSet<crate::ident::Ident>,
+    export_idents: &'a ahash::AHashSet<crate::ident::Ident>,
     /// Shared stamp counter used for `Ident.rename` during beta reduction.
     /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
     /// collide across independent beta reductions of the same function.
@@ -267,9 +267,7 @@ impl<'a> Simplifier<'a> {
                         unreachable!()
                     };
                     match self.ident_tbl.get(&id).cloned() {
-                        Some(IdKind::Constant(c)) if is_const_some(&c) => {
-                            self.simpl_owned(*then_)
-                        }
+                        Some(IdKind::Constant(c)) if is_const_some(&c) => self.simpl_owned(*then_),
                         Some(
                             IdKind::ImmutableBlock(_)
                             | IdKind::MutableBlock(_)
@@ -393,10 +391,15 @@ impl<'a> Simplifier<'a> {
                                     );
                                 self.simpl_owned(reduced)
                             }
-                            Some((func, rec_flag)) if ok_to_inline_fun_when_app(&func, &ap_args) => {
+                            Some((func, rec_flag))
+                                if ok_to_inline_fun_when_app(&func, &ap_args) =>
+                            {
                                 // lam_pass_remove_alias.ml:198-231.
-                                let (param_ok, param_map) =
-                                    is_closed_with_map(self.export_idents, &func.params, &func.body);
+                                let (param_ok, param_map) = is_closed_with_map(
+                                    self.export_idents,
+                                    &func.params,
+                                    &func.body,
+                                );
                                 let is_export_id = self.export_idents.contains(&v);
                                 let allow = match (is_export_id, param_ok) {
                                     (false, _) => true,
@@ -485,9 +488,12 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:247-248
-            Lambda::Lfunction(func) => {
-                Lambda::function_(func.arity, func.params, self.simpl_owned(*func.body), func.attr)
-            }
+            Lambda::Lfunction(func) => Lambda::function_(
+                func.arity,
+                func.params,
+                self.simpl_owned(*func.body),
+                func.attr,
+            ),
 
             // lam_pass_remove_alias.ml:249-267
             Lambda::Lswitch(scrut, switch) => Lambda::switch(
@@ -531,10 +537,9 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:278
-            Lambda::LstaticRaise(i, ls) => Lambda::static_raise(
-                i,
-                ls.into_iter().map(|arg| self.simpl_owned(arg)).collect(),
-            ),
+            Lambda::LstaticRaise(i, ls) => {
+                Lambda::static_raise(i, ls.into_iter().map(|arg| self.simpl_owned(arg)).collect())
+            }
 
             // lam_pass_remove_alias.ml:279
             Lambda::LstaticCatch(l1, ids, l2) => {

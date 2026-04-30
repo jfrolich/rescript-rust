@@ -224,6 +224,14 @@ pub struct TypeContext<'a> {
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
+    /// In-process persistent environment used by abbreviation expansion when a
+    /// persistent module root is not present in the local Env. OCaml resolves
+    /// persistent Pident module heads through Env.find_module_descr before
+    /// reading lazy components (compiler/ml/env.ml:800-808,
+    /// compiler/ml/env.ml:865-906); this gives Rust ctype the same lookup
+    /// source without falling back to disk in in-process builds.
+    persistent_env: RefCell<Option<crate::cmi::persistent_env::PersistentEnv>>,
+
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
@@ -350,6 +358,7 @@ impl<'a> TypeContext<'a> {
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
+            persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
@@ -687,6 +696,21 @@ impl<'a> TypeContext<'a> {
     /// Get the load paths.
     pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
         self.load_paths.borrow()
+    }
+
+    pub(crate) fn set_persistent_env(&self, env: crate::cmi::persistent_env::PersistentEnv) {
+        *self.persistent_env.borrow_mut() = Some(env);
+    }
+
+    pub(crate) fn persistent_env_clone(&self) -> Option<crate::cmi::persistent_env::PersistentEnv> {
+        self.persistent_env.borrow().clone()
+    }
+
+    pub(crate) fn persistent_env_is_in_process(&self) -> bool {
+        self.persistent_env
+            .borrow()
+            .as_ref()
+            .is_some_and(crate::cmi::persistent_env::PersistentEnv::is_in_process_mode)
     }
 
     /// Look up a type declaration by full qualified path string.
