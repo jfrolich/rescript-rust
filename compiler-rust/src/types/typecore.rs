@@ -4863,31 +4863,56 @@ fn force_qualified_value_type_paths<'a>(
         _ => None,
     };
     let ctx = tctx.type_ctx;
-    let selected_alias_targets = selected_module_path
-        .as_ref()
-        .and_then(|path| alias_target_for_module_path(path, env, &mut tctx.persistent_env, ctx))
-        .map(|target| {
-            let mut targets = vec![target.clone()];
-            let normalized = env.normalize_path(&target);
-            if !targets.iter().any(|candidate| candidate.same(&normalized)) {
-                targets.push(normalized);
-            }
-            if let Path::Pident(flat_id) = &target
-                && flat_id.is_persistent()
-                && let Some(qualified_alias_target) = tctx
-                    .persistent_env
-                    .as_ref()
-                    .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_id.name()))
-                    .or_else(|| ctx.find_flattened_alias_component_path(flat_id.name()))
-                && !targets
-                    .iter()
-                    .any(|candidate| candidate.same(&qualified_alias_target))
-            {
-                targets.push(qualified_alias_target);
-            }
-            targets
-        })
-        .unwrap_or_default();
+    let selected_module_is_implicit_stdlib_path =
+        selected_module_path.as_ref().is_some_and(|path| {
+            !value_access_root_is_local
+                && path_root_ident(path)
+                    .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+        });
+    let should_collect_selected_alias_targets = value_access_root_is_local
+        || matches!(selected_module_path.as_ref(), Some(Path::Pident(_)))
+        || selected_module_is_implicit_stdlib_path;
+    let selected_alias_targets = if should_collect_selected_alias_targets {
+        // OCaml compiler/ml/env.ml:781-813 reaches component tables for
+        // qualified value lookup without forcing env.ml:1568's module
+        // declaration thunk. Alias-target recovery is only needed for local
+        // aliases selected from env.ml:665-676's local module table, for
+        // exact root modules whose declaration is read directly by env.ml:800-813,
+        // or for `Stdlib` paths coming from compiler/core/res_compmisc.ml:58-62's
+        // implicit open. Do not do it for direct persistent child navigation
+        // like `Inline_const.N.f3`: that would force env.ml:1568's child
+        // module-declaration thunk and compiler/ml/subst.ml:352-400
+        // `Subst.modtype` renames too early.
+        selected_module_path
+            .as_ref()
+            .and_then(|path| alias_target_for_module_path(path, env, &mut tctx.persistent_env, ctx))
+            .map(|target| {
+                let mut targets = vec![target.clone()];
+                let normalized = env.normalize_path(&target);
+                if !targets.iter().any(|candidate| candidate.same(&normalized)) {
+                    targets.push(normalized);
+                }
+                if let Path::Pident(flat_id) = &target
+                    && flat_id.is_persistent()
+                    && let Some(qualified_alias_target) = tctx
+                        .persistent_env
+                        .as_ref()
+                        .and_then(|pers| {
+                            pers.qualified_alias_path_for_flattened_head(flat_id.name())
+                        })
+                        .or_else(|| ctx.find_flattened_alias_component_path(flat_id.name()))
+                    && !targets
+                        .iter()
+                        .any(|candidate| candidate.same(&qualified_alias_target))
+                {
+                    targets.push(qualified_alias_target);
+                }
+                targets
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut seen = HashSet::new();
     visit(
         tctx,
