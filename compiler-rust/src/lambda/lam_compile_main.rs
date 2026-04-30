@@ -11,7 +11,7 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
 use crate::lambda::lam_pass_collect::collect_info;
-use crate::lambda::lam_pass_deep_flatten::deep_flatten;
+use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets;
 use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx;
@@ -24,10 +24,22 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
 }
 
+pub fn simplify_for_js_backend_owned(lam: Lambda) -> Lambda {
+    simplify_for_js_backend_with_jsx_preserve_owned(lam, false)
+}
+
 /// `jsx_preserve` reaches `simplify_alias` here so that the JSX guard in
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:54-62)
 /// fires on the same callees OCaml does.
 pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
+    simplify_for_js_backend_with_jsx_preserve_owned(lam.clone(), jsx_preserve)
+}
+
+/// Owned entry point for the same `compiler/core/lam_compile_main.ml:148-200`
+/// pipeline. OCaml values are immutable and rebuilt by each pass; Rust can move
+/// the previous pass result into owned ports such as `deep_flatten_owned`
+/// without changing the pass order or behavior.
+pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve: bool) -> Lambda {
     // OCaml constructs `meta` once at lam_compile_main.ml:150-153 with
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
     // entry point. The exports come from `Translmod.transl_implementation`. In
@@ -37,7 +49,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // `Lam_pass_collect.collect_info` (lam_pass_collect.ml:92-93) and the
     // `is_export_id` guard in `Lam_pass_remove_alias.simplify_alias`
     // (lam_pass_remove_alias.ml:211).
-    let mut meta = LamStats::new(extract_export_idents(lam));
+    let mut meta = LamStats::new(extract_export_idents(&lam));
     // Seed the shared rename counter past every stamp already present in the
     // lambda so `Ident.rename` (via beta-reduce) never collides with existing
     // stamps. OCaml's Ident.rename reads from a global mutable counter; this
@@ -47,11 +59,11 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // `coercion_module_alias_test`, which is invalid JS).
     meta.id_gen
         .set_current_stamp(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
-            lam,
+            &lam,
         ));
 
     // lam_compile_main.ml:148 — initial deep_flatten.
-    let lam = deep_flatten(lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:154 — collect_info into meta.
     collect_info(&mut meta, &lam);
@@ -66,7 +78,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:169 — deep_flatten.
-    let lam = deep_flatten(&lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:173 — collect_info.
     collect_info(&mut meta, &lam);
@@ -75,7 +87,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
 
     // lam_compile_main.ml:175 — deep_flatten.
-    let lam = deep_flatten(&lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:176 — collect_info.
     collect_info(&mut meta, &lam);

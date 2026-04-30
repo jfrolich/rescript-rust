@@ -401,10 +401,23 @@ impl LambdaCompiler {
         self.compile_deps_program(lam).program
     }
 
+    /// Compile an owned Lambda expression into a JS IR program.
+    pub fn compile_program_owned(&mut self, lam: Lambda) -> Program {
+        self.compile_deps_program_owned(lam).program
+    }
+
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
+        self.compile_deps_program_owned(lam.clone())
+    }
+
+    /// Compile an owned Lambda expression into a JS IR program with module metadata.
+    pub fn compile_deps_program_owned(&mut self, lam: Lambda) -> DepsProgram {
         let possible_required_modules = std::collections::HashSet::new();
-        self.compile_deps_program_with_possible_required_modules(lam, &possible_required_modules)
+        self.compile_deps_program_with_possible_required_modules_owned(
+            lam,
+            &possible_required_modules,
+        )
     }
 
     /// Compile a Lambda expression into a JS IR program with module metadata
@@ -415,13 +428,30 @@ impl LambdaCompiler {
         lam: &Lambda,
         extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
     ) -> DepsProgram {
+        self.compile_deps_program_with_possible_required_modules_owned(
+            lam.clone(),
+            extra_possible_required_modules,
+        )
+    }
+
+    /// Owned form of `compile_deps_program_with_possible_required_modules`.
+    ///
+    /// This follows the same `compiler/core/lam_compile_main.ml:148-200`
+    /// simplify pipeline, but passes ownership into the Rust lambda passes so
+    /// they can move the previous tree instead of cloning it first.
+    pub fn compile_deps_program_with_possible_required_modules_owned(
+        &mut self,
+        lam: Lambda,
+        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+    ) -> DepsProgram {
         self.external_module_ids.clear();
-        let mut possible_required_modules = collect_possible_required_modules(lam);
+        let mut possible_required_modules = collect_possible_required_modules(&lam);
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(
-            lam,
-            self.jsx_preserve,
-        );
+        let simplified =
+            crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve_owned(
+                lam,
+                self.jsx_preserve,
+            );
         let compiled = self.compile_expr(&simplified);
         let mut block = compiled.prelude;
         let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)

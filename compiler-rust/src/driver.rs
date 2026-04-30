@@ -3255,6 +3255,44 @@ fn compile_js_program_for_output(
     (program, module_path_resolver)
 }
 
+fn compile_js_program_for_output_owned(
+    lowered_lambda: crate::lambda::Lambda,
+    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    output_module_format: Option<ModuleFormat>,
+    persistent_env: Option<PersistentEnv>,
+    jsx_preserve: bool,
+) -> (DepsProgram, ModulePathResolver) {
+    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+        options.source_filename.as_deref(),
+        output_path,
+        output_module_format,
+        options.runtime_path.as_deref(),
+        persistent_env,
+    );
+    for module in possible_required_modules {
+        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
+            if let Some(path) =
+                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
+            {
+                module_path_resolver.set_module_path_override(module.id.name(), path);
+            }
+        }
+    }
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
+        Some(module_path_resolver.clone()),
+        jsx_preserve,
+        options.check_div_by_zero,
+    );
+    let program = compiler.compile_deps_program_with_possible_required_modules_owned(
+        lowered_lambda,
+        possible_required_modules,
+    );
+
+    (program, module_path_resolver)
+}
+
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -3401,15 +3439,33 @@ pub fn compile_preprocessed_structure_in_process(
     let primary_output_module_format = primary_target
         .map(|target| target.module_format)
         .or(options.output_module_format);
-    let (program, module_path_resolver) = compile_js_program_for_output(
-        &lowered_lambda,
-        &possible_required_modules,
-        options,
-        primary_output_path,
-        primary_output_module_format,
-        persistent_env_for_js.clone(),
-        jsx_preserve,
-    );
+    let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
+    let mut lowered_lambda = Some(lowered_lambda);
+    let (program, module_path_resolver) = if compile_multiple_js_targets {
+        compile_js_program_for_output(
+            lowered_lambda
+                .as_ref()
+                .expect("lowered lambda retained for multiple JS targets"),
+            &possible_required_modules,
+            options,
+            primary_output_path,
+            primary_output_module_format,
+            persistent_env_for_js.clone(),
+            jsx_preserve,
+        )
+    } else {
+        compile_js_program_for_output_owned(
+            lowered_lambda
+                .take()
+                .expect("lowered lambda consumed by single JS target"),
+            &possible_required_modules,
+            options,
+            primary_output_path,
+            primary_output_module_format,
+            persistent_env_for_js.clone(),
+            jsx_preserve,
+        )
+    };
     let is_pure = program.side_effect.is_none();
     let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
     let mut rendered_programs = if options.skip_js_render {
@@ -3422,7 +3478,9 @@ pub fn compile_preprocessed_structure_in_process(
         )];
         for target in js_targets.iter().skip(1) {
             let (program, module_path_resolver) = compile_js_program_for_output(
-                &lowered_lambda,
+                lowered_lambda
+                    .as_ref()
+                    .expect("lowered lambda retained for secondary JS targets"),
                 &possible_required_modules,
                 options,
                 Some(&target.path),
