@@ -38,6 +38,7 @@ use crate::lambda::{
     LambdaSwitch, SwitchCaseTag, TagInfo,
 };
 use crate::location::Location;
+use tracing::info_span;
 
 use super::js_exp_make::{
     block_with_return_expr_iife, direct_projection_from_pure_literal, int_expr, int_literal,
@@ -444,26 +445,42 @@ impl LambdaCompiler {
         lam: Lambda,
         extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
     ) -> DepsProgram {
+        let _span = info_span!(
+            "compiler.lambda_to_js",
+            extra_possible_required_modules = extra_possible_required_modules.len(),
+            jsx_preserve = self.jsx_preserve
+        )
+        .entered();
         self.external_module_ids.clear();
-        let mut possible_required_modules = collect_possible_required_modules(&lam);
+        let mut possible_required_modules = {
+            let _phase = info_span!("compiler.lambda_collect_possible_modules").entered();
+            collect_possible_required_modules(&lam)
+        };
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified =
+        let simplified = {
+            let _phase = info_span!("compiler.lambda_simplify").entered();
             crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve_owned(
                 lam,
                 self.jsx_preserve,
-            );
-        let compiled = self.compile_expr(&simplified);
+            )
+        };
+        let compiled = {
+            let _phase = info_span!("compiler.lambda_compile_expr").entered();
+            self.compile_expr(&simplified)
+        };
         let mut block = compiled.prelude;
-        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
-        {
-            if block_terminates(&block) {
-                for value in &mut exports.values {
-                    *value = Expression::undefined(false);
+        let exports = {
+            let _phase = info_span!("compiler.lambda_exports").entered();
+            if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+                if block_terminates(&block) {
+                    for value in &mut exports.values {
+                        *value = Expression::undefined(false);
+                    }
                 }
+                self.coerce_toplevel_exports(&mut block, exports)
+            } else {
+                vec![]
             }
-            self.coerce_toplevel_exports(&mut block, exports)
-        } else {
-            vec![]
         };
         rewrite_toplevel_variable_initializers_through_rewriteable_aliases(&mut block, &exports);
         let exports = resolve_export_aliases(&block, exports);
@@ -474,24 +491,42 @@ impl LambdaCompiler {
             modules: vec![],
             side_effect,
         };
-        deps = apply_js_flatten_pass(deps);
-        deps = apply_external_shadow_pass(deps);
-        deps = apply_js_tailcall_inline_pass(deps);
-        deps = apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve);
-        deps = apply_js_shake_pass(deps);
-        let mut required_modules = self.collect_required_module_set(&deps.program.block);
-        populate_required_modules(
-            self.module_path_resolver.as_ref(),
-            &possible_required_modules,
-            &mut required_modules,
-        );
-        deps.modules = required_modules.to_vec();
-        ocaml_sort_modules(&mut deps.modules);
-        if deps.side_effect.is_none() {
-            deps.side_effect = required_module_side_effect_reason(
+        deps = {
+            let _phase = info_span!("compiler.js_pass_flatten").entered();
+            apply_js_flatten_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_external_shadow").entered();
+            apply_external_shadow_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
+            apply_js_tailcall_inline_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
+            apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_shake").entered();
+            apply_js_shake_pass(deps)
+        };
+        {
+            let _phase = info_span!("compiler.js_required_modules").entered();
+            let mut required_modules = self.collect_required_module_set(&deps.program.block);
+            populate_required_modules(
                 self.module_path_resolver.as_ref(),
-                &deps.modules,
+                &possible_required_modules,
+                &mut required_modules,
             );
+            deps.modules = required_modules.to_vec();
+            ocaml_sort_modules(&mut deps.modules);
+            if deps.side_effect.is_none() {
+                deps.side_effect = required_module_side_effect_reason(
+                    self.module_path_resolver.as_ref(),
+                    &deps.modules,
+                );
+            }
         }
         deps
     }

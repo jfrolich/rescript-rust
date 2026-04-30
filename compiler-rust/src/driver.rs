@@ -8,6 +8,7 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use tracing::info_span;
 
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{CmjExportConstant, ModuleRegistry, PersistentEnv};
@@ -3237,6 +3238,13 @@ fn compile_js_program_for_output(
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
 ) -> (DepsProgram, ModulePathResolver) {
+    let _span = info_span!(
+        "compiler.js_backend",
+        module = options.module_name.as_deref().unwrap_or(""),
+        owned = false,
+        possible_required_modules = possible_required_modules.len()
+    )
+    .entered();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         output_path,
@@ -3275,6 +3283,13 @@ fn compile_js_program_for_output_owned(
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
 ) -> (DepsProgram, ModulePathResolver) {
+    let _span = info_span!(
+        "compiler.js_backend",
+        module = options.module_name.as_deref().unwrap_or(""),
+        owned = true,
+        possible_required_modules = possible_required_modules.len()
+    )
+    .entered();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
         options.source_filename.as_deref(),
         output_path,
@@ -3337,15 +3352,30 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     mut before_js: Option<&mut InProcessBeforeJsHook<'_>>,
 ) -> Result<InProcessCompileResult> {
+    let _span = info_span!(
+        "compiler.in_process_compile",
+        module = %module_name,
+        file = %filename,
+        has_interface,
+        skip_js_render = options.skip_js_render,
+        js_targets = options.js_output_targets.len()
+    )
+    .entered();
     let original_alias_count = registry.alias_rewrite_len();
-    let file_directives = extract_file_directives_from_structure(structure, arena)?;
-    let debug = debug_for_structure(structure, options, arena);
-    let jsx_preserve = jsx_preserve_for_structure(structure, options, arena);
+    let (file_directives, debug, jsx_preserve) = {
+        let _phase = info_span!("compiler.directives").entered();
+        (
+            extract_file_directives_from_structure(structure, arena)?,
+            debug_for_structure(structure, options, arena),
+            jsx_preserve_for_structure(structure, options, arena),
+        )
+    };
 
     log::debug!(
         "[compile_source_in_process] {} type-check start",
         module_name
     );
+    let env_setup_span = info_span!("compiler.env_setup").entered();
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -3371,59 +3401,68 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     );
 
     tctx.set_persistent_env(pers_env);
+    drop(env_setup_span);
 
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, arena, structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let (typed_structure, final_env) = {
+        let _phase = info_span!("compiler.type_structure").entered();
+        type_structure(&mut tctx, &env, arena, structure)
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?
+    };
 
-    if has_interface {
-        apply_moregen_constraints(
-            &mut tctx,
+    let published_signature = {
+        let _phase = info_span!("compiler.signature_prepare").entered();
+        if has_interface {
+            apply_moregen_constraints(
+                &mut tctx,
+                &type_ctx,
+                &typed_structure,
+                options,
+                Some(has_interface),
+            );
+        }
+
+        if !has_interface {
+            normalize_signature_types(&type_ctx, &typed_structure, &final_env);
+        }
+
+        prepare_inferred_signature_for_saving(
             &type_ctx,
             &typed_structure,
-            options,
-            Some(has_interface),
+            options.source_filename.as_deref(),
+            has_interface,
         );
-    }
 
-    if !has_interface {
-        normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-    }
-
-    prepare_inferred_signature_for_saving(
-        &type_ctx,
-        &typed_structure,
-        options.source_filename.as_deref(),
-        has_interface,
-    );
-
-    let published_signature =
-        crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        crate::types::includemod::simplify_signature(&typed_structure.str_type)
+    };
 
     // OCaml saves the inferred `.cmi` before Lambda translation mutates any
     // shared type nodes (compiler/ml/typemod.ml:1779-1788; translmod.ml:267).
     // In-process builds keep the same ordering by serializing the signature
     // before raw-lambda conversion, then removing the current module from this
     // worker env so raw/JS probes only resolve already-published dependencies.
-    let mut internal_env = tctx
-        .persistent_env
-        .take()
-        .unwrap_or_else(PersistentEnv::new);
+    let (pers_struct, new_alias_rewrites, persistent_env_after_signature) = {
+        let _phase = info_span!("compiler.signature_extract").entered();
+        let mut internal_env = tctx
+            .persistent_env
+            .take()
+            .unwrap_or_else(PersistentEnv::new);
 
-    internal_env.register_in_memory_signature(
-        module_name,
-        published_signature.clone(),
-        filename,
-        &type_ctx,
-    );
+        internal_env.register_in_memory_signature(
+            module_name,
+            published_signature.clone(),
+            filename,
+            &type_ctx,
+        );
 
-    let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-        module_name,
-        original_alias_count,
-        &type_ctx,
-        Some(arena),
-    );
-    internal_env.unregister_in_memory_signature(module_name);
-    let persistent_env_after_signature = internal_env;
+        let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
+            module_name,
+            original_alias_count,
+            &type_ctx,
+            Some(arena),
+        );
+        internal_env.unregister_in_memory_signature(module_name);
+        (pers_struct, new_alias_rewrites, internal_env)
+    };
     if let Some(hook) = signature_ready.as_deref_mut() {
         let _ = hook(InProcessSignatureReady {
             signature: published_signature.clone(),
@@ -3454,30 +3493,38 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let implementation_coercion = compute_raw_implementation_coercion(
-        &mut tctx,
-        &type_ctx,
-        &env,
-        &typed_structure,
-        options,
-        Some(has_interface),
-    );
-    let mut raw_converter =
-        crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            arena,
+    let (raw_lambda, possible_required_modules, raw_lambda_current_stamp) = {
+        let _phase = info_span!("compiler.raw_lambda").entered();
+        let implementation_coercion = compute_raw_implementation_coercion(
+            &mut tctx,
             &type_ctx,
             &env,
-            lambda_start_stamp,
-            unit_name,
+            &typed_structure,
+            options,
+            Some(has_interface),
         );
-    raw_converter.set_no_assert_false(options.no_assert_false);
-    if let Some(persistent_env) = tctx.persistent_env.clone() {
-        raw_converter.set_persistent_env(persistent_env);
-    }
-    let raw_lambda =
-        raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-    let possible_required_modules = raw_converter.take_possible_required_modules();
-    let raw_lambda_current_stamp = raw_converter.current_stamp();
+        let mut raw_converter =
+            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+                arena,
+                &type_ctx,
+                &env,
+                lambda_start_stamp,
+                unit_name,
+            );
+        raw_converter.set_no_assert_false(options.no_assert_false);
+        if let Some(persistent_env) = tctx.persistent_env.clone() {
+            raw_converter.set_persistent_env(persistent_env);
+        }
+        let raw_lambda = raw_converter
+            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        let possible_required_modules = raw_converter.take_possible_required_modules();
+        let raw_lambda_current_stamp = raw_converter.current_stamp();
+        (
+            raw_lambda,
+            possible_required_modules,
+            raw_lambda_current_stamp,
+        )
+    };
     if let Some(hook) = before_js.as_deref_mut()
         && let Some(refreshed_registry) = hook(&possible_required_modules)?
     {
@@ -3500,10 +3547,13 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         String::new()
     };
 
-    let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-        raw_lambda,
-        raw_lambda_current_stamp,
-    );
+    let lowered_lambda = {
+        let _phase = info_span!("compiler.lower_lambda").entered();
+        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+            raw_lambda,
+            raw_lambda_current_stamp,
+        )
+    };
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -3525,30 +3575,37 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
     let mut lowered_lambda = Some(lowered_lambda);
-    let (program, module_path_resolver) = if compile_multiple_js_targets {
-        compile_js_program_for_output(
-            lowered_lambda
-                .as_ref()
-                .expect("lowered lambda retained for multiple JS targets"),
-            &possible_required_modules,
-            options,
-            primary_output_path,
-            primary_output_module_format,
-            persistent_env_for_js.clone(),
-            jsx_preserve,
+    let (program, module_path_resolver) = {
+        let _phase = info_span!(
+            "compiler.js_compile",
+            multiple_targets = compile_multiple_js_targets
         )
-    } else {
-        compile_js_program_for_output_owned(
-            lowered_lambda
-                .take()
-                .expect("lowered lambda consumed by single JS target"),
-            &possible_required_modules,
-            options,
-            primary_output_path,
-            primary_output_module_format,
-            persistent_env_for_js.clone(),
-            jsx_preserve,
-        )
+        .entered();
+        if compile_multiple_js_targets {
+            compile_js_program_for_output(
+                lowered_lambda
+                    .as_ref()
+                    .expect("lowered lambda retained for multiple JS targets"),
+                &possible_required_modules,
+                options,
+                primary_output_path,
+                primary_output_module_format,
+                persistent_env_for_js.clone(),
+                jsx_preserve,
+            )
+        } else {
+            compile_js_program_for_output_owned(
+                lowered_lambda
+                    .take()
+                    .expect("lowered lambda consumed by single JS target"),
+                &possible_required_modules,
+                options,
+                primary_output_path,
+                primary_output_module_format,
+                persistent_env_for_js.clone(),
+                jsx_preserve,
+            )
+        }
     };
     let is_pure = program.side_effect.is_none();
     let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
@@ -3577,43 +3634,51 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         rendered_programs
     };
 
-    let (js, js_outputs) = if options.skip_js_render {
-        (String::new(), Vec::new())
-    } else {
-        let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
-        let mut primary_js = print_deps_program_with_directives_and_options(
-            &primary_program,
-            Some(&primary_resolver),
-            &file_directives,
-            debug,
-            jsx_preserve,
-            !options.no_version_header,
-        );
-        let mut js_outputs = Vec::new();
-        let js = if let Some(path) = primary_path {
-            js_outputs.push(JsOutput {
-                path,
-                code: std::mem::take(&mut primary_js),
-            });
-            String::new()
+    let (js, js_outputs) = {
+        let _phase = info_span!(
+            "compiler.js_print",
+            skip_js_render = options.skip_js_render,
+            rendered_programs = rendered_programs.len()
+        )
+        .entered();
+        if options.skip_js_render {
+            (String::new(), Vec::new())
         } else {
-            primary_js
-        };
-        for (path, program, module_path_resolver) in rendered_programs {
-            let Some(path) = path else {
-                continue;
-            };
-            let code = print_deps_program_with_directives_and_options(
-                &program,
-                Some(&module_path_resolver),
+            let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
+            let mut primary_js = print_deps_program_with_directives_and_options(
+                &primary_program,
+                Some(&primary_resolver),
                 &file_directives,
                 debug,
                 jsx_preserve,
                 !options.no_version_header,
             );
-            js_outputs.push(JsOutput { path, code });
+            let mut js_outputs = Vec::new();
+            let js = if let Some(path) = primary_path {
+                js_outputs.push(JsOutput {
+                    path,
+                    code: std::mem::take(&mut primary_js),
+                });
+                String::new()
+            } else {
+                primary_js
+            };
+            for (path, program, module_path_resolver) in rendered_programs {
+                let Some(path) = path else {
+                    continue;
+                };
+                let code = print_deps_program_with_directives_and_options(
+                    &program,
+                    Some(&module_path_resolver),
+                    &file_directives,
+                    debug,
+                    jsx_preserve,
+                    !options.no_version_header,
+                );
+                js_outputs.push(JsOutput { path, code });
+            }
+            (js, js_outputs)
         }
-        (js, js_outputs)
     };
 
     Ok(InProcessCompileResult {
@@ -3712,6 +3777,12 @@ pub fn typecheck_preprocessed_signature_in_process(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
 ) -> Result<InProcessInterfaceResult> {
+    let _span = info_span!(
+        "compiler.in_process_signature",
+        module = %module_name,
+        file = %filename
+    )
+    .entered();
     let original_alias_count = registry.alias_rewrite_len();
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -3740,8 +3811,11 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = transl_signature(&mut tctx, &env, arena, signature)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let typed_signature = {
+        let _phase = info_span!("compiler.type_signature").entered();
+        transl_signature(&mut tctx, &env, arena, signature)
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?
+    };
     let decl_signature =
         crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
 

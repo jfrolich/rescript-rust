@@ -9,32 +9,48 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use rescript::{
     build, cli, cmd, format,
     lock::{LockKind, drop_lock, get_lock_or_exit},
-    watcher,
+    telemetry, watcher,
 };
 
-fn main() -> Result<()> {
+fn main() {
+    let telemetry_guard = telemetry::init_telemetry();
+    let otel_enabled = telemetry_guard.otel_enabled();
+    let exit_code = match run_main(otel_enabled) {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("{:#}", err);
+            1
+        }
+    };
+    drop(telemetry_guard);
+    std::process::exit(exit_code);
+}
+
+fn run_main(otel_enabled: bool) -> Result<()> {
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 
     let log_level_filter = cli.verbose.log_level_filter();
 
-    let stdout_logger = env_logger::Builder::new()
-        .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
-        .filter_level(log_level_filter)
-        .target(env_logger::fmt::Target::Stdout)
-        .build();
+    if !otel_enabled {
+        let stdout_logger = env_logger::Builder::new()
+            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .filter_level(log_level_filter)
+            .target(env_logger::fmt::Target::Stdout)
+            .build();
 
-    let stderr_logger = env_logger::Builder::new()
-        .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
-        .filter_level(log_level_filter)
-        .target(env_logger::fmt::Target::Stderr)
-        .build();
+        let stderr_logger = env_logger::Builder::new()
+            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .filter_level(log_level_filter)
+            .target(env_logger::fmt::Target::Stderr)
+            .build();
 
-    log::set_max_level(log_level_filter);
-    log::set_boxed_logger(Box::new(SplitLogger {
-        stdout: stdout_logger,
-        stderr: stderr_logger,
-    }))
-    .expect("Failed to initialize logger");
+        log::set_max_level(log_level_filter);
+        log::set_boxed_logger(Box::new(SplitLogger {
+            stdout: stdout_logger,
+            stderr: stderr_logger,
+        }))
+        .expect("Failed to initialize logger");
+    }
 
     let is_tty: bool = Term::stdout().is_term() && Term::stderr().is_term();
     let plain_output = !is_tty;
@@ -46,18 +62,15 @@ fn main() -> Result<()> {
     match cli.command {
         cli::Command::CompilerArgs { path } => {
             println!("{}", build::get_compiler_args(Path::new(&path))?);
-            std::process::exit(0);
+            Ok(())
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
-            let build_mode = match cli::resolve_build_mode(
-                *build_args.rust,
-                build_args.in_process.in_process,
-            ) {
+            let build_mode = match cli::resolve_build_mode(*build_args.rust, build_args.in_process.in_process)
+            {
                 Ok(mode) => mode,
                 Err(err) => {
-                    eprintln!("{err}");
-                    std::process::exit(1);
+                    return Err(anyhow::anyhow!(err));
                 }
             };
             configure_rayon_for_in_process(build_mode);
@@ -78,28 +91,22 @@ fn main() -> Result<()> {
                 )
             });
             match build_result {
-                Err(e) => {
-                    eprintln!("{:#}", e);
-                    std::process::exit(1)
-                }
+                Err(e) => Err(e),
                 Ok(_) => {
                     if let Some(args_after_build) = (*build_args.after_build).clone() {
                         cmd::run(args_after_build)
                     }
-                    std::process::exit(0)
+                    Ok(())
                 }
-            };
+            }
         }
         cli::Command::Watch(watch_args) => {
             let features = watch_args.features.parsed();
-            let build_mode = match cli::resolve_build_mode(
-                *watch_args.rust,
-                watch_args.in_process.in_process,
-            ) {
+            let build_mode = match cli::resolve_build_mode(*watch_args.rust, watch_args.in_process.in_process)
+            {
                 Ok(mode) => mode,
                 Err(err) => {
-                    eprintln!("{err}");
-                    std::process::exit(1);
+                    return Err(anyhow::anyhow!(err));
                 }
             };
             configure_rayon_for_in_process(build_mode);
@@ -122,10 +129,7 @@ fn main() -> Result<()> {
                 )
             });
             match watch_result {
-                Err(e) => {
-                    eprintln!("{:#}", e);
-                    std::process::exit(1)
-                }
+                Err(e) => Err(e),
                 Ok(_) => Ok(()),
             }
         }
@@ -152,10 +156,7 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
 
 const IN_PROCESS_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-fn run_with_in_process_stack<T, F>(
-    build_mode: rescript::build::build_types::BuildMode,
-    f: F,
-) -> T
+fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
 where
     T: Send,
     F: FnOnce() -> T + Send,

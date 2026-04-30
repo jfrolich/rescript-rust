@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::SystemTime;
+use tracing::{Span, info_span};
 
 /// Execute js-post-build command for a compiled JavaScript file.
 /// The command runs in the directory containing the rescript.json that defines it.
@@ -219,11 +220,25 @@ fn compile_one(
     warn_error_override: Option<String>,
     subprocess: bool,
     dump_typed_sexp: bool,
+    parent_span: Span,
 ) -> CompletionMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
         .expect("Package not found");
+    let _span = if tracing::enabled!(tracing::Level::INFO) {
+        info_span!(
+            parent: &parent_span,
+            "build.compile_file",
+            module = %module_name,
+            package = %package.name,
+            in_process = build_command_state.build_mode().is_in_process(),
+            dirty = is_dirty
+        )
+        .entered()
+    } else {
+        Span::none().entered()
+    };
 
     if !is_dirty {
         return CompletionMsg {
@@ -384,6 +399,14 @@ pub fn compile(
             }
         })
         .collect::<AHashSet<String>>();
+    let _span = info_span!(
+        "build.compile",
+        dirty_modules = dirty_modules.len(),
+        module_count = build_state.modules.len(),
+        in_process = build_state.build_mode().is_in_process()
+    )
+    .entered();
+    let compile_parent_span = Span::current();
 
     // In --in-process mode, purge deleted/renamed modules from the in-memory
     // registries so stale entries don't remain resolvable in watch mode.
@@ -404,11 +427,15 @@ pub fn compile(
             // Pre-compile all @rescript/runtime modules into the registry.
             // In in-process mode, the registry is the sole source of truth —
             // no CMI fallback. Every dependency must be in the registry.
+            let parent_span = compile_parent_span.clone();
             let pre_compile_result: Result<()> = std::thread::scope(|scope| {
                 let handle = std::thread::Builder::new()
                     .name("rewatch-runtime-precompile".to_string())
                     .stack_size(64 * 1024 * 1024)
-                    .spawn_scoped(scope, || pre_compile_runtime_modules(build_state))
+                    .spawn_scoped(scope, || {
+                        let _parent = parent_span.enter();
+                        pre_compile_runtime_modules(build_state)
+                    })
                     .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
                 match handle.join() {
@@ -532,6 +559,7 @@ pub fn compile(
                 } else {
                     ModuleRegistry::new()
                 };
+                let parent_span = compile_parent_span.clone();
                 scope.spawn(move |_| {
                     let msg = compile_one(
                         build_state_ref,
@@ -542,6 +570,7 @@ pub fn compile(
                         warn_override,
                         subprocess,
                         dump_typed_sexp,
+                        parent_span,
                     );
                     if show_progress {
                         inc_ref();
@@ -1522,11 +1551,13 @@ struct RuntimeCompletionMsg {
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
+    let _span = info_span!("build.runtime_precompile").entered();
     let runtime_root = &build_state.build_state.compiler_info.runtime_path;
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     let runtime_path = runtime_root.join("lib").join("ocaml");
     let mut runtime_modules = collect_runtime_sources(&runtime_path)?;
+    tracing::Span::current().record("runtime_modules", runtime_modules.len());
 
     if runtime_modules.is_empty() {
         return Ok(());
@@ -2140,6 +2171,12 @@ fn compile_module_in_process(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
 ) -> Result<InProcessModuleResult> {
+    let _span = info_span!(
+        "compiler.in_process_module",
+        module = %module_name,
+        package = %package.name
+    )
+    .entered();
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {
@@ -2179,6 +2216,12 @@ fn compile_module_in_process(
 
     // Step 1: If .resi exists, typecheck the interface first
     if let Some(interface) = &source_file.interface {
+        let _interface_span = info_span!(
+            "compiler.in_process_interface",
+            module = %module_name,
+            path = %interface.path.display()
+        )
+        .entered();
         let intf_source_abs = Path::new(&package.path).join(&interface.path);
         let intf_key = format!("{module_name}:intf");
         let intf_result = match build_command_state.get_stored_ast(&intf_key) {
@@ -2263,29 +2306,37 @@ fn compile_module_in_process(
 
     // Step 2: Compile the implementation
     let impl_key = format!("{module_name}:impl");
-    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match build_command_state
-        .get_stored_ast(&impl_key)
-    {
-        Some(StoredAst::Structure(stored)) => {
-            rescript_compiler::driver::compile_preprocessed_structure_in_process(
-                &stored.arena,
-                &stored.structure,
-                &source_abs.to_string_lossy(),
-                module_name,
-                &options,
-                &local_registry,
-                has_interface,
-            )
-        }
-        Some(StoredAst::Signature(_)) => panic!(
-            "in-process invariant violated: expected structure AST for {}, found signature AST",
-            source_abs.display()
-        ),
-        None => panic!(
-            "in-process invariant violated: missing stored structure AST for {}",
-            source_abs.display()
-        ),
-    }));
+    let compile_result = {
+        let _impl_span = info_span!(
+            "compiler.in_process_implementation",
+            module = %module_name,
+            path = %source_abs.display()
+        )
+        .entered();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match build_command_state.get_stored_ast(&impl_key) {
+                Some(StoredAst::Structure(stored)) => {
+                    rescript_compiler::driver::compile_preprocessed_structure_in_process(
+                        &stored.arena,
+                        &stored.structure,
+                        &source_abs.to_string_lossy(),
+                        module_name,
+                        &options,
+                        &local_registry,
+                        has_interface,
+                    )
+                }
+                Some(StoredAst::Signature(_)) => panic!(
+                    "in-process invariant violated: expected structure AST for {}, found signature AST",
+                    source_abs.display()
+                ),
+                None => panic!(
+                    "in-process invariant violated: missing stored structure AST for {}",
+                    source_abs.display()
+                ),
+            }
+        }))
+    };
 
     let compile_result = match compile_result {
         Ok(Ok(result)) => result,
@@ -2353,13 +2404,21 @@ fn compile_module_in_process(
     }
 
     // Step 3: Write only JS output (no compiler assets)
-    write_compiled_js_outputs(
-        &compile_result.js_outputs,
-        &compile_result.js_output,
-        package,
-        implementation_path,
-        root_config,
-    )?;
+    {
+        let _write_span = info_span!(
+            "compiler.write_js",
+            module = %module_name,
+            outputs = compile_result.js_outputs.len()
+        )
+        .entered();
+        write_compiled_js_outputs(
+            &compile_result.js_outputs,
+            &compile_result.js_output,
+            package,
+            implementation_path,
+            root_config,
+        )?;
+    }
 
     // Execute js-post-build command if configured
     if let Some(js_post_build) = &package.config.js_post_build {

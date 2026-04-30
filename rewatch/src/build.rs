@@ -28,6 +28,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracing::info_span;
 
 fn is_dirty(module: &Module) -> bool {
     match module.source_type {
@@ -109,6 +110,11 @@ pub fn format_finished_compilation_message(
 }
 
 pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
+    let _span = info_span!(
+        "rewatch.compiler_args",
+        file_path = %rescript_file_path.display()
+    )
+    .entered();
     let filename = &helpers::get_abs_path(rescript_file_path);
     let current_package = helpers::get_abs_path(
         &helpers::get_nearest_config(rescript_file_path).expect("Couldn't find package root"),
@@ -194,6 +200,14 @@ pub fn initialize_build(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
+    let _span = info_span!(
+        "build.initialize",
+        working_dir = %path.display(),
+        in_process = build_mode.is_in_process(),
+        subprocess,
+        prod
+    )
+    .entered();
     let project_context = ProjectContext::new(path)?;
     let compiler = get_compiler_info(&project_context)?;
 
@@ -308,6 +322,13 @@ pub fn incremental_build(
     create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
+    let _span = info_span!(
+        "build.incremental",
+        module_count = build_state.modules.len(),
+        initial_build,
+        in_process = build_state.build_mode().is_in_process()
+    )
+    .entered();
     let build_folder = build_state.root_folder.to_string_lossy().to_string();
 
     let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
@@ -357,6 +378,7 @@ pub fn incremental_build(
             warnings
         }
         Err(err) => {
+            let _error_span = info_span!("build.parse_error").entered();
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
@@ -439,6 +461,7 @@ pub fn incremental_build(
         |size| pb.set_length(size),
     )
     .map_err(|e| {
+        let _error_span = info_span!("build.compile_error").entered();
         let _lock = drop_lock(LockKind::Build, &build_folder);
 
         IncrementalBuildError {
@@ -636,6 +659,14 @@ pub fn build(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
+    let _span = info_span!(
+        "rewatch.build",
+        working_dir = %path.display(),
+        in_process = build_mode.is_in_process(),
+        subprocess,
+        prod
+    )
+    .entered();
     let default_timing: Option<std::time::Duration> = if no_timing {
         Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
     } else {
