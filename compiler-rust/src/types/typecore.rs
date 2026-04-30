@@ -4598,17 +4598,23 @@ fn force_qualified_value_type_paths<'a>(
                 let args = args.clone();
                 let abbrev = abbrev.clone();
                 drop(desc);
-                if let Path::Pdot(parent, name, _) = &path {
+                if !value_access_root_is_local
+                    && let Path::Pdot(parent, name, _) = &path
+                {
                     // OCaml compiler/ml/typecore.ml:2421-2457 types
-                    // `Pexp_ident` by calling Typetexp.find_value and then
-                    // instancing `desc.val_type`. The qualified value lookup
-                    // path goes through compiler/ml/typetexp.ml:135-143 into
-                    // Env.lookup_value, whose Ldot case at compiler/ml/env.ml:1090-1104
-                    // reads component tables built by env.ml:1496-1524. Those
-                    // component value descriptions are already substituted by
-                    // compiler/ml/subst.ml:303-309, so type constructors inside
-                    // a looked-up value type force their module components at
-                    // this point, before the next source binding is typed.
+                    // `Pexp_ident` by calling `Typetexp.find_value`, checking
+                    // the recarg shape with `repr desc.val_type`, then
+                    // instancing `desc.val_type`. Qualified lookup reaches
+                    // compiler/ml/env.ml:800-813, whose component values were
+                    // built by env.ml:1530-1538 with
+                    // compiler/ml/subst.ml:303-309 `Subst.value_description`.
+                    // For value types such as `Set_gen.of_sorted_list :
+                    // Belt.List.t<_> -> _`, OCaml has forced the selected
+                    // type component before the next source binding is typed.
+                    // But env.ml:781-793 resolves local module aliases through
+                    // the local component path, so do not force the underlying
+                    // persistent path again for alias-rooted values like
+                    // `J.classify`.
                     let _ = lookup_type_in_resolved_path(
                         parent,
                         name.as_str(),
