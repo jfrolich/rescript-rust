@@ -53,11 +53,26 @@ fn first_char_case_variant(name: &str) -> Option<String> {
     }
 }
 
-fn resolve_first_char_case_key<V>(map: &HashMap<String, V>, name: &str) -> Option<String> {
-    if map.contains_key(name) {
-        return Some(name.to_string());
+fn resolve_first_char_case_key<'a, V>(
+    map: &'a HashMap<String, V>,
+    name: &str,
+) -> Option<&'a str> {
+    if let Some((key, _)) = map.get_key_value(name) {
+        return Some(key.as_str());
     }
-    first_char_case_variant(name).filter(|variant| map.contains_key(variant))
+    let variant = first_char_case_variant(name)?;
+    map.get_key_value(&variant).map(|(key, _)| key.as_str())
+}
+
+fn resolve_first_char_case_value<'a, V>(
+    map: &'a HashMap<String, V>,
+    name: &str,
+) -> Option<&'a V> {
+    if let Some(value) = map.get(name) {
+        return Some(value);
+    }
+    let variant = first_char_case_variant(name)?;
+    map.get(&variant)
 }
 
 /// A cached persistent module structure.
@@ -486,7 +501,7 @@ impl PersistentEnv {
         ctx: &'a TypeContext<'a>,
     ) -> Option<&PersStruct> {
         // Check cache first (already internalized)
-        if let Some(cache_key) = resolve_first_char_case_key(&self.cache, name) {
+        if let Some(cache_key) = resolve_first_char_case_key(&self.cache, name).map(str::to_owned) {
             return self.cache.get(&cache_key).and_then(|opt| opt.as_ref());
         }
 
@@ -497,6 +512,7 @@ impl PersistentEnv {
         // 2. Collect alias rewrites
         // 3. Register types by stamp (without cascading alias resolution)
         if let Some(portable_key) = resolve_first_char_case_key(&self.portable_cache, name) {
+            let portable_key = portable_key.to_string();
             let portable = self.portable_cache.get(&portable_key).cloned()?;
             let ps = portable_types::internalize_pers_struct(&portable, ctx);
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
@@ -521,6 +537,7 @@ impl PersistentEnv {
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
         let load_name = resolve_first_char_case_key(&self.source_fallback_paths, name)
+            .map(str::to_owned)
             .unwrap_or_else(|| name.to_string());
         self.cache.insert(load_name.clone(), None);
 
@@ -606,9 +623,7 @@ impl PersistentEnv {
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
-            && let Some(info) = self.in_memory_modules.get(&info_key)
-        {
+        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
             return Some(info.source_path.clone());
         }
 
@@ -648,9 +663,7 @@ impl PersistentEnv {
     /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
-            && let Some(info) = self.in_memory_modules.get(&info_key)
-        {
+        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
             return Some(info.is_pure);
         }
 
@@ -674,9 +687,7 @@ impl PersistentEnv {
         name: &str,
     ) -> Option<HashMap<String, CmjExportConstant>> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info_key) = resolve_first_char_case_key(&self.in_memory_modules, name)
-            && let Some(info) = self.in_memory_modules.get(&info_key)
-        {
+        if let Some(info) = resolve_first_char_case_value(&self.in_memory_modules, name) {
             return Some(info.cmj_export_constants.clone());
         }
 
@@ -887,6 +898,7 @@ impl PersistentEnv {
         // may register source fallback paths, which are also source-only.
         if self.in_process_mode {
             if let Some(source_key) = resolve_first_char_case_key(&self.source_fallback_paths, name)
+                .map(str::to_owned)
             {
                 return self.load_module_from_source_path_fallback(&source_key, ctx);
             }
@@ -1191,8 +1203,7 @@ impl PersistentEnv {
     }
 
     pub fn module_is_runtime(&self, name: &str) -> bool {
-        resolve_first_char_case_key(&self.in_memory_modules, name)
-            .and_then(|key| self.in_memory_modules.get(&key))
+        resolve_first_char_case_value(&self.in_memory_modules, name)
             .map(|info| info.is_runtime)
             .unwrap_or(false)
     }
