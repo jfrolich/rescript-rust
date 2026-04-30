@@ -6299,10 +6299,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         let ctx = tctx.type_ctx;
                         ctx.end_def();
                         crate::types::ctype::generalize(ctx, val_type);
-                        // Match OCaml transl_value_decl parse_arity/get_arity side effects:
-                        // expanding the generalized head seeds simple abbreviations so later
-                        // instance() calls preserve physical sharing on nullary aliases.
-                        crate::types::ctype::expand_head(ctx, &sig_env, val_type);
                         items.push(SigItem::SigValue(
                             val_id,
                             ValueDescription {
@@ -9527,9 +9523,15 @@ pub fn transl_signature<'a>(
                     transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
-                // Keep signature value declaration abbreviation memo side effects
-                // aligned with OCaml transl_value_decl.
-                crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
+                if !vd.pval_prim.is_empty() {
+                    // OCaml compiler/ml/typemod.ml:756-763 delegates Psig_value
+                    // to compiler/ml/typedecl.ml:1875-1914. The extra
+                    // parse_arity/get_arity expansion happens only in the
+                    // primitive branch at typedecl.ml:1888-1907; ordinary
+                    // signature values must not force constructor heads before
+                    // Env.enter_value allocates val_id at typedecl.ml:1908-1911.
+                    let _ = get_primitive_arity_from_type(ctx, &sig_env, val_ty);
+                }
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
                 // lazy signature forcing during type translation consumes stamps
