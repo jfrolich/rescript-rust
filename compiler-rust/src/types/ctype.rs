@@ -1816,12 +1816,9 @@ fn normalize_path_full_inner<'a>(
         // already cached that component view, do not turn recursive
         // normalize-path prefix handling for Belt collection aliases into an
         // earlier full-signature force than OCaml observes.
-        let should_force_persistent_sig =
-            id.is_persistent()
-                && !(id.name() == "Belt" && has_component_cache)
-                && (!env.has_module_ident(id)
-                    || id.name() == "Pervasives"
-                    || id.name() == "Stdlib");
+        let should_force_persistent_sig = id.is_persistent()
+            && !(id.name() == "Belt" && has_component_cache)
+            && (!env.has_module_ident(id) || id.name() == "Pervasives" || id.name() == "Stdlib");
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
@@ -3411,6 +3408,36 @@ fn unify_types<'a>(
 
     // Match on both descriptors
     match (&*desc1, &*desc2) {
+        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
+            if state.env().is_some() && deep_occur(ctx, t1, t2) =>
+        {
+            // OCaml compiler/ml/ctype.ml:2302-2303 routes variable-vs-constructor
+            // pairs that syntactically contain the variable through unify2, so
+            // compiler/ml/ctype.ml:2338-2344 expands aliases before the occurs
+            // check. This accepts abbreviations like `type t<'a> = 'a` without
+            // treating the unexpanded `t<'a>` spelling as a recursive type.
+            let env = state.env().expect("checked above");
+            let exp1 = expand_head_unif(ctx, env, t1);
+            let exp2 = expand_head_unif(ctx, env, t2);
+            drop(desc1);
+            drop(desc2);
+            unify_after_expansion(ctx, state, t1, exp1, t2, exp2)
+        }
+
+        (TypeDesc::Tconstr { .. }, TypeDesc::Tvar(_))
+            if state.env().is_some() && deep_occur(ctx, t2, t1) =>
+        {
+            // OCaml compiler/ml/ctype.ml:2302-2303 handles the symmetric
+            // constructor-vs-variable case through the same unify2 expansion
+            // path before any occurs check is allowed to fail.
+            let env = state.env().expect("checked above");
+            let exp1 = expand_head_unif(ctx, env, t1);
+            let exp2 = expand_head_unif(ctx, env, t2);
+            drop(desc1);
+            drop(desc2);
+            unify_after_expansion(ctx, state, t1, exp1, t2, exp2)
+        }
+
         // Type variable on left - occurs check and link
         (TypeDesc::Tvar(_), _) => {
             drop(desc1);

@@ -18,6 +18,18 @@ use super::decl::{
 };
 use super::path::Path;
 
+fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
+    fn root_ident(path: &Path) -> Option<&Ident> {
+        match path {
+            Path::Pident(id) => Some(id),
+            Path::Pdot(prefix, _, _) => root_ident(prefix),
+            Path::Papply(_, _) => None,
+        }
+    }
+
+    root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
+}
+
 fn add_type_constructors(
     constructors: &mut HashMap<String, Vec<ConstructorDescription>>,
     access_path: &Path,
@@ -296,8 +308,7 @@ impl QualifiedModuleComponents {
                         &access_path,
                         ctx,
                     );
-                    component_modtypes
-                        .insert(id.name().to_string(), (id.clone(), component_mtd));
+                    component_modtypes.insert(id.name().to_string(), (id.clone(), component_mtd));
                 }
                 SignatureItem::SigClassType => {}
             }
@@ -316,13 +327,7 @@ impl QualifiedModuleComponents {
                     }
                 }
                 SignatureItem::SigType(id, decl, _) => {
-                    add_type_constructors(
-                        &mut constructors,
-                        &access_path,
-                        id.name(),
-                        decl,
-                        ctx,
-                    );
+                    add_type_constructors(&mut constructors, &access_path, id.name(), decl, ctx);
                 }
                 SignatureItem::SigTypext(id, ext, _) => {
                     let ext_slot = runtime_pos;
@@ -499,9 +504,7 @@ impl QualifiedModuleComponents {
     }
 
     pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {
-        self.component_modtypes
-            .get(name)
-            .map(|(id, mtd)| (id, mtd))
+        self.component_modtypes.get(name).map(|(id, mtd)| (id, mtd))
     }
 
     pub(crate) fn lookup_qualified_modtype(
@@ -532,7 +535,7 @@ fn qualified_submodule_access_path(
     runtime_pos: usize,
     md: &ModuleDeclaration,
 ) -> Path {
-    if parent_access_path.head().is_persistent() || parent_access_path.head().stamp() == 0 {
+    if path_non_apply_root_is_persistent_or_global(parent_access_path) {
         md.md_path
             .clone()
             .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
@@ -561,11 +564,7 @@ fn build_local_module_components<'a>(
         // effects that later typedtree stamps observe.
         if let Path::Pdot(parent, name, _) = alias_path {
             let _ = crate::types::typecore::lookup_module_in_resolved_path(
-                parent,
-                name,
-                env,
-                pers_env,
-                ctx,
+                parent, name, env, pers_env, ctx,
             );
         }
     }

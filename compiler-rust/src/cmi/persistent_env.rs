@@ -726,8 +726,7 @@ impl PersistentEnv {
             || self.portable_cache.contains_key(name)
             || self.in_memory_modules.contains_key(name)
             || self.source_fallback_paths.contains_key(name)
-            || (!self.in_process_mode
-                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
+            || (!self.in_process_mode && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
     /// Find and load a module by name.
@@ -2462,7 +2461,24 @@ pub fn substitute_type_paths_in_sig(
 ) {
     let maps = build_subst_maps_for_module(sig_items, module_path);
     let type_stamp_map = &maps.type_stamp_map;
-    let type_name_map = &maps.type_name_map;
+    // OCaml compiler/ml/env.ml:1530-1538 builds a component substitution with
+    // `prefix_idents`, then compiler/ml/subst.ml:87-95 and subst.ml:303-309
+    // apply it to value/type descriptions. Rust in-process saved signatures can
+    // contain stamp-0 `Pident(type_name)` self references after portable
+    // serialization, so keep the direct signature binder names available for
+    // this non-recursive component-root substitution.
+    let mut direct_type_name_map = maps.type_name_map.clone();
+    for item in sig_items {
+        match item {
+            SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
+                direct_type_name_map
+                    .entry(id.name().to_string())
+                    .or_insert_with(|| Path::pdot(module_path.clone(), id.name()));
+            }
+            _ => {}
+        }
+    }
+    let type_name_map = &direct_type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();

@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use crate::ident::Ident;
+use crate::types::Path;
 use crate::types::ctype::{self, UnifyState};
 use crate::types::decl::{
     ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
@@ -20,7 +21,6 @@ use crate::types::decl::{
 use crate::types::env::Env;
 use crate::types::type_expr::TypeDesc;
 use crate::types::typedtree::ModuleCoercion;
-use crate::types::Path;
 use crate::types::{TypeContext, TypeExprRef};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
@@ -638,15 +638,13 @@ fn register_paired_signature_substitution(
     modtype_subst: &mut HashMap<String, Path>,
 ) {
     match (paired.impl_item, paired.sig_item) {
-        (
-            SignatureItem::SigType(impl_id, impl_type_decl, _),
-            SignatureItem::SigType(sig_id, _, _),
-        ) => {
-            let subst_path = impl_type_decl
-                .type_path
-                .clone()
-                .unwrap_or_else(|| Path::pident(impl_id.clone()));
-            type_subst.insert(sig_id.name().to_string(), subst_path);
+        (SignatureItem::SigType(impl_id, _, _), SignatureItem::SigType(sig_id, _, _)) => {
+            // OCaml compiler/ml/includemod.ml:358-361 uses
+            // `Subst.add_type id2 (Pident id1)` when pairing signature
+            // components. Do not use the implementation declaration's
+            // strengthened `type_path` here: inside an include/simplified
+            // structure check the implementation component is the local binder.
+            type_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
         }
         (SignatureItem::SigModule(impl_id, _, _), SignatureItem::SigModule(sig_id, _, _)) => {
             module_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));

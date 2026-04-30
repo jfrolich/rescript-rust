@@ -3210,6 +3210,18 @@ fn path_root_is_named(path: &Path, root_name: &str) -> bool {
     }
 }
 
+fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
+    fn root_ident(path: &Path) -> Option<&Ident> {
+        match path {
+            Path::Pident(id) => Some(id),
+            Path::Pdot(prefix, _, _) => root_ident(prefix),
+            Path::Papply(_, _) => None,
+        }
+    }
+
+    root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
+}
+
 fn type_expr_mentions_path_root(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
@@ -3725,8 +3737,7 @@ pub fn lookup_module_path_by_lid<'b>(
                     components
                         .lookup_module(submod_name)
                         .map(|(runtime_pos, _, md)| {
-                            if components.access_path().head().is_persistent()
-                                || components.access_path().head().stamp() == 0
+                            if path_non_apply_root_is_persistent_or_global(components.access_path())
                             {
                                 md.md_path.clone().unwrap_or_else(|| {
                                     Path::pdot(
@@ -6448,19 +6459,19 @@ fn scrape_alias_module_type<'b>(
                             let (runtime_pos, _, md) =
                                 components.lookup_qualified_module(submod.as_str(), ctx)?;
                             let parent_access_path = components.access_path().clone();
-                            let owner_path = if parent_access_path.head().is_persistent()
-                                || parent_access_path.head().stamp() == 0
-                            {
-                                md.md_path.clone().unwrap_or_else(|| {
-                                    Path::pdot(parent_access_path.clone(), submod.clone())
-                                })
-                            } else {
-                                Path::pdot_pos(
-                                    parent_access_path.clone(),
-                                    submod.clone(),
-                                    runtime_pos as i32,
-                                )
-                            };
+                            let owner_path =
+                                if path_non_apply_root_is_persistent_or_global(&parent_access_path)
+                                {
+                                    md.md_path.clone().unwrap_or_else(|| {
+                                        Path::pdot(parent_access_path.clone(), submod.clone())
+                                    })
+                                } else {
+                                    Path::pdot_pos(
+                                        parent_access_path.clone(),
+                                        submod.clone(),
+                                        runtime_pos as i32,
+                                    )
+                                };
                             Some((owner_path, md))
                         },
                     )

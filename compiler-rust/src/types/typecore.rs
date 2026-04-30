@@ -3200,10 +3200,7 @@ fn preserve_apply_argument_alias_representative(
             })
     }
 
-    fn constr_path_and_arity(
-        ctx: &TypeContext<'_>,
-        ty: TypeExprRef,
-    ) -> Option<(Path, usize)> {
+    fn constr_path_and_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(Path, usize)> {
         let ty = ctx.repr(ty);
         let desc = ctx.get_desc(ty);
         match &*desc {
@@ -3268,14 +3265,13 @@ fn preserve_apply_argument_alias_representative(
             {
                 let argument_is_local_alias = path_head_is_local_module_alias(env, argument_path);
                 let parameter_is_local_alias = path_head_is_local_module_alias(env, parameter_path);
-                let flattened_alias_equiv =
-                    crate::types::ctype::flattened_alias_paths_equivalent(
-                        ctx,
-                        env,
-                        parameter_path,
-                        argument_path,
-                        parameter_args.len(),
-                    );
+                let flattened_alias_equiv = crate::types::ctype::flattened_alias_paths_equivalent(
+                    ctx,
+                    env,
+                    parameter_path,
+                    argument_path,
+                    parameter_args.len(),
+                );
                 let direction = if argument_is_local_alias && !parameter_is_local_alias {
                     Some(AliasLinkDirection::ParameterToArgument)
                 } else if parameter_is_local_alias && !argument_is_local_alias {
@@ -3393,10 +3389,9 @@ fn preserve_apply_argument_alias_representative(
         &argument_path,
         arity,
     );
-    let selected_local_parameter_alias =
-        path_head_is_local_module_alias(env, &parameter_path)
-            && !path_head_is_local_module_alias(env, &argument_path)
-            && !local_manifest_arg_pairs.is_empty();
+    let selected_local_parameter_alias = path_head_is_local_module_alias(env, &parameter_path)
+        && !path_head_is_local_module_alias(env, &argument_path)
+        && !local_manifest_arg_pairs.is_empty();
     if path_head_is_local_module_alias(env, &parameter_path)
         && !path_head_is_local_module_alias(env, &argument_path)
         && !selected_local_parameter_alias
@@ -3415,11 +3410,10 @@ fn preserve_apply_argument_alias_representative(
         &argument_path,
         arity,
     );
-    let shares_identity =
-        shares_direct_identity
-            || shares_ctype_identity
-            || selected_local_parameter_alias
-            || shares_flattened_alias;
+    let shares_identity = shares_direct_identity
+        || shares_ctype_identity
+        || selected_local_parameter_alias
+        || shares_flattened_alias;
     if !shares_identity {
         return;
     }
@@ -4746,12 +4740,11 @@ fn force_qualified_value_type_paths<'a>(
                 return Some(new_prefix.clone());
             }
             match path {
-                Path::Pdot(prefix, name, pos) => rewrite_path_prefix(
-                    prefix,
-                    old_prefix,
-                    new_prefix,
-                )
-                .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)),
+                Path::Pdot(prefix, name, pos) => {
+                    rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
+                        Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+                    })
+                }
                 _ => None,
             }
         }
@@ -4806,8 +4799,7 @@ fn force_qualified_value_type_paths<'a>(
                 alias_rewrites.push((alias_path, alias_targets));
             }
         });
-        if let (Some(root), Some(selected_module_path)) =
-            (value_access_root, selected_module_path)
+        if let (Some(root), Some(selected_module_path)) = (value_access_root, selected_module_path)
         {
             if selected_module_path.head().same(root) && !selected_alias_targets.is_empty() {
                 alias_rewrites.push((
@@ -4830,13 +4822,11 @@ fn force_qualified_value_type_paths<'a>(
                         // `Js.Dict.t` must not become `J.t`.
                         return None;
                     }
-                    let candidate_parent =
-                        rewrite_path_prefix(parent, &alias_target, &alias_path)?;
+                    let candidate_parent = rewrite_path_prefix(parent, &alias_target, &alias_path)?;
                     if candidate_parent.same(parent) {
                         return None;
                     }
-                    let candidate =
-                        Path::Pdot(Box::new(candidate_parent), type_name.clone(), *pos);
+                    let candidate = Path::Pdot(Box::new(candidate_parent), type_name.clone(), *pos);
                     if candidate.same(path) {
                         return None;
                     }
@@ -5019,12 +5009,7 @@ fn force_qualified_value_type_paths<'a>(
                     ctx, env, &candidate, path, arity,
                 );
             if !flattened_alias_equivalent
-                && !module_signature_declares_type_component(
-                    ctx,
-                    env,
-                    &candidate_parent,
-                    type_name,
-                )
+                && !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name)
             {
                 continue;
             }
@@ -5120,9 +5105,7 @@ fn force_qualified_value_type_paths<'a>(
                 let args = args.clone();
                 let abbrev = abbrev.clone();
                 drop(desc);
-                if !value_access_root_is_local
-                    && let Path::Pdot(parent, name, _) = &path
-                {
+                if !value_access_root_is_local && let Path::Pdot(parent, name, _) = &path {
                     // OCaml compiler/ml/typecore.ml:2421-2457 types
                     // `Pexp_ident` by calling `Typetexp.find_value`, checking
                     // the recarg shape with `repr desc.val_type`, then
@@ -5181,8 +5164,7 @@ fn force_qualified_value_type_paths<'a>(
                         })
                         .flatten()
                 });
-                if let Some(rewritten_path) = rewritten_path
-                {
+                if let Some(rewritten_path) = rewritten_path {
                     ctx.set_desc(
                         ty,
                         TypeDesc::Tconstr {
@@ -5296,19 +5278,17 @@ fn force_qualified_value_type_paths<'a>(
                 );
                 for (_, field) in fields {
                     match field {
-                        RowField::Rpresent(Some(arg)) => {
-                            visit(
-                                tctx,
-                                env,
-                                arg,
-                                value_access_root_is_local,
-                                value_access_root,
-                                selected_module_path,
-                                selected_alias_targets,
-                                allow_stdlib_flat_parent_inference,
-                                seen,
-                            )
-                        }
+                        RowField::Rpresent(Some(arg)) => visit(
+                            tctx,
+                            env,
+                            arg,
+                            value_access_root_is_local,
+                            value_access_root,
+                            selected_module_path,
+                            selected_alias_targets,
+                            allow_stdlib_flat_parent_inference,
+                            seen,
+                        ),
                         RowField::Reither { types: args, .. } => {
                             for arg in args {
                                 visit(
@@ -5475,7 +5455,10 @@ fn constructor_alias_rewrite_value_path(
     if type_name != "t" || !path_root_is_local(parent) {
         return None;
     }
-    Some(Path::pdot(parent.as_ref().clone(), constructor_name.to_string()))
+    Some(Path::pdot(
+        parent.as_ref().clone(),
+        constructor_name.to_string(),
+    ))
 }
 
 /// Type check an expression against an expected type.
@@ -7700,11 +7683,7 @@ fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
         "Pervasives.~+" | "Pervasives.~-" => Some(unified_op_entry(Unary, true, true, false)),
         "Pervasives.~~~" => Some(unified_op_entry(Unary, false, true, false)),
         "Pervasives.+" => Some(unified_op_entry(Binary, true, true, true)),
-        "Pervasives.-"
-        | "Pervasives.*"
-        | "Pervasives./"
-        | "Pervasives.%"
-        | "Pervasives.mod"
+        "Pervasives.-" | "Pervasives.*" | "Pervasives./" | "Pervasives.%" | "Pervasives.mod"
         | "Pervasives.**" => Some(unified_op_entry(Binary, true, true, false)),
         "Pervasives.<<" | "Pervasives.>>" | "Pervasives.|||" | "Pervasives.^^^"
         | "Pervasives.&&&" => Some(unified_op_entry(Binary, false, true, false)),
@@ -15409,13 +15388,9 @@ fn type_pack(
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
     // typedtree parity depends on doing that work at the same program points.
-    let coercion = crate::types::includemod::modtypes(
-        ctx,
-        &package_env,
-        &arg_mty,
-        &decl_package_mty,
-    )
-    .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    let coercion =
+        crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
+            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
@@ -17181,8 +17156,7 @@ impl Env {
                     ctx,
                     |components| {
                         components.lookup_module(submod_name).map(|(pos, _, md)| {
-                            if parent_path.head().is_persistent() || parent_path.head().stamp() == 0
-                            {
+                            if path_non_apply_root_is_persistent_or_global(&parent_path) {
                                 md.md_path.clone().unwrap_or_else(|| {
                                     Path::pdot(parent_path.clone(), submod_name.to_string())
                                 })
@@ -18500,6 +18474,22 @@ fn path_root_module(path: &Path) -> Path {
     }
 }
 
+fn path_non_apply_root_ident(path: &Path) -> Option<&Ident> {
+    match path {
+        Path::Pident(id) => Some(id),
+        Path::Pdot(prefix, _, _) => path_non_apply_root_ident(prefix),
+        Path::Papply(_, _) => None,
+    }
+}
+
+fn path_non_apply_root_is_persistent(path: &Path) -> bool {
+    path_non_apply_root_ident(path).is_some_and(Ident::is_persistent)
+}
+
+fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
+    path_non_apply_root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
+}
+
 fn is_local_module_access_path(path: &Path) -> bool {
     matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent())
 }
@@ -18843,7 +18833,7 @@ fn qualify_label_description_paths<'a>(
         let root = path_root_module(res_path);
         if !root.same(res_path) {
             if let Some(alias_target) = alias_target_for_module_path(&root, env, pers_env, ctx) {
-                if alias_target.head().is_persistent() && !alias_target.same(&root) {
+                if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
                     let mut visited = HashSet::new();
                     rewrite_direct_root_type_family_in_place(
                         ctx,
@@ -20133,7 +20123,10 @@ fn direct_sig_type_family_rebind_options(
 ) -> (bool, bool) {
     use crate::types::decl::ModuleType as DeclMty;
 
-    if access_path.head().is_persistent() {
+    // OCaml compiler/ml/path.ml:61 makes `Path.head` invalid for `Papply`,
+    // while compiler/ml/env.ml:1744-1751 passes `Papply` roots for applicative
+    // functor components into the same env.ml:1530-1538 prefixing path.
+    if path_non_apply_root_is_persistent(access_path) {
         return (false, false);
     }
 
@@ -20143,7 +20136,7 @@ fn direct_sig_type_family_rebind_options(
         // infer that unique family path for local access-path rebasing.
         DeclMty::MtyAlias(_, target) | DeclMty::MtyIdent(target) => (
             true,
-            matches!(target, Path::Pident(_)) || !target.head().is_persistent(),
+            matches!(target, Path::Pident(_)) || !path_non_apply_root_is_persistent(target),
         ),
         _ => (false, false),
     }
@@ -20501,17 +20494,19 @@ fn with_resolved_child_module_components<'a, R>(
     // `Subst.modtype` would freshen the child's signature binders before
     // OCaml observes them.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
-        let access_path = if parent_components.access_path().head().is_persistent()
-            || parent_components.access_path().head().stamp() == 0
-        {
-            Path::pdot(parent_components.access_path().clone(), child_name.to_string())
-        } else {
-            Path::pdot_pos(
-                parent_components.access_path().clone(),
-                child_name.to_string(),
-                runtime_pos as i32,
-            )
-        };
+        let access_path =
+            if path_non_apply_root_is_persistent_or_global(parent_components.access_path()) {
+                Path::pdot(
+                    parent_components.access_path().clone(),
+                    child_name.to_string(),
+                )
+            } else {
+                Path::pdot_pos(
+                    parent_components.access_path().clone(),
+                    child_name.to_string(),
+                    runtime_pos as i32,
+                )
+            };
         ctx.register_resolved_child_module_path(
             parent_components.access_path(),
             child_name,
@@ -20770,7 +20765,7 @@ fn qualified_submodule_access_path(
     runtime_pos: usize,
     md: &crate::types::decl::ModuleDeclaration,
 ) -> Path {
-    if parent_access_path.head().is_persistent() || parent_access_path.head().stamp() == 0 {
+    if path_non_apply_root_is_persistent_or_global(parent_access_path) {
         md.md_path
             .clone()
             .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
@@ -20925,10 +20920,12 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
 
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
     let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
+    let access_path_has_persistent_root =
+        matches!(path_root_module(access_path), Path::Pident(id) if id.is_persistent());
     let alias_requires_exact_persistent_prefix = matches!(
         mty,
         crate::types::decl::ModuleType::MtyAlias(_, target)
-            if access_path.head().is_persistent() && !target.same(access_path)
+            if access_path_has_persistent_root && !target.same(access_path)
     );
     if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
         let strengthen_path = match mty {
@@ -20962,6 +20959,45 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             old_name,
             access_path,
         );
+    }
+    if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty
+        && !target.same(access_path)
+        && !access_path_has_persistent_root
+    {
+        // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
+        // compiler/ml/env.ml:1530-1538 prefixes component declarations with the
+        // selected access path. Rust persistent signatures are already finalized
+        // under their saved unit path, so rewrite that target prefix to the
+        // selected local alias path before applying the component substitution.
+        match target {
+            Path::Pident(alias_id) => {
+                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                    &sig,
+                    alias_id.name(),
+                    access_path,
+                    ctx,
+                );
+                crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+                    &mut sig,
+                    alias_id.name(),
+                    access_path,
+                );
+            }
+            Path::Pdot(..) => {
+                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                    &sig,
+                    target,
+                    access_path,
+                    ctx,
+                );
+                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                    &mut sig,
+                    target,
+                    access_path,
+                );
+            }
+            Path::Papply(_, _) => {}
+        }
     }
     if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty
         && alias_requires_exact_persistent_prefix
@@ -21191,10 +21227,8 @@ fn build_module_signature_for_path<'a>(
                             pers_env,
                             ctx,
                             |components| {
-                                let mut sig = copy_lookup_signature_for_subst(
-                                    components.signature(),
-                                    ctx,
-                                );
+                                let mut sig =
+                                    copy_lookup_signature_for_subst(components.signature(), ctx);
                                 crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                     &sig,
                                     &qualified_alias_path,
@@ -21237,10 +21271,8 @@ fn build_module_signature_for_path<'a>(
                         pers_env,
                         ctx,
                         |components| {
-                            let mut sig = copy_lookup_signature_for_subst(
-                                components.signature(),
-                                ctx,
-                            );
+                            let mut sig =
+                                copy_lookup_signature_for_subst(components.signature(), ctx);
                             crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                                 &sig,
                                 &qualified_alias_path,
