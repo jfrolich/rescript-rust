@@ -460,6 +460,364 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
     }
 }
 
+/// Owned form of [`lets_helper`].
+///
+/// The branch order and decisions are the same direct port of
+/// `Lam_pass_lets_dce.lets_helper` (compiler/core/lam_pass_lets_dce.ml:14-205);
+/// this variant only consumes the Rust tree when the caller already owns it, so
+/// pass-to-pass plumbing does not deep-clone every unchanged node.
+fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
+    match lam {
+        Lambda::Lvar(v) => state.subst.get(&v).cloned().unwrap_or(Lambda::Lvar(v)),
+
+        Lambda::Llet(kind, v, value, l2)
+            if matches!(value.as_ref(), Lambda::Lvar(_))
+                && matches!(kind, LetKind::Strict | LetKind::Alias | LetKind::StrictOpt) =>
+        {
+            let Lambda::Lvar(w) = *value else {
+                unreachable!()
+            };
+            let simplified_w = lets_helper_owned(state, Lambda::Lvar(w));
+            state.subst.insert(v, simplified_w);
+            lets_helper_owned(state, *l2)
+        }
+
+        Lambda::Llet(LetKind::Strict, v, value, lbody)
+            if matches!(
+                value.as_ref(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                    args,
+                    ..
+                }) if args.len() == 1
+            ) =>
+        {
+            let Lambda::Lprim(PrimInfo {
+                primitive,
+                mut args,
+                loc,
+            }) = *value
+            else {
+                unreachable!()
+            };
+            let linit = args.pop().expect("checked one ref initializer");
+            let slinit = lets_helper_owned(state, linit);
+            let slbody = lets_helper_owned(state, *lbody);
+            match eliminate_ref(&v, &slbody) {
+                Ok(reified) => refine_let(LetKind::Variable, v, slinit, reified),
+                Err(RealReference) => refine_let(
+                    LetKind::Strict,
+                    v,
+                    Lambda::prim(primitive, vec![slinit], loc),
+                    slbody,
+                ),
+            }
+        }
+
+        Lambda::Llet(LetKind::Alias, v, l1, l2) => {
+            let info = state.count_var(&v);
+            if info.times == 0 {
+                return lets_helper_owned(state, *l2);
+            }
+
+            let small_const = matches!(
+                l1.as_ref(),
+                Lambda::Lconst(
+                    Constant::Int { .. }
+                        | Constant::NativeInt { .. }
+                        | Constant::Char(_)
+                        | Constant::Float(_)
+                        | Constant::BigInt { .. }
+                        | Constant::Pointer(_)
+                        | Constant::JsTrue
+                        | Constant::JsFalse
+                        | Constant::JsUndefined { .. }
+                )
+            );
+            let pfield_from_global = matches!(
+                l1.as_ref(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pfield(_, _),
+                    args,
+                    ..
+                }) if args.len() == 1 && matches!(args[0], Lambda::LglobalModule(_, _))
+            );
+            let subst_now = (info.times == 1 && !info.captured)
+                || (info.times == 1
+                    && info.captured
+                    && matches!(l1.as_ref(), Lambda::Lconst(_) | Lambda::Lvar(_)))
+                || small_const
+                || pfield_from_global;
+
+            if subst_now {
+                let simplified = lets_helper_owned(state, *l1);
+                state.subst.insert(v, simplified);
+                return lets_helper_owned(state, *l2);
+            }
+
+            if let Lambda::Lconst(Constant::String { s, delim: None }) = l1.as_ref() {
+                state.string_table.insert(v.clone(), s.clone());
+                let simplified_body = lets_helper_owned(state, *l2);
+                return Lambda::let_(LetKind::Alias, v, *l1, simplified_body);
+            }
+
+            let new_l1 = lets_helper_owned(state, *l1);
+            let new_l2 = lets_helper_owned(state, *l2);
+            Lambda::let_(LetKind::Alias, v, new_l1, new_l2)
+        }
+
+        Lambda::Llet(LetKind::StrictOpt, v, l1, lbody) => {
+            if !state.used(&v) {
+                return lets_helper_owned(state, *lbody);
+            }
+
+            if matches!(
+                l1.as_ref(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                    args,
+                    ..
+                }) if args.len() == 1
+            ) {
+                let Lambda::Lprim(PrimInfo {
+                    primitive,
+                    mut args,
+                    loc,
+                }) = *l1
+                else {
+                    unreachable!()
+                };
+                let linit = args.pop().expect("checked one ref initializer");
+                let slinit = lets_helper_owned(state, linit);
+                let slbody = lets_helper_owned(state, *lbody);
+                return match eliminate_ref(&v, &slbody) {
+                    Ok(reified) => refine_let(LetKind::Variable, v, slinit, reified),
+                    Err(RealReference) => refine_let(
+                        LetKind::StrictOpt,
+                        v,
+                        Lambda::prim(primitive, vec![slinit], loc),
+                        slbody,
+                    ),
+                };
+            }
+
+            let new_l1 = lets_helper_owned(state, *l1);
+            if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+                state.string_table.insert(v.clone(), s.clone());
+                let simplified_body = lets_helper_owned(state, *lbody);
+                return Lambda::let_(LetKind::Alias, v, new_l1, simplified_body);
+            }
+            let simplified_body = lets_helper_owned(state, *lbody);
+            refine_let(LetKind::StrictOpt, v, new_l1, simplified_body)
+        }
+
+        Lambda::Llet(kind @ (LetKind::Strict | LetKind::Variable), v, l1, l2) => {
+            if !state.used(&v) {
+                let new_l1 = lets_helper_owned(state, *l1);
+                let new_l2 = lets_helper_owned(state, *l2);
+                return if no_side_effects(&new_l1) {
+                    new_l2
+                } else {
+                    Lambda::seq(new_l1, new_l2)
+                };
+            }
+            let new_l1 = lets_helper_owned(state, *l1);
+            if matches!(kind, LetKind::Strict) {
+                if let Lambda::Lconst(Constant::String { s, delim: None }) = &new_l1 {
+                    state.string_table.insert(v.clone(), s.clone());
+                    let simplified_body = lets_helper_owned(state, *l2);
+                    return Lambda::let_(LetKind::Alias, v, new_l1, simplified_body);
+                }
+            }
+            let simplified_body = lets_helper_owned(state, *l2);
+            refine_let(kind, v, new_l1, simplified_body)
+        }
+
+        Lambda::Lsequence(l1, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::seq(s1, s2)
+        }
+
+        Lambda::Lapply(apply) => {
+            let Apply {
+                ap_func,
+                ap_args,
+                ap_info,
+                ap_transformed_jsx,
+            } = apply;
+            match *ap_func {
+                Lambda::Lfunction(func)
+                    if func.params.len() == ap_args.len() && lfunction_can_be_inlined(&func) =>
+                {
+                    let reduced = no_names_beta_reduce(&func.params, &func.body, &ap_args);
+                    lets_helper_owned(state, reduced)
+                }
+                func => {
+                    let new_func = lets_helper_owned(state, func);
+                    let new_args = ap_args
+                        .into_iter()
+                        .map(|a| lets_helper_owned(state, a))
+                        .collect();
+                    Lambda::Lapply(Apply {
+                        ap_func: Box::new(new_func),
+                        ap_args: new_args,
+                        ap_info,
+                        ap_transformed_jsx,
+                    })
+                }
+            }
+        }
+
+        Lambda::Lfunction(LFunction {
+            arity,
+            params,
+            body,
+            attr,
+        }) => Lambda::function_(arity, params, lets_helper_owned(state, *body), attr),
+
+        Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => lam,
+
+        Lambda::Lletrec(bindings, body) => {
+            let new_bindings = bindings
+                .into_iter()
+                .map(|(id, e)| (id, lets_helper_owned(state, e)))
+                .collect();
+            let new_body = lets_helper_owned(state, *body);
+            Lambda::letrec(new_bindings, new_body)
+        }
+
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pstringadd,
+            args,
+            loc,
+        }) if args.len() == 2 => {
+            let mut args = args.into_iter();
+            let l_simpl = lets_helper_owned(state, args.next().expect("checked left arg"));
+            let r_simpl = lets_helper_owned(state, args.next().expect("checked right arg"));
+            let opt_l = lookup_string(&l_simpl, &state.string_table);
+            match opt_l {
+                None => Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc),
+                Some(l_s) => {
+                    let opt_r = lookup_string(&r_simpl, &state.string_table);
+                    match opt_r {
+                        None => Lambda::prim(Primitive::Pstringadd, vec![l_simpl, r_simpl], loc),
+                        Some(r_s) => Lambda::Lconst(Constant::String {
+                            s: format!("{}{}", l_s, r_s),
+                            delim: None,
+                        }),
+                    }
+                }
+            }
+        }
+
+        Lambda::Lprim(prim) => Lambda::prim(
+            prim.primitive,
+            prim.args
+                .into_iter()
+                .map(|a| lets_helper_owned(state, a))
+                .collect(),
+            prim.loc,
+        ),
+
+        Lambda::Lswitch(scrut, sw) => {
+            let new_scrut = lets_helper_owned(state, *scrut);
+            let new_consts = sw
+                .sw_consts
+                .into_iter()
+                .map(|(n, e)| (n, lets_helper_owned(state, e)))
+                .collect();
+            let new_blocks = sw
+                .sw_blocks
+                .into_iter()
+                .map(|(n, e)| (n, lets_helper_owned(state, e)))
+                .collect();
+            let new_failaction = sw
+                .sw_failaction
+                .map(|x| Box::new(lets_helper_owned(state, *x)));
+            Lambda::Lswitch(
+                Box::new(new_scrut),
+                LambdaSwitch {
+                    sw_consts_full: sw.sw_consts_full,
+                    sw_consts: new_consts,
+                    sw_blocks_full: sw.sw_blocks_full,
+                    sw_blocks: new_blocks,
+                    sw_failaction: new_failaction,
+                    sw_names: sw.sw_names,
+                },
+            )
+        }
+
+        Lambda::LstringSwitch(scrut, cases, default) => {
+            let new_scrut = lets_helper_owned(state, *scrut);
+            let new_cases = cases
+                .into_iter()
+                .map(|(s, e)| (s, lets_helper_owned(state, e)))
+                .collect();
+            let new_default = default.map(|x| Box::new(lets_helper_owned(state, *x)));
+            Lambda::LstringSwitch(Box::new(new_scrut), new_cases, new_default)
+        }
+
+        Lambda::LstaticRaise(i, args) => Lambda::LstaticRaise(
+            i,
+            args.into_iter()
+                .map(|a| lets_helper_owned(state, a))
+                .collect(),
+        ),
+
+        Lambda::LstaticCatch(l1, label, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::LstaticCatch(Box::new(s1), label, Box::new(s2))
+        }
+
+        Lambda::LtryWith(l1, v, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::LtryWith(Box::new(s1), v, Box::new(s2))
+        }
+
+        Lambda::LifThenElse(l1, l2, l3) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            let s3 = lets_helper_owned(state, *l3);
+            Lambda::LifThenElse(Box::new(s1), Box::new(s2), Box::new(s3))
+        }
+
+        Lambda::Lwhile(l1, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::Lwhile(Box::new(s1), Box::new(s2))
+        }
+
+        Lambda::Lfor(v, l1, l2, dir, l3) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            let s3 = lets_helper_owned(state, *l3);
+            Lambda::Lfor(v, Box::new(s1), Box::new(s2), dir, Box::new(s3))
+        }
+
+        Lambda::Lfor_of(v, l1, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::for_of(v, s1, s2)
+        }
+        Lambda::Lfor_await_of(v, l1, l2) => {
+            let s1 = lets_helper_owned(state, *l1);
+            let s2 = lets_helper_owned(state, *l2);
+            Lambda::for_await_of(v, s1, s2)
+        }
+
+        Lambda::Lassign(v, l) => {
+            let s = lets_helper_owned(state, *l);
+            Lambda::Lassign(v, Box::new(s))
+        }
+
+        Lambda::Lbreak => Lambda::break_(),
+        Lambda::Lcontinue => Lambda::continue_(),
+    }
+}
+
 /// Equivalent of OCaml's nested string-table lookup used by the Pstringadd
 /// branch (lam_pass_lets_dce.ml:158-163, 167-172). Returns Some(s) when the
 /// argument is an inline string literal or an alias for one.
@@ -473,9 +831,15 @@ fn lookup_string(lam: &Lambda, table: &HashMap<Ident, String>) -> Option<String>
 
 /// Direct port of `Lam_pass_lets_dce.simplify_lets` (lam_pass_lets_dce.ml:216-219).
 pub fn simplify_lets(lam: &Lambda) -> Lambda {
-    let occ = collect_occurs(lam);
+    simplify_lets_owned(lam.clone())
+}
+
+/// Owned form of `Lam_pass_lets_dce.simplify_lets`
+/// (compiler/core/lam_pass_lets_dce.ml:216-219).
+pub fn simplify_lets_owned(lam: Lambda) -> Lambda {
+    let occ = collect_occurs(&lam);
     let mut state = LetsState::new(&occ);
-    lets_helper(&mut state, lam)
+    lets_helper_owned(&mut state, lam)
 }
 
 #[cfg(test)]
