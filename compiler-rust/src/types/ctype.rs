@@ -4732,6 +4732,31 @@ pub fn force_generalize_module_sig_values(
     force_generalize_module_type_rec(ctx, mty, &mut seen);
 }
 
+pub fn force_generalize_signature_values(
+    ctx: &TypeContext<'_>,
+    sig_items: &[crate::types::decl::SignatureItem],
+) {
+    use crate::types::decl::SignatureItem;
+
+    let mut seen = HashSet::new();
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, vd) => {
+                force_generalize_sig_type_rec(ctx, vd.val_type, &mut seen);
+            }
+            SignatureItem::SigModule(_, md, _) => {
+                force_generalize_module_type_rec(ctx, &md.md_type, &mut seen);
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(inner) = &mtd.mtd_type {
+                    force_generalize_module_type_rec(ctx, inner, &mut seen);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Generalize the structure of a type at a given level.
 fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);

@@ -17565,10 +17565,7 @@ impl Env {
                             // backing the module body typedtree. Only generalize after
                             // we have detached the signature via `needs_copy`.
                             if needs_copy {
-                                crate::types::ctype::force_generalize_module_sig_values(
-                                    ctx,
-                                    &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-                                );
+                                crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                             }
                         }
                         ctx.register_resolved_module_sig(
@@ -17594,10 +17591,7 @@ impl Env {
                                 ctx,
                             );
                         }
-                        crate::types::ctype::force_generalize_module_sig_values(
-                            ctx,
-                            &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-                        );
+                        crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                         return Some((module_path, sig));
                     }
                 }
@@ -17813,10 +17807,7 @@ impl Env {
                                                 );
                                     }
                                 }
-                                crate::types::ctype::force_generalize_module_sig_values(
-                                    ctx,
-                                    &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-                                );
+                                crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                             }
                             return Some((sub_path, sig));
                         }
@@ -21180,10 +21171,7 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);
     }
     if force_generalize_values {
-        crate::types::ctype::force_generalize_module_sig_values(
-            ctx,
-            &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-        );
+        crate::types::ctype::force_generalize_signature_values(ctx, &sig);
     }
     sig
 }
@@ -21259,10 +21247,7 @@ fn build_module_signature_for_path<'a>(
                 {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
                     let sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
-                    crate::types::ctype::force_generalize_module_sig_values(
-                        ctx,
-                        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-                    );
+                    crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                     Some((access_path, sig))
                 } else if let Ok(md) = env.lookup_module(module_path) {
                     let access_path = md
@@ -21419,10 +21404,7 @@ fn build_module_signature_for_path<'a>(
                     &access_path,
                 );
             }
-            crate::types::ctype::force_generalize_module_sig_values(
-                ctx,
-                &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-            );
+            crate::types::ctype::force_generalize_signature_values(ctx, &sig);
             let flattened_heads = pers_env
                 .as_ref()
                 .map(|pers| pers.flattened_alias_heads_for_path(&resolved_parent_path))
@@ -21482,10 +21464,7 @@ fn build_module_signature_for_path<'a>(
         module_path,
         &mut visiting,
     )?;
-    crate::types::ctype::force_generalize_module_sig_values(
-        ctx,
-        &crate::types::decl::ModuleType::MtySignature(sig.clone()),
-    );
+    crate::types::ctype::force_generalize_signature_values(ctx, &sig);
     Some((module_path.clone(), sig))
 }
 
