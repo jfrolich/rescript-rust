@@ -155,8 +155,14 @@ pub(crate) struct QualifiedModuleComponents {
     modules: HashMap<String, (usize, usize)>,
     modtypes: HashMap<String, usize>,
     component_modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
-    qualified_modules: RefCell<HashMap<String, (Ident, ModuleDeclaration)>>,
-    qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
+    // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
+    // `comp_modtypes` declarations in EnvLazy-backed component tables, and
+    // env.ml:568-571/865-882 forces those thunks at most once per component
+    // table. Rust clones component views out of the global cache before
+    // running callbacks, so the forced-declaration memo must be shared by
+    // those clones to preserve the same lazy identifier-renaming order.
+    qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
+    qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
     child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
 }
 
@@ -412,8 +418,8 @@ impl QualifiedModuleComponents {
             modules,
             modtypes,
             component_modtypes,
-            qualified_modules: RefCell::new(HashMap::new()),
-            qualified_modtypes: RefCell::new(HashMap::new()),
+            qualified_modules: Arc::new(RefCell::new(HashMap::new())),
+            qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
             child_components,
         }
     }

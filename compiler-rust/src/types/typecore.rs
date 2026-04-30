@@ -18116,6 +18116,14 @@ fn is_local_module_access_path(path: &Path) -> bool {
     matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent())
 }
 
+fn is_implicit_stdlib_component_path(path: &Path) -> bool {
+    matches!(path, Path::Pdot(_, _, _))
+        && matches!(
+            path_root_module(path),
+            Path::Pident(id) if id.name() == "Stdlib" || id.name() == "Pervasives"
+        )
+}
+
 fn type_contains_unresolved_local_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     env: &Env,
@@ -19149,9 +19157,21 @@ fn qualify_module_local_type_paths_in_place<'a>(
             }
             let mut rewritten_path: Option<Path> = None;
 
-            if let Some(alias_target) =
+            let alias_target = if is_implicit_stdlib_component_path(module_access_path) {
+                // OCaml compiler/ml/env.ml:1874-1877 exposes the implicit
+                // Stdlib open through component paths. While mirroring
+                // compiler/ml/subst.ml:91-95 for copied type paths, those
+                // component-table reads follow env.ml:781-793 without forcing
+                // env.ml:1568's selected child `comp_modules` thunk. Other
+                // aliases, such as local `module J = Js.Json`, still follow
+                // env.ml:903-914 normalization and must use env.ml:865-882's
+                // forcing module-declaration lookup.
+                raw_alias_target_for_module_path(module_access_path, env, pers_env, ctx)
+            } else {
                 alias_target_for_module_path(module_access_path, env, pers_env, ctx)
-            {
+            };
+
+            if let Some(alias_target) = alias_target {
                 let normalized_alias_target = env.normalize_path(&alias_target);
                 rewritten_path = rewrite_path_prefix(&path, &alias_target, module_access_path);
                 if rewritten_path.is_none() {
@@ -20094,8 +20114,10 @@ fn with_resolved_child_module_components<'a, R>(
     // The implicit Stdlib/Pervasives open from compiler/core/res_compmisc.ml:61-62
     // and compiler/ml/env.ml:1874-1877 exposes dotted component paths such as
     // `Stdlib.JsError.RangeError`. When the child signature contains only
-    // values, OCaml observes the env.ml:1568-1569 module thunk before value
-    // lookup; children with nested components should keep following
+    // values, or exposes manifest types that OCaml expands through
+    // compiler/ml/ctype.ml:1346-1372 before the next structure item, OCaml
+    // observes the env.ml:1568-1569 module thunk via env.ml:865-882. Children
+    // with nested components but no manifest type should keep following
     // env.ml:781-793 and env.ml:1000-1007 through `comp_components` only.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
         let parent_head_name = parent_components.access_path().head().name();
@@ -20106,7 +20128,12 @@ fn with_resolved_child_module_components<'a, R>(
         let child_module_has_only_values = parent_components
             .lookup_module(child_name)
             .is_some_and(|(_, _, md)| module_type_has_only_values(&md.md_type));
-        if parent_is_implicit_stdlib_component_path && child_module_has_only_values {
+        let child_module_has_manifest_type = parent_components
+            .lookup_module(child_name)
+            .is_some_and(|(_, _, md)| module_type_has_manifest_type(&md.md_type));
+        if parent_is_implicit_stdlib_component_path
+            && (child_module_has_only_values || child_module_has_manifest_type)
+        {
             let _ = parent_components.lookup_qualified_module(child_name, ctx);
         }
         let access_path = if parent_components.access_path().head().is_persistent()
@@ -20183,6 +20210,24 @@ fn module_type_has_only_values(module_type: &crate::types::decl::ModuleType) -> 
             if sig.iter().all(|item| matches!(
                 item,
                 crate::types::decl::SignatureItem::SigValue(..)
+            ))
+    )
+}
+
+fn module_type_has_manifest_type(module_type: &crate::types::decl::ModuleType) -> bool {
+    // OCaml compiler/ml/ctype.ml:1367-1372 expands manifest type
+    // abbreviations through `Env.find_type_expansion`, and its fallback
+    // `Env.normalize_path` reaches compiler/ml/env.ml:903-914. For dotted
+    // module paths that asks env.ml:865-882 for the module declaration,
+    // forcing the env.ml:1568 `comp_modules` thunk and running
+    // compiler/ml/subst.ml:378-400 binder substitution.
+    matches!(
+        module_type,
+        crate::types::decl::ModuleType::MtySignature(sig)
+            if sig.iter().any(|item| matches!(
+                item,
+                crate::types::decl::SignatureItem::SigType(_, decl, _)
+                    if decl.type_manifest.is_some()
             ))
     )
 }
@@ -21094,10 +21139,50 @@ pub(crate) fn module_alias_target_for_path<'a>(
         }
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                // OCaml compiler/ml/env.ml:781-793 lets
+                // `lookup_module_descr` navigate component tables without
+                // forcing env.ml:1568's `comp_modules` thunk. This helper is
+                // only asking whether the component declaration is an alias so
+                // Rust can choose a recovery path; using
+                // `lookup_qualified_module` here would force
+                // compiler/ml/subst.ml:378-400-style identifier renaming
+                // before OCaml's env.ml:865-882 `find_module` path asks for
+                // the module declaration itself.
                 components
-                    .lookup_qualified_module(module_name.as_str(), ctx)
+                    .lookup_module(module_name.as_str())
                     .and_then(|(_, _, md)| match &md.md_type {
                         crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
+                        _ => None,
+                    })
+            })?
+        }
+        Path::Papply(_, _) => None,
+    }
+}
+
+fn raw_alias_target_for_module_path<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path> {
+    match module_path {
+        Path::Pident(_) => alias_target_for_module_path(module_path, env, pers_env, ctx),
+        Path::Pdot(parent, module_name, _) => {
+            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                // OCaml compiler/ml/env.ml:781-793 lets
+                // `find_module_descr` descend through component tables, while
+                // env.ml:865-882 only forces `comp_modules` for callers that
+                // need the module declaration itself. This raw alias probe is
+                // used while mirroring compiler/ml/subst.ml:91-95 prefix
+                // rewriting of copied type paths, so inspect the component
+                // declaration without running compiler/ml/subst.ml:378-400
+                // child-signature identifier freshening.
+                components
+                    .lookup_module(module_name.as_str())
+                    .and_then(|(_, _, md)| match &md.md_type {
+                        crate::types::decl::ModuleType::MtyAlias(_, target)
+                        | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
                         _ => None,
                     })
             })?

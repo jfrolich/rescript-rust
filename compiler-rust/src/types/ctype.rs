@@ -1115,6 +1115,29 @@ fn resolve_module_type_through_env_path<'a>(
         }
         Path::Pdot(parent, name, _) => {
             let mut no_persistent_env = None;
+            let parent_root_name = path_root_ident(parent).map(|id| id.name());
+            let parent_is_implicit_stdlib_component =
+                matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
+                    && matches!(parent.as_ref(), Path::Pdot(_, _, _));
+            if parent_is_implicit_stdlib_component {
+                let selected_child_path = Path::pdot(parent.as_ref().clone(), name.to_string());
+                if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
+                    &selected_child_path,
+                    env,
+                    &mut no_persistent_env,
+                    ctx,
+                ) {
+                    // OCaml compiler/ml/env.ml:1094-1100 value lookup uses
+                    // `lookup_module_descr`, which descends through
+                    // env.ml:781-793's `comp_components`; that does not force
+                    // env.ml:1568's child `comp_modules` thunk. When Rust only
+                    // needs the signature for an implicit Stdlib component,
+                    // reuse the selected component signature and leave the
+                    // module-declaration force to env.ml:865-882-equivalent
+                    // callers that actually ask for `find_module`.
+                    return Some(super::decl::ModuleType::MtySignature(sig));
+                }
+            }
             let parent_alias_target = crate::types::typecore::module_alias_target_for_path(
                 parent,
                 env,
@@ -1132,10 +1155,26 @@ fn resolve_module_type_through_env_path<'a>(
             {
                 match &md.md_type {
                     super::decl::ModuleType::MtySignature(_) => {
-                        let preferred_child_path =
-                            parent_alias_target.as_ref().map(|target_parent_path| {
+                        let parent_root_name = path_root_ident(parent).map(|id| id.name());
+                        let parent_is_implicit_stdlib_component =
+                            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
+                                && matches!(parent.as_ref(), Path::Pdot(_, _, _));
+                        let preferred_child_path = (!parent_is_implicit_stdlib_component)
+                            .then(|| parent_alias_target.as_ref())
+                            .flatten()
+                            .map(|target_parent_path| {
                                 Path::pdot(target_parent_path.clone(), name.to_string())
                             });
+                        // OCaml compiler/ml/env.ml:1094-1100 resolves value
+                        // prefixes through `lookup_module_descr`; for dotted
+                        // implicit-Stdlib components that path reads
+                        // env.ml:781-793's selected `comp_components` table.
+                        // Do not immediately rebuild the flattened alias
+                        // target (`Stdlib_JSON.Classify`) after selecting
+                        // `Stdlib.JSON.Classify`; OCaml only forces the
+                        // selected component module declaration at
+                        // env.ml:865-882 when normalization explicitly asks
+                        // for it.
                         crate::types::typecore::resolve_module_signature_for_path(
                             preferred_child_path.as_ref().unwrap_or(&access_path),
                             env,
