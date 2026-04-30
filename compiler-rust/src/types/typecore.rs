@@ -12576,10 +12576,12 @@ fn type_record(
         bool,
     );
 
-    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> = Vec::new();
-    let mut explicit_overrides: HashMap<i32, usize> = HashMap::new();
-    let mut explicit_overrides_by_name: HashMap<String, usize> = HashMap::new();
-    let mut explicit_overrides_in_order = Vec::new();
+    let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> =
+        Vec::with_capacity(fields.len());
+    let mut explicit_overrides: HashMap<i32, usize> = HashMap::with_capacity(fields.len());
+    let mut explicit_overrides_by_name: HashMap<String, usize> =
+        HashMap::with_capacity(fields.len());
+    let mut explicit_overrides_in_order = Vec::with_capacity(fields.len());
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
 
     struct ExplicitField<'a> {
@@ -12867,7 +12869,7 @@ fn type_record(
     {
         all_label_descriptions = None;
     }
-    let mut typed_fields = Vec::new();
+    let mut typed_fields = Vec::with_capacity(fields.len());
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
     let expected_inst_for_record = crate::types::instance(ctx, expected_ty);
@@ -12900,6 +12902,9 @@ fn type_record(
     }
 
     if let Some(all_labels) = all_labels {
+        if all_labels.len() > typed_fields.capacity() {
+            typed_fields.reserve(all_labels.len().saturating_sub(typed_fields.len()));
+        }
         let mut labels_missing = Vec::new();
 
         for (lbl_idx, label_decl) in all_labels.iter().enumerate() {
@@ -13018,10 +13023,16 @@ fn type_record(
                     }
                 };
                 // OCaml uses {loc; txt = Lident lbl.lbl_name} for synthesized optional fields
-                let label_lid_idx = find_existing_lident_idx(tctx.arena, &label_name)
+                let label_lid_idx = ctx
+                    .get_synthesized_record_lident(&label_name)
                     .unwrap_or_else(|| {
-                        let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
-                        unsafe { (*arena_ptr).push_lident(&label_name) }
+                        let lid = find_existing_lident_idx(tctx.arena, &label_name)
+                            .unwrap_or_else(|| {
+                                let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
+                                unsafe { (*arena_ptr).push_lident(&label_name) }
+                            });
+                        ctx.cache_synthesized_record_lident(label_name.clone(), lid);
+                        lid
                     });
                 let label_lid = Located {
                     txt: label_lid_idx,

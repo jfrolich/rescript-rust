@@ -29,6 +29,7 @@ use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
+use crate::parse_arena::LidentIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -292,6 +293,11 @@ pub struct TypeContext<'a> {
         )>,
     >,
 
+    /// Lident indices synthesized while filling omitted optional record fields.
+    /// This avoids repeated reverse scans through the parse arena for large JSX
+    /// DOM prop records while preserving the same index that the scan found.
+    synthesized_record_lidents: RefCell<ahash::AHashMap<String, LidentIdx>>,
+
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
 
@@ -352,6 +358,7 @@ impl<'a> TypeContext<'a> {
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
+            synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
         }
@@ -950,6 +957,22 @@ impl<'a> TypeContext<'a> {
             .borrow()
             .get(type_path_name)
             .cloned()
+    }
+
+    /// Return a cached synthesized record-field lident by label name.
+    pub fn get_synthesized_record_lident(&self, label_name: &str) -> Option<LidentIdx> {
+        self.synthesized_record_lidents
+            .borrow()
+            .get(label_name)
+            .copied()
+    }
+
+    /// Cache the lident chosen for a synthesized record field.
+    pub fn cache_synthesized_record_lident(&self, label_name: String, lid: LidentIdx) {
+        self.synthesized_record_lidents
+            .borrow_mut()
+            .entry(label_name)
+            .or_insert(lid);
     }
 
     /// Replace the synthetic dict-pattern label cache.
