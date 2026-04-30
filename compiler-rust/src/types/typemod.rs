@@ -5967,16 +5967,15 @@ fn strengthen_semantic_ident_module_type<'a>(
     let strengthen_path = match semantic_mty.clone() {
         DeclMty::MtyAlias(_, alias_path) => {
             let mut normalized = alias_path;
-            while let Some(next) = crate::types::typecore::alias_target_for_module_path(
-                &normalized,
-                env,
-                pers_env,
-                ctx,
-            ) {
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
+            while let Some(next) =
+                crate::types::typecore::alias_target_for_module_path(&normalized, env, pers_env, ctx)
+            {
                 if next.same(&normalized) {
                     break;
                 }
                 normalized = next;
+                force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
             }
             semantic_mty =
                 scrape_alias_module_type(&semantic_mty, env, pers_env, ctx).unwrap_or(semantic_mty);
@@ -5990,6 +5989,38 @@ fn strengthen_semantic_ident_module_type<'a>(
         &strengthen_path,
         &semantic_mty,
     )
+}
+
+fn force_persistent_sigs_for_normalize_path<'a>(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    path: &Path,
+) {
+    match path {
+        Path::Pdot(parent, _, _) => {
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, parent);
+        }
+        Path::Papply(functor, arg) => {
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, functor);
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, arg);
+        }
+        Path::Pident(id) if id.is_persistent() && !env.has_module_ident(id) => {
+            // OCaml compiler/ml/typemod.ml:1244-1247 calls
+            // `Env.normalize_path` for alias targets. env.ml:903-914
+            // normalizes a `Pdot` prefix first, and env.ml:865-875 forces
+            // `Lazy.force ps.ps_sig` for a persistent `Pident` that is not in
+            // the local module table. That lazy is created at env.ml:676-678
+            // as `Subst.signature Subst.identity`, whose binder-renaming order
+            // is implemented in compiler/ml/subst.ml:378-400.
+            if let Some(pers) = pers_env.as_mut() {
+                let _ = pers.get_renamed_sig(id.name(), ctx);
+            } else {
+                ctx.trigger_module_sig_rename(id.name());
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Translate a parsed module type (signature) into a decl::ModuleType.
@@ -8520,6 +8551,12 @@ fn type_module_expr_with_alias<'a>(
                     Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => {
                         // Match OCaml typemod.ml line 1246: normalize the alias target
                         let mut normalized = p1.clone();
+                        force_persistent_sigs_for_normalize_path(
+                            env,
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                            &normalized,
+                        );
                         while let Some(next) = crate::types::typecore::alias_target_for_module_path(
                             &normalized,
                             env,
@@ -8530,6 +8567,12 @@ fn type_module_expr_with_alias<'a>(
                                 break;
                             }
                             normalized = next;
+                            force_persistent_sigs_for_normalize_path(
+                                env,
+                                &mut tctx.persistent_env,
+                                tctx.type_ctx,
+                                &normalized,
+                            );
                         }
                         env.normalize_path(&normalized)
                     }
