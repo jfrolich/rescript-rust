@@ -7302,17 +7302,56 @@ enum UnifiedOpForm {
     Binary,
 }
 
-/// Check if a path (by name) is a unified op, returning its form.
-fn get_unified_op_form(path_name: &str) -> Option<UnifiedOpForm> {
+#[derive(Clone, Copy)]
+struct UnifiedOpSpecialization {
+    supports_bool: bool,
+    supports_float: bool,
+    supports_bigint: bool,
+    supports_string: bool,
+}
+
+#[derive(Clone, Copy)]
+struct UnifiedOpEntry {
+    form: UnifiedOpForm,
+    specialization: UnifiedOpSpecialization,
+}
+
+const fn unified_op_entry(
+    form: UnifiedOpForm,
+    supports_float: bool,
+    supports_bigint: bool,
+    supports_string: bool,
+) -> UnifiedOpEntry {
+    UnifiedOpEntry {
+        form,
+        specialization: UnifiedOpSpecialization {
+            supports_bool: false,
+            supports_float,
+            supports_bigint,
+            supports_string,
+        },
+    }
+}
+
+/// Check if a path (by name) is a unified op, returning its OCaml entry.
+fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
+    use UnifiedOpForm::{Binary, Unary};
+
+    // OCaml compiler/ml/unified_ops.ml:40-54 defines the specialization shape,
+    // and unified_ops.ml:58-262 lists these per-operator capabilities.
     match path_name {
-        // Binary unified ops (matching OCaml's unified_ops.ml)
-        "Pervasives.+" | "Pervasives.-" | "Pervasives.*" | "Pervasives./" | "Pervasives.%"
-        | "Pervasives.mod" | "Pervasives.**" | "Pervasives.<<" | "Pervasives.>>"
-        | "Pervasives.>>>" | "Pervasives.|||" | "Pervasives.^^^" | "Pervasives.&&&" => {
-            Some(UnifiedOpForm::Binary)
-        }
-        // Unary unified ops
-        "Pervasives.~+" | "Pervasives.~-" | "Pervasives.~~~" => Some(UnifiedOpForm::Unary),
+        "Pervasives.~+" | "Pervasives.~-" => Some(unified_op_entry(Unary, true, true, false)),
+        "Pervasives.~~~" => Some(unified_op_entry(Unary, false, true, false)),
+        "Pervasives.+" => Some(unified_op_entry(Binary, true, true, true)),
+        "Pervasives.-"
+        | "Pervasives.*"
+        | "Pervasives./"
+        | "Pervasives.%"
+        | "Pervasives.mod"
+        | "Pervasives.**" => Some(unified_op_entry(Binary, true, true, false)),
+        "Pervasives.<<" | "Pervasives.>>" | "Pervasives.|||" | "Pervasives.^^^"
+        | "Pervasives.&&&" => Some(unified_op_entry(Binary, false, true, false)),
+        "Pervasives.>>>" => Some(unified_op_entry(Binary, false, false, false)),
         _ => None,
     }
 }
@@ -7327,6 +7366,37 @@ fn is_type_named(ctx: &TypeContext<'_>, ty: TypeExprRef, name: &str) -> bool {
             _ => false,
         },
         _ => false,
+    }
+}
+
+fn unified_specialized_type_name(
+    ctx: &TypeContext<'_>,
+    ty: TypeExprRef,
+    specialization: UnifiedOpSpecialization,
+) -> Option<&'static str> {
+    if is_type_named(ctx, ty, "int") {
+        Some("int")
+    } else if specialization.supports_bool && is_type_named(ctx, ty, "bool") {
+        Some("bool")
+    } else if specialization.supports_float && is_type_named(ctx, ty, "float") {
+        Some("float")
+    } else if specialization.supports_bigint && is_type_named(ctx, ty, "bigint") {
+        Some("bigint")
+    } else if specialization.supports_string && is_type_named(ctx, ty, "string") {
+        Some("string")
+    } else {
+        None
+    }
+}
+
+fn unified_expected_type(env: &Env, ctx: &TypeContext<'_>, type_name: &str) -> TypeExprRef {
+    match type_name {
+        "int" => env.type_int(ctx),
+        "bool" => env.type_bool(ctx),
+        "float" => env.type_float(ctx),
+        "bigint" => env.type_bigint(ctx),
+        "string" => env.type_string(ctx),
+        _ => unreachable!("unknown unified op primitive type"),
     }
 }
 
@@ -7359,80 +7429,74 @@ fn translate_unified_ops(
         _ => return None,
     };
 
-    let form = match get_unified_op_form(&path_name) {
-        Some(f) => f,
+    let entry = match get_unified_op_entry(&path_name) {
+        Some(entry) => entry,
         None => return None,
     };
 
     let ctx = tctx.type_ctx;
 
-    match form {
+    match entry.form {
         UnifiedOpForm::Binary if args.len() == 2 => {
-            // Type check LHS and RHS independently (not against function type)
-            let lhs_ty = ctx.new_var(None);
-            let lhs_result = type_expect(tctx, env, tctx.arena.get_expr(args[0].1), lhs_ty, None);
-            let lhs = match lhs_result {
+            let lhs_expr = tctx.arena.get_expr(args[0].1);
+            let rhs_expr = tctx.arena.get_expr(args[1].1);
+
+            let lhs = match type_exp(tctx, env, lhs_expr, None) {
                 Ok(e) => e,
                 Err(e) => return Some(Err(e)),
             };
-            let lhs_type = ctx.repr(lhs.exp_type);
+            let lhs_type = crate::types::ctype::expand_head(ctx, env, lhs.exp_type);
 
-            let rhs_ty = ctx.new_var(None);
-            let rhs_result = type_expect(tctx, env, tctx.arena.get_expr(args[1].1), rhs_ty, None);
-            let rhs = match rhs_result {
+            let rhs = match type_exp(tctx, env, rhs_expr, None) {
                 Ok(e) => e,
                 Err(e) => return Some(Err(e)),
             };
-            let rhs_type = ctx.repr(rhs.exp_type);
+            let rhs_type = crate::types::ctype::expand_head(ctx, env, rhs.exp_type);
 
-            // Determine the concrete type using unified ops rules:
-            // Rule 1: If LHS is a known primitive type, use it
-            // Rule 2: If RHS is a known primitive type, use it
-            // Rule 3: Default to int
-            let concrete_type_name = if is_type_named(ctx, lhs_type, "int") {
-                "int"
-            } else if is_type_named(ctx, lhs_type, "float") {
-                "float"
-            } else if is_type_named(ctx, lhs_type, "bigint") {
-                "bigint"
-            } else if is_type_named(ctx, lhs_type, "string") {
-                "string"
-            } else if is_type_named(ctx, rhs_type, "int") {
-                "int"
-            } else if is_type_named(ctx, rhs_type, "float") {
-                "float"
-            } else if is_type_named(ctx, rhs_type, "bigint") {
-                "bigint"
-            } else if is_type_named(ctx, rhs_type, "string") {
-                "string"
+            // OCaml compiler/ml/typecore.ml:3852-3910 first types both
+            // arguments, then intentionally re-types rhs, lhs, or both
+            // depending on the chosen primitive specialization. This is
+            // observable for generated identifiers in discarded `%raw`
+            // expressions, so do not collapse it into direct unification.
+            let (lhs, rhs, result_ty) = if let Some(type_name) =
+                unified_specialized_type_name(ctx, lhs_type, entry.specialization)
+            {
+                let rhs = match type_expect(
+                    tctx,
+                    env,
+                    rhs_expr,
+                    unified_expected_type(env, ctx, type_name),
+                    None,
+                ) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                (lhs, rhs, unified_expected_type(env, ctx, type_name))
+            } else if let Some(type_name) =
+                unified_specialized_type_name(ctx, rhs_type, entry.specialization)
+            {
+                let lhs = match type_expect(
+                    tctx,
+                    env,
+                    lhs_expr,
+                    unified_expected_type(env, ctx, type_name),
+                    None,
+                ) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                (lhs, rhs, unified_expected_type(env, ctx, type_name))
             } else {
-                // Default fallback to int
-                "int"
+                let lhs = match type_expect(tctx, env, lhs_expr, env.type_int(ctx), None) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                let rhs = match type_expect(tctx, env, rhs_expr, env.type_int(ctx), None) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                (lhs, rhs, env.type_int(ctx))
             };
-
-            // Create SEPARATE concrete type nodes for each position.
-            // OCaml's type_expect calls instance() on the expected type, creating
-            // fresh copies each time. We simulate this by creating separate nodes.
-            let make_concrete = || {
-                let path = crate::types::predef::find_predef_path(concrete_type_name)
-                    .unwrap_or_else(|| Path::pident(Ident::create_persistent(concrete_type_name)));
-                ctx.new_constr(path, vec![])
-            };
-
-            // Unify LHS with a fresh concrete type
-            let lhs_concrete = make_concrete();
-            if let Err(e) = unify_expression_types(tctx, loc, lhs.exp_type, lhs_concrete, None) {
-                return Some(Err(e));
-            }
-            // Unify RHS with a fresh concrete type (instead of re-typing which creates
-            // duplicate type nodes that don't share with the first typing's nodes)
-            let rhs_concrete = make_concrete();
-            if let Err(e) = unify_expression_types(tctx, loc, rhs.exp_type, rhs_concrete, None) {
-                return Some(Err(e));
-            }
-
-            // Result type is a fresh concrete type
-            let result_ty = make_concrete();
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
             if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
@@ -7464,37 +7528,28 @@ fn translate_unified_ops(
             )))
         }
         UnifiedOpForm::Unary if args.len() == 1 => {
-            // Type check the argument independently
-            let arg_ty = ctx.new_var(None);
-            let arg_result = type_expect(tctx, env, tctx.arena.get_expr(args[0].1), arg_ty, None);
-            let arg = match arg_result {
+            let arg_expr = tctx.arena.get_expr(args[0].1);
+            let arg = match type_exp(tctx, env, arg_expr, None) {
                 Ok(e) => e,
                 Err(e) => return Some(Err(e)),
             };
-            let arg_type = ctx.repr(arg.exp_type);
+            let arg_type = crate::types::ctype::expand_head(ctx, env, arg.exp_type);
 
-            // Determine the concrete type
-            let concrete_type_name = if is_type_named(ctx, arg_type, "int") {
-                "int"
-            } else if is_type_named(ctx, arg_type, "float") {
-                "float"
-            } else if is_type_named(ctx, arg_type, "bigint") {
-                "bigint"
+            // OCaml compiler/ml/typecore.ml:3821-3846 types unary unified-op
+            // arguments once, expands the head, and only falls back by unifying
+            // that expanded type with int.
+            let result_ty = if let Some(type_name) =
+                unified_specialized_type_name(ctx, arg_type, entry.specialization)
+            {
+                unified_expected_type(env, ctx, type_name)
             } else {
-                "int" // Default fallback
+                if let Err(e) =
+                    unify_expression_types(tctx, arg.exp_loc, arg_type, env.type_int(ctx), None)
+                {
+                    return Some(Err(e));
+                }
+                env.type_int(ctx)
             };
-
-            let concrete_path = crate::types::predef::find_predef_path(concrete_type_name)
-                .unwrap_or_else(|| Path::pident(Ident::create_persistent(concrete_type_name)));
-            let concrete_ty = ctx.new_constr(concrete_path.clone(), vec![]);
-
-            // Unify arg with concrete type
-            if let Err(e) = unify_expression_types(tctx, loc, arg.exp_type, concrete_ty, None) {
-                return Some(Err(e));
-            }
-
-            // Result type
-            let result_ty = ctx.new_constr(concrete_path, vec![]);
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
             if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
