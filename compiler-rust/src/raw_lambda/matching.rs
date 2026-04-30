@@ -13,9 +13,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::ident::{Ident, IdentFlags};
-use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
+use crate::lambda::LetKind;
 use crate::lambda::{
     Comparison, FieldDbgInfo, Primitive, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchNames,
     SwitchTag, TagInfo,
@@ -121,7 +121,11 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn normalize_bigint_digits(digits: &str) -> &str {
         let trimmed = digits.trim_start_matches('0');
-        if trimmed.is_empty() { "0" } else { trimmed }
+        if trimmed.is_empty() {
+            "0"
+        } else {
+            trimmed
+        }
     }
 
     fn compare_bigint(positive1: bool, digits1: &str, positive2: bool, digits2: &str) -> Ordering {
@@ -1593,9 +1597,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
         }
         match e {
             RawLambda::Lvar(id) => {
-                if let Some((_, replacement)) =
-                    env.iter().rev().find(|(key, _)| key.same(id))
-                {
+                if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id)) {
                     Some(replacement.clone())
                 } else {
                     Some(e.clone())
@@ -3700,7 +3702,10 @@ fn do_cases_or_deque(
     args: &[(RawLambda, LetKind)],
     def: &DefaultEnv,
     next_raise: &mut i32,
-) -> (VecDeque<Clause>, Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>) {
+) -> (
+    VecDeque<Clause>,
+    Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>,
+) {
     match ors.split_first() {
         None => (VecDeque::new(), Vec::new()),
         Some((cl, rem)) => {
@@ -6756,16 +6761,24 @@ fn combine_constructor(
             mk_failaction_pos(ctx_ref, partial, &pats, ctx, def)
         };
 
-        let mut tag_lambda_list = tag_lambda_list;
-        // Prepend fails to tag_lambda_list
-        let mut combined = fails;
-        combined.extend(tag_lambda_list);
-        tag_lambda_list = combined;
+        // OCaml shares the immutable list cells/actions here:
+        // compiler/ml/matching.ml:2152-2155 builds `fails @ tag_lambda_list`,
+        // then passes the same list to both `split_cases` and `same_actions`.
+        // Rust's Vec is moved into `split_cases`, so compute the pure
+        // same-action fast path first instead of cloning every action.
+        let mut actions = fails;
+        actions.extend(tag_lambda_list);
+        let one_action = if fail_opt.is_none() {
+            same_actions_tagged(&actions)
+        } else {
+            None
+        };
 
-        let (consts, nonconsts) = split_cases(tag_lambda_list.clone());
-        let lambda1 = match (&fail_opt, same_actions_tagged(&tag_lambda_list)) {
-            (None, Some(act)) => act, // Identical actions, no failure
-            _ => {
+        let lambda1 = if let Some(act) = one_action {
+            act // Identical actions, no failure
+        } else {
+            let (consts, nonconsts) = split_cases(actions);
+            {
                 match (
                     cstr.cstr_consts,
                     cstr.cstr_nonconsts,
@@ -6825,19 +6838,12 @@ fn combine_constructor(
                         }
                     }
                     (_n, _, _, _) => {
-                        let act0 = match (&fail_opt, nonconsts.as_slice()) {
-                            (Some(a), []) => Some(a.clone()),
-                            (Some(_), _) => {
-                                if nonconsts.len() == cstr.cstr_nonconsts as usize {
-                                    same_actions_tagged(&nonconsts)
-                                } else {
-                                    None
-                                }
-                            }
-                            (None, _) => same_actions_tagged(&nonconsts),
-                        };
-                        // Emit a switch
-                        let _ = act0; // OCaml has dead code paths here (false guards)
+                        // Emit a switch. OCaml computes `act0` at
+                        // compiler/ml/matching.ml:2179-2189, but the only arm
+                        // that can consume it is guarded by `when false` at
+                        // matching.ml:2190. Skipping that pure computation
+                        // avoids normalizing/cloning switch actions without
+                        // changing the emitted lambda.
                         let sw = RawLambdaSwitch {
                             sw_numconsts: cstr.cstr_consts as usize,
                             sw_consts_full: false,
