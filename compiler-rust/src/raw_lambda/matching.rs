@@ -3027,7 +3027,7 @@ fn split_or(
         VecDeque::new(),
         VecDeque::new(),
         VecDeque::new(),
-        &cls,
+        cls.into(),
         args,
         &def,
         next_raise,
@@ -3041,51 +3041,53 @@ fn do_split_or(
     before: VecDeque<Clause>,
     ors: VecDeque<Clause>,
     no: VecDeque<Clause>,
-    rest: &[Clause],
+    mut rest: VecDeque<Clause>,
     args: &[(RawLambda, LetKind)],
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    match rest.split_first() {
+    match rest.pop_front() {
         None => {
             let before = rev_deque_to_vec(before);
             let ors = rev_deque_to_vec(ors);
             let no = rev_deque_to_vec(no);
-            cons_next_or(ctx_ref, argo, before, ors, &no, args, def, next_raise)
+            cons_next_or(ctx_ref, argo, before, ors, no, args, def, next_raise)
         }
-        Some((cl, rem)) => match cl.0.split_first() {
+        Some(cl) => match cl.0.split_first() {
             Some((p, ps)) => {
                 let act = &cl.1;
                 if up_ok_iter(cl.0.as_slice(), act, no.iter()) {
                     if is_or(p) {
                         let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
                         do_split_or(
-                            ctx_ref, argo, before, new_ors, new_no, rem, args, def, next_raise,
+                            ctx_ref, argo, before, new_ors, new_no, rest, args, def, next_raise,
                         )
                     } else if up_ok_iter(cl.0.as_slice(), act, ors.iter()) {
                         let mut new_before = before;
-                        new_before.push_front(cl.clone());
+                        new_before.push_front(cl);
+                        // OCaml `do_split` moves the current row into
+                        // `before` with `(cl :: before)` (compiler/ml/matching.ml:820-826).
                         do_split_or(
-                            ctx_ref, argo, new_before, ors, no, rem, args, def, next_raise,
+                            ctx_ref, argo, new_before, ors, no, rest, args, def, next_raise,
                         )
                     } else if or_ok_iter(p, ps, ors.iter()) {
                         let mut new_ors = ors;
-                        new_ors.push_front(cl.clone());
+                        new_ors.push_front(cl);
                         do_split_or(
-                            ctx_ref, argo, before, new_ors, no, rem, args, def, next_raise,
+                            ctx_ref, argo, before, new_ors, no, rest, args, def, next_raise,
                         )
                     } else {
                         let mut new_no = no;
-                        new_no.push_front(cl.clone());
+                        new_no.push_front(cl);
                         do_split_or(
-                            ctx_ref, argo, before, ors, new_no, rem, args, def, next_raise,
+                            ctx_ref, argo, before, ors, new_no, rest, args, def, next_raise,
                         )
                     }
                 } else {
                     let mut new_no = no;
-                    new_no.push_front(cl.clone());
+                    new_no.push_front(cl);
                     do_split_or(
-                        ctx_ref, argo, before, ors, new_no, rem, args, def, next_raise,
+                        ctx_ref, argo, before, ors, new_no, rest, args, def, next_raise,
                     )
                 }
             }
@@ -3100,7 +3102,7 @@ fn cons_next_or(
     argo: &Option<Ident>,
     yes: Vec<Clause>,
     yesor: Vec<Clause>,
-    no: &[Clause],
+    no: Vec<Clause>,
     args: &[(RawLambda, LetKind)],
     def: &DefaultEnv,
     next_raise: &mut i32,
@@ -3123,7 +3125,7 @@ fn cons_next_or(
             VecDeque::new(),
             VecDeque::new(),
             VecDeque::new(),
-            no,
+            no.into(),
             args,
             def,
             next_raise,
