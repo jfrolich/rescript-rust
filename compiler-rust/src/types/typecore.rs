@@ -12243,11 +12243,14 @@ fn record_labels_match_ids(
     field_names: &[String],
     closed_record: bool,
 ) -> bool {
-    let label_names: HashSet<String> = labels
+    let label_names: HashSet<&str> = labels
         .iter()
-        .map(|ld| ld.ld_id.name().to_string())
+        .map(|ld| ld.ld_id.name())
         .collect();
-    if !field_names.iter().all(|name| label_names.contains(name)) {
+    if !field_names
+        .iter()
+        .all(|name| label_names.contains(name.as_str()))
+    {
         return false;
     }
 
