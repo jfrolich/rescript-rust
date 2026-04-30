@@ -15370,11 +15370,25 @@ fn type_pack(
         .unwrap_or(crate::types::decl::ModuleType::MtyIdent(pack_path.clone()));
         // Matches compiler/ml/typemod.ml:1713-1718: after constructing the
         // constrained module type, each package argument is unified with a
-        // fresh variable to enforce the same scoping check and type mutation.
-        for package_arg in &pack_args {
-            crate::types::unify(ctx, &mut tctx.unify_state, *package_arg, ctx.new_var(None))
-                .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        // fresh variable under the shadowed package env from
+        // compiler/ml/typemod.ml:1686-1694. That env contains the synthetic
+        // `%M` module used by compiler/ml/typemod.ml:1692-1694, so paths such as
+        // `%M.t` can expand to manifests before `rue` unifies the package.
+        let saved_unify_env = tctx
+            .unify_state
+            .env()
+            .map(crate::types::env::Env::clone_preserve_id);
+        tctx.unify_state.set_env(&package_env);
+        let package_arg_unify_result: crate::types::TypeResult<()> = (|| {
+            for package_arg in &pack_args {
+                crate::types::unify(ctx, &mut tctx.unify_state, *package_arg, ctx.new_var(None))?;
+            }
+            Ok(())
+        })();
+        if let Some(saved_env) = saved_unify_env {
+            tctx.unify_state.set_env(&saved_env);
         }
+        package_arg_unify_result.map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
         package_mty
     };
     let constraint_arg_mty =
@@ -15422,23 +15436,21 @@ fn type_pack(
     // Matches compiler/ml/typecore.ml:3525-3531: `Pexp_pack` returns via
     // `rue`, whose helper at compiler/ml/typecore.ml:2408-2410 unifies the
     // fresh package expression type with `instance env ty_expected`.
-    rue_unify(tctx, loc, packed_type, expected_ty, context.clone())?;
-    let exp_type = packed_type;
     let saved_unify_env = tctx
         .unify_state
         .env()
         .map(crate::types::env::Env::clone_preserve_id);
     tctx.unify_state.set_env(&package_env);
-    let unify_result = unify_expression_types(tctx, loc, exp_type, expected_inst, context);
+    let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context.clone());
     if let Some(saved_env) = saved_unify_env {
         tctx.unify_state.set_env(&saved_env);
     }
-    unify_result?;
+    rue_result?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_pack(Box::new(wrapped_module)),
         loc,
-        exp_type,
+        packed_type,
         EnvRef(0),
         attributes.to_vec().into(),
     ))

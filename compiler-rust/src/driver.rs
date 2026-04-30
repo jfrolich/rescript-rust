@@ -1547,26 +1547,27 @@ fn build_name_based_coercion(
     impl_sig: &crate::types::decl::Signature,
     intf_sig: &crate::types::decl::Signature,
 ) -> crate::types::typedtree::ModuleCoercion {
+    use crate::types::decl::{AliasPresence, ModuleType, SignatureItem};
     use crate::types::includemod::is_runtime_component;
-    use crate::types::typedtree::ModuleCoercion;
+    use crate::types::typedtree::{EnvRef, ModuleCoercion};
 
     // Build name → runtime_position map from the implementation signature.
     // Only runtime components get a position index.
-    let mut impl_name_to_pos: std::collections::HashMap<String, usize> =
+    let mut impl_name_to_component: std::collections::HashMap<String, (usize, &SignatureItem)> =
         std::collections::HashMap::new();
     let mut runtime_pos = 0usize;
     for item in impl_sig {
         if is_runtime_component(item) {
             let name = match item {
-                crate::types::decl::SignatureItem::SigValue(id, _)
-                | crate::types::decl::SignatureItem::SigModule(id, _, _)
-                | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+                SignatureItem::SigValue(id, _)
+                | SignatureItem::SigModule(id, _, _)
+                | SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
                 _ => {
                     runtime_pos += 1;
                     continue;
                 }
             };
-            impl_name_to_pos.insert(name, runtime_pos);
+            impl_name_to_component.insert(name, (runtime_pos, item));
             runtime_pos += 1;
         }
     }
@@ -1581,14 +1582,41 @@ fn build_name_based_coercion(
         if !is_runtime_component(item) {
             continue;
         }
-        let name = match item {
-            crate::types::decl::SignatureItem::SigValue(id, _)
-            | crate::types::decl::SignatureItem::SigModule(id, _, _)
-            | crate::types::decl::SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
+        let (name, is_interface_module) = match item {
+            SignatureItem::SigValue(id, _) => (id.name().to_string(), false),
+            SignatureItem::SigModule(id, _, _) => (id.name().to_string(), true),
+            SignatureItem::SigTypext(id, _, _) => (id.name().to_string(), false),
             _ => continue,
         };
-        if let Some(&pos) = impl_name_to_pos.get(&name) {
-            coercions.push((pos, ModuleCoercion::Tcoerce_none));
+        if let Some(&(pos, impl_item)) = impl_name_to_component.get(&name) {
+            let coercion = match (is_interface_module, impl_item) {
+                (
+                    true,
+                    SignatureItem::SigModule(
+                        _,
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, alias_path),
+                            ..
+                        },
+                        _,
+                    ),
+                ) => {
+                    // This fallback runs only after `Includemod.compunit`
+                    // cannot compare Rust's implementation signature with an
+                    // OCaml-built `.cmi`. Preserve the alias coercion OCaml
+                    // would have produced for an absent implementation module
+                    // alias (`compiler/ml/includemod.ml:221-241`) so
+                    // `Translmod.apply_coercion` exports the target path
+                    // (`compiler/ml/translmod.ml:84-87`).
+                    ModuleCoercion::Tcoerce_alias(
+                        EnvRef(0),
+                        alias_path.clone(),
+                        Box::new(ModuleCoercion::Tcoerce_none),
+                    )
+                }
+                _ => ModuleCoercion::Tcoerce_none,
+            };
+            coercions.push((pos, coercion));
             runtime_fields.push(name);
         }
     }
