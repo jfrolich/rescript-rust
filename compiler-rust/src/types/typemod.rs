@@ -3521,26 +3521,26 @@ pub fn lookup_module_path_by_lid<'b>(
                 pers_env,
                 ctx,
                 |components| {
-                components
-                    .lookup_module(submod_name)
-                    .map(|(runtime_pos, _, md)| {
-                        if components.access_path().head().is_persistent()
-                            || components.access_path().head().stamp() == 0
-                        {
-                            md.md_path.clone().unwrap_or_else(|| {
-                                Path::pdot(
+                    components
+                        .lookup_module(submod_name)
+                        .map(|(runtime_pos, _, md)| {
+                            if components.access_path().head().is_persistent()
+                                || components.access_path().head().stamp() == 0
+                            {
+                                md.md_path.clone().unwrap_or_else(|| {
+                                    Path::pdot(
+                                        components.access_path().clone(),
+                                        submod_name.to_string(),
+                                    )
+                                })
+                            } else {
+                                Path::pdot_pos(
                                     components.access_path().clone(),
                                     submod_name.to_string(),
+                                    runtime_pos as i32,
                                 )
-                            })
-                        } else {
-                            Path::pdot_pos(
-                                components.access_path().clone(),
-                                submod_name.to_string(),
-                                runtime_pos as i32,
-                            )
-                        }
-                    })
+                            }
+                        })
                 },
             )
             .flatten()
@@ -6187,9 +6187,12 @@ fn strengthen_semantic_ident_module_type<'a>(
         DeclMty::MtyAlias(_, alias_path) => {
             let mut normalized = alias_path;
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
-            while let Some(next) =
-                crate::types::typecore::alias_target_for_module_path(&normalized, env, pers_env, ctx)
-            {
+            while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+                &normalized,
+                env,
+                pers_env,
+                ctx,
+            ) {
                 if next.same(&normalized) {
                     break;
                 }
@@ -6620,13 +6623,23 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 }
                                 _ => (tctx.type_ctx.create_ident(mod_name), None),
                             };
-                        let inner_mty = translate_module_type_to_decl_with_typed_hint(
-                            tctx,
-                            &sig_env,
-                            arena,
-                            arena.get_mod_type(md.pmd_type),
-                            typed_inner_mty,
-                        )?;
+                        let inner_mty = match typed_inner_mty.and_then(decl_module_type_from_typed)
+                        {
+                            Some(mty) => {
+                                // OCaml compiler/ml/typemod.ml:806-834 stores
+                                // `tmty.mty_type` directly in the `Sig_module`
+                                // after `transl_modtype`; it does not translate
+                                // the parsed module type a second time.
+                                mty
+                            }
+                            None => translate_module_type_to_decl_with_typed_hint(
+                                tctx,
+                                &sig_env,
+                                arena,
+                                arena.get_mod_type(md.pmd_type),
+                                typed_inner_mty,
+                            )?,
+                        };
                         sig_env.add_module(
                             mod_id.clone(),
                             crate::types::decl::ModuleDeclaration {
@@ -6656,19 +6669,26 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 }
                                 _ => (tctx.type_ctx.create_ident(modtype_name), None),
                             };
-                        let mtd_type = pmtd
-                            .pmtd_type
-                            .as_ref()
-                            .map(|inner_idx| {
-                                translate_module_type_to_decl_with_typed_hint(
-                                    tctx,
-                                    &sig_env,
-                                    arena,
-                                    arena.get_mod_type(*inner_idx),
-                                    typed_inner_mty,
-                                )
-                            })
-                            .transpose()?;
+                        let mtd_type = match typed_inner_mty.and_then(decl_module_type_from_typed) {
+                            Some(mty) => Some(mty),
+                            None => pmtd
+                                .pmtd_type
+                                .as_ref()
+                                .map(|inner_idx| {
+                                    // OCaml compiler/ml/typemod.ml:898-923
+                                    // builds `mtd_type` from `tmty.mty_type`.
+                                    // Re-translate only when no typed hint is
+                                    // available.
+                                    translate_module_type_to_decl_with_typed_hint(
+                                        tctx,
+                                        &sig_env,
+                                        arena,
+                                        arena.get_mod_type(*inner_idx),
+                                        typed_inner_mty,
+                                    )
+                                })
+                                .transpose()?,
+                        };
                         let mtd = crate::types::decl::ModtypeDeclaration {
                             mtd_type,
                             mtd_attributes: vec![],
@@ -6734,13 +6754,25 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     ),
                 };
             let param_decl = match param_type {
-                Some(pt_idx) => Some(Box::new(translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    env,
-                    arena,
-                    arena.get_mod_type(*pt_idx),
-                    typed_param_mty,
-                )?)),
+                Some(pt_idx) => {
+                    let decl = match typed_param_mty.and_then(decl_module_type_from_typed) {
+                        Some(mty) => {
+                            // OCaml compiler/ml/typemod.ml:713-724 reuses
+                            // `arg.mty_type` as `ty_arg` when building
+                            // `Mty_functor`; it does not translate the
+                            // parameter module type again.
+                            mty
+                        }
+                        None => translate_module_type_to_decl_with_typed_hint(
+                            tctx,
+                            env,
+                            arena,
+                            arena.get_mod_type(*pt_idx),
+                            typed_param_mty,
+                        )?,
+                    };
+                    Some(Box::new(decl))
+                }
                 None => None,
             };
             let mut result_env = env.clone();
@@ -6756,13 +6788,21 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     md_path: None,
                 },
             );
-            let result_decl = translate_module_type_to_decl_with_typed_hint(
-                tctx,
-                &result_env,
-                arena,
-                arena.get_mod_type(*result_type_idx),
-                typed_result_mty,
-            )?;
+            let result_decl = match typed_result_mty.and_then(decl_module_type_from_typed) {
+                Some(mty) => {
+                    // OCaml compiler/ml/typemod.ml:721-724 stores
+                    // `res.mty_type` in the functor result. Reusing it keeps
+                    // nested `Pmty_with` freshening single-pass.
+                    mty
+                }
+                None => translate_module_type_to_decl_with_typed_hint(
+                    tctx,
+                    &result_env,
+                    arena,
+                    arena.get_mod_type(*result_type_idx),
+                    typed_result_mty,
+                )?,
+            };
             Ok(DeclMty::MtyFunctor {
                 param: param_id,
                 param_type: param_decl,
@@ -8903,12 +8943,16 @@ fn type_module_expr_with_alias<'a>(
             if let Some(simplified_structure_sig) = simplified_structure_sig {
                 let simplified =
                     crate::types::decl::ModuleType::MtySignature(simplified_structure_sig);
-                let coercion =
-                    crate::types::includemod::modtypes(tctx.type_ctx, env, &md.mod_type, &simplified)
-                        .map_err(|err| TypeModError::SignatureMismatch {
-                            expected: format!("{simplified:?}"),
-                            found: format!("{err:?}"),
-                        })?;
+                let coercion = crate::types::includemod::modtypes(
+                    tctx.type_ctx,
+                    env,
+                    &md.mod_type,
+                    &simplified,
+                )
+                .map_err(|err| TypeModError::SignatureMismatch {
+                    expected: format!("{simplified:?}"),
+                    found: format!("{err:?}"),
+                })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(md),
@@ -9097,14 +9141,11 @@ fn type_module_expr_with_alias<'a>(
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
             let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
             let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
-            let parsed_mty = arena.get_mod_type(*mod_type_idx);
-            let decl_mty = translate_module_type_to_decl_with_typed_hint(
-                tctx,
-                env,
-                arena,
-                parsed_mty,
-                Some(&typed_mty),
-            )?;
+            // OCaml compiler/ml/typemod.ml:1359-1367 passes
+            // `mty.mty_type` from the just-translated module type directly to
+            // `wrap_constraint`; it does not re-run module-type translation.
+            let decl_mty = decl_module_type_from_typed(&typed_mty)
+                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
@@ -9530,13 +9571,12 @@ pub fn transl_signature<'a>(
                     transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(md.pmd_type))?;
                 // Add module to sig_env so subsequent items (Psig_open etc.) can find it.
                 // This matches OCaml's transl_sig: `let newenv = Env.enter_module_declaration id md env`.
-                let decl_mty = translate_module_type_to_decl_with_typed_hint(
-                    tctx,
-                    &sig_env,
-                    arena,
-                    arena.get_mod_type(md.pmd_type),
-                    Some(&typed_mty),
-                )?;
+                // OCaml compiler/ml/typemod.ml:806-834 uses the
+                // `tmty.mty_type` produced by `transl_modtype` as the
+                // declaration's `md_type`. Re-translating here would repeat
+                // side effects such as `Mtype.freshen` for `Pmty_with`.
+                let decl_mty = decl_module_type_from_typed(&typed_mty)
+                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
                 sig_env.add_module(
                     id.clone(),
                     crate::types::decl::ModuleDeclaration {
