@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, OnceLock};
 
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::lam_constant::PointerInfo;
@@ -52,27 +53,90 @@ use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 /// being transformed, and clone the raw lambda only when final code needs
 /// ownership.
 #[derive(Clone)]
-struct MatchAction(Arc<RawLambda>);
+struct MatchAction {
+    raw: Arc<RawLambda>,
+    normalized_key: Arc<OnceLock<Option<String>>>,
+}
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
-        Self(Arc::new(action))
+        Self {
+            raw: Arc::new(action),
+            normalized_key: Arc::new(OnceLock::new()),
+        }
     }
 
     fn as_raw(&self) -> &RawLambda {
-        self.0.as_ref()
+        self.raw.as_ref()
     }
 
     fn to_raw(&self) -> RawLambda {
-        self.0.as_ref().clone()
+        self.raw.as_ref().clone()
     }
 
     fn into_raw(self) -> RawLambda {
-        Arc::try_unwrap(self.0).unwrap_or_else(|shared| shared.as_ref().clone())
+        Arc::try_unwrap(self.raw).unwrap_or_else(|shared| shared.as_ref().clone())
+    }
+
+    fn normalized_key(&self) -> Option<&str> {
+        // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
+        // `compiler/ml/matching.ml:489-500,708-846` compares those pure keys while
+        // shuffling the same immutable actions through match matrices. Cache the
+        // key beside the shared action so Rust preserves the same result without
+        // repeatedly cloning the raw lambda to rebuild the normalized key.
+        self.normalized_key
+            .get_or_init(|| make_key_string(self.as_raw()))
+            .as_deref()
     }
 }
 
 type Clause = (Vec<Pattern>, MatchAction);
+
+/// Shared match arguments used while compiling pattern matrices.
+///
+/// OCaml `compiler/ml/matching.ml:814-1090` passes immutable `args` lists
+/// through `split_or`, `precompile_var`, and `precompile_or`; constructing a
+/// `Pm`/`PmOr` node shares that list. Rust used `Vec<(RawLambda, LetKind)>`
+/// directly, so every `args.to_vec()` recursively cloned raw-lambda scrutinees.
+/// Store the backing vector once and represent OCaml tail lists with a start
+/// offset to preserve the same functional sharing.
+#[derive(Clone)]
+pub struct MatchArgs {
+    values: Arc<Vec<(RawLambda, LetKind)>>,
+    start: usize,
+}
+
+impl MatchArgs {
+    fn new(values: Vec<(RawLambda, LetKind)>) -> Self {
+        Self {
+            values: Arc::new(values),
+            start: 0,
+        }
+    }
+
+    fn tail(&self, count: usize) -> Self {
+        assert!(
+            self.start + count <= self.values.len(),
+            "MatchArgs::tail past end"
+        );
+        Self {
+            values: Arc::clone(&self.values),
+            start: self.start + count,
+        }
+    }
+
+    fn as_slice(&self) -> &[(RawLambda, LetKind)] {
+        &self.values[self.start..]
+    }
+}
+
+impl Deref for MatchArgs {
+    type Target = [(RawLambda, LetKind)];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
 // ============================================================================
 // Omega (wildcard) helpers — ported from parmatch.ml
@@ -1512,7 +1576,7 @@ pub struct PatternMatching {
     /// Cases: list of (pattern_row, action).
     cases: Vec<Clause>,
     /// Arguments to match against: (expression, let_kind).
-    pub args: Vec<(RawLambda, LetKind)>,
+    pub args: MatchArgs,
     /// Default: mapping from matrices to exit numbers.
     pub default: DefaultEnv,
 }
@@ -2067,11 +2131,9 @@ pub fn same_actions(cases: &[Clause]) -> Option<RawLambda> {
         [] => None,
         [(_, act)] => Some(act.to_raw()),
         [(_, act0), rem @ ..] => {
-            let raw_act0 = tr_raw(act0.as_raw())?;
-            let raw_act0_str = lambda_to_string(&raw_act0);
+            let raw_act0_str = act0.normalized_key()?;
             for (_, act) in rem {
-                let raw_act = tr_raw(act.as_raw())?;
-                if lambda_to_string(&raw_act) != raw_act0_str {
+                if act.normalized_key()? != raw_act0_str {
                     return None;
                 }
             }
@@ -2088,9 +2150,9 @@ pub fn same_actions(cases: &[Clause]) -> Option<RawLambda> {
 /// Returns true if both can be normalized and their normalized forms are equal.
 ///
 /// Equivalent to OCaml's `up_ok_action`.
-fn up_ok_action(act1: &RawLambda, act2: &RawLambda) -> bool {
-    match (tr_raw(act1), tr_raw(act2)) {
-        (Some(raw1), Some(raw2)) => lambda_to_string(&raw1) == lambda_to_string(&raw2),
+fn up_ok_action(act1: &MatchAction, act2: &MatchAction) -> bool {
+    match (act1.normalized_key(), act2.normalized_key()) {
+        (Some(raw1), Some(raw2)) => raw1 == raw2,
         _ => false,
     }
 }
@@ -2113,7 +2175,7 @@ fn up_ok_iter<'a>(
     act_p: &MatchAction,
     mut clauses: impl Iterator<Item = &'a Clause>,
 ) -> bool {
-    clauses.all(|(qs, act_q)| up_ok_action(act_p.as_raw(), act_q.as_raw()) || !may_compats(ps, qs))
+    clauses.all(|(qs, act_q)| up_ok_action(act_p, act_q) || !may_compats(ps, qs))
 }
 
 // ============================================================================
@@ -3017,7 +3079,7 @@ fn split_or(
     ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     cls: Vec<Clause>,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
@@ -3044,7 +3106,7 @@ fn do_split_or(
     ors: VecDeque<Clause>,
     no: VecDeque<Clause>,
     mut rest: VecDeque<Clause>,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
@@ -3105,7 +3167,7 @@ fn cons_next_or(
     yes: Vec<Clause>,
     yesor: Vec<Clause>,
     no: Vec<Clause>,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
@@ -3151,7 +3213,7 @@ fn cons_next_or(
 /// Equivalent to OCaml's `split_naive`.
 fn split_naive(
     cls: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3179,7 +3241,7 @@ fn split_exc(
     cstr0: &crate::types::ConstructorDescription,
     yes: Vec<Clause>,
     rest: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3191,7 +3253,7 @@ fn split_exc(
                 PmHalfCompiledInfo {
                     me: PmHalfCompiled::Pm(PatternMatching {
                         cases: yes.clone(),
-                        args: args.to_vec(),
+                        args: args.clone(),
                         default: def.clone(),
                     }),
                     matrix: as_matrix(&yes),
@@ -3231,7 +3293,7 @@ fn split_exc(
                         PmHalfCompiledInfo {
                             me: PmHalfCompiled::Pm(PatternMatching {
                                 cases: yes.clone(),
-                                args: args.to_vec(),
+                                args: args.clone(),
                                 default: new_def.clone(),
                             }),
                             matrix: as_matrix(&yes),
@@ -3258,7 +3320,7 @@ fn split_exc(
                     PmHalfCompiledInfo {
                         me: PmHalfCompiled::Pm(PatternMatching {
                             cases: yes.clone(),
-                            args: args.to_vec(),
+                            args: args.clone(),
                             default: new_def.clone(),
                         }),
                         matrix: as_matrix(&yes),
@@ -3276,7 +3338,7 @@ fn split_exc(
 fn split_noexc(
     yes: Vec<Clause>,
     rest: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3330,7 +3392,7 @@ fn split_noexc(
 /// Equivalent to OCaml's `split_constr`.
 fn split_constr(
     cls: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3380,7 +3442,7 @@ fn split_ex(
     yes: Vec<Clause>,
     no: Vec<Clause>,
     rest: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3394,7 +3456,7 @@ fn split_ex(
                     PmHalfCompiledInfo {
                         me: PmHalfCompiled::Pm(PatternMatching {
                             cases: yes.clone(),
-                            args: args.to_vec(),
+                            args: args.clone(),
                             default: def.clone(),
                         }),
                         matrix: as_matrix(&yes),
@@ -3439,7 +3501,7 @@ fn split_ex(
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
                                     cases: yes.clone(),
-                                    args: args.to_vec(),
+                                    args: args.clone(),
                                     default: new_def.clone(),
                                 }),
                                 matrix: as_matrix(&yes),
@@ -3472,7 +3534,7 @@ fn split_noex(
     yes: Vec<Clause>,
     no: Vec<Clause>,
     rest: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3559,13 +3621,13 @@ fn split_noex(
 /// split further on the second column.
 /// Equivalent to OCaml's `precompile_var`.
 fn precompile_var(
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     cls: Vec<Clause>,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    match args {
+    match args.as_slice() {
         [] => panic!("precompile_var: empty args"),
         [_, arg_rest @ ..] if !arg_rest.is_empty() => {
             // Check if second arg is Lvar
@@ -3586,11 +3648,12 @@ fn precompile_var(
                         let var_def =
                             make_default(&|_p: &Pattern, rem: &[Pattern]| Ok(rem.to_vec()), &def);
                         let av = arg_rest[0].0.clone();
+                        let arg_tail = args.tail(1);
                         let (first_info, nexts) = split_or(
                             None, // TypeContext not available in do_split_or
                             &Some(v.clone()),
                             var_cls,
-                            arg_rest,
+                            &arg_tail,
                             var_def,
                             next_raise,
                         );
@@ -3623,7 +3686,7 @@ fn precompile_var(
 /// Don't precompile: just wrap the cases in a PatternMatching.
 /// Equivalent to OCaml's `dont_precompile_var`.
 fn dont_precompile_var(
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     cls: Vec<Clause>,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
@@ -3632,7 +3695,7 @@ fn dont_precompile_var(
         PmHalfCompiledInfo {
             me: PmHalfCompiled::Pm(PatternMatching {
                 cases: cls.clone(),
-                args: args.to_vec(),
+                args: args.clone(),
                 default: def.clone(),
             }),
             matrix: as_matrix(&cls),
@@ -3649,7 +3712,7 @@ fn precompile_or(
     argo: &Option<Ident>,
     cls: Vec<Clause>,
     ors: Vec<Clause>,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: DefaultEnv,
     k: Vec<(i32, PmHalfCompiled)>,
     next_raise: &mut i32,
@@ -3664,7 +3727,7 @@ fn precompile_or(
     let matrix = as_matrix(&[cls.as_slice(), ors.as_slice()].concat());
     let body = PatternMatching {
         cases: [cls, end_body].concat(),
-        args: args.to_vec(),
+        args: args.clone(),
         default: def.clone(),
     };
     (
@@ -3687,7 +3750,7 @@ fn do_cases_or(
     ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     ors: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (Vec<Clause>, Vec<(Matrix, i32, Vec<Ident>, PatternMatching)>) {
@@ -3699,7 +3762,7 @@ fn do_cases_or_deque(
     ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
     ors: &[Clause],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (
@@ -3725,7 +3788,7 @@ fn do_cases_or_deque(
                         cases
                     };
                     let orpm_args = match args.split_first() {
-                        Some((_, r)) => r.to_vec(),
+                        Some(_) => args.tail(1),
                         None => panic!("do_cases_or: empty args"),
                     };
                     let orpm = PatternMatching {
@@ -3839,12 +3902,12 @@ struct MatchCell {
 /// Add a case to the appropriate cell in a division, creating a new cell if needed.
 /// Equivalent to OCaml's `add`.
 fn add<K>(
-    make_matching_fun: impl FnOnce(&[(RawLambda, LetKind)]) -> MatchCell,
+    make_matching_fun: impl FnOnce(&MatchArgs) -> MatchCell,
     mut division: Vec<(K, MatchCell)>,
     eq_key: impl Fn(&K, &K) -> bool,
     key: K,
     patl_action: Clause,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> Vec<(K, MatchCell)> {
     // Try to find existing entry with matching key
     if let Some(pos) = division.iter().position(|(k, _)| eq_key(&key, k)) {
@@ -3864,7 +3927,7 @@ fn add<K>(
 /// Iterating from the tail, pushing, and reversing once preserves the same
 /// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
 fn divide<K>(
-    make: impl Fn(&Pattern, &DefaultEnv, &[Ctx], &[(RawLambda, LetKind)]) -> MatchCell,
+    make: impl Fn(&Pattern, &DefaultEnv, &[Ctx], &MatchArgs) -> MatchCell,
     eq_key: impl Fn(&K, &K) -> bool,
     get_key: impl Fn(&Pattern) -> K,
     get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
@@ -3904,7 +3967,7 @@ fn divide<K>(
 /// without shifting the whole Rust vector per case.
 fn divide_line(
     make_ctx: impl Fn(&[Ctx]) -> Vec<Ctx>,
-    make: impl Fn(&DefaultEnv, &[(RawLambda, LetKind)]) -> PatternMatching,
+    make: impl Fn(&DefaultEnv, &MatchArgs) -> PatternMatching,
     get_args: impl Fn(&Pattern, &[Pattern]) -> Vec<Pattern>,
     pat: Pattern,
     ctx: &[Ctx],
@@ -3982,18 +4045,18 @@ fn make_constant_matching(
     p: &Pattern,
     def: &DefaultEnv,
     ctx: &[Ctx],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_constant_matching"),
-        Some((_, argl)) => {
+        Some(_) => {
             let key = get_key_constant("make", p);
             let def = make_default(&|p2, rem| matcher_const(&key, p2, rem), def);
             let ctx = filter_ctx(None, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: argl.to_vec(),
+                    args: args.tail(1),
                     default: def,
                 },
                 ctx,
@@ -4027,7 +4090,7 @@ fn make_field_args(
     arg: &RawLambda,
     first_pos: i32,
     last_pos: i32,
-    argl: &[(RawLambda, LetKind)],
+    argl: &MatchArgs,
 ) -> Vec<(RawLambda, LetKind)> {
     let mut result = Vec::new();
     for pos in first_pos..=last_pos {
@@ -4225,11 +4288,12 @@ fn make_constr_matching(
     p: &Pattern,
     def: &DefaultEnv,
     ctx: &[Ctx],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_constr_matching"),
-        Some(((arg, _mut), argl)) => {
+        Some(((arg, _mut), _)) => {
+            let argl = args.tail(1);
             let cstr = pat_as_constr(p);
             let untagged = has_untagged(&cstr.cstr_attributes);
             let newargs = if cstr.cstr_inlined.is_some() || (untagged && !cstr.cstr_args.is_empty())
@@ -4299,7 +4363,7 @@ fn make_constr_matching(
                             arg,
                             0,
                             cstr.cstr_arity - 1,
-                            argl,
+                            &argl,
                         )
                     }
                     ConstructorTag::CstrUnboxed => {
@@ -4314,7 +4378,7 @@ fn make_constr_matching(
                         arg,
                         1,
                         cstr.cstr_arity,
-                        argl,
+                        &argl,
                     ),
                 }
             };
@@ -4322,7 +4386,7 @@ fn make_constr_matching(
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: newargs,
+                    args: MatchArgs::new(newargs),
                     default: make_default(&|p2, rem| matcher_constr(&cstr_clone, p2, rem), def),
                 },
                 ctx: filter_ctx(Some(ctx_ref), p, ctx),
@@ -4377,18 +4441,18 @@ fn make_variant_matching_constant(
     lab: &str,
     def: &DefaultEnv,
     ctx: &[Ctx],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_variant_matching_constant"),
-        Some((_, argl)) => {
+        Some(_) => {
             let lab_owned = lab.to_string();
             let def = make_default(&|p2, rem| matcher_variant_const(&lab_owned, p2, rem), def);
             let ctx = filter_ctx(None, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: argl.to_vec(),
+                    args: args.tail(1),
                     default: def,
                 },
                 ctx,
@@ -4428,11 +4492,12 @@ fn make_variant_matching_nonconst(
     lab: &str,
     def: &DefaultEnv,
     ctx: &[Ctx],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_variant_matching_nonconst"),
-        Some(((arg, _mut), argl)) => {
+        Some(((arg, _mut), _)) => {
+            let argl = args.tail(1);
             let lab_owned = lab.to_string();
             let def = make_default(
                 &|p2, rem| matcher_variant_nonconst(&lab_owned, p2, rem),
@@ -4451,7 +4516,7 @@ fn make_variant_matching_nonconst(
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: new_args,
+                    args: MatchArgs::new(new_args),
                     default: def,
                 },
                 ctx,
@@ -4477,7 +4542,7 @@ fn divide_variant(
         cases: &[Clause],
         def: &DefaultEnv,
         ctx: &[Ctx],
-        al: &[(RawLambda, LetKind)],
+        al: &MatchArgs,
     ) -> Vec<((String, ConstructorTag), MatchCell)> {
         match cases.split_first() {
             Some(((patl, action), rem)) => {
@@ -4565,12 +4630,12 @@ fn matcher_get_args_var(_p: &Pattern, rem: &[Pattern]) -> Result<Vec<Pattern>, M
 
 /// Make a variable matching.
 /// Equivalent to OCaml's `make_var_matching`.
-fn make_var_matching(def: &DefaultEnv, args: &[(RawLambda, LetKind)]) -> PatternMatching {
+fn make_var_matching(def: &DefaultEnv, args: &MatchArgs) -> PatternMatching {
     match args.split_first() {
         None => panic!("Matching.make_var_matching"),
-        Some((_, argl)) => PatternMatching {
+        Some(_) => PatternMatching {
             cases: Vec::new(),
-            args: argl.to_vec(),
+            args: args.tail(1),
             default: make_default(&matcher_get_args_var, def),
         },
     }
@@ -4634,11 +4699,12 @@ fn make_tuple_matching(
     loc: Location,
     arity: usize,
     def: &DefaultEnv,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> PatternMatching {
     match args.split_first() {
         None => panic!("Matching.make_tuple_matching"),
-        Some(((arg, _mut), argl)) => {
+        Some(((arg, _mut), _)) => {
+            let argl = args.tail(1);
             let mut new_args = Vec::new();
             for pos in 0..arity {
                 new_args.push((
@@ -4653,7 +4719,7 @@ fn make_tuple_matching(
             new_args.extend(argl.iter().cloned());
             PatternMatching {
                 cases: Vec::new(),
-                args: new_args,
+                args: MatchArgs::new(new_args),
                 default: make_default(&|p2, rem| matcher_tuple(arity, p2, rem), def),
             }
         }
@@ -4778,11 +4844,12 @@ fn make_record_matching(
     loc: Location,
     all_labels: &[LabelDescription],
     def: &DefaultEnv,
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> PatternMatching {
     match args.split_first() {
         None => panic!("Matching.make_record_matching"),
-        Some(((arg, _mut), argl)) => {
+        Some(((arg, _mut), _)) => {
+            let argl = args.tail(1);
             let mut new_args = Vec::new();
             for lbl in all_labels.iter() {
                 let access = match &lbl.lbl_repres {
@@ -4817,7 +4884,7 @@ fn make_record_matching(
             let def = make_default(&|p2, rem| matcher_record(nfields, p2, rem), def);
             PatternMatching {
                 cases: Vec::new(),
-                args: new_args,
+                args: MatchArgs::new(new_args),
                 default: def,
             }
         }
@@ -4894,11 +4961,12 @@ fn make_array_matching(
     p: &Pattern,
     def: &DefaultEnv,
     ctx: &[Ctx],
-    args: &[(RawLambda, LetKind)],
+    args: &MatchArgs,
 ) -> MatchCell {
     match args.split_first() {
         None => panic!("Matching.make_array_matching"),
-        Some(((arg, _mut), argl)) => {
+        Some(((arg, _mut), _)) => {
+            let argl = args.tail(1);
             let len = get_key_array(p);
             let mut new_args = Vec::new();
             for pos in 0..len {
@@ -4923,7 +4991,7 @@ fn make_array_matching(
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
-                    args: new_args,
+                    args: MatchArgs::new(new_args),
                     default: def,
                 },
                 ctx,
@@ -7652,7 +7720,7 @@ fn compile_match(
             };
             let new_pm = PatternMatching {
                 cases: m.cases.clone(),
-                args: new_args,
+                args: MatchArgs::new(new_args),
                 default: m.default.clone(),
             };
             let (first_match, rem) =
@@ -8680,7 +8748,7 @@ pub fn compile_matching(
                     .into_iter()
                     .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
                     .collect(),
-                args: vec![(arg, LetKind::Strict)],
+                args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
             match compile_match(
@@ -8702,7 +8770,7 @@ pub fn compile_matching(
                     .into_iter()
                     .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
                     .collect(),
-                args: vec![(arg, LetKind::Strict)],
+                args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
             match compile_match(
@@ -8890,10 +8958,12 @@ pub fn for_tupled_function(
     let omegas_row: Vec<Vec<Pattern>> = vec![paraml.iter().map(|_| omega()).collect()];
     let pm = PatternMatching {
         cases: pats_act_list,
-        args: paraml
-            .iter()
-            .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Strict))
-            .collect(),
+        args: MatchArgs::new(
+            paraml
+                .iter()
+                .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Strict))
+                .collect(),
+        ),
         default: vec![(omegas_row, raise_num)],
     };
     match compile_match(
@@ -8990,7 +9060,7 @@ fn flatten_def(size: usize, def: &DefaultEnv) -> Result<DefaultEnv, CannotFlatte
 /// Equivalent to OCaml's `flatten_pm`.
 fn flatten_pm(
     size: usize,
-    args: Vec<(RawLambda, LetKind)>,
+    args: MatchArgs,
     pm: &PatternMatching,
 ) -> Result<PatternMatching, CannotFlattenExn> {
     Ok(PatternMatching {
@@ -9004,17 +9074,17 @@ fn flatten_pm(
 /// Equivalent to OCaml's `flatten_precompiled`.
 fn flatten_precompiled(
     size: usize,
-    args: Vec<(RawLambda, LetKind)>,
+    args: &MatchArgs,
     pmh: PmHalfCompiled,
 ) -> Result<PmHalfCompiled, CannotFlattenExn> {
     match pmh {
-        PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(size, args, &pm)?)),
+        PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(size, args.clone(), &pm)?)),
         PmHalfCompiled::PmOr(PmOrCompiled {
             body,
             handlers,
             or_matrix,
         }) => {
-            let flat_body = flatten_pm(size, args, &body)?;
+            let flat_body = flatten_pm(size, args.clone(), &body)?;
             let flat_handlers: Vec<_> = handlers
                 .into_iter()
                 .map(|(mat, i, vars, pm)| {
@@ -9090,14 +9160,14 @@ pub fn do_for_multiple_match(
                         .iter()
                         .map(|(pat, act)| (vec![pat.clone()], MatchAction::new(act.clone())))
                         .collect(),
-                    args: vec![(
+                    args: MatchArgs::new(vec![(
                         RawLambda::Lprim(RawPrimInfo {
                             primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
                             args: paraml.clone(),
                             loc: loc.clone(),
                         }),
                         LetKind::Strict,
-                    )],
+                    )]),
                     default: vec![(vec![vec![omega()]], raise_num)],
                 },
             )
@@ -9109,14 +9179,14 @@ pub fn do_for_multiple_match(
                     .iter()
                     .map(|(pat, act)| (vec![pat.clone()], MatchAction::new(act.clone())))
                     .collect(),
-                args: vec![(
+                args: MatchArgs::new(vec![(
                     RawLambda::Lprim(RawPrimInfo {
                         primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
                         args: paraml.clone(),
                         loc: loc.clone(),
                     }),
                     LetKind::Strict,
-                )],
+                )]),
                 default: Vec::new(),
             },
         ),
@@ -9133,16 +9203,17 @@ pub fn do_for_multiple_match(
             .iter()
             .map(|_| ctx_ref.create_ident("match"))
             .collect();
-        let args: Vec<(RawLambda, LetKind)> = idl
-            .iter()
-            .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Alias))
-            .collect();
+        let args = MatchArgs::new(
+            idl.iter()
+                .map(|id| (RawLambda::Lvar(id.clone()), LetKind::Alias))
+                .collect(),
+        );
 
-        let flat_next = flatten_precompiled(size, args.clone(), next)?;
+        let flat_next = flatten_precompiled(size, &args, next)?;
         let flat_nexts: Vec<(i32, PmHalfCompiled)> = nexts
             .into_iter()
             .map(|(e, pm)| {
-                let flat = flatten_precompiled(size, args.clone(), pm)?;
+                let flat = flatten_precompiled(size, &args, pm)?;
                 Ok((e, flat))
             })
             .collect::<Result<_, CannotFlattenExn>>()?;
