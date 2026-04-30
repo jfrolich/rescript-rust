@@ -20,15 +20,15 @@ use super::path::Path;
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
-    access_path: Path,
-    signature: Signature,
-    values: HashMap<String, (usize, usize)>,
-    types: HashMap<String, usize>,
-    modules: HashMap<String, (usize, usize)>,
-    modtypes: HashMap<String, usize>,
+    access_path: Arc<Path>,
+    signature: Arc<Signature>,
+    values: Arc<HashMap<String, (usize, usize)>>,
+    types: Arc<HashMap<String, usize>>,
+    modules: Arc<HashMap<String, (usize, usize)>>,
+    modtypes: Arc<HashMap<String, usize>>,
     qualified_modules: RefCell<HashMap<String, (Ident, ModuleDeclaration)>>,
     qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
-    child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+    child_components: Arc<HashMap<String, (usize, Arc<StoredModuleComponents>)>>,
 }
 
 impl QualifiedModuleComponents {
@@ -73,28 +73,28 @@ impl QualifiedModuleComponents {
         }
 
         Self {
-            access_path,
-            signature,
-            values,
-            types,
-            modules,
-            modtypes,
+            access_path: Arc::new(access_path),
+            signature: Arc::new(signature),
+            values: Arc::new(values),
+            types: Arc::new(types),
+            modules: Arc::new(modules),
+            modtypes: Arc::new(modtypes),
             qualified_modules: RefCell::new(HashMap::new()),
             qualified_modtypes: RefCell::new(HashMap::new()),
-            child_components,
+            child_components: Arc::new(child_components),
         }
     }
 
     pub(crate) fn access_path(&self) -> &Path {
-        &self.access_path
+        self.access_path.as_ref()
     }
 
     pub(crate) fn signature(&self) -> &[SignatureItem] {
-        &self.signature
+        self.signature.as_slice()
     }
 
     pub(crate) fn cloned_signature(&self) -> Signature {
-        self.signature.clone()
+        self.signature.as_ref().clone()
     }
 
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
