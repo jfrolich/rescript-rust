@@ -51,24 +51,26 @@ fn flatten_and_mark_dead_program(
 
 fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident>) -> Block {
     let mut rewritten = Vec::with_capacity(block.len());
+    let mut block = block.into_iter().map(Some).collect::<Vec<_>>();
     let mut index = 0;
 
     while index < block.len() {
-        let Some(current) = block.get(index) else {
-            break;
+        let Some(current) = block[index].as_ref() else {
+            index += 1;
+            continue;
         };
-        let Some(next) = block.get(index + 1) else {
-            rewritten.push(current.clone());
+        let Some(next) = block.get(index + 1).and_then(Option::as_ref) else {
+            rewritten.push(block[index].take().expect("current statement was present"));
             break;
         };
 
         let StatementDesc::Variable(function_decl) = &current.desc else {
-            rewritten.push(current.clone());
+            rewritten.push(block[index].take().expect("current statement was present"));
             index += 1;
             continue;
         };
         let StatementDesc::Variable(alias_decl) = &next.desc else {
-            rewritten.push(current.clone());
+            rewritten.push(block[index].take().expect("current statement was present"));
             index += 1;
             continue;
         };
@@ -80,11 +82,16 @@ fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident
             ..
         }) = &function_decl.value
         else {
-            rewritten.push(current.clone());
+            rewritten.push(block[index].take().expect("current statement was present"));
             index += 1;
             continue;
         };
 
+        // OCaml's JS pass mutates the program in-place and returns the same
+        // block (`compiler/core/js_pass_flatten_and_mark_dead.ml:32-92`). This
+        // Rust-only component-alias fold consumes the block, so move statements
+        // through unchanged on the common no-op path and clone only for the
+        // rare replacement.
         if *async_
             || directive.is_some()
             || !is_make_like_binding_name(function_decl.ident.name())
@@ -104,11 +111,11 @@ fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident
                     .expect("function value checked above"),
                 &function_decl.ident,
             )
-            || statements_mention_ident(&block[(index + 2)..], &function_decl.ident)
+            || optional_statements_mention_ident(&block[(index + 2)..], &function_decl.ident)
             || !export_set.contains(&alias_decl.ident)
-                && !statements_mention_ident(&block[(index + 2)..], &alias_decl.ident)
+                && !optional_statements_mention_ident(&block[(index + 2)..], &alias_decl.ident)
         {
-            rewritten.push(current.clone());
+            rewritten.push(block[index].take().expect("current statement was present"));
             index += 1;
             continue;
         }
@@ -122,6 +129,8 @@ fn collapse_sync_component_make_aliases(block: Block, export_set: &HashSet<Ident
             }),
             comment: current.comment.clone().or_else(|| next.comment.clone()),
         });
+        block[index].take();
+        block[index + 1].take();
         index += 2;
     }
 
@@ -610,6 +619,13 @@ fn is_descriptive_component_binding_name(name: &str) -> bool {
 fn statements_mention_ident(stmts: &[Statement], target: &Ident) -> bool {
     stmts
         .iter()
+        .any(|stmt| statement_mentions_ident(stmt, target))
+}
+
+fn optional_statements_mention_ident(stmts: &[Option<Statement>], target: &Ident) -> bool {
+    stmts
+        .iter()
+        .flatten()
         .any(|stmt| statement_mentions_ident(stmt, target))
 }
 
