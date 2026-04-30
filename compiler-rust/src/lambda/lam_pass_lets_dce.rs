@@ -412,12 +412,14 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             Lambda::LtryWith(Box::new(s1), v.clone(), Box::new(s2))
         }
 
-        // Lifthenelse (lam_pass_lets_dce.ml:199).
+        // OCaml uses Lam.if_ after simplification here
+        // (compiler/core/lam_pass_lets_dce.ml:199), so preserve Lam.if_'s
+        // raise/sequence rewrite from compiler/core/lam.ml:665-668.
         Lambda::LifThenElse(l1, l2, l3) => {
             let s1 = lets_helper(state, l1);
             let s2 = lets_helper(state, l2);
             let s3 = lets_helper(state, l3);
-            Lambda::LifThenElse(Box::new(s1), Box::new(s2), Box::new(s3))
+            Lambda::if_(s1, s2, s3)
         }
 
         // Lwhile (lam_pass_lets_dce.ml:200).
@@ -781,7 +783,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             let s1 = lets_helper_owned(state, *l1);
             let s2 = lets_helper_owned(state, *l2);
             let s3 = lets_helper_owned(state, *l3);
-            Lambda::LifThenElse(Box::new(s1), Box::new(s2), Box::new(s3))
+            Lambda::if_(s1, s2, s3)
         }
 
         Lambda::Lwhile(l1, l2) => {
