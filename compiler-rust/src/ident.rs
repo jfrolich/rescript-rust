@@ -139,9 +139,11 @@ impl Ident {
     /// thread isolation isn't required.
     #[inline]
     pub fn create_local(name: impl Into<SmolStr>) -> Self {
+        let stamp = LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        let name = name.into();
         Self {
-            name: name.into(),
-            stamp: LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed) + 1,
+            name,
+            stamp,
             flags: IdentFlags::NONE,
         }
     }
