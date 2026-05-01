@@ -2950,6 +2950,54 @@ pub fn unify<'a>(
     result
 }
 
+/// Unify with OCaml's `unify_var` fast path.
+///
+/// OCaml compiler/ml/ctype.ml:2820-2837 links a left-hand `Tvar` directly
+/// after the occurs check and level update, falling back to full `unify` for
+/// constructor self-occurrences and non-variable left sides.
+pub fn unify_var<'a>(
+    ctx: &'a TypeContext<'a>,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    let t1 = ctx.repr(t1);
+    let t2 = ctx.repr(t2);
+    if t1 == t2 {
+        return Ok(());
+    }
+
+    let desc1 = ctx.get_desc(t1);
+    let desc2 = ctx.get_desc(t2);
+    match (&*desc1, &*desc2) {
+        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. }) if deep_occur(ctx, t1, t2) => {
+            drop(desc1);
+            drop(desc2);
+            unify(ctx, state, t1, t2)
+        }
+        (TypeDesc::Tvar(_), _) => {
+            drop(desc1);
+            drop(desc2);
+            if occurs(ctx, t1, t2) {
+                return Err(TypeError::Unify(vec![(t1, t2)]));
+            }
+            let level = ctx.get_level(t1);
+            if let Some(env) = state.env() {
+                update_level_expand(ctx, env, level, t2);
+            } else {
+                update_level(ctx, level, t2);
+            }
+            link_type(ctx, t1, t2);
+            Ok(())
+        }
+        _ => {
+            drop(desc1);
+            drop(desc2);
+            unify(ctx, state, t1, t2)
+        }
+    }
+}
+
 // Match OCaml ctype.ml unify2/unify3 alias-expansion linking direction.
 // OCaml still picks a relinking direction when both sides expanded:
 //   if t1 == t1' || t2 != t2' then unify3 t1 t1' t2 t2'

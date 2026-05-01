@@ -1648,7 +1648,16 @@ fn transl_type_inner(
             }
             ty_list.reverse();
 
-            let poly_ty = ctx.new_poly(body_ty, ty_list);
+            // OCaml compiler/ml/typetexp.ml:538-539 builds this node with
+            // `Btype.newgenty` and immediately checks it through
+            // `unify_var env (newvar ()) ty'`.
+            let poly_ty = ctx.new_generic_type(TypeDesc::Tpoly {
+                body: body_ty,
+                vars: ty_list,
+            });
+            let scope_var = ctx.new_var(None);
+            crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, scope_var, poly_ty)
+                .map_err(|_| TypeCoreError::PatternTypeClash(vec![(scope_var, poly_ty)]))?;
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(var_names, Box::new(body_ctyp)),
