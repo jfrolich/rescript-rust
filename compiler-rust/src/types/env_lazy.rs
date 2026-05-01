@@ -560,19 +560,28 @@ fn build_local_module_components<'a>(
 ) -> Option<QualifiedModuleComponents> {
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
-        // component tables, and env.ml:1441-1444 implements the `Mty_alias`
-        // case by forcing `find_module path env`. Preserve that alias-target
-        // module-declaration force separately from resolving the alias
-        // signature, because the force consumes identifier-renaming side
-        // effects that later typedtree stamps observe.
-        if let Path::Pdot(parent, name, _) = alias_path {
-            let _ = crate::types::typecore::lookup_module_in_resolved_path(
-                parent,
-                name,
-                env,
-                pers_env,
-                ctx,
-            );
+        // component tables, and env.ml:1441-1444 implements every
+        // `Mty_alias` case by forcing `find_module path env`. Preserve that
+        // alias-target force separately from resolving the alias signature,
+        // because env.ml:865-882/1568 run identifier-renaming side effects
+        // that later typedtree binder stamps observe.
+        match alias_path {
+            Path::Pdot(parent, name, _) => {
+                let _ = crate::types::typecore::lookup_module_in_resolved_path(
+                    parent,
+                    name,
+                    env,
+                    pers_env,
+                    ctx,
+                );
+            }
+            Path::Pident(id) if id.is_persistent() => {
+                if let Some(pers) = pers_env.as_mut() {
+                    let _ = pers.get_renamed_sig(id.name(), ctx);
+                }
+            }
+            Path::Pident(_) => {}
+            Path::Papply(_, _) => {}
         }
     }
     let (raw_sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;

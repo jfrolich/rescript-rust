@@ -4601,6 +4601,91 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
+    fn type_expr_mentions_path_root(
+        ctx: &TypeContext<'_>,
+        ty: TypeExprRef,
+        root_name: &str,
+        seen: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                path.head().name() == root_name
+                    || args
+                        .iter()
+                        .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                type_expr_mentions_path_root(ctx, arg.typ, root_name, seen)
+                    || type_expr_mentions_path_root(ctx, *ret, root_name, seen)
+            }
+            TypeDesc::Ttuple(args) => args
+                .iter()
+                .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen)),
+            TypeDesc::Tobject { fields, name } => {
+                type_expr_mentions_path_root(ctx, *fields, root_name, seen)
+                    || name.as_ref().is_some_and(|(path, args)| {
+                        path.head().name() == root_name
+                            || args.iter().any(|arg| {
+                                type_expr_mentions_path_root(ctx, *arg, root_name, seen)
+                            })
+                    })
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                type_expr_mentions_path_root(ctx, *typ, root_name, seen)
+                    || type_expr_mentions_path_root(ctx, *rest, root_name, seen)
+            }
+            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
+                type_expr_mentions_path_root(ctx, *inner, root_name, seen)
+            }
+            TypeDesc::Tvariant(row) => {
+                type_expr_mentions_path_root(ctx, row.row_more, root_name, seen)
+                    || row.row_name.as_ref().is_some_and(|(path, args)| {
+                        path.head().name() == root_name
+                            || args.iter().any(|arg| {
+                                type_expr_mentions_path_root(ctx, *arg, root_name, seen)
+                            })
+                    })
+                    || row.row_fields.iter().any(|(_, field)| match field {
+                        RowField::Rpresent(Some(arg)) => {
+                            type_expr_mentions_path_root(ctx, *arg, root_name, seen)
+                        }
+                        RowField::Reither { types, .. } => types
+                            .iter()
+                            .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen)),
+                        RowField::Rpresent(None) | RowField::Rabsent => false,
+                    })
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                type_expr_mentions_path_root(ctx, *body, root_name, seen)
+                    || vars
+                        .iter()
+                        .any(|var| type_expr_mentions_path_root(ctx, *var, root_name, seen))
+            }
+            TypeDesc::Tpackage { path, args, .. } => {
+                path.head().name() == root_name
+                    || args
+                        .iter()
+                        .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+        }
+    }
+
+    fn type_decl_manifest_mentions_path_root(
+        ctx: &TypeContext<'_>,
+        decl: &crate::types::decl::TypeDeclaration,
+        root_name: &str,
+    ) -> bool {
+        decl.type_manifest.is_some_and(|manifest| {
+            type_expr_mentions_path_root(ctx, manifest, root_name, &mut HashSet::new())
+        })
+    }
+
     fn selected_value_module_alias_target<'a>(
         path: &Path,
         env: &Env,
@@ -4866,13 +4951,45 @@ fn force_qualified_value_type_paths<'a>(
                     // the local component path, so do not force the underlying
                     // persistent path again for alias-rooted values like
                     // `J.classify`.
-                    let _ = lookup_type_in_resolved_path(
+                    let type_parent_is_selected_value_module = selected_module_path
+                        .is_some_and(|selected| parent.same(selected))
+                        || selected_alias_targets
+                            .iter()
+                            .any(|target| parent.same(target));
+                    let resolved = lookup_type_in_resolved_path(
                         parent,
                         name.as_str(),
                         env,
                         &mut tctx.persistent_env,
                         ctx,
                     );
+                    // This extra manifest expansion is only for result-side
+                    // aliases: the OCaml path above observes them after the
+                    // selected value returns. Argument-side aliases such as
+                    // React.forwardRef's callback ref still perform the type
+                    // lookup above, but stay otherwise lazy until
+                    // typecore.ml:4171-4177 types the actual argument.
+                    if !allow_stdlib_flat_parent_inference
+                        && !type_parent_is_selected_value_module
+                        && let Some((_, _, decl)) = resolved
+                        && type_decl_manifest_mentions_path_root(ctx, &decl, "Primitive_js_extern")
+                    {
+                        // OCaml compiler/ml/typecore.ml:2421-2457 instances
+                        // a qualified value's `desc.val_type`; for actual
+                        // applications, typecore.ml:4171-4177 reaches
+                        // `type_argument`, whose typecore.ml:3771-3774
+                        // `unify_exp` calls compiler/ml/ctype.ml:2338-2344
+                        // `expand_head_unif`. That expansion follows
+                        // ctype.ml:1346-1372 to env.ml:903-914
+                        // `normalize_path`, forcing the persistent
+                        // `Primitive_js_extern` signature before later binders
+                        // are named. Rust's value-type path visitor already
+                        // mirrors the selected component lookup here, so
+                        // consume the same manifest head-expansion side effect
+                        // when a different selected declaration exposes the
+                        // primitive JS family.
+                        crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
+                    }
                 }
                 let rewritten_path = visible_local_alias_type_path(
                     ctx,
@@ -20207,6 +20324,9 @@ fn with_resolved_child_module_components<'a, R>(
     // observes the env.ml:1568-1569 module thunk via env.ml:865-882. Children
     // with nested components but no manifest type should keep following
     // env.ml:781-793 and env.ml:1000-1007 through `comp_components` only.
+    // Alias children are the direct `scrape_alias` case: env.ml:1517 calls
+    // `scrape_alias`, and env.ml:1441-1444 forces `find_module path env`
+    // through env.ml:865-882 before the aliased component table is built.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
         let parent_head_name = parent_components.access_path().head().name();
         let parent_is_implicit_stdlib_component_path = matches!(
@@ -20219,8 +20339,18 @@ fn with_resolved_child_module_components<'a, R>(
         let child_module_has_manifest_type = parent_components
             .lookup_module(child_name)
             .is_some_and(|(_, _, md)| module_type_has_manifest_type(&md.md_type));
-        if parent_is_implicit_stdlib_component_path
-            && (child_module_has_only_values || child_module_has_manifest_type)
+        let child_module_is_alias = parent_components
+            .lookup_module(child_name)
+            .is_some_and(|(_, _, md)| {
+                matches!(
+                    md.md_type,
+                    crate::types::decl::ModuleType::MtyAlias(..)
+                        | crate::types::decl::ModuleType::MtyIdent(..)
+                )
+            });
+        if (parent_is_implicit_stdlib_component_path
+            && (child_module_has_only_values || child_module_has_manifest_type))
+            || child_module_is_alias
         {
             let _ = parent_components.lookup_qualified_module(child_name, ctx);
         }
