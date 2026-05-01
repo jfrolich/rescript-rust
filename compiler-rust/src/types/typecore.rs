@@ -4693,7 +4693,7 @@ fn force_qualified_value_type_paths<'a>(
         ctx: &'a TypeContext<'a>,
     ) -> Option<Path> {
         match path {
-            Path::Pident(_) => alias_target_for_module_path(path, env, pers_env, ctx),
+            Path::Pident(_) => find_module_alias_target(path, env, pers_env, ctx),
             Path::Pdot(parent, module_name, _) => {
                 // OCaml compiler/ml/env.ml:781-793 descends through
                 // `comp_components`, env.ml:1091-1099 reads `comp_values`, and
@@ -18121,7 +18121,7 @@ fn expand_type_path_for_compare<'a>(
                     }
                     if let Path::Pdot(parent, leaf_name, _) = path {
                         if let Some(alias_target) =
-                            alias_target_for_module_path(parent, env, pers_env, ctx)
+                            find_module_alias_target(parent, env, pers_env, ctx)
                         {
                             let target_path = Path::pdot(alias_target, leaf_name.as_str());
                             let expanded = expand_type_path_for_compare(
@@ -18647,14 +18647,14 @@ fn qualify_label_description_paths<'a>(
                 // `comp_modules` thunk until env.ml:865-882 needs the
                 // module declaration itself.
                 let parent_has_alias_target =
-                    alias_target_for_module_descr_path(&parent, env, pers_env, ctx).is_some();
+                    find_module_descr_alias_target(&parent, env, pers_env, ctx).is_some();
                 if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
             }
             let root = path_root_module(res_path);
             let root_has_alias_target =
-                alias_target_for_module_descr_path(&root, env, pers_env, ctx).is_some();
+                find_module_descr_alias_target(&root, env, pers_env, ctx).is_some();
             let is_top_level_alias_type = res_path
                 .parent()
                 .as_ref()
@@ -18673,7 +18673,7 @@ fn qualify_label_description_paths<'a>(
         let root = path_root_module(res_path);
         if !root.same(res_path) {
             if let Some(alias_target) =
-                alias_target_for_module_descr_path(&root, env, pers_env, ctx)
+                find_module_descr_alias_target(&root, env, pers_env, ctx)
             {
                 if alias_target.head().is_persistent() && !alias_target.same(&root) {
                     let mut visited = HashSet::new();
@@ -19227,7 +19227,7 @@ fn disambiguate_label<'a>(
 // compiler/ml/env.ml:865-882 `find_module ~alias` forces `comp_modules`;
 // compiler/ml/env.ml:781-793 `find_module_descr` reads component
 // descriptors without forcing child module declarations.
-type ModuleAliasTargetLookup<'a> = fn(
+type FindModuleAliasTarget<'a> = fn(
     &Path,
     &Env,
     &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -19248,7 +19248,7 @@ fn qualify_module_local_type_paths_in_place<'a>(
         pers_env,
         ty,
         module_access_path,
-        alias_target_for_module_path,
+        find_module_alias_target,
         visited,
     );
 }
@@ -19267,7 +19267,7 @@ fn qualify_module_local_type_paths_from_module_descr_in_place<'a>(
         pers_env,
         ty,
         module_access_path,
-        alias_target_for_module_descr_path,
+        find_module_descr_alias_target,
         visited,
     );
 }
@@ -19278,7 +19278,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
     module_access_path: &Path,
-    alias_target_lookup: ModuleAliasTargetLookup<'a>,
+    alias_target_lookup: FindModuleAliasTarget<'a>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::RowField;
@@ -19434,7 +19434,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 // nodes, so descriptor-mode callers use the same
                 // component-table lookup instead of forcing child module
                 // declarations.
-                alias_target_for_module_descr_path(module_access_path, env, pers_env, ctx)
+                find_module_descr_alias_target(module_access_path, env, pers_env, ctx)
             } else {
                 alias_target_lookup(module_access_path, env, pers_env, ctx)
             };
@@ -21421,7 +21421,7 @@ pub(crate) fn resolve_module_signature_for_path<'a>(
     })
 }
 
-pub(crate) fn alias_target_for_module_path<'a>(
+pub(crate) fn find_module_alias_target<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -21494,14 +21494,14 @@ pub(crate) fn module_alias_target_for_path<'a>(
     }
 }
 
-fn alias_target_for_module_descr_path<'a>(
+fn find_module_descr_alias_target<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<Path> {
     match module_path {
-        Path::Pident(_) => alias_target_for_module_path(module_path, env, pers_env, ctx),
+        Path::Pident(_) => find_module_alias_target(module_path, env, pers_env, ctx),
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
                 // OCaml compiler/ml/env.ml:781-793 lets

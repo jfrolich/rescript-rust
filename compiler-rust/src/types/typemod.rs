@@ -6187,7 +6187,7 @@ fn strengthen_semantic_ident_module_type<'a>(
         DeclMty::MtyAlias(_, alias_path) => {
             let mut normalized = alias_path;
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
-            while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+            while let Some(next) = crate::types::typecore::find_module_alias_target(
                 &normalized,
                 env,
                 pers_env,
@@ -8853,7 +8853,7 @@ fn type_module_expr_with_alias<'a>(
                             tctx.type_ctx,
                             &normalized,
                         );
-                        while let Some(next) = crate::types::typecore::alias_target_for_module_path(
+                        while let Some(next) = crate::types::typecore::find_module_alias_target(
                             &normalized,
                             env,
                             &mut tctx.persistent_env,

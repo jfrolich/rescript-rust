@@ -3532,7 +3532,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         if Self::path_may_follow_mty_ident(&path) {
-            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
                 &path,
                 env,
                 &mut self.persistent_env,
@@ -3585,7 +3585,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         if Self::path_may_follow_mty_ident(&path) {
-            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
                 &path,
                 env,
                 &mut self.persistent_env,
@@ -3680,7 +3680,7 @@ impl<'a> RawLambdaConverter<'a> {
             dynamic_import: bool,
         ) {
             let normalized = this.normalize_module_path_in_env(env, path);
-            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
+            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
                 &normalized,
                 env,
                 &mut this.persistent_env,
