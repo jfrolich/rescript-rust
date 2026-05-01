@@ -20898,6 +20898,44 @@ fn build_module_signature_for_path<'a>(
                     None
                 }
             } else {
+                if id.is_persistent()
+                    && let Some(raw_sig) = ctx.find_raw_module_sig(id.name())
+                    && raw_sig.iter().any(|item| {
+                        matches!(item, crate::types::decl::SignatureItem::SigModtype(_, _))
+                    })
+                {
+                    // OCaml compiler/ml/env.ml:669-678 stores persistent
+                    // `ps_comps` from the raw `sign` separately from the lazy
+                    // `ps_sig = Subst.signature ...`; env.ml:1000-1007 returns
+                    // those components for qualified type lookup before
+                    // ctype.ml:1367-1372 falls back to env.ml:903-914
+                    // `normalize_path`. Recover the component view from the raw
+                    // signature cache without forcing the full-signature copy.
+                    let access_path = Path::pident(id.clone());
+                    let mut sig = raw_sig;
+                    if let Some(qualified_alias_path) =
+                        ctx.find_flattened_alias_component_path(id.name())
+                    {
+                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                            &sig,
+                            &qualified_alias_path,
+                            &access_path,
+                            ctx,
+                        );
+                        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                            &mut sig,
+                            &qualified_alias_path,
+                            &access_path,
+                        );
+                        rewrite_flattened_alias_child_prefixes(
+                            &sig,
+                            &qualified_alias_path,
+                            &access_path,
+                            ctx,
+                        );
+                    }
+                    return Some((access_path, sig));
+                }
                 let qualified_alias_path = ctx
                     .find_flattened_alias_component_path(id.name())
                     .filter(|qualified_alias_path| !qualified_alias_path.same(module_path));

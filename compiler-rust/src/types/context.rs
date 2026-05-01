@@ -1408,6 +1408,10 @@ impl<'a> TypeContext<'a> {
         self.raw_module_sigs.borrow().contains_key(name)
     }
 
+    pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<super::decl::Signature> {
+        self.raw_module_sigs.borrow().get(name).cloned()
+    }
+
     /// Trigger module signature renaming for a persistent module.
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
