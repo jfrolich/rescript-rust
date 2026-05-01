@@ -1698,13 +1698,13 @@ fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> 
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, None)
 }
 
 fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
@@ -1749,6 +1749,7 @@ fn normalize_path_full_inner<'a>(
     depth: usize,
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
+    root_child: Option<&str>,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -1760,9 +1761,12 @@ fn normalize_path_full_inner<'a>(
             matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"));
         if parent_is_implicit_root
             && let Ok((_, md, false)) = env.find_module_with_origin(module_name)
-            && md.md_path.as_ref().is_some_and(|md_path| md_path.same(path))
+            && md
+                .md_path
+                .as_ref()
+                .is_some_and(|md_path| md_path.same(path))
             && let super::decl::ModuleType::MtyAlias(_, alias_path)
-                | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
+            | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
             && resolved_module_signature_has_submodules(ctx, alias_path)
             && !alias_path.same(path)
         {
@@ -1777,6 +1781,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                None,
             );
         }
         if !parent_is_implicit_root
@@ -1799,6 +1804,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                None,
             );
         }
     }
@@ -1819,6 +1825,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                Some(s.as_str()),
             );
             if p_norm == **p {
                 path.clone()
@@ -1833,12 +1840,12 @@ fn normalize_path_full_inner<'a>(
     // compiler/ml/env.ml:865-875/env.ml:903-914: `normalize_path` calls
     // `find_module ~alias:true`, which forces a persistent structure's
     // `ps_sig` unless the exact module id is already present in `env.modules`.
-    // Rust keeps root `Pervasives`/`Stdlib` module bindings for qualified
+    // Rust keeps implicit `Pervasives`/`Stdlib` root bindings for qualified
     // lookup even though OCaml's implicit open in
     // compiler/core/res_compmisc.ml:61-62 and compiler/ml/env.ml:1874-1877
-    // only adds signature components. Ignore those Rust-only root bindings so
-    // expanding paths like `Pervasives.ref` and `Stdlib.Iterator.result`
-    // consumes the same lazy `Subst.signature` stamps.
+    // exposes components, not root module bindings. Keep the compensation so
+    // paths like `Pervasives.ref` and `Stdlib.Iterator.result` consume
+    // compiler/ml/env.ml:865-875 `ps_sig` stamps at the same point.
     if let Path::Pident(id) = &path {
         let has_component_cache = {
             let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
@@ -1853,12 +1860,21 @@ fn normalize_path_full_inner<'a>(
         // already cached that component view, do not turn recursive
         // normalize-path prefix handling for Belt collection aliases into an
         // earlier full-signature force than OCaml observes.
-        let should_force_persistent_sig =
-            id.is_persistent()
-                && !(id.name() == "Belt" && has_component_cache)
-                && (!env.has_module_ident(id)
-                    || id.name() == "Pervasives"
-                    || id.name() == "Stdlib");
+        let stdlib_array_buffer_component_lookup =
+            id.name() == "Stdlib" && matches!(root_child, Some("ArrayBuffer"));
+        // OCaml compiler/ml/env.ml:1000-1007 can reach the implicit
+        // `Stdlib.ArrayBuffer` component through `ps_comps` while typing
+        // `Stdlib_TypedArray` signatures; compiler/ml/env.ml:865-875 is not
+        // entered for the root `Stdlib` until a later normalize-path call.
+        // Rust recursively normalizes the synthetic `Stdlib.ArrayBuffer.t`
+        // path, so skip only that root force to preserve OCaml's lazy
+        // `Subst.signature` stamp order without weakening `Stdlib.Iterator.*`
+        // normalize-path forcing.
+        let should_force_persistent_sig = id.is_persistent()
+            && !(id.name() == "Belt" && has_component_cache)
+            && (!env.has_module_ident(id)
+                || id.name() == "Pervasives"
+                || (id.name() == "Stdlib" && !stdlib_array_buffer_component_lookup));
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
@@ -1907,6 +1923,7 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
+            None,
         );
     }
 
@@ -1932,6 +1949,7 @@ fn normalize_path_full_inner<'a>(
                     depth + 1,
                     visiting,
                     allow_reverse_local_aliases,
+                    None,
                 );
             }
         }
@@ -1944,6 +1962,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                None,
             );
         }
     }
@@ -1958,6 +1977,7 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
+            None,
         );
     }
 
