@@ -18163,6 +18163,33 @@ fn expand_type_path_for_compare<'a>(
     path.clone()
 }
 
+fn force_persistent_sigs_for_normalize_path<'a>(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    path: &Path,
+) {
+    match path {
+        Path::Pdot(parent, _, _) => {
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, parent);
+        }
+        Path::Papply(functor, arg) => {
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, functor);
+            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, arg);
+        }
+        Path::Pident(id) if id.is_persistent() => {
+            if !env.has_module_ident(id) {
+                if let Some(pers) = pers_env.as_mut() {
+                    let _ = pers.get_renamed_sig(id.name(), ctx);
+                } else {
+                    ctx.trigger_module_sig_rename(id.name());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn resolve_type_item_identity<'a>(
     path: &Path,
     env: &Env,
@@ -18237,6 +18264,25 @@ fn compare_type_paths_for_disambiguation<'a>(
     left_expanded.same(&right_expanded)
 }
 
+fn compare_type_path<'a>(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    left: &Path,
+    right: &Path,
+) -> bool {
+    // OCaml compiler/ml/typecore.ml:786-787 always calls `expand_path` on
+    // both sides before comparing. That path reaches typecore.ml:783
+    // `Env.normalize_path`, which can force persistent module signatures via
+    // compiler/ml/env.ml:865-882. Run that lazy side effect before Rust's
+    // identity shortcut in `compare_type_paths_for_disambiguation`, otherwise
+    // equal-by-stamp label paths skip the same compiler/ml/subst.ml:327-364
+    // binder renaming that OCaml performs.
+    force_persistent_sigs_for_normalize_path(env, pers_env, ctx, left);
+    force_persistent_sigs_for_normalize_path(env, pers_env, ctx, right);
+    compare_type_paths_for_disambiguation(left, right, env, pers_env, ctx)
+}
+
 fn label_result_path<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     label: &crate::types::LabelDescription,
@@ -18246,6 +18292,35 @@ fn label_result_path<'a>(
     match &*desc {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
         _ => None,
+    }
+}
+
+fn ambiguous_types<'a>(
+    label: &crate::types::LabelDescription,
+    others_newest_first: impl Iterator<Item = &'a crate::types::LabelDescription>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Vec<Path> {
+    let Some(first_path) = label_result_path(ctx, label) else {
+        return Vec::new();
+    };
+    let mut unique_paths = vec![first_path];
+    for other in others_newest_first {
+        let Some(other_path) = label_result_path(ctx, other) else {
+            continue;
+        };
+        if !unique_paths
+            .iter()
+            .any(|path| compare_type_path(env, pers_env, ctx, &other_path, path))
+        {
+            unique_paths.push(other_path);
+        }
+    }
+    if unique_paths.len() <= 1 {
+        Vec::new()
+    } else {
+        unique_paths
     }
 }
 
@@ -19147,6 +19222,22 @@ fn disambiguate_label<'a>(
     }
 
     let mut selected = None;
+
+    if opath.is_none() {
+        if let Some((label, rest)) = all_labels.split_last() {
+            // OCaml compiler/ml/typecore.ml:990-1007 `NameChoice.disambiguate`
+            // handles the no-`opath` case by selecting the first in-scope label,
+            // then calling `ambiguous_types`. Rust's label vectors are oldest-first,
+            // so `split_last` is the same newest label. The returned warning payload
+            // is irrelevant here, but compiler/ml/typecore.ml:978 runs
+            // `unique (compare_type_path env)`, and compare_type_path at
+            // typecore.ml:786-787 expands both paths. That expansion reaches
+            // compiler/ml/env.ml:903-914 `Env.normalize_path`, which may force
+            // env.ml:676-678's lazy persistent signature and its
+            // compiler/ml/subst.ml:327-364 binder renaming.
+            let _ = ambiguous_types(label, rest.iter().rev().copied(), env, pers_env, ctx);
+        }
+    }
 
     // If we have a target type path, try to disambiguate by exact path identity.
     // Prefer the most recently added matching label (reverse iteration).
