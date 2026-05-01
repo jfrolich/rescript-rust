@@ -194,7 +194,6 @@ test_single_file() {
     local ocaml_fail=0 rust_fail=0 parity_fail=0
     local rust_timeout=0 rust_crash=0
     local parity_hunks=0
-    local norm_parity_pass=0 norm_parity_fail=0 norm_parity_hunks=0
 
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
@@ -296,33 +295,16 @@ test_single_file() {
     if [[ "$RUST_AVAILABLE" == "true" && "$ocaml_pass" -eq 1 && "$rust_pass" -eq 1 ]]; then
         if diff -q "$file_temp/ocaml.out" "$file_temp/rust.out" > /dev/null 2>&1; then
             parity_pass=1
-            norm_parity_pass=1
         else
             parity_fail=1
             diff -ua "$file_temp/ocaml.out" "$file_temp/rust.out" > "$diff_cache" 2>&1 || true
             if [[ -f "$diff_cache" ]]; then
                 parity_hunks=$(grep -c '^@@' "$diff_cache" || true)
             fi
-            # Stamp-canonicalized comparison: renumber stamps sequentially per-name
-            python3 "$PROJECT_ROOT/scripts/canonicalize_lambda_stamps.py" < "$file_temp/ocaml.out" > "$file_temp/ocaml.norm"
-            python3 "$PROJECT_ROOT/scripts/canonicalize_lambda_stamps.py" < "$file_temp/rust.out" > "$file_temp/rust.norm"
-            if diff -q "$file_temp/ocaml.norm" "$file_temp/rust.norm" > /dev/null 2>&1; then
-                norm_parity_pass=1
-            elif diff -q <(tr -s '[:space:]' ' ' < "$file_temp/ocaml.norm") <(tr -s '[:space:]' ' ' < "$file_temp/rust.norm") > /dev/null 2>&1; then
-                # Only whitespace/formatting differences after stamp canonicalization
-                norm_parity_pass=1
-            else
-                norm_parity_fail=1
-                local norm_diff_cache="$CACHE_DIR/lambda/diffs/$safe_name.norm.diff"
-                diff -ua "$file_temp/ocaml.norm" "$file_temp/rust.norm" > "$norm_diff_cache" 2>&1 || true
-                if [[ -f "$norm_diff_cache" ]]; then
-                    norm_parity_hunks=$(grep -c '^@@' "$norm_diff_cache" || true)
-                fi
-            fi
         fi
     fi
 
-    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail:parity_hunks=$parity_hunks:norm_parity_pass=$norm_parity_pass:norm_parity_fail=$norm_parity_fail:norm_parity_hunks=$norm_parity_hunks" > "$result_file"
+    echo "$file:ocaml_pass=$ocaml_pass:ocaml_fail=$ocaml_fail:rust_pass=$rust_pass:rust_fail=$rust_fail:rust_timeout=$rust_timeout:rust_crash=$rust_crash:parity_pass=$parity_pass:parity_fail=$parity_fail:parity_hunks=$parity_hunks" > "$result_file"
 
     if [[ "$VERBOSE" == "true" ]]; then
         if [[ "$ocaml_pass" -eq 1 ]]; then
@@ -342,9 +324,9 @@ test_single_file() {
                 echo -e "${RED}FAIL${RESET} [Rust] $file"
             fi
 
-            if [[ "$norm_parity_pass" -eq 1 ]]; then
+            if [[ "$parity_pass" -eq 1 ]]; then
                 echo -e "${GREEN}PASS${RESET} [Parity] $file"
-            elif [[ "$norm_parity_fail" -eq 1 ]]; then
+            elif [[ "$parity_fail" -eq 1 ]]; then
                 echo -e "${RED}FAIL${RESET} [Parity] $file"
             fi
         fi
@@ -390,14 +372,12 @@ RUST_TIMEOUTS=0
 RUST_CRASHES=0
 PARITY_PASS=0
 PARITY_FAIL=0
-NORM_PARITY_PASS=0
-NORM_PARITY_FAIL=0
-NORM_PARITY_HUNKS=0
+PARITY_HUNKS=0
 OCAML_FAILURES=""
 RUST_FAILURES=""
 RUST_TIMEOUT_LIST=""
 RUST_CRASH_LIST=""
-NORM_PARITY_FAILURES=""
+PARITY_FAILURES=""
 
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
@@ -427,16 +407,16 @@ for result_file in "$RESULTS_DIR"/*.result; do
             fi
         fi
 
-        if echo "$result" | grep -q ":norm_parity_pass=1"; then
-            NORM_PARITY_PASS=$((NORM_PARITY_PASS + 1))
-        elif echo "$result" | grep -q ":norm_parity_fail=1"; then
-            NORM_PARITY_FAIL=$((NORM_PARITY_FAIL + 1))
-            NORM_PARITY_FAILURES="$NORM_PARITY_FAILURES  $file\n"
+        if echo "$result" | grep -q ":parity_pass=1"; then
+            PARITY_PASS=$((PARITY_PASS + 1))
+        elif echo "$result" | grep -q ":parity_fail=1"; then
+            PARITY_FAIL=$((PARITY_FAIL + 1))
+            PARITY_FAILURES="$PARITY_FAILURES  $file\n"
         fi
 
-        norm_hunk_count=$(echo "$result" | sed -n 's/.*:norm_parity_hunks=\([0-9][0-9]*\)$/\1/p')
-        if [[ -n "$norm_hunk_count" ]]; then
-            NORM_PARITY_HUNKS=$((NORM_PARITY_HUNKS + norm_hunk_count))
+        hunk_count=$(echo "$result" | sed -n 's/.*:parity_hunks=\([0-9][0-9]*\)$/\1/p')
+        if [[ -n "$hunk_count" ]]; then
+            PARITY_HUNKS=$((PARITY_HUNKS + hunk_count))
         fi
     fi
 done
@@ -444,9 +424,9 @@ done
 echo -e "OCaml bsc:    ${GREEN}${OCAML_PASS} passed${RESET}, ${RED}${OCAML_FAIL} failed${RESET}"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
     echo -e "Rust bsc:     ${GREEN}${RUST_PASS} passed${RESET}, ${RED}${RUST_FAIL} failed${RESET}"
-    echo -e "Parity:       ${GREEN}${NORM_PARITY_PASS} passed${RESET}, ${RED}${NORM_PARITY_FAIL} failed${RESET}"
-    if [[ "$NORM_PARITY_HUNKS" -gt 0 ]]; then
-        echo -e "Parity hunks: ${YELLOW}${NORM_PARITY_HUNKS}${RESET}"
+    echo -e "Parity:       ${GREEN}${PARITY_PASS} passed${RESET}, ${RED}${PARITY_FAIL} failed${RESET}"
+    if [[ "$PARITY_HUNKS" -gt 0 ]]; then
+        echo -e "Parity hunks: ${YELLOW}${PARITY_HUNKS}${RESET}"
     fi
 else
     echo "Rust bsc:     (not available)"
@@ -477,19 +457,19 @@ if [[ "$RUST_CRASHES" -gt 0 ]]; then
     echo ""
 fi
 
-if [[ "$NORM_PARITY_FAIL" -gt 0 ]]; then
+if [[ "$PARITY_FAIL" -gt 0 ]]; then
     echo -e "${YELLOW}Parity failures:${RESET}"
-    printf "%b" "$NORM_PARITY_FAILURES"
+    printf "%b" "$PARITY_FAILURES"
     echo ""
     echo "Diff files saved to: $CACHE_DIR/lambda/diffs"
 fi
 
-if [[ "$OCAML_FAIL" -gt 0 || ("$RUST_AVAILABLE" == "true" && ("$RUST_FAIL" -gt 0 || "$NORM_PARITY_FAIL" -gt 0)) ]]; then
+if [[ "$OCAML_FAIL" -gt 0 || ("$RUST_AVAILABLE" == "true" && ("$RUST_FAIL" -gt 0 || "$PARITY_FAIL" -gt 0)) ]]; then
     exit 1
 fi
 
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
-    echo -e "${GREEN}${BOLD}SUCCESS: All ${NORM_PARITY_PASS} files have matching lambda IR!${RESET}"
+    echo -e "${GREEN}${BOLD}SUCCESS: All ${PARITY_PASS} files have matching lambda IR!${RESET}"
 else
     echo -e "${GREEN}${BOLD}SUCCESS: All ${OCAML_PASS} OCaml files compiled.${RESET}"
 fi
