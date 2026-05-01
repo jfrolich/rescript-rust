@@ -13495,16 +13495,16 @@ fn type_newtype(
     let name_str = tctx.arena.get_string(name.txt).to_string();
     let replacement_ty = ctx.new_var(None);
 
-    // Match OCaml typecore.ml:
-    // 1. Enter a fresh abstract type declaration for the newtype name.
-    // 2. Type the body with that declaration in scope.
-    // 3. Copy the resulting type and replace occurrences of the newtype constructor
-    //    with a fresh type variable.
-    // 4. Restore definition level even on error.
+    // Match OCaml compiler/ml/typecore.ml:3462-3488:
+    // create the replacement type, begin a definition scope, reserve the
+    // replacement type's level in the ident stamp counter, enter the local
+    // abstract type, then reset the definition level to Ident.current_time()
+    // before typing the body.
     ctx.begin_def();
     let result = (|| -> TypeCoreResult<Expression> {
         let level = ctx.current_level();
         let mut new_env = env.clone();
+        ctx.set_current_time(ctx.get_level(replacement_ty));
         // Use the shared stamp counter (ctx.create_ident) so the newtype ident
         // participates in the same stamp sequence as other typed-tree idents.
         // This matches OCaml where Env.enter_type uses Ident.create.
@@ -13527,6 +13527,7 @@ fn type_newtype(
                 type_path: None,
             },
         );
+        ctx.init_def(ctx.current_stamp());
 
         // OCaml types the newtype body with type_exp (no expected type).
         // Use a fresh variable here to avoid constraining the body early.
