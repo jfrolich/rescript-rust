@@ -741,132 +741,138 @@ fn generate_ast_with_rust_parser(
     Option<super::build_types::StoredAst>,
     Option<Dependencies>,
 )> {
-    let bytes =
-        std::fs::read(source_file).with_context(|| format!("Failed to read {}", source_file.display()))?;
-    let source = source_bytes_to_latin1(bytes);
-    let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
-    let mut warnings = String::new();
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let bytes = std::fs::read(source_file)
+            .with_context(|| format!("Failed to read {}", source_file.display()))?;
+        let source = source_bytes_to_latin1(bytes);
+        let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
+        let mut warnings = String::new();
 
-    let is_interface = source_file
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|ext| ext == "resi" || ext == "mli");
+        let is_interface = source_file
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext == "resi" || ext == "mli");
 
-    if is_interface {
-        let signature = module::parse_signature(&mut parser);
-        if parser.has_errors() {
-            let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
-            return if stderr.is_empty() {
-                Err(anyhow!(
-                    "Parse failed with {} error(s) in {}",
-                    parser.diagnostics().len(),
-                    source_file.display()
-                ))
+        if is_interface {
+            let signature = module::parse_signature(&mut parser);
+            if parser.has_errors() {
+                let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
+                return if stderr.is_empty() {
+                    Err(anyhow!(
+                        "Parse failed with {} error(s) in {}",
+                        parser.diagnostics().len(),
+                        source_file.display()
+                    ))
+                } else {
+                    Err(anyhow!(stderr))
+                };
+            }
+
+            // Apply per-file @@config({flags: [...]}) overrides
+            let file_config =
+                rescript_compiler::driver::extract_file_config_from_signature(&signature, parser.arena());
+            let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
+            let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
+
+            let (signature, jsx_warnings) =
+                jsx_ppx::transform_signature_with_warnings(signature, jsx_version, parser.arena_mut());
+            append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
+            let signature =
+                let_unwrap_ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap_enabled)
+                    .map_err(|e| anyhow!(e))?;
+
+            let (signature, deps) = if in_process {
+                let signature = ppx::rewrite_signature(&signature, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+                let mut deps = extract_signature_deps(parser.arena(), &signature);
+                deps.extend(extra_deps.iter().cloned());
+                (signature, Some(deps))
             } else {
-                Err(anyhow!(stderr))
+                write_signature_ast_current_with_extra_deps(
+                    ast_output_path,
+                    source_path_for_ast,
+                    parser.arena_mut(),
+                    &signature,
+                    extra_deps,
+                )
+                .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+                (signature, None)
             };
-        }
 
-        // Apply per-file @@config({flags: [...]}) overrides
-        let file_config =
-            rescript_compiler::driver::extract_file_config_from_signature(&signature, parser.arena());
-        let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
-        let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
-
-        let (signature, jsx_warnings) =
-            jsx_ppx::transform_signature_with_warnings(signature, jsx_version, parser.arena_mut());
-        append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
-        let signature = let_unwrap_ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap_enabled)
-            .map_err(|e| anyhow!(e))?;
-
-        let (signature, deps) = if in_process {
-            let signature = ppx::rewrite_signature(&signature, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-            let mut deps = extract_signature_deps(parser.arena(), &signature);
-            deps.extend(extra_deps.iter().cloned());
-            (signature, Some(deps))
-        } else {
-            write_signature_ast_current_with_extra_deps(
-                ast_output_path,
-                source_path_for_ast,
-                parser.arena_mut(),
-                &signature,
-                extra_deps,
-            )
-            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-            (signature, None)
-        };
-
-        let stored = if store_ast {
-            Some(super::build_types::StoredAst::Signature(Arc::new(
-                super::build_types::StoredSignatureAst {
-                    arena: parser.into_arena(),
-                    signature,
-                },
-            )))
-        } else {
-            None
-        };
-        Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
-    } else {
-        let structure = module::parse_structure(&mut parser);
-        if parser.has_errors() {
-            let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
-            return if stderr.is_empty() {
-                Err(anyhow!(
-                    "Parse failed with {} error(s) in {}",
-                    parser.diagnostics().len(),
-                    source_file.display()
-                ))
+            let stored = if store_ast {
+                Some(super::build_types::StoredAst::Signature(Arc::new(
+                    super::build_types::StoredSignatureAst {
+                        arena: parser.into_arena(),
+                        signature,
+                    },
+                )))
             } else {
-                Err(anyhow!(stderr))
+                None
             };
-        }
+            Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
+        } else {
+            let structure = module::parse_structure(&mut parser);
+            if parser.has_errors() {
+                let stderr = diagnostics_to_stderr(&parser, &source, source_path_for_ast);
+                return if stderr.is_empty() {
+                    Err(anyhow!(
+                        "Parse failed with {} error(s) in {}",
+                        parser.diagnostics().len(),
+                        source_file.display()
+                    ))
+                } else {
+                    Err(anyhow!(stderr))
+                };
+            }
 
-        // Apply per-file @@config({flags: [...]}) overrides
-        let file_config =
-            rescript_compiler::driver::extract_file_config_from_structure(&structure, parser.arena());
-        let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
-        let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
+            // Apply per-file @@config({flags: [...]}) overrides
+            let file_config =
+                rescript_compiler::driver::extract_file_config_from_structure(&structure, parser.arena());
+            let let_unwrap_enabled = let_unwrap_enabled || file_config.let_unwrap;
+            let jsx_version = file_config.jsx_version.unwrap_or(jsx_version);
 
-        let (structure, jsx_warnings) =
-            jsx_ppx::transform_structure_with_warnings(structure, jsx_version, parser.arena_mut());
-        append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
-        let structure = let_unwrap_ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap_enabled)
-            .map_err(|e| anyhow!(e))?;
-
-        let (structure, deps) = if in_process {
-            let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let (structure, jsx_warnings) =
+                jsx_ppx::transform_structure_with_warnings(structure, jsx_version, parser.arena_mut());
+            append_jsx_preprocessor_warnings(&mut warnings, &source, source_path_for_ast, &jsx_warnings);
             let structure =
-                rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
-            let mut deps = extract_structure_deps(parser.arena(), &structure);
-            deps.extend(extra_deps.iter().cloned());
-            (structure, Some(deps))
-        } else {
-            write_structure_ast_current_with_extra_deps(
-                ast_output_path,
-                source_path_for_ast,
-                parser.arena_mut(),
-                &structure,
-                extra_deps,
-            )
-            .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
-            (structure, None)
-        };
+                let_unwrap_ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap_enabled)
+                    .map_err(|e| anyhow!(e))?;
 
-        let stored = if store_ast {
-            Some(super::build_types::StoredAst::Structure(Arc::new(
-                super::build_types::StoredStructureAst {
-                    arena: parser.into_arena(),
+            let (structure, deps) = if in_process {
+                let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+                let structure = rescript_compiler::binary_ast::writer::apply_no_export_config(
+                    parser.arena_mut(),
                     structure,
-                },
-            )))
-        } else {
-            None
-        };
-        Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
-    }
+                );
+                let mut deps = extract_structure_deps(parser.arena(), &structure);
+                deps.extend(extra_deps.iter().cloned());
+                (structure, Some(deps))
+            } else {
+                write_structure_ast_current_with_extra_deps(
+                    ast_output_path,
+                    source_path_for_ast,
+                    parser.arena_mut(),
+                    &structure,
+                    extra_deps,
+                )
+                .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
+                (structure, None)
+            };
+
+            let stored = if store_ast {
+                Some(super::build_types::StoredAst::Structure(Arc::new(
+                    super::build_types::StoredStructureAst {
+                        arena: parser.into_arena(),
+                        structure,
+                    },
+                )))
+            } else {
+                None
+            };
+            Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
+        }
+    })
 }
 
 fn filter_ppx_flags(

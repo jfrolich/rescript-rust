@@ -1906,9 +1906,11 @@ fn module_name_from_stem(stem: &str) -> Option<String> {
 }
 
 fn read_source_latin1(path: &Path) -> Result<String> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
-    Ok(source_bytes_to_latin1(bytes))
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
+        Ok(source_bytes_to_latin1(bytes))
+    })
 }
 
 fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
@@ -1937,53 +1939,57 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
 }
 
 fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Signature, AHashSet<String>)> {
-    let filename = path.to_string_lossy();
-    let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
-    let signature = rescript_compiler::parser::module::parse_signature(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "failed to parse runtime interface {} with {} error(s)",
-            path.display(),
-            parser.diagnostics().len()
-        ));
-    }
-    let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
-        .map_err(|err| {
-            anyhow!(
-                "runtime interface PPX rewrite failed for {}: {err}",
-                path.display()
-            )
-        })?;
-    let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
-        .into_iter()
-        .collect();
-    Ok((parser.into_arena(), signature, deps))
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let filename = path.to_string_lossy();
+        let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
+        let signature = rescript_compiler::parser::module::parse_signature(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "failed to parse runtime interface {} with {} error(s)",
+                path.display(),
+                parser.diagnostics().len()
+            ));
+        }
+        let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
+            .map_err(|err| {
+                anyhow!(
+                    "runtime interface PPX rewrite failed for {}: {err}",
+                    path.display()
+                )
+            })?;
+        let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
+            .into_iter()
+            .collect();
+        Ok((parser.into_arena(), signature, deps))
+    })
 }
 
 fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Structure, AHashSet<String>)> {
-    let filename = path.to_string_lossy();
-    let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
-    let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "failed to parse runtime implementation {} with {} error(s)",
-            path.display(),
-            parser.diagnostics().len()
-        ));
-    }
-    let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|err| {
-            anyhow!(
-                "runtime implementation PPX rewrite failed for {}: {err}",
-                path.display()
-            )
-        })?;
-    let structure =
-        rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
-    let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
-        .into_iter()
-        .collect();
-    Ok((parser.into_arena(), structure, deps))
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let filename = path.to_string_lossy();
+        let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
+        let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "failed to parse runtime implementation {} with {} error(s)",
+                path.display(),
+                parser.diagnostics().len()
+            ));
+        }
+        let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|err| {
+                anyhow!(
+                    "runtime implementation PPX rewrite failed for {}: {err}",
+                    path.display()
+                )
+            })?;
+        let structure =
+            rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+        let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
+            .into_iter()
+            .collect();
+        Ok((parser.into_arena(), structure, deps))
+    })
 }
 
 fn runtime_dependency_graph(runtime_modules: &[RuntimeModuleSource]) -> (Vec<usize>, Vec<Vec<usize>>) {

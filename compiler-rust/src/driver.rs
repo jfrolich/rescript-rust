@@ -3450,11 +3450,12 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
 
-    let (typed_structure, final_env) = {
-        let _phase = info_span!("compiler.type_structure").entered();
-        type_structure(&mut tctx, &env, arena, structure)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?
-    };
+    let (typed_structure, final_env) =
+        crate::timing::measure(crate::timing::Phase::Typecheck, || {
+            let _phase = info_span!("compiler.type_structure").entered();
+            type_structure(&mut tctx, &env, arena, structure)
+                .map_err(|e| anyhow!("Type checking failed: {e:?}"))
+        })?;
 
     let published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
@@ -3540,38 +3541,39 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let (raw_lambda, possible_required_modules, raw_lambda_current_stamp) = {
-        let _phase = info_span!("compiler.raw_lambda").entered();
-        let implementation_coercion = compute_raw_implementation_coercion(
-            &mut tctx,
-            &type_ctx,
-            &env,
-            &typed_structure,
-            options,
-            Some(has_interface),
-        );
-        let mut raw_converter =
-            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-                arena,
+    let (raw_lambda, possible_required_modules, raw_lambda_current_stamp) =
+        crate::timing::measure(crate::timing::Phase::Lambda, || {
+            let _phase = info_span!("compiler.raw_lambda").entered();
+            let implementation_coercion = compute_raw_implementation_coercion(
+                &mut tctx,
                 &type_ctx,
                 &env,
-                lambda_start_stamp,
-                unit_name,
+                &typed_structure,
+                options,
+                Some(has_interface),
             );
-        raw_converter.set_no_assert_false(options.no_assert_false);
-        if let Some(persistent_env) = tctx.persistent_env.clone() {
-            raw_converter.set_persistent_env(persistent_env);
-        }
-        let raw_lambda = raw_converter
-            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-        let possible_required_modules = raw_converter.take_possible_required_modules();
-        let raw_lambda_current_stamp = raw_converter.current_stamp();
-        (
-            raw_lambda,
-            possible_required_modules,
-            raw_lambda_current_stamp,
-        )
-    };
+            let mut raw_converter =
+                crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+                    arena,
+                    &type_ctx,
+                    &env,
+                    lambda_start_stamp,
+                    unit_name,
+                );
+            raw_converter.set_no_assert_false(options.no_assert_false);
+            if let Some(persistent_env) = tctx.persistent_env.clone() {
+                raw_converter.set_persistent_env(persistent_env);
+            }
+            let raw_lambda = raw_converter
+                .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+            let possible_required_modules = raw_converter.take_possible_required_modules();
+            let raw_lambda_current_stamp = raw_converter.current_stamp();
+            (
+                raw_lambda,
+                possible_required_modules,
+                raw_lambda_current_stamp,
+            )
+        });
     if let Some(hook) = before_js.as_deref_mut()
         && let Some(refreshed_registry) = hook(&possible_required_modules)?
     {
@@ -3594,13 +3596,13 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         String::new()
     };
 
-    let lowered_lambda = {
+    let lowered_lambda = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.lower_lambda").entered();
         crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
             raw_lambda,
             raw_lambda_current_stamp,
         )
-    };
+    });
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -3681,7 +3683,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         rendered_programs
     };
 
-    let (js, js_outputs) = {
+    let (js, js_outputs) = crate::timing::measure(crate::timing::Phase::Codegen, || {
         let _phase = info_span!(
             "compiler.js_print",
             skip_js_render = options.skip_js_render,
@@ -3726,7 +3728,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
             }
             (js, js_outputs)
         }
-    };
+    });
 
     Ok(InProcessCompileResult {
         js_output: js,
@@ -3858,11 +3860,11 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = {
+    let typed_signature = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_signature").entered();
         transl_signature(&mut tctx, &env, arena, signature)
-            .map_err(|e| anyhow!("Type checking failed: {e:?}"))?
-    };
+            .map_err(|e| anyhow!("Type checking failed: {e:?}"))
+    })?;
     let decl_signature =
         crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
 
@@ -3959,8 +3961,11 @@ pub fn typecheck_implementation_in_process(
 
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, _final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let (typed_structure, _final_env) =
+        crate::timing::measure(crate::timing::Phase::Typecheck, || {
+            type_structure(&mut tctx, &env, parser.arena(), &structure)
+                .map_err(|e| anyhow!("Type checking failed: {e:?}"))
+        })?;
     let _ = has_interface; // post-typecheck constraint pass not ported here
 
     let published_signature =

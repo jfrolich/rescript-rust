@@ -329,6 +329,10 @@ pub fn incremental_build(
         in_process = build_state.build_mode().is_in_process()
     )
     .entered();
+    let phase_timing_enabled = rescript_compiler::timing::enabled();
+    if phase_timing_enabled {
+        rescript_compiler::timing::reset();
+    }
     let build_folder = build_state.root_folder.to_string_lossy().to_string();
 
     let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
@@ -394,6 +398,9 @@ pub fn incremental_build(
 
             eprintln!("{}", &err);
             let _lock = drop_lock(LockKind::Build, &build_folder);
+            if phase_timing_enabled {
+                rescript_compiler::timing::print_report();
+            }
 
             return Err(IncrementalBuildError {
                 kind: IncrementalBuildErrorKind::SourceFileParseError,
@@ -463,6 +470,9 @@ pub fn incremental_build(
     .map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
 
         IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(Some(e.to_string())),
@@ -503,6 +513,9 @@ pub fn incremental_build(
         }
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
 
         Err(IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(None),
@@ -543,6 +556,9 @@ pub fn incremental_build(
         write_compiler_info(build_state);
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
         Ok(outcome)
     }
 }
