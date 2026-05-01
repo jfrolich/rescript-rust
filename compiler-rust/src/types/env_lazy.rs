@@ -706,12 +706,38 @@ impl StoredModuleComponents {
         if self.cached.borrow().is_none() {
             let mut module_decl = self.module_decl.clone();
             if let Some((parent_access_path, parent_sig)) = &self.parent_context {
-                crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                    &mut module_decl.md_type,
-                    parent_sig,
-                    parent_access_path,
-                    ctx,
-                );
+                let sibling_alias = match &module_decl.md_type {
+                    super::decl::ModuleType::MtyAlias(_, Path::Pdot(parent, name, _))
+                        if !parent_access_path.head().is_persistent()
+                            && parent_access_path.head().stamp() != 0
+                            && parent.same(parent_access_path) =>
+                    {
+                        parent_sig.iter().find_map(|item| match item {
+                            SignatureItem::SigModule(id, md, _) if id.name() == name.as_str() => {
+                                Some(md.md_type.clone())
+                            }
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(md_type) = sibling_alias {
+                    // OCaml compiler/ml/env.ml:1516-1578 runs
+                    // `scrape_alias` on local child module types before
+                    // `prefix_idents` applies the selected component path.
+                    // Resolve local sibling aliases from the parent signature
+                    // here instead of substituting the alias path first;
+                    // otherwise Rust forces env.ml:1568's `Subst.modtype`
+                    // thunk and freshens child binders before OCaml does.
+                    module_decl.md_type = md_type;
+                } else {
+                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                        &mut module_decl.md_type,
+                        parent_sig,
+                        parent_access_path,
+                        ctx,
+                    );
+                }
             }
             let components = build_local_module_components(
                 self.seed_env.as_ref(),
