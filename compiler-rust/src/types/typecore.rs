@@ -12219,115 +12219,155 @@ fn type_record(
             first_disambiguated_label = disambiguated.clone();
         }
 
-        // Build label description (prefer env-disambiguated metadata).
-        let (mut label_desc, field_input_ty, poly_vars) = if let Some(env_label) = disambiguated {
-            let expected_label = expected_labels_by_name
-                .as_ref()
-                .and_then(|labels| labels.get(&field_name).cloned());
-            let env_label = expected_label
-                .or_else(|| {
-                    lookup_label_by_expected_type(
-                        &field_name,
-                        expected_ty,
-                        env,
-                        &mut tctx.persistent_env,
-                        ctx,
-                    )
-                })
-                .filter(|expected_label| {
-                    if prefer_expected_closed_record_label
-                        && should_force_expected_closed_record_label(
-                            expected_ty,
-                            expected_label,
-                            &env_label,
-                            env,
-                            &mut tctx.persistent_env,
-                            ctx,
-                        )
-                    {
-                        return true;
+        // OCaml compiler/ml/typecore.ml:3677-3711 (`type_label_exp`) opens a
+        // definition scope before instantiating the label and keeps it open
+        // through `type_argument`; functions inside record fields therefore see
+        // the raised level until the field value is fully typed.
+        ctx.begin_def();
+        let field_result = (|| -> TypeCoreResult<(
+            crate::types::LabelDescription,
+            TypeExprRef,
+            Vec<TypeExprRef>,
+            Expression,
+        )> {
+            // Build label description (prefer env-disambiguated metadata).
+            let (label_desc, field_input_ty, poly_vars) =
+                if let Some(env_label) = disambiguated {
+                    let expected_label = expected_labels_by_name
+                        .as_ref()
+                        .and_then(|labels| labels.get(&field_name).cloned());
+                    let env_label = expected_label
+                        .or_else(|| {
+                            lookup_label_by_expected_type(
+                                &field_name,
+                                expected_ty,
+                                env,
+                                &mut tctx.persistent_env,
+                                ctx,
+                            )
+                        })
+                        .filter(|expected_label| {
+                            if prefer_expected_closed_record_label
+                                && should_force_expected_closed_record_label(
+                                    expected_ty,
+                                    expected_label,
+                                    &env_label,
+                                    env,
+                                    &mut tctx.persistent_env,
+                                    ctx,
+                                )
+                            {
+                                return true;
+                            }
+                            should_prefer_expected_record_label(
+                                expected_label,
+                                &env_label,
+                                env,
+                                &mut tctx.persistent_env,
+                                ctx,
+                            )
+                        })
+                        .unwrap_or(env_label);
+
+                    let separate = env.has_local_constraints();
+                    if separate {
+                        // OCaml compiler/ml/typecore.ml:3681-3694 opens two
+                        // nested scopes for local constraints, closes one after
+                        // `instance_label`, then generalizes label result nodes.
+                        ctx.begin_def();
+                        ctx.begin_def();
                     }
-                    should_prefer_expected_record_label(
-                        expected_label,
-                        &env_label,
-                        env,
-                        &mut tctx.persistent_env,
-                        ctx,
+
+                    let (poly_vars, ty_arg0, ty_res0) =
+                        crate::types::ctype::instance_label(ctx, true, &env_label);
+                    if separate {
+                        ctx.end_def();
+                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
+                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
+                    }
+
+                    // Match OCaml typecore.ml:3695-3698:
+                    //   unify env (instance_def ty_res) (instance env ty_expected)
+                    //   let ty_arg = instance_def ty_arg
+                    let ty_res = crate::types::ctype::instance(ctx, ty_res0);
+                    let expected_record_ty = crate::types::ctype::instance(ctx, expected_ty);
+                    let _ =
+                        crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty);
+                    let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
+
+                    if separate {
+                        // OCaml compiler/ml/typecore.ml:3699-3702 closes the
+                        // second local-constraint scope after `ty_arg` is
+                        // instantiated, then generalizes the argument type.
+                        ctx.end_def();
+                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg);
+                    }
+
+                    let input_ty = if env_label.lbl_optional && !field.opt {
+                        crate::types::ctype::extract_option_type(ctx, ty_arg).unwrap_or(ty_arg)
+                    } else {
+                        ty_arg
+                    };
+
+                    (
+                        crate::types::LabelDescription {
+                            lbl_name: env_label.lbl_name.clone(),
+                            lbl_res: record_ty,
+                            lbl_arg: ty_arg,
+                            lbl_mut: env_label.lbl_mut.clone(),
+                            lbl_optional: env_label.lbl_optional,
+                            lbl_pos: env_label.lbl_pos,
+                            lbl_all: env_label.lbl_all,
+                            lbl_repres: env_label.lbl_repres.clone(),
+                            lbl_private: env_label.lbl_private.clone(),
+                            lbl_loc: env_label.lbl_loc.clone(),
+                            lbl_attributes: env_label.lbl_attributes.clone(),
+                        },
+                        input_ty,
+                        poly_vars,
                     )
-                })
-                .unwrap_or(env_label);
-            let (poly_vars, ty_arg0, ty_res0) =
-                crate::types::ctype::instance_label(ctx, true, &env_label);
-            // Match OCaml typecore.ml type_label_exp:
-            //   unify env (instance_def ty_res) (instance env ty_expected)
-            //   let ty_arg = instance_def ty_arg
-            let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-            let expected_record_ty = crate::types::ctype::instance(ctx, expected_ty);
-            let unify_res =
-                crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty);
-            let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
+                } else {
+                    let inner_ty = ctx.new_var(None);
+                    let lbl_arg = if field.opt {
+                        env.type_option(ctx, inner_ty)
+                    } else {
+                        inner_ty
+                    };
 
-            let input_ty = if env_label.lbl_optional && !field.opt {
-                crate::types::ctype::extract_option_type(ctx, ty_arg).unwrap_or(ty_arg)
-            } else {
-                ty_arg
-            };
+                    (
+                        crate::types::LabelDescription {
+                            lbl_name: field_name,
+                            lbl_res: record_ty,
+                            lbl_arg,
+                            lbl_mut: crate::types::MutableFlag::Immutable,
+                            lbl_optional: field.opt,
+                            lbl_pos: idx as i32,
+                            lbl_all: crate::types::LabelArrayRef(0),
+                            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                            lbl_private: crate::types::PrivateFlag::Public,
+                            lbl_loc: tctx.arena.to_location(field.lid.loc),
+                            lbl_attributes: vec![],
+                        },
+                        lbl_arg,
+                        vec![],
+                    )
+                };
 
-            (
-                crate::types::LabelDescription {
-                    lbl_name: env_label.lbl_name.clone(),
-                    lbl_res: record_ty,
-                    lbl_arg: ty_arg,
-                    lbl_mut: env_label.lbl_mut.clone(),
-                    lbl_optional: env_label.lbl_optional,
-                    lbl_pos: env_label.lbl_pos,
-                    lbl_all: env_label.lbl_all,
-                    lbl_repres: env_label.lbl_repres.clone(),
-                    lbl_private: env_label.lbl_private.clone(),
-                    lbl_loc: env_label.lbl_loc.clone(),
-                    lbl_attributes: env_label.lbl_attributes.clone(),
-                },
-                input_ty,
-                poly_vars,
-            )
-        } else {
-            let inner_ty = ctx.new_var(None);
-            let lbl_arg = if field.opt {
-                env.type_option(ctx, inner_ty)
-            } else {
-                inner_ty
-            };
-
-            (
-                crate::types::LabelDescription {
-                    lbl_name: field_name,
-                    lbl_res: record_ty,
-                    lbl_arg,
-                    lbl_mut: crate::types::MutableFlag::Immutable,
-                    lbl_optional: field.opt,
-                    lbl_pos: idx as i32,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                    lbl_private: crate::types::PrivateFlag::Public,
-                    lbl_loc: tctx.arena.to_location(field.lid.loc),
-                    lbl_attributes: vec![],
-                },
-                lbl_arg,
-                vec![],
-            )
-        };
-
-        let typed_expr = type_expect(
-            tctx,
-            env,
-            tctx.arena.get_expr(field.expr),
-            field_input_ty,
-            None,
-        )?;
-        // OCaml `type_argument`: after typing against `ty_expected'`, unify with
-        // a fresh `instance` of that type to preserve sharing behavior.
-        let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
-        unify_expression_types(tctx, loc, typed_expr.exp_type, field_input_ty_inst, None)?;
+            let typed_expr = type_expect(
+                tctx,
+                env,
+                tctx.arena.get_expr(field.expr),
+                field_input_ty,
+                None,
+            )?;
+            // OCaml `type_argument`: after typing against `ty_expected'`, unify with
+            // a fresh `instance` of that type to preserve sharing behavior.
+            let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
+            unify_expression_types(tctx, loc, typed_expr.exp_type, field_input_ty_inst, None)?;
+            Ok((label_desc, field_input_ty, poly_vars, typed_expr))
+        })();
+        ctx.end_def();
+        let (label_desc, _field_input_ty, poly_vars, typed_expr) = field_result?;
 
         // OCaml check_univars: convert fresh Tvars back to Tunivar for poly fields
         if !poly_vars.is_empty() {
