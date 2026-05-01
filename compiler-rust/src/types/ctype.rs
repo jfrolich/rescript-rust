@@ -754,7 +754,9 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
-                        if should_preserve_local_t_alias_during_level_update(ctx, &path, expanded) {
+                        if should_preserve_local_t_alias_during_level_update(
+                            ctx, env, &path, expanded,
+                        ) {
                             ctx.set_level(ty, level);
                             iter_type_expr(ctx, ty, |child| {
                                 update_level_expand(ctx, env, level, child);
@@ -845,6 +847,7 @@ fn is_predef_type_name(name: &str) -> bool {
 
 fn should_preserve_local_t_alias_during_level_update(
     ctx: &TypeContext<'_>,
+    env: &Env,
     original_path: &Path,
     expanded: TypeExprRef,
 ) -> bool {
@@ -862,14 +865,38 @@ fn should_preserve_local_t_alias_during_level_update(
 
     let expanded = ctx.repr(expanded);
     let desc = ctx.get_desc(expanded);
-    matches!(&*desc, TypeDesc::Tconstr { path, .. } if {
+    let should_preserve = matches!(&*desc, TypeDesc::Tconstr { path, .. } if {
         if is_local_t_path {
-            let head = path.head_name();
-            head == "array" || head == "int"
+            // OCaml compiler/ml/ctype.ml:698-704 only links
+            // `forward_try_expand_once` after compiler/ml/env.ml:800-813 has
+            // resolved the selected path. Local module aliases such as
+            // `module L = List; L.t` remain observable as the local path in the
+            // typedtree. Aliases through another local module (`module U = L`)
+            // continue to collapse through env.ml:1435-1444 `scrape_alias`;
+            // module-type ascriptions (`module(L: X)`) have no module binding
+            // for their target and preserve the selected local path.
+            is_predef_type_name(path.head_name())
         } else {
             path.last() == "cmp"
         }
-    })
+    });
+    if !should_preserve {
+        return false;
+    }
+
+    match original_path {
+        Path::Pdot(parent, _, _) => match env.lookup_module(parent) {
+            Ok(md) => match &md.md_type {
+                super::decl::ModuleType::MtyAlias(_, target)
+                | super::decl::ModuleType::MtyIdent(target) => {
+                    path_root_is_persistent(target) || !env.has_module_ident(target.head())
+                }
+                _ => false,
+            },
+            Err(_) => false,
+        },
+        _ => false,
+    }
 }
 
 // ============================================================================
@@ -5598,41 +5625,13 @@ pub fn lower_args<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) {
             return;
         };
 
-        // OCaml typecore.ml lower_args:
-        //   try unify_var env (newvar ()) arg.typ with Unify _ -> assert false
-        // Use unify_var-equivalent behavior here (not full unify): fresh var
-        // linking should only do occur/update_level/link on this path.
-        let fresh = ctx.repr(ctx.new_var(None));
-        let arg_ty = ctx.repr(arg_ty);
-        if fresh != arg_ty {
-            let fresh_is_var = matches!(&*ctx.get_desc(fresh), TypeDesc::Tvar(_));
-            if fresh_is_var {
-                let needs_full_unify = {
-                    let arg_desc = ctx.get_desc(arg_ty);
-                    let is_constr = matches!(&*arg_desc, TypeDesc::Tconstr { .. });
-                    drop(arg_desc);
-                    is_constr && deep_occur(ctx, fresh, arg_ty)
-                };
-                if needs_full_unify {
-                    let mut state = UnifyState::new();
-                    state.set_env(env);
-                    if unify(ctx, &mut state, fresh, arg_ty).is_err() {
-                        unreachable!("lower_args failed deep_occur full unify")
-                    }
-                } else {
-                    if occurs(ctx, fresh, arg_ty) {
-                        unreachable!("lower_args recursive type in unify_var path")
-                    }
-                    update_level(ctx, ctx.get_level(fresh), arg_ty);
-                    link_type(ctx, fresh, arg_ty);
-                }
-            } else {
-                let mut state = UnifyState::new();
-                state.set_env(env);
-                if unify(ctx, &mut state, fresh, arg_ty).is_err() {
-                    unreachable!("lower_args failed fallback unify")
-                }
-            }
+        // OCaml compiler/ml/typecore.ml:2341 calls
+        // `unify_var env (newvar ()) arg.typ`; keep the Rust structure on the
+        // same ctype.ml:2820-2837 path instead of inlining a second copy here.
+        let mut state = UnifyState::new();
+        state.set_env(env);
+        if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
+            unreachable!("lower_args failed unify_var")
         }
 
         seen.push(expanded);
