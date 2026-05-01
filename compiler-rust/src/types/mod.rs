@@ -83,7 +83,7 @@ pub use ctype::{
     SubtypeContext, TypeError, TypePair, TypeResult, UnifyMode, UnifyState, copy_type, deep_occur,
     function_arity, generalize, generalize_structure, instance, instance_constructor,
     instance_constructor_in_pattern, is_function, link_type, occurs, split_arrow, tuple_elements,
-    unify, update_level,
+    unify, unify_var, update_level,
 };
 
 // env exports

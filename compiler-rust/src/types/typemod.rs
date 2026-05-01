@@ -95,20 +95,31 @@ fn flattened_persistent_alias_path(
         return None;
     }
 
-    let mut flattened_heads = Vec::new();
+    let registered_heads = pers.flattened_alias_heads_for_path(path);
+    let mut flattened_heads = if registered_heads.is_empty() {
+        Vec::new()
+    } else {
+        // OCaml compiler/ml/env.ml:1441-1444 and 1517 use the exact alias
+        // module selected by `find_module`. Prefer registered rewrites over
+        // heuristic spellings so `Js.Dict` resolves to `Js_dict` only, not an
+        // additional fabricated `Js_Dict` persistent unit.
+        registered_heads
+    };
     let mut underscore_joined = head.name().to_string();
-    for component in &components {
-        underscore_joined.push('_');
-        underscore_joined.push_str(component);
-    }
-    flattened_heads.push(underscore_joined);
-    if components.len() > 1 {
-        let mut concatenated = head.name().to_string();
-        concatenated.push('_');
+    if flattened_heads.is_empty() {
         for component in &components {
-            concatenated.push_str(component);
+            underscore_joined.push('_');
+            underscore_joined.push_str(component);
         }
-        flattened_heads.push(concatenated);
+        flattened_heads.push(underscore_joined);
+        if components.len() > 1 {
+            let mut concatenated = head.name().to_string();
+            concatenated.push('_');
+            for component in &components {
+                concatenated.push_str(component);
+            }
+            flattened_heads.push(concatenated);
+        }
     }
     // OCaml compiler/ml/env.ml:781-813 resolves dotted lookups through
     // component tables. ReScript's persistent environment can materialize
@@ -4709,77 +4720,15 @@ fn apply_package_constraints_to_module_type<'b>(
         return Some(mty.clone());
     }
 
-    fn rewrite_package_type_path_idents(
-        ctx: &crate::types::context::TypeContext<'_>,
-        ty: TypeExprRef,
-        direct_type_ids: &HashMap<String, Ident>,
-        visited: &mut HashSet<TypeExprRef>,
-    ) {
-        use crate::types::type_expr::TypeDesc;
-
-        let ty = ctx.repr(ty);
-        if !visited.insert(ty) {
-            return;
-        }
-
-        let desc = ctx.get_desc(ty).clone();
-        match desc {
-            TypeDesc::Tconstr { path, args, abbrev } => {
-                let rewritten_path = match &path {
-                    Path::Pident(id) => direct_type_ids
-                        .get(id.name())
-                        .filter(|sig_id| !sig_id.same(&id))
-                        .map(|sig_id| Path::pident(sig_id.clone())),
-                    _ => None,
-                };
-                if let Some(path) = rewritten_path {
-                    ctx.set_desc(
-                        ty,
-                        TypeDesc::Tconstr {
-                            path,
-                            args: args.clone(),
-                            abbrev,
-                        },
-                    );
-                }
-                for arg in args {
-                    rewrite_package_type_path_idents(ctx, arg, direct_type_ids, visited);
-                }
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite_package_type_path_idents(ctx, arg.typ, direct_type_ids, visited);
-                rewrite_package_type_path_idents(ctx, ret, direct_type_ids, visited);
-            }
-            TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
-                for ty in types {
-                    rewrite_package_type_path_idents(ctx, ty, direct_type_ids, visited);
-                }
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                rewrite_package_type_path_idents(ctx, body, direct_type_ids, visited);
-                for var in vars {
-                    rewrite_package_type_path_idents(ctx, var, direct_type_ids, visited);
-                }
-            }
-            _ => {
-                crate::types::iter_type_expr(ctx, ty, |child| {
-                    rewrite_package_type_path_idents(ctx, child, direct_type_ids, visited);
-                });
-            }
-        }
-    }
-
     fn rewrite_package_constraints_over_sig(
         sig: &[crate::types::decl::SignatureItem],
         constraints: &[PackageConstraint],
-        ctx: &crate::types::context::TypeContext<'_>,
     ) -> (
         crate::types::decl::Signature,
         Vec<(usize, Vec<PackageConstraint>)>,
     ) {
         let mut rewritten_sig = Vec::with_capacity(sig.len());
         let mut nested_modules = Vec::new();
-        let mut direct_type_ids = HashMap::new();
 
         for item in sig {
             match item {
@@ -4794,7 +4743,6 @@ fn apply_package_constraints_to_module_type<'b>(
                             .find(|(path, _)| path.len() == 1 && path[0] == id.name())
                         {
                             td.type_manifest = Some(*manifest_ty);
-                            direct_type_ids.insert(id.name().to_string(), id.clone());
                         }
                     }
                     rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
@@ -4811,41 +4759,6 @@ fn apply_package_constraints_to_module_type<'b>(
                     ));
                 }
                 other => rewritten_sig.push(other.clone()),
-            }
-        }
-
-        if !direct_type_ids.is_empty() {
-            let mut visited = HashSet::new();
-            for item in &rewritten_sig {
-                match item {
-                    SignatureItem::SigValue(_, vd) => {
-                        rewrite_package_type_path_idents(
-                            ctx,
-                            vd.val_type,
-                            &direct_type_ids,
-                            &mut visited,
-                        );
-                    }
-                    SignatureItem::SigType(_, td, _) => {
-                        for param in &td.type_params {
-                            rewrite_package_type_path_idents(
-                                ctx,
-                                *param,
-                                &direct_type_ids,
-                                &mut visited,
-                            );
-                        }
-                        if let Some(manifest) = td.type_manifest {
-                            rewrite_package_type_path_idents(
-                                ctx,
-                                manifest,
-                                &direct_type_ids,
-                                &mut visited,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
             }
         }
 
@@ -4924,7 +4837,6 @@ fn apply_package_constraints_to_module_type<'b>(
                             rewrite_package_constraints_over_sig(
                                 components.signature(),
                                 constraints,
-                                ctx,
                             )
                         },
                     )
@@ -4950,7 +4862,6 @@ fn apply_package_constraints_to_module_type<'b>(
                             rewrite_package_constraints_over_sig(
                                 components.signature(),
                                 constraints,
-                                ctx,
                             )
                         },
                     )
@@ -4980,7 +4891,7 @@ fn apply_package_constraints_to_module_type<'b>(
                 } else {
                     let sig = resolve_path_to_sig_impl(path, Some(env), pers_env, ctx, visiting)?;
                     let (rewritten_sig, nested_modules) =
-                        rewrite_package_constraints_over_sig(&sig, constraints, ctx);
+                        rewrite_package_constraints_over_sig(&sig, constraints);
                     finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
                 }
             }
@@ -5004,7 +4915,7 @@ fn apply_package_constraints_to_module_type<'b>(
         match mty {
             DeclMty::MtySignature(sig) => {
                 let (rewritten_sig, nested_modules) =
-                    rewrite_package_constraints_over_sig(sig, constraints, ctx);
+                    rewrite_package_constraints_over_sig(sig, constraints);
                 finish_rewritten_package_sig(env, rewritten_sig, nested_modules, pers_env, ctx)
             }
             DeclMty::MtyAlias(_, path) | DeclMty::MtyIdent(path) => {
@@ -7072,11 +6983,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 match &*sig_item.psig_desc {
                     crate::parser::ast::SignatureItemDesc::Psig_value(vd) => {
                         let val_name = arena.get_string(vd.pval_name.txt);
-                        let typed_val_id = match typed_sig_item.map(|item| &item.sig_desc) {
-                            Some(TypedSigDesc::Tsig_value(typed_vd)) => {
-                                Some(typed_vd.val_id.clone())
-                            }
-                            _ => None,
+                        let val_id = match typed_sig_item.map(|item| &item.sig_desc) {
+                            Some(TypedSigDesc::Tsig_value(typed_vd)) => typed_vd.val_id.clone(),
+                            _ => tctx.type_ctx.create_ident(val_name),
                         };
                         // Use transl_type_scheme pattern: begin_def/end_def/generalize
                         // OCaml: reset_type_variables() for each val declaration
@@ -7092,7 +7001,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         // expanding the generalized head seeds simple abbreviations so later
                         // instance() calls preserve physical sharing on nullary aliases.
                         crate::types::ctype::expand_head(ctx, &sig_env, val_type);
-                        let val_id = typed_val_id.unwrap_or_else(|| ctx.create_ident(val_name));
                         items.push(SigItem::SigValue(
                             val_id,
                             ValueDescription {
@@ -10386,9 +10294,15 @@ pub fn transl_signature<'a>(
                     transl_type(tctx, &sig_env, arena.get_core_type(vd.pval_type))?;
                 ctx.end_def();
                 crate::types::ctype::generalize(ctx, val_ty);
-                // Keep signature value declaration abbreviation memo side effects
-                // aligned with OCaml transl_value_decl.
-                crate::types::ctype::expand_head(ctx, &sig_env, val_ty);
+                if !vd.pval_prim.is_empty() {
+                    // OCaml compiler/ml/typemod.ml:756-763 delegates Psig_value
+                    // to compiler/ml/typedecl.ml:1875-1914. The extra
+                    // parse_arity/get_arity expansion happens only in the
+                    // primitive branch at typedecl.ml:1888-1907; ordinary
+                    // signature values must not force constructor heads before
+                    // Env.enter_value allocates val_id at typedecl.ml:1908-1911.
+                    let _ = get_primitive_arity_from_type(ctx, &sig_env, val_ty);
+                }
                 // OCaml typedecl.ml:1875-1914 translates the type scheme before
                 // Env.enter_value creates the value ident. Keep the same order so
                 // lazy signature forcing during type translation consumes stamps
@@ -10508,12 +10422,14 @@ pub fn transl_signature<'a>(
                     )?),
                     None => None,
                 };
-                let id = ctx.create_ident(&name_str);
                 let decl_mtd = crate::types::ModtypeDeclaration {
                     mtd_type: typed_mty.as_ref().map(|tmty| tmty.mty_type.clone()),
                     mtd_attributes: vec![],
                     mtd_loc: crate::location::Location::none(),
                 };
+                // OCaml compiler/ml/typemod.ml:895-913 translates the module
+                // type first, then allocates exactly one id via
+                // Env.enter_modtype for both the declaration and typedtree.
                 let id = ctx.create_ident(&name_str);
                 sig_env.add_modtype(id.clone(), decl_mtd);
                 TSigDesc::Tsig_modtype(crate::types::typedtree::ModuleTypeDeclaration {
@@ -11596,7 +11512,6 @@ fn type_structure_item<'a>(
             let id = tctx.type_ctx.create_ident(&name_str);
 
             // Add the external value to the environment
-            let id = ctx.create_ident(&name_str);
             let mut new_env = env.clone();
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,

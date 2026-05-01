@@ -149,8 +149,9 @@ impl Ident {
             counter.set(stamp);
             stamp
         });
+        let name = name.into();
         Self {
-            name: name.into(),
+            name,
             stamp,
             flags: IdentFlags::NONE,
         }

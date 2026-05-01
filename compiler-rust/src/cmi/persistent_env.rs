@@ -2971,20 +2971,6 @@ fn substitute_module_path(
 ) -> Path {
     match path {
         Path::Pident(ident) => {
-            let debug_subst = std::env::var_os("RUST_DEBUG_SUBST_STDLIB_INTL").is_some()
-                && (ident.name().contains("Stdlib_Intl") || ident.name().contains("NumberFormat"));
-            if debug_subst {
-                eprintln!(
-                    "[subst-module] ident={} stamp={} has_stamp={} has_name={}",
-                    ident.name(),
-                    ident.stamp(),
-                    module_stamp_map.get(&ident.stamp()).is_some()
-                        && !protected_module_head.is_some_and(|(stamp, name)| {
-                            *stamp == ident.stamp() && name == ident.name()
-                        }),
-                    module_name_map.contains_key(ident.name())
-                );
-            }
             if ident.stamp() != 0 {
                 let protected = protected_module_head
                     .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());

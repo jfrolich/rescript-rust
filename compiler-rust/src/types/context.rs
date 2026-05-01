@@ -243,6 +243,10 @@ pub struct TypeContext<'a> {
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
 
+    /// Cached forced module declarations from qualified component tables.
+    qualified_module_decl_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Ident, super::decl::ModuleDeclaration)>>,
+
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
@@ -382,6 +386,7 @@ impl<'a> TypeContext<'a> {
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             persistent_env: RefCell::new(None),
@@ -568,25 +573,21 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Borrow a cached qualified module-components view.
-    /// OCaml stores lazy module components once and reads the cached component
-    /// tables directly (compiler/ml/env.ml:1513-1514,1516-1588). Move the
-    /// cached value out while running `f` so recursive lookups can still mutate
-    /// this cache without cloning the full signature/component graph.
+    /// OCaml stores lazy module components once and keeps that table visible to
+    /// recursive lookup while forcing nested thunks (compiler/ml/env.ml:1513-1514,
+    /// 1516-1588). Clone only the Arc-backed view here so re-entrant lookups
+    /// observe the same cached component table instead of rebuilding and
+    /// freshening bound identifiers again.
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        let components = self
-            .qualified_module_components_cache
-            .borrow_mut()
-            .remove(key)?;
-        let result = f(&components);
-        self.qualified_module_components_cache
-            .borrow_mut()
-            .entry(key.clone())
-            .or_insert(components);
-        Some(result)
+        let components = {
+            let cache = self.qualified_module_components_cache.borrow();
+            cache.get(key)?.clone()
+        };
+        Some(f(&components))
     }
 
     pub(crate) fn has_qualified_module_components(
@@ -597,7 +598,9 @@ impl<'a> TypeContext<'a> {
         // `ps_comps` without forcing `ps_sig`; Rust stores that selected
         // component view explicitly, so later normalization can observe that
         // the component table is already available.
-        self.qualified_module_components_cache.borrow().contains_key(key)
+        self.qualified_module_components_cache
+            .borrow()
+            .contains_key(key)
     }
 
     pub(crate) fn register_flattened_alias_component_path(
@@ -718,6 +721,31 @@ impl<'a> TypeContext<'a> {
         child_name: &str,
     ) -> Option<Path> {
         self.resolved_child_module_path_cache
+            .borrow()
+            .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
+    }
+
+    /// Cache a forced qualified module declaration.
+    pub(crate) fn register_qualified_module_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        id: Ident,
+        md: super::decl::ModuleDeclaration,
+    ) {
+        self.qualified_module_decl_cache
+            .borrow_mut()
+            .insert((parent_path.clone(), child_name.to_string()), (id, md));
+    }
+
+    /// Look up a forced qualified module declaration.
+    pub(crate) fn find_qualified_module_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<(Ident, super::decl::ModuleDeclaration)> {
+        self.qualified_module_decl_cache
             .borrow()
             .get(&(parent_path.clone(), child_name.to_string()))
             .cloned()
@@ -1521,6 +1549,10 @@ impl<'a> TypeContext<'a> {
         self.raw_module_sigs.borrow().contains_key(name)
     }
 
+    pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<super::decl::Signature> {
+        self.raw_module_sigs.borrow().get(name).cloned()
+    }
+
     /// Trigger module signature renaming for a persistent module.
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
@@ -1585,8 +1617,7 @@ impl<'a> TypeContext<'a> {
                 if !first.is_ascii_uppercase() {
                     return None;
                 }
-                let uncap_name =
-                    format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
+                let uncap_name = format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
                 let uncap = dir.join(format!("{uncap_name}.cmi"));
                 uncap.exists().then_some(uncap)
             })
@@ -1609,13 +1640,16 @@ impl<'a> TypeContext<'a> {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: &str) -> Ident {
-        self.id_gen.set_current_stamp(Ident::current_local_stamp());
+        // OCaml compiler/ext/ident.ml:28-40 increments the active
+        // currentstamp directly in `Ident.create`/`Ident.rename`; unrelated
+        // helper-created local identifiers must not advance the typedtree
+        // context's stamp stream.
         self.id_gen.create(name)
     }
 
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
-        self.id_gen.set_current_stamp(Ident::current_local_stamp());
+        // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
         id.rename(self.id_gen)
     }
 

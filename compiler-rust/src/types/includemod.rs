@@ -992,132 +992,6 @@ fn value_descriptions<'a>(
         }
     }
 
-    fn expand_expected_manifest_aliases(
-        type_ctx: &TypeContext<'_>,
-        env: &Env,
-        ty: TypeExprRef,
-        seen: &mut HashSet<TypeExprRef>,
-        active_constrs: &mut HashSet<(Path, Vec<TypeExprRef>)>,
-    ) {
-        use crate::types::type_expr::{RowField, TypeDesc};
-
-        fn constr_cycle_key(
-            type_ctx: &TypeContext<'_>,
-            path: &Path,
-            args: &[TypeExprRef],
-        ) -> (Path, Vec<TypeExprRef>) {
-            (
-                path.clone(),
-                args.iter().map(|arg| type_ctx.repr(*arg)).collect(),
-            )
-        }
-
-        let ty = type_ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-
-        let desc = type_ctx.get_desc(ty).clone();
-        match desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                for arg in &args {
-                    expand_expected_manifest_aliases(type_ctx, env, *arg, seen, active_constrs);
-                }
-                // Keep the constructor head active while recursively walking its
-                // expansion. OCaml's abbreviation expansion detects alias cycles
-                // by identity; without this, freshly allocated Rust expansions can
-                // bounce through the same module alias indefinitely.
-                let key = constr_cycle_key(type_ctx, &path, &args);
-                if !active_constrs.insert(key.clone()) {
-                    return;
-                }
-                let expanded = ctype::expand_head_once(type_ctx, env, ty);
-                if let Some(expanded) = expanded {
-                    let expanded = type_ctx.repr(expanded);
-                    if expanded != ty {
-                        type_ctx.set_desc(ty, TypeDesc::Tlink(expanded));
-                        expand_expected_manifest_aliases(
-                            type_ctx,
-                            env,
-                            expanded,
-                            seen,
-                            active_constrs,
-                        );
-                    }
-                }
-                active_constrs.remove(&key);
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                expand_expected_manifest_aliases(type_ctx, env, arg.typ, seen, active_constrs);
-                expand_expected_manifest_aliases(type_ctx, env, ret, seen, active_constrs);
-            }
-            TypeDesc::Ttuple(items) => {
-                for item in items {
-                    expand_expected_manifest_aliases(type_ctx, env, item, seen, active_constrs);
-                }
-            }
-            TypeDesc::Tobject { fields, name } => {
-                expand_expected_manifest_aliases(type_ctx, env, fields, seen, active_constrs);
-                if let Some((_, args)) = name {
-                    for arg in args {
-                        expand_expected_manifest_aliases(type_ctx, env, arg, seen, active_constrs);
-                    }
-                }
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                expand_expected_manifest_aliases(type_ctx, env, typ, seen, active_constrs);
-                expand_expected_manifest_aliases(type_ctx, env, rest, seen, active_constrs);
-            }
-            TypeDesc::Tvariant(row0) => {
-                let row = crate::types::btype::row_repr(type_ctx, &row0);
-                expand_expected_manifest_aliases(type_ctx, env, row.row_more, seen, active_constrs);
-                for (_, field) in row.row_fields {
-                    match field {
-                        RowField::Rpresent(Some(arg)) => expand_expected_manifest_aliases(
-                            type_ctx,
-                            env,
-                            arg,
-                            seen,
-                            active_constrs,
-                        ),
-                        RowField::Reither { types, .. } => {
-                            for arg in types {
-                                expand_expected_manifest_aliases(
-                                    type_ctx,
-                                    env,
-                                    arg,
-                                    seen,
-                                    active_constrs,
-                                );
-                            }
-                        }
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
-                    }
-                }
-                if let Some((_, args)) = row.row_name {
-                    for arg in args {
-                        expand_expected_manifest_aliases(type_ctx, env, arg, seen, active_constrs);
-                    }
-                }
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                expand_expected_manifest_aliases(type_ctx, env, body, seen, active_constrs);
-                for var in vars {
-                    expand_expected_manifest_aliases(type_ctx, env, var, seen, active_constrs);
-                }
-            }
-            TypeDesc::Tpackage { args, .. } => {
-                for arg in args {
-                    expand_expected_manifest_aliases(type_ctx, env, arg, seen, active_constrs);
-                }
-            }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                expand_expected_manifest_aliases(type_ctx, env, target, seen, active_constrs);
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-        }
-    }
-
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     let mut unify_state = UnifyState::default();
@@ -1130,25 +1004,13 @@ fn value_descriptions<'a>(
         modtype_subst,
     );
 
-    // Match OCaml Includecore.value_descriptions/Ctype.moregeneral more
-    // closely: the destructive unification must happen on scratch copies.
-    // A module implementation signature can share type nodes with the typed
-    // tree (for example a functor argument structure inside a first-class
-    // module), and `instance` intentionally returns non-generic nodes
-    // unchanged. Duplicate after instantiation so inclusion checks cannot
-    // rewrite those typedtree-owned nodes through manifest aliases.
-    let impl_ty =
-        ctype::subst_identity_copy(type_ctx, ctype::instance(type_ctx, impl_desc.val_type));
-    let sig_ty = ctype::subst_identity_copy(type_ctx, ctype::instance(type_ctx, expected_ty));
-    let mut seen_expected_aliases = HashSet::new();
-    let mut active_expected_aliases = HashSet::new();
-    expand_expected_manifest_aliases(
-        type_ctx,
-        env,
-        sig_ty,
-        &mut seen_expected_aliases,
-        &mut active_expected_aliases,
-    );
+    // OCaml compiler/ml/includemod.ml:56-60 only substitutes the expected
+    // value description before calling compiler/ml/includecore.ml:43-48,
+    // where `Ctype.moregeneral` compares the two value types directly. Forcing
+    // manifest aliases up front changes Env.normalize_path side effects and
+    // shifts subsequent Ident stamps.
+    let impl_ty = ctype::instance(type_ctx, impl_desc.val_type);
+    let sig_ty = ctype::instance(type_ctx, expected_ty);
 
     // Try to unify (signature type should match implementation type)
     if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
