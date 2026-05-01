@@ -654,20 +654,12 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             direction_flag(dir),
             lambda(body, with_locs),
         ]),
-        Lambda::Lfor_of(var, iterable, body) => Sexp::list(vec![
-            Sexp::atom("Lfor_of"),
-            ident(var),
-            lambda(iterable, with_locs),
-            lambda(body, with_locs),
-        ]),
-        Lambda::Lfor_await_of(var, iterable, body) => Sexp::list(vec![
-            Sexp::atom("Lfor_await_of"),
-            ident(var),
-            lambda(iterable, with_locs),
-            lambda(body, with_locs),
-        ]),
-        Lambda::Lbreak => Sexp::atom("Lbreak"),
-        Lambda::Lcontinue => Sexp::atom("Lcontinue"),
+        // OCaml compiler/core/sexp_lambda.ml:483-486 intentionally prints
+        // these loop-control nodes as constructor-only sexps.
+        Lambda::Lfor_of(..) => Sexp::list(vec![Sexp::atom("Lfor_of")]),
+        Lambda::Lfor_await_of(..) => Sexp::list(vec![Sexp::atom("Lfor_await_of")]),
+        Lambda::Lbreak => Sexp::list(vec![Sexp::atom("Lbreak")]),
+        Lambda::Lcontinue => Sexp::list(vec![Sexp::atom("Lcontinue")]),
         Lambda::Lassign(var, value) => Sexp::list(vec![
             Sexp::atom("Lassign"),
             ident(var),
