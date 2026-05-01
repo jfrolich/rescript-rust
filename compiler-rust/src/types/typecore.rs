@@ -13229,7 +13229,7 @@ fn type_field(
         if let Some(module_path) = module_access_path {
             if is_local_module_access_path(&module_path) {
                 let mut visited_arg = HashSet::new();
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_from_module_descr_in_place(
                     tctx.type_ctx,
                     env,
                     &mut tctx.persistent_env,
@@ -13238,7 +13238,7 @@ fn type_field(
                     &mut visited_arg,
                 );
                 let mut visited_res = HashSet::new();
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_from_module_descr_in_place(
                     tctx.type_ctx,
                     env,
                     &mut tctx.persistent_env,
@@ -13336,7 +13336,7 @@ fn type_setfield(
         if let Some(module_path) = module_access_path {
             if is_local_module_access_path(&module_path) {
                 let mut visited_arg = HashSet::new();
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_from_module_descr_in_place(
                     ctx,
                     env,
                     &mut tctx.persistent_env,
@@ -13345,7 +13345,7 @@ fn type_setfield(
                     &mut visited_arg,
                 );
                 let mut visited_res = HashSet::new();
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_from_module_descr_in_place(
                     ctx,
                     env,
                     &mut tctx.persistent_env,
@@ -18641,15 +18641,20 @@ fn qualify_label_description_paths<'a>(
                 &mut probe_visited,
             );
             if let Some(parent) = res_path.parent() {
+                // OCaml compiler/ml/env.ml:781-793 and env.ml:1000-1007
+                // let label-path component probes inspect `ps_comps` /
+                // `comp_components`; they do not force env.ml:1568's
+                // `comp_modules` thunk until env.ml:865-882 needs the
+                // module declaration itself.
                 let parent_has_alias_target =
-                    alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
+                    alias_target_for_module_descr_path(&parent, env, pers_env, ctx).is_some();
                 if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
             }
             let root = path_root_module(res_path);
             let root_has_alias_target =
-                alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
+                alias_target_for_module_descr_path(&root, env, pers_env, ctx).is_some();
             let is_top_level_alias_type = res_path
                 .parent()
                 .as_ref()
@@ -18667,7 +18672,9 @@ fn qualify_label_description_paths<'a>(
     if let Path::Pdot(_, _, _) = res_path {
         let root = path_root_module(res_path);
         if !root.same(res_path) {
-            if let Some(alias_target) = alias_target_for_module_path(&root, env, pers_env, ctx) {
+            if let Some(alias_target) =
+                alias_target_for_module_descr_path(&root, env, pers_env, ctx)
+            {
                 if alias_target.head().is_persistent() && !alias_target.same(&root) {
                     let mut visited = HashSet::new();
                     rewrite_direct_root_type_family_in_place(
@@ -18685,7 +18692,7 @@ fn qualify_label_description_paths<'a>(
 
     for module_access_path in module_access_paths {
         let mut visited = HashSet::new();
-        qualify_module_local_type_paths_in_place(
+        qualify_module_local_type_paths_from_module_descr_in_place(
             ctx,
             env,
             pers_env,
@@ -19215,18 +19222,63 @@ fn disambiguate_label<'a>(
     selected
 }
 
-/// Type-directed constructor disambiguation.
-///
-/// When a constructor like `A` is used without qualification and is not found
-/// in the local env, look at the expected type to find which type defines it.
-/// For example, if the expected type is `M.t` and `M.t` is defined as `A | B(int)`,
-/// we can resolve the unqualified `A` constructor.
+// Rust-side path qualification for copied label/constructor type nodes.
+// The alias lookup callback mirrors OCaml's two environment paths:
+// compiler/ml/env.ml:865-882 `find_module ~alias` forces `comp_modules`;
+// compiler/ml/env.ml:781-793 `find_module_descr` reads component
+// descriptors without forcing child module declarations.
+type ModuleAliasTargetLookup<'a> = fn(
+    &Path,
+    &Env,
+    &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    &'a crate::types::context::TypeContext<'a>,
+) -> Option<Path>;
+
 fn qualify_module_local_type_paths_in_place<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
     module_access_path: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    qualify_module_local_type_paths_with_alias_lookup_in_place(
+        ctx,
+        env,
+        pers_env,
+        ty,
+        module_access_path,
+        alias_target_for_module_path,
+        visited,
+    );
+}
+
+fn qualify_module_local_type_paths_from_module_descr_in_place<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    module_access_path: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    qualify_module_local_type_paths_with_alias_lookup_in_place(
+        ctx,
+        env,
+        pers_env,
+        ty,
+        module_access_path,
+        alias_target_for_module_descr_path,
+        visited,
+    );
+}
+
+fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    module_access_path: &Path,
+    alias_target_lookup: ModuleAliasTargetLookup<'a>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::RowField;
@@ -19351,29 +19403,40 @@ fn qualify_module_local_type_paths_in_place<'a>(
     match desc {
         TypeDesc::Tconstr { path, args, abbrev } => {
             for arg in &args {
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_with_alias_lookup_in_place(
                     ctx,
                     env,
                     pers_env,
                     *arg,
                     module_access_path,
+                    alias_target_lookup,
                     visited,
                 );
             }
             let mut rewritten_path: Option<Path> = None;
 
-            let alias_target = if is_implicit_stdlib_component_path(module_access_path) {
-                // OCaml compiler/ml/env.ml:1874-1877 exposes the implicit
-                // Stdlib open through component paths. While mirroring
-                // compiler/ml/subst.ml:91-95 for copied type paths, those
-                // component-table reads follow env.ml:781-793 without forcing
-                // env.ml:1568's selected child `comp_modules` thunk. Other
-                // aliases, such as local `module J = Js.Json`, still follow
-                // env.ml:903-914 normalization and must use env.ml:865-882's
-                // forcing module-declaration lookup.
-                raw_alias_target_for_module_path(module_access_path, env, pers_env, ctx)
+            let alias_target = if is_implicit_stdlib_component_path(module_access_path)
+                || module_access_path.head().is_persistent()
+                || module_access_path.head().stamp() == 0
+            {
+                // OCaml compiler/ml/env.ml:781-793 and env.ml:1000-1007
+                // navigate persistent component paths through
+                // `find_module_descr`, reading `ps_comps` or child
+                // `comp_components` without forcing env.ml:1568's
+                // `comp_modules` thunk. While mirroring compiler/ml/subst.ml
+                // path substitution for copied type paths, keep that raw
+                // component-table lookup here. Local aliases such as
+                // `module J = Js.Json` are non-persistent and still use
+                // env.ml:865-882's forcing module-declaration lookup.
+                //
+                // This helper walks copied type paths as a Rust-side
+                // compensation for OCaml's shared label/constructor type
+                // nodes, so descriptor-mode callers use the same
+                // component-table lookup instead of forcing child module
+                // declarations.
+                alias_target_for_module_descr_path(module_access_path, env, pers_env, ctx)
             } else {
-                alias_target_for_module_path(module_access_path, env, pers_env, ctx)
+                alias_target_lookup(module_access_path, env, pers_env, ctx)
             };
 
             if let Some(alias_target) = alias_target {
@@ -19452,82 +19515,90 @@ fn qualify_module_local_type_paths_in_place<'a>(
             }
         }
         TypeDesc::Tarrow { arg, ret, .. } => {
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 arg.typ,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 ret,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
         }
         TypeDesc::Ttuple(types) => {
             for item in &types {
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_with_alias_lookup_in_place(
                     ctx,
                     env,
                     pers_env,
                     *item,
                     module_access_path,
+                    alias_target_lookup,
                     visited,
                 );
             }
         }
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 target,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
         }
         TypeDesc::Tobject { fields, name } => {
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 fields,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
             if let Some((_, args)) = name {
                 for item in &args {
-                    qualify_module_local_type_paths_in_place(
+                    qualify_module_local_type_paths_with_alias_lookup_in_place(
                         ctx,
                         env,
                         pers_env,
                         *item,
                         module_access_path,
+                        alias_target_lookup,
                         visited,
                     );
                 }
             }
         }
         TypeDesc::Tfield { typ, rest, .. } => {
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 typ,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 rest,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
         }
@@ -19535,23 +19606,25 @@ fn qualify_module_local_type_paths_in_place<'a>(
             for (_label, field) in &row.row_fields {
                 match field {
                     RowField::Rpresent(Some(ty)) => {
-                        qualify_module_local_type_paths_in_place(
+                        qualify_module_local_type_paths_with_alias_lookup_in_place(
                             ctx,
                             env,
                             pers_env,
                             *ty,
                             module_access_path,
+                            alias_target_lookup,
                             visited,
                         );
                     }
                     RowField::Reither { types, .. } => {
                         for ty in types {
-                            qualify_module_local_type_paths_in_place(
+                            qualify_module_local_type_paths_with_alias_lookup_in_place(
                                 ctx,
                                 env,
                                 pers_env,
                                 *ty,
                                 module_access_path,
+                                alias_target_lookup,
                                 visited,
                             );
                         }
@@ -19559,55 +19632,60 @@ fn qualify_module_local_type_paths_in_place<'a>(
                     _ => {}
                 }
             }
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 row.row_more,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
             if let Some((_, args)) = &row.row_name {
                 for item in args {
-                    qualify_module_local_type_paths_in_place(
+                    qualify_module_local_type_paths_with_alias_lookup_in_place(
                         ctx,
                         env,
                         pers_env,
                         *item,
                         module_access_path,
+                        alias_target_lookup,
                         visited,
                     );
                 }
             }
         }
         TypeDesc::Tpoly { body, vars } => {
-            qualify_module_local_type_paths_in_place(
+            qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,
                 pers_env,
                 body,
                 module_access_path,
+                alias_target_lookup,
                 visited,
             );
             for var in &vars {
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_with_alias_lookup_in_place(
                     ctx,
                     env,
                     pers_env,
                     *var,
                     module_access_path,
+                    alias_target_lookup,
                     visited,
                 );
             }
         }
         TypeDesc::Tpackage { args, .. } => {
             for item in &args {
-                qualify_module_local_type_paths_in_place(
+                qualify_module_local_type_paths_with_alias_lookup_in_place(
                     ctx,
                     env,
                     pers_env,
                     *item,
                     module_access_path,
+                    alias_target_lookup,
                     visited,
                 );
             }
@@ -21416,7 +21494,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
     }
 }
 
-fn raw_alias_target_for_module_path<'a>(
+fn alias_target_for_module_descr_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -21429,11 +21507,11 @@ fn raw_alias_target_for_module_path<'a>(
                 // OCaml compiler/ml/env.ml:781-793 lets
                 // `find_module_descr` descend through component tables, while
                 // env.ml:865-882 only forces `comp_modules` for callers that
-                // need the module declaration itself. This raw alias probe is
-                // used while mirroring compiler/ml/subst.ml:91-95 prefix
-                // rewriting of copied type paths, so inspect the component
-                // declaration without running compiler/ml/subst.ml:378-400
-                // child-signature identifier freshening.
+                // need the module declaration itself. This descriptor alias
+                // probe is used while mirroring compiler/ml/subst.ml:91-95
+                // prefix rewriting of copied type paths, so inspect the
+                // component declaration without running compiler/ml/subst.ml:
+                // 378-400 child-signature identifier freshening.
                 components
                     .lookup_module(module_name.as_str())
                     .and_then(|(_, _, md)| match &md.md_type {
