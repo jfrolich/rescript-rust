@@ -639,14 +639,14 @@ fn register_paired_signature_substitution(
 ) {
     match (paired.impl_item, paired.sig_item) {
         (
-            SignatureItem::SigType(impl_id, impl_type_decl, _),
+            SignatureItem::SigType(impl_id, _, _),
             SignatureItem::SigType(sig_id, _, _),
         ) => {
-            let subst_path = impl_type_decl
-                .type_path
-                .clone()
-                .unwrap_or_else(|| Path::pident(impl_id.clone()));
-            type_subst.insert(sig_id.name().to_string(), subst_path);
+            // OCaml compiler/ml/includemod.ml:348-359 registers paired
+            // signature type components with `Subst.add_type id2 (Pident id1)`;
+            // strengthened manifests remain in the declaration, not in the
+            // inclusion substitution.
+            type_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
         }
         (SignatureItem::SigModule(impl_id, _, _), SignatureItem::SigModule(sig_id, _, _)) => {
             module_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
