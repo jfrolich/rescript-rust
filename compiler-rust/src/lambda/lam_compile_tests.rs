@@ -7317,6 +7317,7 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
         &[],
         false,
         true,
+        false,
     );
 
     assert!(

@@ -90,6 +90,7 @@ struct Options {
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
     jsx_preserve: bool,
+    no_version_header: bool,
 }
 
 fn main() {
@@ -181,6 +182,9 @@ fn run() -> Result<()> {
                     }
                 }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
+                // OCaml compiler/bsc/rescript_compiler_main.ml:372-374 maps
+                // this CLI flag directly to `Js_config.no_version_header`.
+                "-bs-no-version-header" => opts.no_version_header = true,
                 "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
                 | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
@@ -243,6 +247,7 @@ fn run() -> Result<()> {
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
+        no_version_header: opts.no_version_header,
         check_div_by_zero: true,
         nopervasives: false,
         module_name: opts.module_name.clone(),

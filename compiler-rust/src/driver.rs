@@ -1157,6 +1157,8 @@ pub struct CompilerOptions {
     pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
     pub debug: bool,
+    /// Mirror `Js_config.no_version_header` for `-bs-no-version-header`.
+    pub no_version_header: bool,
     /// Mirror `Js_config.check_div_by_zero` for checked integer/bigint lowering.
     pub check_div_by_zero: bool,
     /// When true, do not implicitly open Pervasives and Stdlib.
@@ -1184,6 +1186,7 @@ impl Default for CompilerOptions {
             jsx_version: None,
             jsx_preserve: false,
             debug: false,
+            no_version_header: false,
             check_div_by_zero: true,
             nopervasives: false,
             module_name: None,
@@ -1455,6 +1458,7 @@ pub fn compile_source_to_js_with_options(
         &file_directives,
         debug,
         jsx_preserve,
+        options.no_version_header,
     );
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
@@ -3198,6 +3202,7 @@ pub fn compile_source_in_process(
         &file_directives,
         options.debug,
         options.jsx_preserve,
+        options.no_version_header,
     );
     let js_ms = phase_elapsed_ms(t_js);
 
