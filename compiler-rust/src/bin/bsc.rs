@@ -95,6 +95,7 @@ struct Options {
     nopervasives: bool,
     no_version_header: bool,
     no_check_div_by_zero: bool,
+    cross_module_inline: bool,
     no_assert_false: bool,
     make_runtime: bool,
 }
@@ -205,6 +206,7 @@ fn run() -> Result<()> {
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
                 "-bs-no-version-header" => opts.no_version_header = true,
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
+                "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
                 "-w" | "-warn-error" | "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
@@ -273,6 +275,7 @@ fn run() -> Result<()> {
         debug: opts.debug,
         no_version_header: opts.no_version_header,
         check_div_by_zero: !opts.no_check_div_by_zero,
+        cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),

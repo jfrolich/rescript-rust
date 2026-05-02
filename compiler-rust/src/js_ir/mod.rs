@@ -24,6 +24,7 @@ use std::path::{Component, Path as FsPath, PathBuf};
 
 use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
+use crate::lambda::Lambda;
 use crate::lambda::SwitchCaseTag;
 use crate::lambda::lam_tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
@@ -161,6 +162,14 @@ impl ModulePathResolver {
         self.persistent_env
             .as_ref()
             .and_then(|env| env.module_cmj_export_constants(module_name))
+            .map(|exports| exports.into_iter().collect())
+    }
+
+    /// Read closed lambda exports recorded in a module's companion `.cmj`.
+    pub fn module_cmj_export_lambdas(&self, module_name: &str) -> Option<HashMap<String, Lambda>> {
+        self.persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_export_lambdas(module_name))
             .map(|exports| exports.into_iter().collect())
     }
 

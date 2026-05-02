@@ -1184,6 +1184,8 @@ pub struct CompilerOptions {
     pub no_version_header: bool,
     /// Mirror `Js_config.check_div_by_zero` for checked integer/bigint lowering.
     pub check_div_by_zero: bool,
+    /// Mirror `Js_config.cross_module_inline` / `-bs-cross-module-opt`.
+    pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
     /// When true, do not implicitly open Pervasives and Stdlib.
@@ -1223,6 +1225,7 @@ impl Default for CompilerOptions {
             debug: false,
             no_version_header: false,
             check_div_by_zero: true,
+            cross_module_inline: false,
             no_assert_false: false,
             nopervasives: false,
             module_name: None,
@@ -1505,6 +1508,7 @@ pub fn compile_source_to_js_with_options(
         Some(module_path_resolver.clone()),
         jsx_preserve,
         options.check_div_by_zero,
+        options.cross_module_inline,
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
@@ -3320,6 +3324,7 @@ fn compile_js_program_for_output(
         Some(module_path_resolver.clone()),
         jsx_preserve,
         options.check_div_by_zero,
+        options.cross_module_inline,
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
@@ -3366,6 +3371,7 @@ fn compile_js_program_for_output_owned(
         Some(module_path_resolver.clone()),
         jsx_preserve,
         options.check_div_by_zero,
+        options.cross_module_inline,
     );
     let program = compiler.compile_deps_program_with_possible_required_modules_owned(
         lowered_lambda,

@@ -27,6 +27,8 @@ use crate::lambda::js_shake::{
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
 use crate::lambda::lam_analysis;
+use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
@@ -265,7 +267,9 @@ pub struct LambdaCompiler {
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
+    pub(crate) cross_module_inline: bool,
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
+    pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -349,7 +353,9 @@ impl LambdaCompiler {
             module_path_resolver: None,
             jsx_preserve: false,
             check_div_by_zero: true,
+            cross_module_inline: false,
             cmj_constant_cache: HashMap::new(),
+            cmj_lambda_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -371,7 +377,7 @@ impl LambdaCompiler {
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
     ) -> Self {
-        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true)
+        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true, false)
     }
 
     /// Create a compiler with the JS-backend options that affect lowering.
@@ -379,13 +385,16 @@ impl LambdaCompiler {
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
         check_div_by_zero: bool,
+        cross_module_inline: bool,
     ) -> Self {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
+            cross_module_inline,
             cmj_constant_cache: HashMap::new(),
+            cmj_lambda_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -694,6 +703,10 @@ impl LambdaCompiler {
             }
         }
 
+        if let Some(inlined) = self.try_compile_external_field_apply(apply) {
+            return inlined;
+        }
+
         let mut prelude = vec![];
         let func = self.compile_expr(&apply.ap_func);
         prelude.extend(func.prelude);
@@ -712,6 +725,80 @@ impl LambdaCompiler {
                 call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
             ),
         }
+    }
+
+    fn resolve_cmj_module_field_lambda(
+        &mut self,
+        module: &ModuleId,
+        field_name: &str,
+    ) -> Option<Lambda> {
+        if !self.cross_module_inline || !matches!(module.kind, Kind::Ml) {
+            return None;
+        }
+
+        if !self.cmj_lambda_cache.contains_key(module.id.name()) {
+            let lambdas = self
+                .module_path_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.module_cmj_export_lambdas(module.id.name()));
+            self.cmj_lambda_cache
+                .insert(module.id.name().to_string(), lambdas);
+        }
+
+        self.cmj_lambda_cache
+            .get(module.id.name())
+            .and_then(|exports| exports.as_ref())
+            .and_then(|exports| exports.get(field_name).cloned())
+    }
+
+    fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
+            args,
+            ..
+        }) = lam
+        else {
+            return None;
+        };
+        let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+            return None;
+        };
+        Some((
+            ModuleId {
+                id: id.clone(),
+                kind: Kind::Ml,
+                dynamic_import: *dynamic_import,
+            },
+            name.as_str(),
+        ))
+    }
+
+    fn try_compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
+        let (module, field_name) = self.module_field_apply_target(&apply.ap_func)?;
+        let lambda = self.resolve_cmj_module_field_lambda(&module, field_name)?;
+        let Lambda::Lfunction(func) = lambda else {
+            return None;
+        };
+        if func.params.len() != apply.ap_args.len() || !lfunction_can_be_inlined(&func) {
+            return None;
+        }
+
+        // OCaml lam_compile.ml:275-290 inlines closed `persistent_closed_lambda`
+        // functions from `.cmj` during `compile_external_field_apply`, then
+        // beta-reduces them with Lam_beta_reduce.propagate_beta_reduce_with_map.
+        let exports = ahash::AHashSet::new();
+        let (_, param_map) = is_closed_with_map(&exports, &func.params, &func.body);
+        let mut ident_tbl = crate::lambda::lam_compile_context::IdentTable::new();
+        let reduced =
+            crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                &mut ident_tbl,
+                &self.id_gen,
+                &param_map,
+                &func.params,
+                &func.body,
+                &apply.ap_args,
+            );
+        Some(self.compile_expr(&reduced))
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
