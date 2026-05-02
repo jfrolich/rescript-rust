@@ -469,9 +469,22 @@ impl LambdaCompiler {
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
         let simplified = crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
             let _phase = info_span!("compiler.lambda_simplify").entered();
-            crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve_owned(
+            let jsx_preserve = self.jsx_preserve;
+            let mut external_inline =
+                |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                    self.resolve_cmj_module_field_lambda(
+                        &ModuleId {
+                            id: module_id.clone(),
+                            kind: Kind::Ml,
+                            dynamic_import,
+                        },
+                        field_name,
+                    )
+                };
+            crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_owned(
                 lam,
-                self.jsx_preserve,
+                jsx_preserve,
+                &mut external_inline,
             )
         });
         crate::timing::measure(crate::timing::Phase::Codegen, || {

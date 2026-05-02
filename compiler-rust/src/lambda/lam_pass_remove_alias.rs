@@ -4,17 +4,13 @@
 //! and boolean-constant folding using the `ident_tbl` populated by
 //! `Lam_pass_collect.collect_info`.
 //!
-//! Cross-module inlining (`Lam_compile_env.query_external_id_info`) has no
-//! Rust counterpart yet, so the corresponding `Lapply` arm short-circuits to
-//! the default fallthrough. This mirrors what OCaml does whenever the
-//! external info is missing — the application is left intact.
-//!
 //! Every line below must trace to a specific line in OCaml. No invented
 //! logic.
 
+use crate::ident::Ident;
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
 use crate::lambda::lam_closure::is_closed_with_map;
-use crate::lambda::lam_compat::Comparison;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
@@ -23,6 +19,10 @@ use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
+
+/// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
+/// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
+pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, bool, &str) -> Option<Lambda> + 'a;
 
 /// Direct port of `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +86,28 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
     }
 }
 
+fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, bool, &str)> {
+    let Lambda::Lprim(PrimInfo {
+        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+        args,
+        ..
+    }) = lam
+    else {
+        return None;
+    };
+    let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+        return None;
+    };
+    Some((id, *dynamic_import, name.as_str()))
+}
+
+fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> bool {
+    args.iter().all(|arg| match arg {
+        Lambda::Lvar(param) => !matches!(ident_tbl.get(param), Some(IdKind::Parameter)),
+        _ => true,
+    })
+}
+
 /// Direct port of `Lam_pass_remove_alias.simplify_alias`
 /// (lam_pass_remove_alias.ml:50-290).
 ///
@@ -104,6 +126,15 @@ pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
 /// changes so callers that already own the previous pass output do not clone it
 /// before this pass.
 pub fn simplify_alias_owned(meta: &mut LamStats, lam: Lambda) -> Lambda {
+    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    simplify_alias_with_external_inline_owned(meta, lam, &mut no_external_inline)
+}
+
+pub fn simplify_alias_with_external_inline_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    external_inline: &mut ExternalInlineResolver<'_>,
+) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
     let result = Simplifier {
@@ -111,6 +142,7 @@ pub fn simplify_alias_owned(meta: &mut LamStats, lam: Lambda) -> Lambda {
         export_idents: &export_idents,
         id_gen: &id_gen,
         jsx_preserve: false,
+        external_inline,
     }
     .simpl_owned(lam);
     meta.export_idents = export_idents;
@@ -132,6 +164,21 @@ pub fn simplify_alias_with_jsx_owned(
     lam: Lambda,
     jsx_preserve: bool,
 ) -> Lambda {
+    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    simplify_alias_with_jsx_and_external_inline_owned(
+        meta,
+        lam,
+        jsx_preserve,
+        &mut no_external_inline,
+    )
+}
+
+pub fn simplify_alias_with_jsx_and_external_inline_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    jsx_preserve: bool,
+    external_inline: &mut ExternalInlineResolver<'_>,
+) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
     let result = Simplifier {
@@ -139,6 +186,7 @@ pub fn simplify_alias_with_jsx_owned(
         export_idents: &export_idents,
         id_gen: &id_gen,
         jsx_preserve,
+        external_inline,
     }
     .simpl_owned(lam);
     meta.export_idents = export_idents;
@@ -153,6 +201,7 @@ struct Simplifier<'a> {
     /// collide across independent beta reductions of the same function.
     id_gen: &'a crate::context::IdGenerator,
     jsx_preserve: bool,
+    external_inline: &'a mut ExternalInlineResolver<'a>,
 }
 
 impl<'a> Simplifier<'a> {
@@ -347,11 +396,11 @@ impl<'a> Simplifier<'a> {
                 Lambda::letrec(bindings, self.simpl_owned(*body))
             }
 
-            // lam_pass_remove_alias.ml:169-246 — local/direct application
-            // inlining. The cross-module Pfield application at
-            // lam_pass_remove_alias.ml:131-162 is intentionally absent for the
-            // same reason as the borrowed walker: Rust has no
-            // Lam_compile_env.query_external_id_info equivalent here.
+            // lam_pass_remove_alias.ml:131-246 — cross-module, local, and
+            // direct application inlining. The cross-module arm runs before
+            // local/direct application just like OCaml, and uses plain
+            // `propagate_beta_reduce` (lam_pass_remove_alias.ml:159), not
+            // the later with-map reducer from lam_compile.ml:289.
             Lambda::Lapply(apply) => {
                 let Apply {
                     ap_func,
@@ -359,6 +408,26 @@ impl<'a> Simplifier<'a> {
                     ap_info,
                     ap_transformed_jsx,
                 } = apply;
+
+                if let Some((module_id, dynamic_import, field_name)) =
+                    module_field_apply_target(ap_func.as_ref())
+                    && let Some(Lambda::Lfunction(func)) =
+                        (self.external_inline)(module_id, dynamic_import, field_name)
+                    && func.params.len() == ap_args.len()
+                    && external_inline_args_are_allowed(&ap_args, self.ident_tbl)
+                    && lfunction_can_be_inlined(&func)
+                {
+                    let reduced =
+                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                            self.ident_tbl,
+                            self.id_gen,
+                            &func.params,
+                            &func.body,
+                            &ap_args,
+                        );
+                    return self.simpl_owned(reduced);
+                }
+
                 match *ap_func {
                     Lambda::Lvar(v) => {
                         let ap_args: Vec<Lambda> = ap_args
@@ -787,11 +856,40 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:131-162 — cross-module fn inlining via
-            // `Lam_compile_env.query_external_id_info`. The Rust JS backend
-            // has no env counterpart, so we cannot resolve the foreign
-            // function's `persistent_closed_lambda`. Fall through to the
-            // default Lapply arm below by NOT catching this case here.
-            //
+            // `Lam_compile_env.query_external_id_info`. This pass uses plain
+            // `propagate_beta_reduce` at line 159, so complex arguments are
+            // let-bound here before the later compile-time with-map inliner
+            // (lam_compile.ml:289) ever sees the call.
+            Lambda::Lapply(apply)
+                if module_field_apply_target(apply.ap_func.as_ref()).is_some() =>
+            {
+                let (module_id, dynamic_import, field_name) =
+                    module_field_apply_target(apply.ap_func.as_ref()).expect("guarded above");
+                if let Some(Lambda::Lfunction(func)) =
+                    (self.external_inline)(module_id, dynamic_import, field_name)
+                    && func.params.len() == apply.ap_args.len()
+                    && external_inline_args_are_allowed(&apply.ap_args, self.ident_tbl)
+                    && lfunction_can_be_inlined(&func)
+                {
+                    let reduced =
+                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                            self.ident_tbl,
+                            self.id_gen,
+                            &func.params,
+                            &func.body,
+                            &apply.ap_args,
+                        );
+                    self.simpl(&reduced)
+                } else {
+                    Lambda::apply(
+                        self.simpl(apply.ap_func.as_ref()),
+                        apply.ap_args.iter().map(|a| self.simpl(a)).collect(),
+                        apply.ap_info.clone(),
+                        apply.ap_transformed_jsx,
+                    )
+                }
+            }
+
             // lam_pass_remove_alias.ml:169-232 — local Lvar callee inlining.
             Lambda::Lapply(apply) if matches!(apply.ap_func.as_ref(), Lambda::Lvar(_)) => {
                 let Lambda::Lvar(v) = apply.ap_func.as_ref() else {
