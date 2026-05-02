@@ -21338,6 +21338,51 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     }
 }
 
+fn rewrite_flattened_alias_ancestor_prefixes<'a>(
+    sig: &mut [crate::types::decl::SignatureItem],
+    access_path: &Path,
+    pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    let Some(pers_env) = pers_env else {
+        return;
+    };
+
+    let mut ancestor = access_path.parent();
+    while let Some(qualified_path) = ancestor {
+        let implicit_stdlib_component = matches!(qualified_path, Path::Pdot(_, _, _))
+            && matches!(qualified_path.head().name(), "Pervasives" | "Stdlib");
+        if implicit_stdlib_component {
+            // OCaml compiler/ml/env.ml:781-793 selects dotted Stdlib components
+            // from `comp_components`, but compiler/ml/env.ml:865-880 only forces
+            // the module declaration when normalization explicitly asks for it.
+            // Public manifest aliases like `Stdlib_Error.t` therefore keep their
+            // flattened persistent root in typedtree output.
+            ancestor = qualified_path.parent();
+            continue;
+        }
+        for flat_head in pers_env.flattened_alias_heads_for_path(&qualified_path) {
+            let flattened_path = Path::pident(Ident::create_persistent(&flat_head));
+            if flattened_path.same(&qualified_path) {
+                continue;
+            }
+            // OCaml compiler/ml/env.ml:1530-1538 builds component
+            // substitutions from the selected alias ancestor, and
+            // compiler/ml/subst.ml:303-309 applies that substitution to value
+            // descriptions. Descendant component tables must therefore rewrite
+            // sibling references like `Layout__Types.Name.t` through the
+            // ancestor `Layout.Types`, not through the full selected child.
+            crate::cmi::persistent_env::rewrite_deep_prefix_in_sig(
+                sig,
+                &flat_head,
+                &qualified_path,
+                ctx,
+            );
+        }
+        ancestor = qualified_path.parent();
+    }
+}
+
 fn qualify_resolved_signature_for_access_path_inner<'a>(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
@@ -21501,6 +21546,7 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
     if let Some(strengthen_path) = alias_module_strengthen_path.as_ref() {
         strengthen_sig_module_decls_for_module_access_path(&mut sig, strengthen_path);
     }
+    rewrite_flattened_alias_ancestor_prefixes(&mut sig, access_path, pers_env.as_ref(), ctx);
     if !skip_self_manifest_subst {
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, access_path, ctx);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, access_path);

@@ -2649,18 +2649,59 @@ pub fn rewrite_module_prefix_in_sig(
     ctx: &TypeContext<'_>,
 ) {
     let mut visited = HashSet::new();
+    rewrite_module_prefix_in_sig_with_visited(sig_items, old_name, new_prefix, ctx, &mut visited);
+}
 
+fn rewrite_module_prefix_in_module_type(
+    module_type: &ModuleType,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    match module_type {
+        ModuleType::MtySignature(sig) => {
+            // OCaml compiler/ml/subst.ml:345-356 recursively substitutes module
+            // types, and subst.ml:372/377-380 applies that to every
+            // `Sig_module` declaration reached from a signature component.
+            rewrite_module_prefix_in_sig_with_visited(sig, old_name, new_prefix, ctx, visited);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_ref() {
+                rewrite_module_prefix_in_module_type(
+                    param_type,
+                    old_name,
+                    new_prefix,
+                    ctx,
+                    visited,
+                );
+            }
+            rewrite_module_prefix_in_module_type(result, old_name, new_prefix, ctx, visited);
+        }
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+    }
+}
+
+fn rewrite_module_prefix_in_sig_with_visited(
+    sig_items: &[SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                rewrite_type_expr_prefix(desc.val_type, old_name, new_prefix, ctx, &mut visited);
+                rewrite_type_expr_prefix(desc.val_type, old_name, new_prefix, ctx, visited);
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
-                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, visited);
                 }
                 if let Some(manifest) = decl.type_manifest {
-                    rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, &mut visited);
+                    rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, visited);
                 }
                 match &decl.type_kind {
                     TypeKind::TypeVariant(constrs) => {
@@ -2673,7 +2714,7 @@ pub fn rewrite_module_prefix_in_sig(
                                             old_name,
                                             new_prefix,
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -2684,7 +2725,7 @@ pub fn rewrite_module_prefix_in_sig(
                                             old_name,
                                             new_prefix,
                                             ctx,
-                                            &mut visited,
+                                            visited,
                                         );
                                     }
                                 }
@@ -2695,7 +2736,7 @@ pub fn rewrite_module_prefix_in_sig(
                                     old_name,
                                     new_prefix,
                                     ctx,
-                                    &mut visited,
+                                    visited,
                                 );
                             }
                         }
@@ -2707,7 +2748,7 @@ pub fn rewrite_module_prefix_in_sig(
                                 old_name,
                                 new_prefix,
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
@@ -2716,12 +2757,12 @@ pub fn rewrite_module_prefix_in_sig(
             }
             SignatureItem::SigTypext(_id, ext, _) => {
                 for &param in &ext.ext_type_params {
-                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, visited);
                 }
                 match &ext.ext_args {
                     crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                         for &arg in args {
-                            rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, &mut visited);
+                            rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
                         }
                     }
                     crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
@@ -2731,16 +2772,41 @@ pub fn rewrite_module_prefix_in_sig(
                                 old_name,
                                 new_prefix,
                                 ctx,
-                                &mut visited,
+                                visited,
                             );
                         }
                     }
                 }
                 if let Some(ret) = ext.ext_ret_type {
-                    rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, &mut visited);
+                    rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, visited);
                 }
             }
-            _ => {}
+            SignatureItem::SigModule(_id, md, _) => {
+                // OCaml compiler/ml/env.ml:1517/1530 runs `scrape_alias` before
+                // `prefix_idents`, then compiler/ml/subst.ml:366-388 applies the
+                // substitution recursively through nested module declarations.
+                rewrite_module_prefix_in_module_type(
+                    &md.md_type,
+                    old_name,
+                    new_prefix,
+                    ctx,
+                    visited,
+                );
+            }
+            SignatureItem::SigModtype(_id, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_ref() {
+                    // OCaml compiler/ml/subst.ml:373/384-388 applies the same
+                    // recursive module-type substitution to modtype declarations.
+                    rewrite_module_prefix_in_module_type(
+                        module_type,
+                        old_name,
+                        new_prefix,
+                        ctx,
+                        visited,
+                    );
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
     }
 }
@@ -3114,7 +3180,10 @@ fn collect_alias_rewrites(
 /// Depth-restricted prefix rewriting for an entire signature.
 /// Only rewrites Tconstr paths where old_name appears as a module prefix
 /// at depth >= 2 (not as the direct parent of a type name).
-fn rewrite_deep_prefix_in_sig(
+/// Matches OCaml compiler/ml/env.ml:1530-1538 plus
+/// compiler/ml/subst.ml:358-364, where component substitutions rename nested
+/// bound module identifiers without normalizing public manifest type roots.
+pub fn rewrite_deep_prefix_in_sig(
     sig_items: &[SignatureItem],
     old_name: &str,
     new_prefix: &Path,
