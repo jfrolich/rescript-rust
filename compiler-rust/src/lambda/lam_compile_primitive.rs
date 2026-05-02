@@ -178,7 +178,12 @@ impl LambdaCompiler {
                 Box::new(compiled_args[0].clone()),
                 "TAG".to_string(),
             )),
-            Pobjsize => Expression::length(compiled_args[0].clone(), LengthObject::CamlBlock),
+            // OCaml js_exp_make.ml:1374-1375 wraps Caml_block length in
+            // to_int32, unlike array/string/function length.
+            Pobjsize => to_int32(Expression::length(
+                compiled_args[0].clone(),
+                LengthObject::CamlBlock,
+            )),
             Pboolorder => match (
                 bool_literal(&compiled_args[0]),
                 bool_literal(&compiled_args[1]),
