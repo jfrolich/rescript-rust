@@ -523,10 +523,12 @@ impl Env {
     }
 
     fn module_path_scope_cache_key(path: &Path) -> Option<String> {
-        if matches!(path, Path::Papply(_, _)) {
+        let Ok((head, _)) = path.flatten() else {
+            // OCaml compiler/ml/env.ml:903-914 handles `Papply` while
+            // normalizing paths, but functor applications do not form a stable
+            // component-cache prefix key.
             return None;
-        }
-        let head = path.head();
+        };
         let name = path.name();
         if head.is_persistent() || head.stamp() == 0 {
             Some(name)
@@ -588,7 +590,14 @@ impl Env {
 
         let requires = self.with_current_local_module_aliases(|aliases| {
             aliases.iter().any(|(_, target_path)| {
-                let target_head = target_path.head();
+                let Ok((target_head, _)) = target_path.flatten() else {
+                    // OCaml compiler/ml/env.ml:903-914 normalizes
+                    // `Papply` paths structurally and only resolves aliases
+                    // through `find_module`. Rust's env-scoped component cache
+                    // is an optimization for ordinary module-prefix aliases;
+                    // functor applications are not valid component prefixes.
+                    return false;
+                };
                 self.find_module_with_origin(target_head.name())
                     .ok()
                     .is_some_and(|(origin_id, _, is_local)| {

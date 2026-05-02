@@ -1117,6 +1117,15 @@ fn rewrite_included_signature_paths_to_local(
     }
 }
 
+fn module_type_is_self_alias(mty: &crate::types::decl::ModuleType, id: &Ident) -> bool {
+    matches!(
+        mty,
+        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+            if alias_id.same(id)
+    )
+}
+
 fn rewrite_module_path_prefix(path: &Path, old_param: &Ident, new_prefix: &Path) -> Path {
     match path {
         Path::Pident(id) if id.same(old_param) => new_prefix.clone(),
@@ -13171,7 +13180,7 @@ fn type_structure_item<'a>(
                 // OCaml's include adds all signature items directly to the environment
                 // as if they were defined locally (Pident paths, not Pdot paths).
                 // This matches OCaml's Env.add_signature behavior.
-                for item in sig_items {
+                for (sig_index, item) in sig_items.iter().enumerate() {
                     match item {
                         crate::types::decl::SignatureItem::SigValue(id, desc) => {
                             new_env.add_value(id.clone(), desc.clone());
@@ -13330,7 +13339,30 @@ fn type_structure_item<'a>(
                             }
                         }
                         crate::types::decl::SignatureItem::SigModule(id, md, _) => {
-                            new_env.add_module(id.clone(), md.clone());
+                            let env_md = if module_type_is_self_alias(&md.md_type, id) {
+                                // OCaml compiler/ml/typemod.ml:1575-1581
+                                // computes `sg = Subst.signature identity
+                                // (extract_sig_open ...)` and passes that same
+                                // signature to `Env.add_signature`. Do not let
+                                // Rust's include-local path rewrite turn a
+                                // child alias such as `DB__Scene__Read.Key`
+                                // into `Key = Key`; env.ml:1718-1731 would
+                                // store an empty self-alias component table.
+                                stored_include_sig
+                                    .as_ref()
+                                    .and_then(|stored_sig| match stored_sig.get(sig_index) {
+                                        Some(crate::types::decl::SignatureItem::SigModule(
+                                            _,
+                                            stored_md,
+                                            _,
+                                        )) => Some(stored_md.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| md.clone())
+                            } else {
+                                md.clone()
+                            };
+                            new_env.add_module(id.clone(), env_md);
                         }
                         crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
                             new_env.add_modtype(id.clone(), mtd.clone());
