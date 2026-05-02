@@ -202,11 +202,10 @@ pub(crate) struct QualifiedModuleComponents {
 
 fn build_child_components_from_signature(
     access_path: &Path,
-    signature: &Signature,
+    signature: &Arc<Signature>,
 ) -> HashMap<String, (usize, Arc<StoredModuleComponents>)> {
     let mut child_components = HashMap::new();
     let mut working_env = super::env::Env::empty();
-    let parent_sig = Arc::new(signature.clone());
     let mut runtime_pos = 0usize;
 
     // OCaml compiler/ml/env.ml:1530-1578 computes component paths once,
@@ -215,7 +214,7 @@ fn build_child_components_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    for item in signature {
+    for item in signature.iter() {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
@@ -236,7 +235,7 @@ fn build_child_components_from_signature(
                     md.clone(),
                     md.clone(),
                     child_access_path,
-                    Some((access_path.clone(), parent_sig.clone())),
+                    Some((access_path.clone(), signature.clone())),
                 );
                 if let Some(stored) = working_env
                     .with_local_module_components(&Path::pident(id.clone()), |stored| {
@@ -263,12 +262,21 @@ impl QualifiedModuleComponents {
         signature: Signature,
         ctx: &super::context::TypeContext<'_>,
     ) -> Self {
-        Self::new_with_child_components(access_path, signature, HashMap::new(), ctx)
+        Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
     }
 
     pub(crate) fn new_with_child_components(
         access_path: Path,
         signature: Signature,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        ctx: &super::context::TypeContext<'_>,
+    ) -> Self {
+        Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
+    }
+
+    pub(crate) fn new_with_child_components_arc(
+        access_path: Path,
+        signature: Arc<Signature>,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext<'_>,
     ) -> Self {
@@ -347,7 +355,7 @@ impl QualifiedModuleComponents {
         // path from env.ml:1530-1538. Later env.ml:1132-1137 reads this
         // table directly for qualified constructor lookup.
         let mut runtime_pos = 0i32;
-        for item in &signature {
+        for item in signature.iter() {
             match item {
                 SignatureItem::SigValue(_, desc) => {
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
@@ -438,7 +446,7 @@ impl QualifiedModuleComponents {
 
         Self {
             access_path: Arc::new(access_path),
-            signature: Arc::new(signature),
+            signature,
             values: Arc::new(values),
             constructors: Arc::new(constructors),
             types: Arc::new(types),
@@ -626,9 +634,10 @@ fn build_local_module_components<'a>(
         return None;
     }
 
+    let qualified_sig = Arc::new(qualified_sig);
     let mut working_env = env.clone_preserve_id();
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
-    let qualified_sig_for_children = Arc::new(qualified_sig.clone());
+    let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();
     let mut runtime_pos = 0usize;
 
@@ -713,7 +722,7 @@ fn build_local_module_components<'a>(
         }
     }
 
-    Some(QualifiedModuleComponents::new_with_child_components(
+    Some(QualifiedModuleComponents::new_with_child_components_arc(
         access_path.clone(),
         qualified_sig,
         child_components,
