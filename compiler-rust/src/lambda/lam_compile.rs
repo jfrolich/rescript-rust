@@ -480,7 +480,7 @@ impl LambdaCompiler {
                 self.compile_expr(&simplified)
             };
             let mut block = compiled.prelude;
-            let exports = {
+            let (exports, name_reservations) = {
                 let _phase = info_span!("compiler.lambda_exports").entered();
                 if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
                     if block_terminates(&block) {
@@ -488,9 +488,9 @@ impl LambdaCompiler {
                             *value = Expression::undefined(false);
                         }
                     }
-                    self.coerce_toplevel_exports(&mut block, exports)
+                    self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
                 } else {
-                    vec![]
+                    (vec![], vec![])
                 }
             };
             rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
@@ -500,7 +500,7 @@ impl LambdaCompiler {
             let side_effect = module_side_effect_reason(&simplified);
 
             let mut deps = DepsProgram {
-                program: Program::new(block, exports),
+                program: Program::new_with_name_reservations(block, exports, name_reservations),
                 modules: vec![],
                 side_effect,
             };
@@ -550,6 +550,15 @@ impl LambdaCompiler {
         block: &mut Block,
         extracted: ExtractedExports,
     ) -> Vec<Ident> {
+        self.coerce_toplevel_exports_with_name_reservations(block, extracted)
+            .0
+    }
+
+    fn coerce_toplevel_exports_with_name_reservations(
+        &mut self,
+        block: &mut Block,
+        extracted: ExtractedExports,
+    ) -> (Vec<Ident>, Vec<Ident>) {
         let mut max_stamp = max_ident_stamp_in_block(block);
         for export in &extracted.exports {
             max_stamp = max_stamp.max(export.stamp());
@@ -564,6 +573,13 @@ impl LambdaCompiler {
         let block_ended = block_terminates(block);
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
+        // OCaml `lam_coercion.ml` can replace an original export id with a
+        // same-name different-stamp target (`compiler/core/lam_coercion.ml:100-110`)
+        // or with `Ident.rename original_export_id`
+        // (`compiler/core/lam_coercion.ml:140-156`). The JS printer then sees
+        // the original id as occupying the base name and prints the selected
+        // local as `$1`; carry those original ids as explicit reservations.
+        let mut name_reservations = Vec::new();
         let mut rebound_exports = Vec::new();
 
         let extracted_len = extracted.exports.len();
@@ -591,14 +607,17 @@ impl LambdaCompiler {
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
                     if declared.contains(export) {
-                        exports.push(
+                        let selected =
                             if keeps_declared_same_name_function_export_alias(block, export) {
                                 export.clone()
                             } else {
                                 resolve_declared_same_name_self_alias_target(block, export)
                                     .unwrap_or_else(|| export.clone())
-                            },
-                        );
+                            };
+                        if !selected.same(export) {
+                            name_reservations.push(export.clone());
+                        }
+                        exports.push(selected);
                         continue;
                     }
                     if declared.contains(target) {
@@ -608,12 +627,14 @@ impl LambdaCompiler {
                             target,
                             false,
                         );
-                        match resolved.desc {
-                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => {
-                                exports.push(resolved_target);
-                            }
-                            _ => exports.push(target.clone()),
+                        let selected = match resolved.desc {
+                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => resolved_target,
+                            _ => target.clone(),
+                        };
+                        if !selected.same(export) {
+                            name_reservations.push(export.clone());
                         }
+                        exports.push(selected);
                         continue;
                     }
                 }
@@ -662,6 +683,7 @@ impl LambdaCompiler {
             }
 
             let rebound = self.id_gen.create(export.name());
+            name_reservations.push(export.clone());
             let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
                 LetKind::Alias
             } else {
@@ -678,7 +700,7 @@ impl LambdaCompiler {
 
         block.extend(rebound_exports);
         reorder_trailing_export_bindings_by_export_order(block, &exports);
-        exports
+        (exports, name_reservations)
     }
 
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {

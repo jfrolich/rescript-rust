@@ -770,6 +770,18 @@ impl JsPrinter {
             }
         }
 
+        if let Some(Expression {
+            desc: ExpressionDesc::Fun { params, body, .. },
+            ..
+        }) = &decl.value
+        {
+            // OCaml reserves the unbounded function environment plus the
+            // Name_non_top binding before printing it; see
+            // compiler/core/js_dump.ml:337-345 and 411-414.
+            let reserved_idents = function_reserved_idents(params, body, Some(&decl.ident));
+            self.reserve_idents_in_current_scope(&reserved_idents);
+        }
+
         let var_name = self.ident_name(&decl.ident);
         self.write("let ");
         self.write(&var_name);
@@ -806,15 +818,7 @@ impl JsPrinter {
         function_ident: Option<&Ident>,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let mut reserved_idents: Vec<Ident> =
-            free_variables_of_block_with_defined(body, params.iter().cloned())
-                .into_iter()
-                .collect();
-        if let Some(function_ident) = function_ident {
-            reserved_idents.push(function_ident.clone());
-        }
-        reserved_idents.sort();
-        reserved_idents.dedup();
+        let reserved_idents = function_reserved_idents(params, body, function_ident);
 
         let reserved_printed_names = reserved_idents
             .into_iter()
@@ -822,6 +826,20 @@ impl JsPrinter {
             .collect::<Vec<_>>();
 
         self.with_local_ident_scope(&reserved_printed_names, f)
+    }
+
+    pub(super) fn reserve_idents_in_current_scope(&mut self, idents: &[Ident]) {
+        for ident in idents {
+            if ident.stamp() == 0 {
+                // OCaml `Ext_pp_scope.merge` reserves the converted printed
+                // name for every id in a function environment, including
+                // stamp-0 JS globals; see compiler/ext/ext_pp_scope.ml:98-100.
+                let base = convert_ident_name(ident.name());
+                Self::reserve_printed_name(self.current_name_scope_mut(), &base);
+            } else {
+                let _ = self.ident_name(ident);
+            }
+        }
     }
 
     fn print_function_declaration(
@@ -850,6 +868,11 @@ impl JsPrinter {
             self.semi();
             return;
         }
+        // OCaml reserves the unbounded function environment plus the Name_top
+        // binding before printing the function id; see
+        // compiler/core/js_dump.ml:337-345 and 416-419.
+        let reserved_idents = function_reserved_idents(params, body, Some(ident));
+        self.reserve_idents_in_current_scope(&reserved_idents);
         if async_ {
             self.write("async ");
         }
@@ -4492,6 +4515,23 @@ fn free_variables_of_block_with_defined(
     let mut stats = JsIdentStats::with_defined(defined);
     collect_block_idents(block, &mut stats);
     stats.free_variables()
+}
+
+fn function_reserved_idents(
+    params: &[Ident],
+    body: &Block,
+    function_ident: Option<&Ident>,
+) -> Vec<Ident> {
+    let mut reserved_idents: Vec<Ident> =
+        free_variables_of_block_with_defined(body, params.iter().cloned())
+            .into_iter()
+            .collect();
+    if let Some(function_ident) = function_ident {
+        reserved_idents.push(function_ident.clone());
+    }
+    reserved_idents.sort();
+    reserved_idents.dedup();
+    reserved_idents
 }
 
 fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {

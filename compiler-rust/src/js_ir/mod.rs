@@ -2952,6 +2952,8 @@ pub struct Program {
     pub exports: Exports,
     /// Set of exported identifiers
     pub export_set: std::collections::HashSet<Ident>,
+    /// Idents that occupy printed names without emitting statements.
+    pub name_reservations: Vec<Ident>,
 }
 
 impl Program {
@@ -2962,6 +2964,22 @@ impl Program {
             block,
             exports,
             export_set,
+            name_reservations: Vec::new(),
+        }
+    }
+
+    /// Create a program with additional printer name reservations.
+    pub fn new_with_name_reservations(
+        block: Block,
+        exports: Exports,
+        name_reservations: Vec<Ident>,
+    ) -> Self {
+        let export_set = exports.iter().cloned().collect();
+        Self {
+            block,
+            exports,
+            export_set,
+            name_reservations,
         }
     }
 
@@ -2971,6 +2989,7 @@ impl Program {
             block: vec![],
             exports: vec![],
             export_set: std::collections::HashSet::new(),
+            name_reservations: Vec::new(),
         }
     }
 }

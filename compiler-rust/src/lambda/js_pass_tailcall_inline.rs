@@ -28,6 +28,7 @@ fn tailcall_inline_program(program: Program) -> Program {
         block: inliner.transform_block(program.block),
         exports: program.exports,
         export_set: program.export_set,
+        name_reservations: program.name_reservations,
     };
     apply_tailcall_used_stats_block(&mut program.block, &inliner.statuses);
     program

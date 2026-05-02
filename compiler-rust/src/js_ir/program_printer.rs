@@ -74,6 +74,7 @@ impl JsPrinter {
         }
         let _printed_imports = self.print_module_imports(&program.modules);
         self.at_least_two_lines();
+        self.reserve_idents_in_current_scope(&program.program.name_reservations);
         self.print_statements(&program.program.block[block_start..], true);
 
         self.at_least_two_lines();
@@ -224,6 +225,7 @@ fn deps_program_is_empty(program: &DepsProgram) -> bool {
         && program.side_effect.is_none()
         && program.program.block.is_empty()
         && program.program.exports.is_empty()
+        && program.program.name_reservations.is_empty()
 }
 
 fn split_leading_file_comments(block: &Block) -> (Vec<&str>, usize) {
