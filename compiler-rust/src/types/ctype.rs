@@ -32,6 +32,7 @@ use super::type_expr::{
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
+use crate::intern::StrIdx;
 use crate::location::Location;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 // ============================================================================
@@ -2970,12 +2971,42 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
     required_lids: &[crate::parser::longident::Longident],
     existing_lids: &[crate::parser::longident::Longident],
 ) -> bool {
+    fn component_same_name(ctx: &TypeContext<'_>, lhs: StrIdx, rhs: StrIdx) -> bool {
+        if lhs == rhs {
+            return true;
+        }
+        match (
+            ctx.cmi_longident_component_name(lhs),
+            ctx.cmi_longident_component_name(rhs),
+        ) {
+            (Some(lhs), Some(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+
+    fn longident_same_name(
+        ctx: &TypeContext<'_>,
+        lhs: &crate::parser::longident::Longident,
+        rhs: &crate::parser::longident::Longident,
+    ) -> bool {
+        use crate::parser::longident::Longident;
+
+        match (lhs, rhs) {
+            (Longident::Lident(lhs), Longident::Lident(rhs)) => {
+                component_same_name(ctx, *lhs, *rhs)
+            }
+            (Longident::Ldot(lhs_prefix, lhs), Longident::Ldot(rhs_prefix, rhs)) => {
+                longident_same_name(ctx, lhs_prefix, rhs_prefix)
+                    && component_same_name(ctx, *lhs, *rhs)
+            }
+            _ => false,
+        }
+    }
+
     // Matches the same-label path through compiler/ml/ctype.ml:2199-2206:
     // `complete_type_list` first allocates `Pkg` and calls `Env.add_module`
     // (compiler/ml/ctype.ml:2200-2201), then returns existing entries when
-    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206). This helper is
-    // intentionally limited to that exact path; missing-label completion at
-    // compiler/ml/ctype.ml:2207-2231 needs a full Longident string comparator.
+    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206).
     let pkg_id = ctx.create_ident("Pkg");
     if let Some(env) = env {
         let mut env_prime = env.clone_preserve_id();
@@ -2989,7 +3020,11 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
             },
         );
     }
-    required_lids == existing_lids
+    required_lids.len() == existing_lids.len()
+        && required_lids
+            .iter()
+            .zip(existing_lids)
+            .all(|(required, existing)| longident_same_name(ctx, required, existing))
 }
 
 /// Unify two types.
@@ -4130,6 +4165,36 @@ fn unify_types<'a>(
             unify(ctx, state, rest1, rest2)?;
             link_type(ctx, t1, t2);
             Ok(())
+        }
+
+        (TypeDesc::Tpackage { .. }, TypeDesc::Tconstr { .. }) => {
+            drop(desc1);
+            drop(desc2);
+            if let Some(env) = state.env() {
+                // OCaml compiler/ml/ctype.ml:2341-2344 expands constructor
+                // aliases before the package case at ctype.ml:2497-2500. Keep
+                // this path for package aliases such as Belt.Map.id without
+                // changing other constructor unification order.
+                let exp2 = expand_head_unif(ctx, env, t2);
+                if exp2 != t2 {
+                    return unify_after_expansion(ctx, state, t1, t1, t2, exp2);
+                }
+            }
+            Err(TypeError::Unify(vec![(t1, t2)]))
+        }
+
+        (TypeDesc::Tconstr { .. }, TypeDesc::Tpackage { .. }) => {
+            drop(desc1);
+            drop(desc2);
+            if let Some(env) = state.env() {
+                // OCaml compiler/ml/ctype.ml:2341-2344 expands constructor
+                // aliases before the package case at ctype.ml:2497-2500.
+                let exp1 = expand_head_unif(ctx, env, t1);
+                if exp1 != t1 {
+                    return unify_after_expansion(ctx, state, t1, exp1, t2, t2);
+                }
+            }
+            Err(TypeError::Unify(vec![(t1, t2)]))
         }
 
         // Package types

@@ -414,6 +414,10 @@ impl<'a> TypeContext<'a> {
         StrIdx::from_raw(raw)
     }
 
+    pub(crate) fn cmi_longident_component_name(&self, idx: StrIdx) -> Option<String> {
+        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+    }
+
     /// Resolve a Longident component StrIdx to string, checking CMI synthetic
     /// indices first and falling back to the parse arena interner.
     pub fn resolve_longident_component(
