@@ -16,6 +16,7 @@ use rescript_compiler::driver::{
     CompilerOptions, compile_file_to_js_with_options, enable_cli_cleanup_skip,
     typecheck_interface_file,
 };
+use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::parser::{Parser, module, sexp_locs};
 use std::env;
 use std::fs;
@@ -232,6 +233,10 @@ fn run() -> Result<()> {
 
     // Auto-detect runtime path if not explicitly provided
     let runtime_path = opts.runtime_path.clone().or_else(default_runtime_path);
+    let package_output = opts
+        .package_outputs
+        .first()
+        .and_then(|spec| parse_package_output(spec));
 
     let compiler_opts = CompilerOptions {
         dump_lambda: opts.dump_lambda,
@@ -244,6 +249,8 @@ fn run() -> Result<()> {
         open_modules: opts.open_modules.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
+        package_output_module_format: package_output.as_ref().map(|output| output.module_format),
+        package_output_suffix: package_output.as_ref().map(|output| output.suffix.clone()),
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
@@ -404,13 +411,14 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
 
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
-            if let Some((dir, suffix)) = parse_package_output(spec) {
+            if let Some(output) = parse_package_output(spec) {
                 let module_name = module_name_for_file(
                     source_path,
                     opts.namespace.as_deref(),
                     opts.module_name.as_deref(),
                 );
-                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
+                let out_path =
+                    Path::new(&output.dir).join(format!("{module_name}{}", output.suffix));
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -428,12 +436,45 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     Ok(())
 }
 
-fn parse_package_output(spec: &str) -> Option<(String, String)> {
-    let mut parts = spec.splitn(3, ':');
-    let _module = parts.next()?;
-    let dir = parts.next()?.to_string();
-    let suffix = parts.next()?.to_string();
-    Some((dir, suffix))
+struct PackageOutput {
+    module_format: ModuleFormat,
+    dir: String,
+    suffix: String,
+}
+
+fn parse_package_output(spec: &str) -> Option<PackageOutput> {
+    let parts = spec.split(':').collect::<Vec<_>>();
+    // OCaml compiler/core/js_packages_info.ml:177-193 parses
+    // `-bs-package-output` as `[path]`, `[module_system:path]`, or
+    // `[module_system:path:suffix]`, defaulting the one-part form to ESModule.
+    match parts.as_slice() {
+        [dir] => Some(PackageOutput {
+            module_format: ModuleFormat::EsModule,
+            dir: (*dir).to_string(),
+            suffix: ".js".to_string(),
+        }),
+        [module_system, dir] => Some(PackageOutput {
+            module_format: parse_module_format(module_system)?,
+            dir: (*dir).to_string(),
+            suffix: ".js".to_string(),
+        }),
+        [module_system, dir, suffix] => Some(PackageOutput {
+            module_format: parse_module_format(module_system)?,
+            dir: (*dir).to_string(),
+            suffix: (*suffix).to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn parse_module_format(module_system: &str) -> Option<ModuleFormat> {
+    // OCaml compiler/core/js_packages_info.ml:96-100 recognizes the same
+    // module-system names in `module_system_of_string`.
+    match module_system {
+        "commonjs" => Some(ModuleFormat::CommonJs),
+        "esmodule" => Some(ModuleFormat::EsModule),
+        _ => None,
+    }
 }
 
 fn module_name_for_file(path: &Path, ns: Option<&str>, override_name: Option<&str>) -> String {

@@ -69,9 +69,30 @@ impl ModulePathResolver {
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
     ) -> Self {
+        Self::from_compile_options_with_output_info(
+            source_filename,
+            output_path,
+            runtime_path,
+            persistent_env,
+            None,
+            None,
+        )
+    }
+
+    /// Build a resolver while honoring package-output module metadata.
+    pub fn from_compile_options_with_output_info(
+        source_filename: Option<&str>,
+        output_path: Option<&FsPath>,
+        runtime_path: Option<&FsPath>,
+        persistent_env: Option<PersistentEnv>,
+        module_format: Option<ModuleFormat>,
+        output_suffix: Option<&str>,
+    ) -> Self {
         Self {
-            format: module_format_from_output_path(output_path),
-            output_suffix: output_suffix_from_path(output_path),
+            format: module_format.unwrap_or_else(|| module_format_from_output_path(output_path)),
+            output_suffix: output_suffix
+                .map(str::to_string)
+                .unwrap_or_else(|| output_suffix_from_path(output_path)),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             runtime_path: runtime_path.map(normalize_absolute_path),

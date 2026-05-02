@@ -13,7 +13,7 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{ModuleRegistry, PersistentEnv};
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
-use crate::js_ir::{Kind, ModulePathResolver, print_deps_program_with_directives};
+use crate::js_ir::{Kind, ModuleFormat, ModulePathResolver, print_deps_program_with_directives};
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -1151,6 +1151,10 @@ pub struct CompilerOptions {
     pub source_filename: Option<String>,
     /// Output path used for module-format and relative-import resolution.
     pub output_path: Option<PathBuf>,
+    /// Module system selected by `-bs-package-output`, if present.
+    pub package_output_module_format: Option<ModuleFormat>,
+    /// JavaScript suffix selected by `-bs-package-output`, if present.
+    pub package_output_suffix: Option<String>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
     /// Preserve transformed JSX syntax in the final JS dumper.
@@ -1183,6 +1187,8 @@ impl Default for CompilerOptions {
             open_modules: Vec::new(),
             source_filename: None,
             output_path: None,
+            package_output_module_format: None,
+            package_output_suffix: None,
             jsx_version: None,
             jsx_preserve: false,
             debug: false,
@@ -1426,11 +1432,16 @@ pub fn compile_source_to_js_with_options(
     }
 
     // Lambda -> JS IR
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+    // OCaml compiler/core/lam_compile_main.ml:311-318 passes each
+    // `-bs-package-output` module system to the JS dumper; this must not be
+    // inferred from a separate `-o` path used only to redirect output.
+    let mut module_path_resolver = ModulePathResolver::from_compile_options_with_output_info(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
         options.runtime_path.as_deref(),
         tctx.persistent_env.clone(),
+        options.package_output_module_format,
+        options.package_output_suffix.as_deref(),
     );
     for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
@@ -3172,11 +3183,16 @@ pub fn compile_source_in_process(
     };
 
     let t_jsir = phase_now();
-    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+    // OCaml compiler/core/lam_compile_main.ml:311-318 passes each
+    // `-bs-package-output` module system to the JS dumper; this must not be
+    // inferred from a separate `-o` path used only to redirect output.
+    let mut module_path_resolver = ModulePathResolver::from_compile_options_with_output_info(
         options.source_filename.as_deref(),
         options.output_path.as_deref(),
         options.runtime_path.as_deref(),
         tctx.persistent_env.clone(),
+        options.package_output_module_format,
+        options.package_output_suffix.as_deref(),
     );
     for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
