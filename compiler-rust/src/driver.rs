@@ -1190,6 +1190,10 @@ pub struct CompilerOptions {
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
     pub module_name: Option<String>,
+    /// Current npm package name from `-bs-package-name`.
+    pub package_name: Option<String>,
+    /// Compile the runtime package (`-make-runtime`).
+    pub make_runtime: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1222,6 +1226,8 @@ impl Default for CompilerOptions {
             no_assert_false: false,
             nopervasives: false,
             module_name: None,
+            package_name: None,
+            make_runtime: false,
             capture_intermediates: false,
             skip_js_render: false,
         }
@@ -1484,6 +1490,7 @@ pub fn compile_source_to_js_with_options(
         options.output_module_format,
         options.runtime_path.as_deref(),
         tctx.persistent_env.clone(),
+        options.make_runtime,
     );
     for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
@@ -3298,6 +3305,7 @@ fn compile_js_program_for_output(
         output_module_format,
         options.runtime_path.as_deref(),
         persistent_env,
+        options.make_runtime,
     );
     for module in possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
@@ -3343,6 +3351,7 @@ fn compile_js_program_for_output_owned(
         output_module_format,
         options.runtime_path.as_deref(),
         persistent_env,
+        options.make_runtime,
     );
     for module in possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {

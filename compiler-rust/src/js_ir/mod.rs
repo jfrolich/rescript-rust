@@ -61,6 +61,7 @@ pub struct ModulePathResolver {
     current_source_path: Option<PathBuf>,
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
+    current_package_is_runtime: bool,
     path_overrides: HashMap<String, String>,
 }
 
@@ -72,6 +73,7 @@ impl ModulePathResolver {
         output_module_format: Option<ModuleFormat>,
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
+        current_package_is_runtime: bool,
     ) -> Self {
         Self {
             format: output_module_format
@@ -81,6 +83,7 @@ impl ModulePathResolver {
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
+            current_package_is_runtime,
             path_overrides: HashMap::new(),
         }
     }
@@ -162,6 +165,13 @@ impl ModulePathResolver {
     }
 
     fn runtime_module_path(&self, module_name: &str) -> String {
+        // OCaml emits sibling runtime imports while compiling the runtime
+        // package itself; see compiler/core/js_name_of_module_id.ml:68-84
+        // and compiler/core/js_packages_info.ml:49-50.
+        if self.current_package_is_runtime {
+            return format!("./{module_name}{}", self.output_suffix);
+        }
+
         // Mirror upstream PR #8207: runtime files use .mjs / .cjs extensions
         // matching the module system, not .js.
         let (dir, ext) = match self.format {
@@ -273,6 +283,7 @@ fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {
         .and_then(|name| name.to_str())
     {
         Some(name) if name.ends_with(".mjs") => ".mjs".to_string(),
+        Some(name) if name.ends_with(".cjs") => ".cjs".to_string(),
         Some(name) if name.ends_with(".bs.js") => ".bs.js".to_string(),
         _ => ".js".to_string(),
     }
@@ -3470,6 +3481,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let module = ModuleId {
             id: Ident::create_local("Side_effect"),

@@ -1131,6 +1131,7 @@ struct InProcessCompilerFlags {
     no_version_header: bool,
     check_div_by_zero: bool,
     no_assert_false: bool,
+    make_runtime: bool,
     debug: bool,
     jsx_preserve: bool,
     jsx_version: Option<i32>,
@@ -1144,6 +1145,7 @@ impl Default for InProcessCompilerFlags {
             no_version_header: false,
             check_div_by_zero: true,
             no_assert_false: false,
+            make_runtime: false,
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
@@ -1161,6 +1163,7 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             "-bs-no-version-header" => parsed.no_version_header = true,
             "-bs-no-check-div-by-zero" => parsed.check_div_by_zero = false,
             "-bs-noassertfalse" => parsed.no_assert_false = true,
+            "-make-runtime" => parsed.make_runtime = true,
             "-bs-g" => parsed.debug = true,
             "-bs-jsx-preserve" => parsed.jsx_preserve = true,
             "-bs-jsx" => {
@@ -1266,6 +1269,8 @@ fn build_compiler_options(
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
         module_name: Some(module_name.to_string()),
+        package_name: Some(package.config.name.clone()),
+        make_runtime: parsed_flags.make_runtime,
         ..Default::default()
     })
 }
@@ -2143,6 +2148,8 @@ fn runtime_compiler_options(
         no_assert_false: parsed_flags.no_assert_false,
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
+        package_name: Some(runtime_config.name.clone()),
+        make_runtime: parsed_flags.make_runtime,
         skip_js_render: true,
         ..Default::default()
     }

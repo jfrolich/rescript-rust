@@ -398,6 +398,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let rendered = print_deps_program(
             &DepsProgram {
@@ -460,6 +461,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let rendered = print_deps_program(
             &DepsProgram {
@@ -518,6 +520,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let mut printer = JsPrinter::with_module_path_resolver(Some(&resolver));
         let printed = printer.print_module_imports(&[ModuleId {
@@ -575,6 +578,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let rendered = print_deps_program(
             &DepsProgram {

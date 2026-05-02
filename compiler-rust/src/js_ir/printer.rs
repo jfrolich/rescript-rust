@@ -4269,6 +4269,11 @@ fn is_hex_float_literal(float_str: &str) -> bool {
 }
 
 fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
+    let value = parse_hex_float_literal(float_str)?;
+    Some(js_number_to_string(value))
+}
+
+fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
     let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
         (true, rest)
     } else if let Some(rest) = float_str.strip_prefix('+') {
@@ -4281,17 +4286,58 @@ fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))?;
     let digits = digits.replace('_', "");
-    if digits.is_empty() || digits.contains('.') || digits.contains('p') || digits.contains('P') {
+    if digits.is_empty() {
         return None;
     }
 
-    let value = u128::from_str_radix(&digits, 16).ok()?;
-    let rendered = value.to_string();
-    Some(if negative {
-        format!("-{rendered}")
+    let (mantissa, exponent) = if let Some((mantissa, exponent)) =
+        digits.split_once('p').or_else(|| digits.split_once('P'))
+    {
+        (mantissa, exponent.parse::<i32>().ok()?)
     } else {
-        rendered
-    })
+        (digits.as_str(), 0)
+    };
+
+    let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fractional.is_empty() {
+        return None;
+    }
+
+    let mut value = 0.0f64;
+    for byte in whole.bytes().chain(fractional.bytes()) {
+        value = value * 16.0 + hex_digit_value(byte)? as f64;
+    }
+    value *= 2.0f64.powi(exponent - (fractional.len() as i32 * 4));
+
+    Some(if negative { -value } else { value })
+}
+
+fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn js_number_to_string(value: f64) -> String {
+    // OCaml converts every hexadecimal float through float_of_string and then
+    // Js_number.to_string; see compiler/core/js_number.ml:42-57 and 93-97.
+    if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
+    } else if value.is_nan() {
+        "NaN".to_string()
+    } else {
+        let int_value = value as i64;
+        if int_value as f64 == value {
+            int_value.to_string()
+        } else {
+            value.to_string()
+        }
+    }
 }
 
 fn transform_float_literal(float_str: &str) -> String {

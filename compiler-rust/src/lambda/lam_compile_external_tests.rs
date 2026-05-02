@@ -1923,6 +1923,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
         None,
         Some(runtime.path()),
         None,
+        false,
     );
     let mut compiler = LambdaCompiler::with_module_path_resolver(Some(resolver));
     let program = compiler.compile_program(&Lambda::prim(
@@ -1981,6 +1982,7 @@ fn resolves_local_module_paths_from_ast_metadata() {
         None,
         None,
         Some(pers),
+        false,
     );
     let module = ModuleId {
         id: Ident::create_persistent("ModuleWithAlias"),

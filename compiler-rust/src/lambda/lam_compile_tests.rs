@@ -291,6 +291,7 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
         None,
         None,
         Some(persistent_env),
+        false,
     )
 }
 
@@ -812,6 +813,7 @@ fn compile_module_primitives_require_primitive_module_runtime_import() {
         None,
         None,
         None,
+        false,
     );
     let rendered = print_deps_program(&deps, Some(&resolver));
     assert!(rendered.contains(
@@ -8694,6 +8696,7 @@ fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block
         None,
         None,
         None,
+        false,
     );
     let rendered = print_deps_program(&deps, Some(&resolver));
     assert!(rendered.contains(

@@ -88,12 +88,15 @@ struct Options {
     input: Option<PathBuf>,
     include_paths: Vec<PathBuf>,
     runtime_path: Option<PathBuf>,
+    package_name: Option<String>,
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
     jsx_preserve: bool,
     nopervasives: bool,
     no_version_header: bool,
+    no_check_div_by_zero: bool,
     no_assert_false: bool,
+    make_runtime: bool,
 }
 
 impl Options {
@@ -184,6 +187,11 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
+                "-bs-package-name" => {
+                    if let Some(val) = args.next() {
+                        opts.package_name = Some(val);
+                    }
+                }
                 "-open" => {
                     if let Some(val) = args.next() {
                         opts.open_modules.push(val);
@@ -196,9 +204,9 @@ fn run() -> Result<()> {
                 }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
                 "-bs-no-version-header" => opts.no_version_header = true,
+                "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
-                "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
-                | "-ppx" | "-ppxopt" => {
+                "-w" | "-warn-error" | "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -212,6 +220,7 @@ fn run() -> Result<()> {
                 | "-bs-no-check-cmi" => {
                     // Boolean flags - no argument to consume
                 }
+                "-make-runtime" => opts.make_runtime = true,
                 "-nopervasives" => opts.nopervasives = true,
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
@@ -263,10 +272,12 @@ fn run() -> Result<()> {
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
         no_version_header: opts.no_version_header,
-        check_div_by_zero: true,
+        check_div_by_zero: !opts.no_check_div_by_zero,
         no_assert_false: opts.no_assert_false,
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
+        package_name: opts.package_name.clone(),
+        make_runtime: opts.make_runtime,
         capture_intermediates: false,
         skip_js_render: false,
     };
