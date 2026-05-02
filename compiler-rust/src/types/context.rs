@@ -537,7 +537,9 @@ impl<'a> TypeContext<'a> {
         // `ps_comps` without forcing `ps_sig`; Rust stores that selected
         // component view explicitly, so later normalization can observe that
         // the component table is already available.
-        self.qualified_module_components_cache.borrow().contains_key(key)
+        self.qualified_module_components_cache
+            .borrow()
+            .contains_key(key)
     }
 
     pub(crate) fn register_flattened_alias_component_path(
@@ -1511,8 +1513,7 @@ impl<'a> TypeContext<'a> {
                 if !first.is_ascii_uppercase() {
                     return None;
                 }
-                let uncap_name =
-                    format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
+                let uncap_name = format!("{}{}", first.to_ascii_lowercase(), &module_name[1..]);
                 let uncap = dir.join(format!("{uncap_name}.cmi"));
                 uncap.exists().then_some(uncap)
             })

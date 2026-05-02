@@ -1135,13 +1135,11 @@ impl Env {
             }
 
             match path {
-                Path::Pident(id) => {
-                    env
-                        .modules
-                        .find_by_ident_in_name_bucket(id)
-                        .map(|m| m.as_ref())
-                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
-                }
+                Path::Pident(id) => env
+                    .modules
+                    .find_by_ident_in_name_bucket(id)
+                    .map(|m| m.as_ref())
+                    .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
                 Path::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)

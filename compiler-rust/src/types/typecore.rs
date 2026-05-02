@@ -3988,7 +3988,13 @@ fn type_pattern_record(
             Some(record_ty),
         )
         .or_else(|| {
-            disambiguate_label_for_pattern(&field_name, record_ty, env, &mut tctx.persistent_env, ctx)
+            disambiguate_label_for_pattern(
+                &field_name,
+                record_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
         });
 
         let label = disambiguated.map(|env_label| {
@@ -4557,15 +4563,14 @@ fn force_qualified_value_type_paths<'a>(
                     let is_known = pers_env
                         .as_ref()
                         .is_some_and(|pers| pers.has_known_module_without_loading(&candidate))
-                        || ctx.find_flattened_alias_component_path(&candidate).is_some();
+                        || ctx
+                            .find_flattened_alias_component_path(&candidate)
+                            .is_some();
                     if !is_known {
                         continue;
                     }
                     let flattened_target = Path::pident(Ident::create_persistent(&candidate));
-                    if !out
-                        .iter()
-                        .any(|existing| existing.same(&flattened_target))
-                    {
+                    if !out.iter().any(|existing| existing.same(&flattened_target)) {
                         // OCaml compiler/ml/env.ml:1530-1538 substitutes the
                         // selected component path, so nested paths inside a
                         // value type follow `J.Kind.*`. Rust may still see the
@@ -16717,8 +16722,7 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
         pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
         ctx: &crate::types::context::TypeContext<'_>,
     ) -> bool {
-        pers_env
-            .is_some_and(|pers| pers.has_known_module_without_loading(candidate))
+        pers_env.is_some_and(|pers| pers.has_known_module_without_loading(candidate))
             || ctx.find_flattened_alias_component_path(candidate).is_some()
     }
 
@@ -16988,7 +16992,7 @@ impl Env {
                         ty: TypeExprRef(0),
                         method: lid_str,
                         alternatives: None,
-                        });
+                    });
                 }
 
                 // Fallback: try looking up as a flattened value in the local env.
@@ -19030,7 +19034,15 @@ fn lookup_label_by_lid<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     expected_record_ty: Option<TypeExprRef>,
 ) -> Option<crate::types::LabelDescription> {
-    lookup_label_by_lid_with_path_qualification(lid, arena, env, pers_env, ctx, expected_record_ty, true)
+    lookup_label_by_lid_with_path_qualification(
+        lid,
+        arena,
+        env,
+        pers_env,
+        ctx,
+        expected_record_ty,
+        true,
+    )
 }
 
 fn lookup_label_by_lid_for_pattern<'a>(
@@ -19293,7 +19305,9 @@ fn lookup_label_by_expected_type<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<crate::types::LabelDescription> {
-    lookup_label_by_expected_type_with_path_qualification(label_name, record_ty, env, pers_env, ctx, true)
+    lookup_label_by_expected_type_with_path_qualification(
+        label_name, record_ty, env, pers_env, ctx, true,
+    )
 }
 
 fn lookup_label_by_expected_type_with_path_qualification<'a>(
@@ -21729,7 +21743,9 @@ fn build_module_signature_for_path<'a>(
                 {
                     return Some(raw_components);
                 }
-                let ps_sig = pers.find_pers_struct(id.name(), ctx).map(|ps| ps.ps_sig.clone());
+                let ps_sig = pers
+                    .find_pers_struct(id.name(), ctx)
+                    .map(|ps| ps.ps_sig.clone());
                 if let Some(ps_sig) = ps_sig {
                     if let Some(raw_components) =
                         raw_persistent_components_signature_for_path(id, Some(pers), ctx)

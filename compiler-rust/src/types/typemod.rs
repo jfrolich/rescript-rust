@@ -6165,12 +6165,9 @@ fn strengthen_semantic_ident_module_type<'a>(
         DeclMty::MtyAlias(_, alias_path) => {
             let mut normalized = alias_path;
             force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
-            while let Some(next) = crate::types::typecore::find_module_alias_target(
-                &normalized,
-                env,
-                pers_env,
-                ctx,
-            ) {
+            while let Some(next) =
+                crate::types::typecore::find_module_alias_target(&normalized, env, pers_env, ctx)
+            {
                 if next.same(&normalized) {
                     break;
                 }

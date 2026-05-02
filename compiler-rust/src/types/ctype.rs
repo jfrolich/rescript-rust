@@ -287,13 +287,8 @@ fn lookup_type_decl_for_path_with_persistent_env(
     // types through the existing module component tables before falling back to
     // persistent structures. Prefer the env/component path here so lookups like
     // `Js.Types.tagged_t` do not eagerly read `Js.cmi`.
-    if let Some(decl) = resolve_type_through_env_with_persistent_env(
-        ctx,
-        env,
-        pers_env,
-        path,
-        true,
-    ) {
+    if let Some(decl) = resolve_type_through_env_with_persistent_env(ctx, env, pers_env, path, true)
+    {
         return Some(decl);
     }
 
@@ -1667,13 +1662,8 @@ fn resolve_type_item_through_env_with_persistent_env<'a>(
         let alias_target_for_strengthening = if strengthen_alias_types {
             // Preserve local access paths like `L.t` / `V.t` instead of
             // collapsing them back to the alias target during expansion.
-            crate::types::typecore::module_alias_target_for_path(
-                module_path,
-                env,
-                pers_env,
-                ctx,
-            )
-            .filter(|_| module_access_origin_is_persistent)
+            crate::types::typecore::module_alias_target_for_path(module_path, env, pers_env, ctx)
+                .filter(|_| module_access_origin_is_persistent)
         } else {
             None
         };
@@ -1979,7 +1969,8 @@ fn normalize_path_full_inner<'a>(
         let has_component_cache = {
             let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
                 path.clone(),
-                env.module_path_requires_env_scoped_cache(&path).then_some(env.id()),
+                env.module_path_requires_env_scoped_cache(&path)
+                    .then_some(env.id()),
             );
             ctx.has_qualified_module_components(&key)
         };
@@ -5383,14 +5374,10 @@ fn generalize_expansive_rec(
 
     match action {
         Action::Constr { path, args } => {
-            let mut variances = lookup_type_decl_for_path_with_persistent_env(
-                ctx,
-                env,
-                pers_env,
-                &path,
-            )
-                .map(|decl| decl.type_variance.clone())
-                .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
+            let mut variances =
+                lookup_type_decl_for_path_with_persistent_env(ctx, env, pers_env, &path)
+                    .map(|decl| decl.type_variance.clone())
+                    .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
             if !args.is_empty() && variances.iter().all(|v| *v == Variance::NULL) {
                 variances = vec![Variance::MAY_INV; args.len()];
             }
@@ -5704,11 +5691,7 @@ fn compute_variance_rec(
     }
 }
 
-fn force_implicit_pervasives_for_lower_args(
-    ctx: &TypeContext<'_>,
-    env: &Env,
-    ty: TypeExprRef,
-) {
+fn force_implicit_pervasives_for_lower_args(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     let TypeDesc::Tconstr { path, .. } = &*desc else {

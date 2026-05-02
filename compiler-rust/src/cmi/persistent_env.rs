@@ -418,8 +418,7 @@ impl PersistentEnv {
             || self.portable_cache.contains_key(name)
             || self.in_memory_modules.contains_key(name)
             || self.source_fallback_paths.contains_key(name)
-            || (!self.in_process_mode
-                && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
+            || (!self.in_process_mode && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
     pub fn is_loading_module(&self, name: &str) -> bool {
@@ -2680,11 +2679,7 @@ fn rewrite_module_prefix_in_module_type(
         } => {
             if let Some(param_type) = param_type.as_ref() {
                 rewrite_module_prefix_in_module_type(
-                    param_type,
-                    old_name,
-                    new_prefix,
-                    ctx,
-                    visited,
+                    param_type, old_name, new_prefix, ctx, visited,
                 );
             }
             rewrite_module_prefix_in_module_type(result, old_name, new_prefix, ctx, visited);
@@ -2719,11 +2714,7 @@ fn rewrite_module_prefix_in_sig_with_visited(
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                                     for &arg in args {
                                         rewrite_type_expr_prefix(
-                                            arg,
-                                            old_name,
-                                            new_prefix,
-                                            ctx,
-                                            visited,
+                                            arg, old_name, new_prefix, ctx, visited,
                                         );
                                     }
                                 }
@@ -2740,13 +2731,7 @@ fn rewrite_module_prefix_in_sig_with_visited(
                                 }
                             }
                             if let Some(res) = cd.cd_res {
-                                rewrite_type_expr_prefix(
-                                    res,
-                                    old_name,
-                                    new_prefix,
-                                    ctx,
-                                    visited,
-                                );
+                                rewrite_type_expr_prefix(res, old_name, new_prefix, ctx, visited);
                             }
                         }
                     }
