@@ -1643,6 +1643,19 @@ impl<'a> TypeContext<'a> {
         &self,
         module_name: &str,
     ) -> Option<super::decl::Signature> {
+        if self.persistent_env_is_in_process() {
+            let mut pers_env = self.persistent_env_clone().unwrap_or_else(|| {
+                panic!(
+                    "in-process invariant violated: missing PersistentEnv while forcing raw signature for {module_name}"
+                )
+            });
+            return Some(pers_env.read_raw_sig(module_name, self).unwrap_or_else(|| {
+                panic!(
+                    "in-process invariant violated: raw signature for {module_name} was not in the module registry"
+                )
+            }));
+        }
+
         let cmi_path = {
             let load_paths = self.load_paths.borrow();
             let cmi_filename = format!("{module_name}.cmi");

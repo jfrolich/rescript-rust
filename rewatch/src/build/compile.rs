@@ -421,39 +421,37 @@ pub fn compile(
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
 
-        if build_includes_runtime_package(build_state) {
-            debug!("Skipping runtime pre-compilation because @rescript/runtime is in the build graph");
-        } else {
-            // Pre-compile all @rescript/runtime modules into the registry.
-            // In in-process mode, the registry is the sole source of truth —
-            // no CMI fallback. Every dependency must be in the registry.
-            let parent_span = compile_parent_span.clone();
-            let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-                let handle = std::thread::Builder::new()
-                    .name("rewatch-runtime-precompile".to_string())
-                    .stack_size(64 * 1024 * 1024)
-                    .spawn_scoped(scope, || {
-                        let _parent = parent_span.enter();
-                        pre_compile_runtime_modules(build_state)
-                    })
-                    .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+        // Pre-compile all @rescript/runtime modules into the registry.
+        // In in-process mode, the registry is the sole source of truth —
+        // no CMI fallback. Every dependency must be in the registry before
+        // project modules start compiling, even when @rescript/runtime is
+        // also present in the package graph.
+        let parent_span = compile_parent_span.clone();
+        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("rewatch-runtime-precompile".to_string())
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || {
+                    let _parent = parent_span.enter();
+                    pre_compile_runtime_modules(build_state)
+                })
+                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
-                match handle.join() {
-                    Ok(result) => result,
-                    Err(panic) => {
-                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "unknown".to_string()
-                        };
-                        Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                    }
+            match handle.join() {
+                Ok(result) => result,
+                Err(panic) => {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
                 }
-            });
-            pre_compile_result?;
-        }
+            }
+        });
+        pre_compile_result?;
 
         // Clear source-fallback paths after pre-compilation.
         build_state
@@ -848,13 +846,6 @@ pub fn compile(
     }
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
-}
-
-fn build_includes_runtime_package(build_state: &BuildCommandState) -> bool {
-    build_state
-        .packages
-        .values()
-        .any(|package| package.name == "@rescript/runtime")
 }
 
 static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();

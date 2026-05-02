@@ -3516,6 +3516,18 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
             filename,
             &type_ctx,
         );
+        // OCaml saves the current unit into the persistent table before
+        // lambda translation (compiler/ml/typemod.ml:1779-1788). That save
+        // also installs `ps_sig` for later lazy component forcing
+        // (compiler/ml/env.ml:1960-1977). In-process builds do not write/read
+        // the `.cmi`, so keep the just-saved current signature in the
+        // TypeContext raw-signature cache before hiding the transient module.
+        let current_raw_sig = internal_env.read_raw_sig(module_name, &type_ctx).unwrap_or_else(|| {
+            panic!(
+                "in-process invariant violated: saved signature for {module_name} was not available"
+            )
+        });
+        type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
             module_name,
