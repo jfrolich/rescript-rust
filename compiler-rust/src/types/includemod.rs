@@ -638,10 +638,7 @@ fn register_paired_signature_substitution(
     modtype_subst: &mut HashMap<String, Path>,
 ) {
     match (paired.impl_item, paired.sig_item) {
-        (
-            SignatureItem::SigType(impl_id, _, _),
-            SignatureItem::SigType(sig_id, _, _),
-        ) => {
+        (SignatureItem::SigType(impl_id, _, _), SignatureItem::SigType(sig_id, _, _)) => {
             // OCaml compiler/ml/includemod.ml:348-359 registers paired
             // signature type components with `Subst.add_type id2 (Pident id1)`;
             // strengthened manifests remain in the declaration, not in the
