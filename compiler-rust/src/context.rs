@@ -115,6 +115,17 @@ impl IdGenerator {
         }
     }
 
+    /// Restore the stamp counter to an exact value.
+    ///
+    /// This is used around isolated source-fallback type checking. OCaml's
+    /// compiler/ml/env.ml:669-678 builds persistent `ps_comps` while loading a
+    /// different unit, but that work does not advance the current unit's later
+    /// binder stamps.
+    #[inline]
+    pub fn restore_current_stamp(&self, stamp: i32) {
+        self.current_stamp.store(stamp.max(0), Ordering::Relaxed);
+    }
+
     /// Initialize the reinit level if not already set.
     pub fn init_reinit_level(&self) {
         let current = self.reinit_level.load(Ordering::Relaxed);

@@ -181,7 +181,16 @@ pub struct BindingTable<T> {
     /// local (true = from `add`, false = from `add_opened`).
     by_name: im_rc::HashMap<String, Vec<(Ident, T, bool)>>,
     /// Bindings indexed by identifier stamp.
-    by_stamp: im_rc::HashMap<i32, T>,
+    by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+}
+
+fn same_idtbl_binding(entry_id: &Ident, id: &Ident) -> bool {
+    // OCaml compiler/ext/ident.ml:52-54 `Ident.same` is stamp-only for
+    // non-persistent identifiers, but compiler/ext/ident.ml:156-163
+    // `IdTbl.find_same` first selects the name bucket and only then checks the
+    // stamp chain. Keep that name guard here so imported CMI stamps do not
+    // make an opened module alias look like an unrelated local type path.
+    entry_id.name() == id.name() && entry_id.same(id)
 }
 
 impl<T: Clone> BindingTable<T> {
@@ -199,7 +208,7 @@ impl<T: Clone> BindingTable<T> {
         let name = id.name().to_string();
         let stamp = id.stamp();
 
-        self.by_stamp.insert(stamp, value.clone());
+        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, true)),
@@ -216,7 +225,7 @@ impl<T: Clone> BindingTable<T> {
         let name = id.name().to_string();
         let stamp = id.stamp();
 
-        self.by_stamp.insert(stamp, value.clone());
+        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
 
         match self.by_name.get_mut(&name) {
             Some(entries) => entries.push((id, value, false)),
@@ -273,9 +282,37 @@ impl<T: Clone> BindingTable<T> {
                 }
                 entries.last().map(|(_, value, _)| value)
             })
+        } else if let Some((entry_id, value)) = self.by_stamp.get(&stamp) {
+            if entry_id.same(id) {
+                Some(value)
+            } else {
+                self.by_name.get(id.name()).and_then(|entries| {
+                    entries
+                        .iter()
+                        .rev()
+                        .find(|(entry_id, _, _)| entry_id.same(id))
+                        .map(|(_, value, _)| value)
+                })
+            }
         } else {
-            self.by_stamp.get(&stamp)
+            self.by_name.get(id.name()).and_then(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|(entry_id, _, _)| entry_id.same(id))
+                    .map(|(_, value, _)| value)
+            })
         }
+    }
+
+    fn find_by_ident_in_name_bucket(&self, id: &Ident) -> Option<&T> {
+        self.by_name.get(id.name()).and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|(entry_id, _, _)| same_idtbl_binding(entry_id, id))
+                .map(|(_, value, _)| value)
+        })
     }
 
     /// Get all bindings with a given name.
@@ -626,7 +663,9 @@ impl Env {
         // Persistent idents share stamp=0, and lookup for those already goes
         // through by_name. Keep by_stamp untouched for stamp=0.
         if id.stamp() != 0 {
-            self.values.by_stamp.insert(id.stamp(), updated);
+            self.values
+                .by_stamp
+                .insert(id.stamp(), (id.clone(), updated));
         }
 
         self.bump_id();
@@ -1053,13 +1092,69 @@ impl Env {
             _ => path.clone(),
         };
 
-        // Then check if the path itself is a module alias
-        if let Ok(md) = self.lookup_module(&path) {
+        // Then check if the path itself is a module alias. OCaml
+        // compiler/ml/env.ml:865-875 `find_module` resolves Pident modules
+        // with `IdTbl.find_same`; normalize_path at env.ml:903-914 must not
+        // fall back by name, or a local type path like `t/1544` can be treated
+        // as an unrelated opened module named `t` and force its lazy signature.
+        if let Ok(md) = self.lookup_module_same_for_normalize_path(&path) {
             if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
                 return self.normalize_path_inner(alias_path, depth + 1);
             }
         }
         path
+    }
+
+    fn lookup_module_same_for_normalize_path(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
+        fn lookup_submodule_in_module_type<'a>(
+            env: &'a Env,
+            mty: &'a ModuleType,
+            name: &str,
+            visiting: &mut HashSet<Path>,
+        ) -> Option<&'a ModuleDeclaration> {
+            match mty {
+                ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
+                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
+                    _ => None,
+                }),
+                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    let md = lookup_module_inner(env, alias_path, visiting).ok()?;
+                    lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
+                }
+                ModuleType::MtyFunctor { .. } => None,
+            }
+        }
+
+        fn lookup_module_inner<'a>(
+            env: &'a Env,
+            path: &Path,
+            visiting: &mut HashSet<Path>,
+        ) -> EnvResult<&'a ModuleDeclaration> {
+            if !visiting.insert(path.clone()) {
+                return Err(EnvError::ModuleNotFound(path.name()));
+            }
+
+            match path {
+                Path::Pident(id) => {
+                    env
+                        .modules
+                        .find_by_ident_in_name_bucket(id)
+                        .map(|m| m.as_ref())
+                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
+                }
+                Path::Pdot(parent, name, _) => {
+                    let parent_md = lookup_module_inner(env, parent, visiting)?;
+                    lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
+                        .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+                }
+                Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
+                    "(functor application)".to_string(),
+                )),
+            }
+        }
+
+        let mut visiting = HashSet::new();
+        lookup_module_inner(self, path, &mut visiting)
     }
 
     // ========================================================================

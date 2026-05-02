@@ -1396,6 +1396,41 @@ impl<'a> TypeContext<'a> {
         self.id_gen.set_current_stamp(t);
     }
 
+    pub(crate) fn current_id_gen_stamp(&self) -> i32 {
+        self.id_gen.current_stamp()
+    }
+
+    pub(crate) fn current_def_level_state(&self) -> (i32, i32, i32, usize) {
+        (
+            self.current_level.get(),
+            self.nongen_level.get(),
+            self.global_level.get(),
+            self.saved_levels.borrow().len(),
+        )
+    }
+
+    pub(crate) fn restore_source_fallback_state(
+        &self,
+        id_gen_stamp: i32,
+        local_stamp: i32,
+        current_level: i32,
+        nongen_level: i32,
+        global_level: i32,
+        saved_levels_len: usize,
+    ) {
+        // OCaml compiler/ml/env.ml:669-678 acknowledges a persistent structure
+        // and builds `ps_comps` without making that dependency load consume the
+        // current unit's later `Ident` stamps or Ctype definition levels.
+        // Source fallback does real typechecking in Rust, so restore the
+        // current-unit counters after the isolated load completes.
+        self.id_gen.restore_current_stamp(id_gen_stamp);
+        Ident::set_current_time(local_stamp);
+        self.current_level.set(current_level);
+        self.nongen_level.set(nongen_level);
+        self.global_level.set(global_level);
+        self.saved_levels.borrow_mut().truncate(saved_levels_len);
+    }
+
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
     pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {

@@ -174,6 +174,8 @@ impl ModuleRegistry {
 pub struct PersistentEnv {
     /// Cache of loaded modules: module_name -> PersStruct (or None if loading failed)
     cache: HashMap<String, Option<PersStruct>>,
+    /// Modules currently being loaded through `find_pers_struct`.
+    loading_modules: HashSet<String>,
     /// Load path: list of directories to search for .cmi files
     load_path: Vec<PathBuf>,
     /// Alias prefix rewrites: flattened_name -> qualified_path.
@@ -218,11 +220,51 @@ fn should_register_lazy_raw_sig(name: &str) -> bool {
     name.contains('_')
 }
 
+struct SourceFallbackStateSnapshot<'a, 'ctx> {
+    ctx: &'a TypeContext<'ctx>,
+    id_gen_stamp: i32,
+    local_stamp: i32,
+    current_level: i32,
+    nongen_level: i32,
+    global_level: i32,
+    saved_levels_len: usize,
+}
+
+impl<'a, 'ctx> SourceFallbackStateSnapshot<'a, 'ctx> {
+    fn new(ctx: &'a TypeContext<'ctx>) -> Self {
+        let (current_level, nongen_level, global_level, saved_levels_len) =
+            ctx.current_def_level_state();
+        Self {
+            ctx,
+            id_gen_stamp: ctx.current_id_gen_stamp(),
+            local_stamp: Ident::current_local_stamp(),
+            current_level,
+            nongen_level,
+            global_level,
+            saved_levels_len,
+        }
+    }
+}
+
+impl Drop for SourceFallbackStateSnapshot<'_, '_> {
+    fn drop(&mut self) {
+        self.ctx.restore_source_fallback_state(
+            self.id_gen_stamp,
+            self.local_stamp,
+            self.current_level,
+            self.nongen_level,
+            self.global_level,
+            self.saved_levels_len,
+        );
+    }
+}
+
 impl PersistentEnv {
     /// Create a new persistent environment with no load paths.
     pub fn new() -> Self {
         PersistentEnv {
             cache: HashMap::new(),
+            loading_modules: HashSet::new(),
             load_path: Vec::new(),
             alias_prefix_rewrites: HashMap::new(),
             open_modules: Vec::new(),
@@ -251,6 +293,7 @@ impl PersistentEnv {
         let portable_cache = registry.cached_modules.clone();
         PersistentEnv {
             cache: HashMap::new(),
+            loading_modules: HashSet::new(),
             load_path: Vec::new(),
             alias_prefix_rewrites: registry.alias_rewrites.clone(),
             open_modules: Vec::new(),
@@ -379,6 +422,14 @@ impl PersistentEnv {
                 && self.find_in_path_uncap(&format!("{name}.cmi")).is_some())
     }
 
+    pub fn is_loading_module(&self, name: &str) -> bool {
+        // OCaml compiler/ml/env.ml:872-875 and env.ml:1000-1007 do not resolve
+        // the current unit through `persistent_structures`. Rust uses an
+        // explicit loading set for the same state so alias recovery cannot
+        // observe a half-built persistent signature.
+        self.loading_modules.contains(name)
+    }
+
     /// Find and load a module by name.
     /// Returns the cached signature, or None if the module cannot be found.
     pub fn find_pers_struct<'a>(
@@ -424,10 +475,12 @@ impl PersistentEnv {
 
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
+        self.loading_modules.insert(name.to_string());
         self.cache.insert(name.to_string(), None);
 
         // Try to load from disk
         let result = self.load_module(name, ctx);
+        self.loading_modules.remove(name);
         self.cache.insert(name.to_string(), result);
         self.cache.get(name).and_then(|opt| opt.as_ref())
     }
@@ -470,6 +523,12 @@ impl PersistentEnv {
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
         if should_register_lazy_raw_sig(name) {
             ctx.register_raw_module_sig(name, signature.clone());
+            // OCaml compiler/ml/env.ml:669-678 stores `ps_comps` as an
+            // EnvLazy thunk from the raw persistent `sign`; the actual
+            // `components_of_module_maker` work at env.ml:1516-1585 is forced
+            // later by env.ml:568-571/1000-1007. Keep only the raw signature
+            // here so Rust does not eagerly freshen component module-type
+            // declarations while merely acknowledging the persistent unit.
         }
 
         PersStruct {
@@ -604,6 +663,11 @@ impl PersistentEnv {
         if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
             return None;
         }
+        // OCaml compiler/ml/env.ml:669-678 obtains persistent components from
+        // an already-compiled signature. Rust may typecheck a runtime source
+        // fallback to synthesize that signature, but those temporary binders
+        // must not shift the current unit's later `Ident` stamps.
+        let _source_fallback_state_snapshot = SourceFallbackStateSnapshot::new(ctx);
 
         let filename = source_path.to_string_lossy().into_owned();
         let source = Self::read_source_latin1(source_path)?;
@@ -618,6 +682,7 @@ impl PersistentEnv {
             .collect();
         let mut fallback_pers = PersistentEnv {
             cache: placeholders,
+            loading_modules: self.loading_modules.clone(),
             load_path: self.load_path.clone(),
             alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),

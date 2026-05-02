@@ -2765,7 +2765,7 @@ fn path_is_t_of_js_child(path: &Path, child_name: &str) -> bool {
     )
 }
 
-fn type_path_is_instanceof_backed_object(path: &Path) -> bool {
+fn type_to_instanceof_backed_obj(path: &Path) -> bool {
     if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
         return true;
     }
@@ -2801,46 +2801,25 @@ fn type_path_is_instanceof_backed_object(path: &Path) -> bool {
         || path_is_t_of_stdlib_child(path, "WeakMap")
 }
 
-fn force_persistent_module_for_type_path(
-    ctx: &crate::types::context::TypeContext<'_>,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    path: &Path,
-) {
-    let Path::Pdot(parent, type_name, _) = path else {
-        return;
-    };
-    if type_name != "t" {
-        return;
-    }
-    let Path::Pident(module_id) = parent.as_ref() else {
-        return;
-    };
-    if !module_id.is_persistent() {
-        return;
-    }
-    if let Some(pers) = pers_env.as_mut() {
-        let _ = pers.get_renamed_sig(module_id.name(), ctx);
-    }
-}
-
 fn touch_untagged_constructor_payload_type(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
 ) {
     if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
-        if type_path_is_instanceof_backed_object(path) {
+        if type_to_instanceof_backed_obj(path) {
             return;
         }
     }
 
+    // OCaml compiler/ml/ast_untagged_variants.ml:274-301 calls
+    // `expand_head` and then classifies the expanded type. It does not force the
+    // persistent module's `ps_sig` after recognizing an instance-backed object.
     let expanded = crate::types::ctype::expand_head(ctx, env, ty);
     match &*ctx.get_desc(expanded) {
         crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-            if type_path_is_instanceof_backed_object(path) {
-                force_persistent_module_for_type_path(ctx, pers_env, path);
-                let _ = crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path);
+            if type_to_instanceof_backed_obj(path) {
+                return;
             }
         }
         crate::types::type_expr::TypeDesc::Tarrow { .. }
@@ -2852,7 +2831,6 @@ fn touch_untagged_constructor_payload_type(
 fn touch_untagged_variant_well_formedness(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     decl: &crate::types::decl::TypeDeclaration,
 ) {
     let crate::types::decl::TypeKind::TypeVariant(constructors) = &decl.type_kind else {
@@ -2872,7 +2850,7 @@ fn touch_untagged_variant_well_formedness(
         match &constructor.cd_args {
             crate::types::decl::ConstructorArguments::CstrTuple(args) => {
                 if let [arg] = args.as_slice() {
-                    touch_untagged_constructor_payload_type(ctx, env, pers_env, *arg);
+                    touch_untagged_constructor_payload_type(ctx, env, *arg);
                 }
             }
             crate::types::decl::ConstructorArguments::CstrRecord(_) => {}
@@ -12038,12 +12016,7 @@ fn type_structure_item<'a>(
             }
 
             for decl in &internal_decls_for_generalize {
-                touch_untagged_variant_well_formedness(
-                    ctx,
-                    &new_env,
-                    &mut tctx.persistent_env,
-                    decl,
-                );
+                touch_untagged_variant_well_formedness(ctx, &new_env, decl);
             }
 
             // OCaml typedecl.ml:1588-1592 runs untagged checks first, then
