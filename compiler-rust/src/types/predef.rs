@@ -125,6 +125,12 @@ pub fn ident_exn() -> Ident {
 pub fn ident_array() -> Ident {
     make_ident("array", STAMP_ARRAY)
 }
+pub fn ident_iterable() -> Ident {
+    make_ident("iterable", STAMP_ITERABLE)
+}
+pub fn ident_async_iterable() -> Ident {
+    make_ident("asyncIterable", STAMP_ASYNC_ITERABLE)
+}
 pub fn ident_list() -> Ident {
     make_ident("list", STAMP_LIST)
 }
@@ -151,12 +157,6 @@ pub fn ident_unknown() -> Ident {
 }
 pub fn ident_promise() -> Ident {
     make_ident("promise", STAMP_PROMISE)
-}
-pub fn ident_iterable() -> Ident {
-    make_ident("iterable", STAMP_ITERABLE)
-}
-pub fn ident_async_iterable() -> Ident {
-    make_ident("asyncIterable", STAMP_ASYNC_ITERABLE)
 }
 
 // Comptime type reflection idents
@@ -348,6 +348,12 @@ pub fn path_exn() -> Path {
 pub fn path_array() -> Path {
     Path::pident(ident_array())
 }
+pub fn path_iterable() -> Path {
+    Path::pident(ident_iterable())
+}
+pub fn path_async_iterable() -> Path {
+    Path::pident(ident_async_iterable())
+}
 pub fn path_list() -> Path {
     Path::pident(ident_list())
 }
@@ -374,12 +380,6 @@ pub fn path_unknown() -> Path {
 }
 pub fn path_promise() -> Path {
     Path::pident(ident_promise())
-}
-pub fn path_iterable() -> Path {
-    Path::pident(ident_iterable())
-}
-pub fn path_async_iterable() -> Path {
-    Path::pident(ident_async_iterable())
 }
 pub fn path_match_failure() -> Path {
     Path::pident(ident_match_failure())
@@ -416,6 +416,8 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "unit" => Some(ident_unit()),
         "exn" => Some(ident_exn()),
         "array" => Some(ident_array()),
+        "iterable" => Some(ident_iterable()),
+        "asyncIterable" => Some(ident_async_iterable()),
         "list" => Some(ident_list()),
         "option" => Some(ident_option()),
         "result" => Some(ident_result()),
@@ -425,8 +427,6 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
-        "iterable" => Some(ident_iterable()),
-        "asyncIterable" => Some(ident_async_iterable()),
         "typeInfo" => Some(ident_type_info()),
         "fieldInfo" => Some(ident_field_info()),
         "constructorInfo" => Some(ident_constructor_info()),

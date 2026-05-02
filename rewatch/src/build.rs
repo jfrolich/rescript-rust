@@ -28,6 +28,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracing::info_span;
 
 fn is_dirty(module: &Module) -> bool {
     match module.source_type {
@@ -47,6 +48,21 @@ fn is_dirty(module: &Module) -> bool {
         SourceType::MlMap(MlMap {
             parse_dirty: dirty, ..
         }) => dirty,
+    }
+}
+
+fn mark_all_modules_dirty(build_state: &mut BuildCommandState) {
+    for module in build_state.modules.values_mut() {
+        module.compile_dirty = true;
+        match &mut module.source_type {
+            SourceType::SourceFile(source_file) => {
+                source_file.implementation.parse_dirty = true;
+                if let Some(interface) = &mut source_file.interface {
+                    interface.parse_dirty = true;
+                }
+            }
+            SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
+        }
     }
 }
 
@@ -94,6 +110,11 @@ pub fn format_finished_compilation_message(
 }
 
 pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
+    let _span = info_span!(
+        "rewatch.compiler_args",
+        file_path = %rescript_file_path.display()
+    )
+    .entered();
     let filename = &helpers::get_abs_path(rescript_file_path);
     let current_package = helpers::get_abs_path(
         &helpers::get_nearest_config(rescript_file_path).expect("Couldn't find package root"),
@@ -179,6 +200,14 @@ pub fn initialize_build(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
+    let _span = info_span!(
+        "build.initialize",
+        working_dir = %path.display(),
+        in_process = build_mode.is_in_process(),
+        subprocess,
+        prod
+    )
+    .entered();
     let project_context = ProjectContext::new(path)?;
     let compiler = get_compiler_info(&project_context)?;
 
@@ -293,6 +322,17 @@ pub fn incremental_build(
     create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
+    let _span = info_span!(
+        "build.incremental",
+        module_count = build_state.modules.len(),
+        initial_build,
+        in_process = build_state.build_mode().is_in_process()
+    )
+    .entered();
+    let phase_timing_enabled = rescript_compiler::timing::enabled();
+    if phase_timing_enabled {
+        rescript_compiler::timing::reset();
+    }
     let build_folder = build_state.root_folder.to_string_lossy().to_string();
 
     let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
@@ -302,18 +342,16 @@ pub fn incremental_build(
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
     // so every file gets re-parsed (to store AST) and sexp-dumped
     if build_state.dump_typed_sexp() {
-        for module in build_state.modules.values_mut() {
-            module.compile_dirty = true;
-            match &mut module.source_type {
-                crate::build::build_types::SourceType::SourceFile(sf) => {
-                    sf.implementation.parse_dirty = true;
-                    if let Some(ref mut iface) = sf.interface {
-                        iface.parse_dirty = true;
-                    }
-                }
-                crate::build::build_types::SourceType::MlMap(mlmap) => mlmap.parse_dirty = true,
-            }
-        }
+        mark_all_modules_dirty(build_state);
+    }
+
+    // A fresh --in-process build has no disk-backed .cmi cache to consult.
+    // Seed the in-memory registry by parsing and compiling every module once;
+    // watch-mode rebuilds can then keep using the retained registry.
+    let needs_in_process_seed =
+        build_state.build_mode().is_in_process() && build_state.module_registry.lock().unwrap().is_empty();
+    if needs_in_process_seed {
+        mark_all_modules_dirty(build_state);
     }
 
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
@@ -344,6 +382,7 @@ pub fn incremental_build(
             warnings
         }
         Err(err) => {
+            let _error_span = info_span!("build.parse_error").entered();
             logs::finalize(&build_state.packages);
 
             if !plain_output && show_progress {
@@ -359,6 +398,9 @@ pub fn incremental_build(
 
             eprintln!("{}", &err);
             let _lock = drop_lock(LockKind::Build, &build_folder);
+            if phase_timing_enabled {
+                rescript_compiler::timing::print_report();
+            }
 
             return Err(IncrementalBuildError {
                 kind: IncrementalBuildErrorKind::SourceFileParseError,
@@ -389,7 +431,9 @@ pub fn incremental_build(
         eprintln!("{}", &parse_warnings);
     }
 
-    mark_modules_with_expired_deps_dirty(build_state);
+    if !build_state.build_mode().is_in_process() {
+        mark_modules_with_expired_deps_dirty(build_state);
+    }
     mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     current_step += 1;
 
@@ -424,7 +468,11 @@ pub fn incremental_build(
         |size| pb.set_length(size),
     )
     .map_err(|e| {
+        let _error_span = info_span!("build.compile_error").entered();
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
 
         IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(Some(e.to_string())),
@@ -465,6 +513,9 @@ pub fn incremental_build(
         }
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
 
         Err(IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(None),
@@ -505,6 +556,9 @@ pub fn incremental_build(
         write_compiler_info(build_state);
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
+        if phase_timing_enabled {
+            rescript_compiler::timing::print_report();
+        }
         Ok(outcome)
     }
 }
@@ -621,6 +675,14 @@ pub fn build(
     prod: bool,
     features: Option<Vec<String>>,
 ) -> Result<BuildCommandState> {
+    let _span = info_span!(
+        "rewatch.build",
+        working_dir = %path.display(),
+        in_process = build_mode.is_in_process(),
+        subprocess,
+        prod
+    )
+    .entered();
     let default_timing: Option<std::time::Duration> = if no_timing {
         Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
     } else {

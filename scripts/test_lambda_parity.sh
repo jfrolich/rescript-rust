@@ -18,6 +18,7 @@
 #   -l, --locs        Test with locations (-dlambda-sexp-locs)
 #   -r, --raw         Test unoptimized lambda printer output (-drawlambda)
 #   -u, --unoptimized Alias for --raw; compare pre-optimization lambda
+#   --stdlib          Test runtime/standard-library implementation sources
 #   -h, --help        Show this help message
 #
 # EXAMPLES:
@@ -25,6 +26,7 @@
 #   ./scripts/test_lambda_parity.sh "Core_"
 #   ./scripts/test_lambda_parity.sh --quick
 #   ./scripts/test_lambda_parity.sh
+#   ./scripts/test_lambda_parity.sh --stdlib Belt_Id
 
 set -e
 
@@ -34,6 +36,7 @@ VERBOSE=false
 TEST_LOCS=false
 TEST_RAW=false
 FILE_ARG=""
+STDLIB_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -62,8 +65,12 @@ while [[ $# -gt 0 ]]; do
             TEST_RAW=true
             shift
             ;;
+        --stdlib)
+            STDLIB_MODE=true
+            shift
+            ;;
         -h|--help)
-            sed -n '11,27p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '11,28p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -81,6 +88,16 @@ RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
+STDLIB_PROJECT="$PROJECT_ROOT/packages/@rescript/runtime"
+
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    if [[ ! -f "$STDLIB_PROJECT/rescript.json" ]]; then
+        echo -e "Error: runtime rescript.json not found at $STDLIB_PROJECT"
+        exit 1
+    fi
+    TEST_PROJECT="$STDLIB_PROJECT"
+    BUILD_DIR="$STDLIB_PROJECT"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -134,6 +151,9 @@ else
 fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    echo "Stdlib project: $STDLIB_PROJECT"
+fi
 if $TEST_RAW; then
     echo "Testing: unoptimized lambda (-drawlambda)"
 elif $TEST_LOCS; then
@@ -146,7 +166,9 @@ echo ""
 
 echo -e "${BOLD}Step 1: Building project with rescript...${RESET}"
 cd "$BUILD_DIR"
-RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+if [[ "$STDLIB_MODE" != "true" ]]; then
+    RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" clean 2>/dev/null || true
+fi
 if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
     echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
 fi
@@ -159,13 +181,20 @@ if [[ -n "$FILE_ARG" ]]; then
     elif [[ -f "$PROJECT_ROOT/$FILE_ARG" ]]; then
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     else
-        find tests/tests/src -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        if [[ "$STDLIB_MODE" == "true" ]]; then
+            find "$STDLIB_PROJECT" -maxdepth 1 -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        else
+            find tests/tests/src -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        fi
         if [[ ! -s "$TEMP_DIR/files.txt" ]]; then
             echo -e "${RED}Error: No files found matching '$FILE_ARG'${RESET}"
             echo "Hint: Try a pattern like 'Core_' or a full path"
             exit 1
         fi
     fi
+elif [[ "$STDLIB_MODE" == "true" ]]; then
+    # Interfaces produce no lambda, so lambda parity covers implementation sources only.
+    find "$STDLIB_PROJECT" -maxdepth 1 -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 else
     find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
@@ -182,7 +211,7 @@ echo ""
 RESULTS_DIR="$TEMP_DIR/results"
 mkdir -p "$RESULTS_DIR" "$TEMP_DIR/work"
 
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT CACHE_DIR TEST_LOCS TEST_RAW STDLIB_MODE
 
 test_single_file() {
     local file="$1"

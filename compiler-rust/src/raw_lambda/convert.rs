@@ -61,6 +61,11 @@ enum RawFunctionBinding {
     Module(Ident, Located<String>, ModuleExpr),
 }
 
+enum RawFunctionBindingRef<'a> {
+    Value(&'a [ValueBinding]),
+    Module(&'a Ident, &'a ModuleExpr),
+}
+
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
@@ -486,6 +491,61 @@ fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<Tag
         .collect()
 }
 
+fn config_payload_flags_contains(
+    payload: &crate::parser::ast::Payload,
+    value: &str,
+    arena: &ParseArena,
+) -> bool {
+    use crate::parser::ast::{Constant as PConstant, ExpressionDesc as PExpressionDesc};
+    use crate::parser::longident::Longident;
+
+    let crate::parser::ast::Payload::PStr(items) = payload else {
+        return false;
+    };
+
+    items.iter().any(|item| {
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+            return false;
+        };
+        let (expr_idx, _) = &**inner;
+        let expr = arena.get_expr(*expr_idx);
+        let PExpressionDesc::Pexp_record(record) = &*expr.pexp_desc else {
+            return false;
+        };
+        let (fields, _) = &**record;
+        fields.iter().any(|field| {
+            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                return false;
+            };
+            if arena.get_string(*name_idx) != "flags" {
+                return false;
+            }
+            let field_expr = arena.get_expr(field.expr);
+            let PExpressionDesc::Pexp_array(elements) = &*field_expr.pexp_desc else {
+                return false;
+            };
+            elements.iter().any(|elem_idx| {
+                let elem = arena.get_expr(*elem_idx);
+                matches!(
+                    &*elem.pexp_desc,
+                    PExpressionDesc::Pexp_constant(c)
+                        if matches!(&**c, PConstant::String(s, _) if s.as_ref() == value)
+                )
+            })
+        })
+    })
+}
+
+fn structure_has_config_string(structure: &Structure, value: &str, arena: &ParseArena) -> bool {
+    structure.str_items.iter().any(|item| {
+        let StructureItemDesc::Tstr_attribute(attr) = &item.str_desc else {
+            return false;
+        };
+        arena.get_string(attr.0.txt) == "config"
+            && config_payload_flags_contains(&attr.1, value, arena)
+    })
+}
+
 fn raw_polyvariant_const(tag: &str) -> RawLambda {
     RawLambda::const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
@@ -754,6 +814,7 @@ pub struct RawLambdaConverter<'a> {
     next_negative_raise: i32,
     lowered: LambdaConverter<'a>,
     unit_name: String,
+    no_assert_false: bool,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -774,6 +835,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
+            no_assert_false: false,
         }
     }
 
@@ -795,6 +857,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
+            no_assert_false: false,
         }
     }
 
@@ -817,6 +880,7 @@ impl<'a> RawLambdaConverter<'a> {
             next_negative_raise: 0,
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
+            no_assert_false: false,
         }
     }
 
@@ -827,6 +891,10 @@ impl<'a> RawLambdaConverter<'a> {
         self.persistent_env = Some(persistent_env);
     }
 
+    pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
+        self.no_assert_false = no_assert_false;
+    }
+
     pub fn current_stamp(&self) -> i32 {
         self.id_gen
             .current_stamp()
@@ -835,6 +903,27 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn take_possible_required_modules(&mut self) -> std::collections::HashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
+    }
+
+    fn sync_local_stamp_generators(&mut self) {
+        let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
+        self.type_ctx.set_current_time(shared_stamp);
+        self.id_gen.set_current_stamp(shared_stamp);
+        self.lowered.set_current_stamp(shared_stamp);
+    }
+
+    fn fresh_ident(&mut self, name: &str) -> Ident {
+        // OCaml uses one global `Ident.currentstamp` for both Translcore and
+        // Translmod (`compiler/ml/translcore.ml:1250-1271`,
+        // `compiler/ml/translmod.ml:422-448`). Rust has separate raw and
+        // lowered converters, so synchronize before and after minting a raw
+        // identifier to preserve OCaml's physical stamp ordering.
+        self.sync_local_stamp_generators();
+        let id = self.id_gen.create(name);
+        let stamp = id.stamp();
+        self.type_ctx.set_current_time(stamp);
+        self.lowered.set_current_stamp(stamp);
+        id
     }
 
     fn note_possible_required_module(&mut self, id: &Ident, dynamic_import: bool) {
@@ -993,10 +1082,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn sync_matching_stamps(&mut self) {
-        let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
-        self.type_ctx.set_current_time(shared_stamp);
-        self.id_gen.set_current_stamp(shared_stamp);
-        self.lowered.set_current_stamp(shared_stamp);
+        self.sync_local_stamp_generators();
     }
 
     fn compile_matching_with_synced_stamps(
@@ -1116,7 +1202,7 @@ impl<'a> RawLambdaConverter<'a> {
         cases
             .iter()
             .find_map(|case| self.id_of_pattern(&case.c_lhs))
-            .unwrap_or_else(|| self.id_gen.create(default))
+            .unwrap_or_else(|| self.fresh_ident(default))
     }
 
     fn fresh_name_from_cases(&self, default: &str, cases: &[Case]) -> String {
@@ -1269,13 +1355,18 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         module_path: &crate::types::Path,
         module_type: &crate::types::decl::ModuleType,
+        visited_module_paths: &mut HashSet<String>,
     ) {
         match module_type {
             crate::types::decl::ModuleType::MtySignature(sig) => {
-                self.register_signature_type_paths(Some(module_path), sig);
+                self.register_signature_type_paths_inner(
+                    Some(module_path),
+                    sig,
+                    visited_module_paths,
+                );
             }
             crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
-                self.register_module_type_paths(module_path, result);
+                self.register_module_type_paths(module_path, result, visited_module_paths);
             }
             crate::types::decl::ModuleType::MtyIdent(_)
             | crate::types::decl::ModuleType::MtyAlias(_, _) => {}
@@ -1286,6 +1377,27 @@ impl<'a> RawLambdaConverter<'a> {
         &self,
         prefix: Option<&crate::types::Path>,
         sig: &[SignatureItem],
+    ) {
+        let mut visited_module_paths = HashSet::new();
+        self.register_signature_type_paths_inner(prefix, sig, &mut visited_module_paths);
+    }
+
+    fn should_register_nested_module_type_paths(&self, module_path: &crate::types::Path) -> bool {
+        let Ok((head, _)) = module_path.flatten() else {
+            // OCaml `Path.head` asserts on functor applications and callers use
+            // `Path.flatten` when they need a safe dotted-path test
+            // (compiler/ml/path.ml:58-69). Registration is only a side-table
+            // seed for current/local modules, so functor applications stay out.
+            return false;
+        };
+        !head.is_persistent() && !head.is_global() || head.name() == self.unit_name
+    }
+
+    fn register_signature_type_paths_inner(
+        &self,
+        prefix: Option<&crate::types::Path>,
+        sig: &[SignatureItem],
+        visited_module_paths: &mut HashSet<String>,
     ) {
         for item in sig {
             match item {
@@ -1307,7 +1419,20 @@ impl<'a> RawLambdaConverter<'a> {
                             |prefix| crate::types::Path::pdot(prefix.clone(), id.name()),
                         )
                     });
-                    self.register_module_type_paths(&module_path, &md.md_type);
+                    // OCaml raw translation walks the current structure and
+                    // coercion (compiler/ml/translmod.ml:290-451), not the full
+                    // signatures of already-compiled dependency modules. Keep
+                    // this Rust side-table seeding to local/current-module
+                    // paths so dependency cycles stay in PersistentEnv lookups.
+                    if self.should_register_nested_module_type_paths(&module_path)
+                        && visited_module_paths.insert(module_path.name())
+                    {
+                        self.register_module_type_paths(
+                            &module_path,
+                            &md.md_type,
+                            visited_module_paths,
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -1983,66 +2108,40 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn is_immediate_type_with_env(&self, ty: TypeExprRef, env: &crate::types::env::Env) -> bool {
-        self.is_base_type_with_env(ty, "int", env)
-            || self.is_base_type_with_env(ty, "char", env)
-            || self.is_base_type_with_env(ty, "bool", env)
-            || self.is_base_type_with_env(ty, "unit", env)
-            || self.is_immediate_poly_variant_with_env(ty, env)
-    }
-
-    /// Check if a type is "immediate" (not a pointer), matching OCaml's
-    /// maybe_pointer_type. Checks type_immediate on type declarations,
-    /// all-constant variant types, and closed poly variant rows without payloads.
-    fn is_immediate_poly_variant(&self, ty: TypeExprRef) -> bool {
-        self.is_immediate_poly_variant_with_env(ty, self.env)
-    }
-
-    fn is_immediate_poly_variant_with_env(
-        &self,
-        ty: TypeExprRef,
-        env: &crate::types::env::Env,
-    ) -> bool {
         use crate::types::btype;
         use crate::types::type_expr::TypeDesc;
-        // Try expand_head first to resolve type aliases
-        let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
-        let ty = self.type_ctx.repr(expanded);
+
+        // Match OCaml `Ctype.maybe_pointer_type`: for `Tconstr`, inspect only
+        // `Env.find_type p env` and its `type_immediate` bit; do not chase the
+        // manifest here (compiler/ml/ctype.ml:4492-4512). `Translcore`
+        // chooses integer comparison when that result is `Immediate`
+        // (compiler/ml/translcore.ml:407-415).
+        let ty = self.type_ctx.repr(ty);
         match &*self.type_ctx.get_desc(ty) {
             TypeDesc::Tconstr { path, .. } => {
                 if let Some(decl) =
                     crate::raw_lambda::typeopt::find_type_decl_pub(self.type_ctx, env, path)
                 {
-                    if decl.type_immediate {
-                        return true;
-                    }
-                    // Variant types with all constant constructors are immediate
-                    if let crate::types::decl::TypeKind::TypeVariant(cdecls) = &decl.type_kind {
-                        return cdecls.iter().all(|cd| {
-                            matches!(&cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty())
-                        });
-                    }
-                    // For abstract types with a manifest, check the manifest
-                    if let Some(manifest) = decl.type_manifest {
-                        return self.is_immediate_poly_variant_with_env(manifest, env);
-                    }
+                    return decl.type_immediate;
                 }
                 false
             }
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.type_ctx, row);
-                if !row.row_closed {
-                    return false;
-                }
-                !row.row_fields.iter().any(|(_, f)| {
-                    matches!(
-                        btype::row_field_repr(self.type_ctx, f),
-                        crate::types::type_expr::RowField::Rpresent(Some(_))
-                            | crate::types::type_expr::RowField::Reither {
-                                constant: false,
-                                ..
-                            }
-                    )
-                })
+                row.row_closed
+                    && !row.row_fields.iter().any(|(_, f)| {
+                        matches!(
+                            btype::row_field_repr(self.type_ctx, f),
+                            crate::types::type_expr::RowField::Rpresent(Some(_))
+                                | crate::types::type_expr::RowField::Reither {
+                                    constant: false,
+                                    ..
+                                }
+                        )
+                    })
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                self.is_immediate_type_with_env(*next, env)
             }
             _ => false,
         }
@@ -2144,11 +2243,23 @@ impl<'a> RawLambdaConverter<'a> {
         Lambda::prim(Primitive::Praise, vec![block], loc)
     }
 
-    fn raw_assert_failure(&self, loc: Location) -> RawLambda {
+    fn raw_assert_failed(&self, loc: Location) -> RawLambda {
         RawLambda::from_lowered(self.raise_predef_exception(
             "Assert_failure",
             PREDEF_ASSERT_FAILURE_STAMP,
             loc,
+        ))
+    }
+
+    fn raw_assert_false(&self, loc: Location) -> RawLambda {
+        // OCaml translcore.ml:926-931 only lowers `assert false` to
+        // Lambda.lambda_assert_false when -bs-noassertfalse is active.
+        if !self.no_assert_false {
+            return self.raw_assert_failed(loc);
+        }
+        RawLambda::const_(Constant::int_with_comment(
+            0,
+            crate::lambda::lam_constant::PointerInfo::AssertFalse,
         ))
     }
 
@@ -2185,6 +2296,73 @@ impl<'a> RawLambdaConverter<'a> {
                 wrapped
             }
         })
+    }
+
+    fn push_raw_function_binding_refs<'b>(
+        bindings: &mut Vec<RawFunctionBindingRef<'b>>,
+        pending: Vec<RawFunctionBindingRef<'b>>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let old = std::mem::take(bindings);
+        bindings.reserve(pending.len() + old.len());
+        bindings.extend(pending);
+        bindings.extend(old);
+    }
+
+    fn strip_default_bindings_before_function<'b>(
+        &self,
+        mut rhs: &'b Expression,
+    ) -> (&'b Expression, Vec<RawFunctionBindingRef<'b>>) {
+        let mut bindings = Vec::new();
+        loop {
+            match &rhs.exp_desc {
+                ExpressionDesc::Texp_let(
+                    crate::parser::ast::RecFlag::Nonrecursive,
+                    binds,
+                    inner,
+                ) if self.has_only_expr_attr(rhs, "#default")
+                    && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    bindings.push(RawFunctionBindingRef::Value(binds));
+                    rhs = inner;
+                }
+                ExpressionDesc::Texp_letmodule(_id, _name, _mexpr, inner)
+                    if self.has_only_expr_attr(rhs, "#modulepat")
+                        && matches!(inner.exp_desc, ExpressionDesc::Texp_function { .. }) =>
+                {
+                    if let ExpressionDesc::Texp_letmodule(id, _name, mexpr, _) = &rhs.exp_desc {
+                        bindings.push(RawFunctionBindingRef::Module(id, mexpr));
+                    }
+                    rhs = inner;
+                }
+                _ => return (rhs, bindings),
+            }
+        }
+    }
+
+    fn wrap_raw_function_binding_refs(
+        &mut self,
+        mut body: RawLambda,
+        bindings: &[RawFunctionBindingRef<'_>],
+    ) -> RawLambda {
+        for binding in bindings {
+            body = match binding {
+                RawFunctionBindingRef::Value(binds) => self.convert_let_with_body_raw(
+                    crate::parser::ast::RecFlag::Nonrecursive,
+                    binds,
+                    body,
+                ),
+                RawFunctionBindingRef::Module(id, mexpr) => RawLambda::let_(
+                    LetKind::Strict,
+                    (*id).clone(),
+                    self.convert_module_expr_raw(mexpr, &None),
+                    body,
+                ),
+            };
+        }
+        body
     }
 
     fn push_defaults_case(&self, bindings: Vec<RawFunctionBinding>, case: &Case) -> Case {
@@ -2615,6 +2793,18 @@ impl<'a> RawLambdaConverter<'a> {
             "%string_safe_get" => Some(Primitive::Pstringrefs),
             "%string_unsafe_get" => Some(Primitive::Pstringrefu),
             "%powint" => Some(Primitive::Ppowint),
+            // OCaml translcore.ml:377-387 maps these runtime externals to
+            // dedicated primitives before lambda conversion.
+            "%function_arity" => Some(Primitive::PfnArity),
+            "%curry_apply1" => Some(Primitive::PjsApply),
+            "%curry_apply2" => Some(Primitive::PjsApply),
+            "%curry_apply3" => Some(Primitive::PjsApply),
+            "%curry_apply4" => Some(Primitive::PjsApply),
+            "%curry_apply5" => Some(Primitive::PjsApply),
+            "%curry_apply6" => Some(Primitive::PjsApply),
+            "%curry_apply7" => Some(Primitive::PjsApply),
+            "%curry_apply8" => Some(Primitive::PjsApply),
+            "%makemutablelist" => Some(Primitive::Pmakelist),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
             "#null" => Some(Primitive::Pnull),
             "#undefined" => Some(Primitive::Pundefined),
@@ -2623,6 +2813,7 @@ impl<'a> RawLambdaConverter<'a> {
             "#null_to_opt" => Some(Primitive::PnullToOpt),
             "#nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
             "#import" => Some(Primitive::Pimport),
+            "#makemutablelist" => Some(Primitive::Pmakelist),
             _ => {
                 // %fieldN -> Pfield(N, Fld_tuple)
                 if let Some(n_str) = prim_name.strip_prefix("%field") {
@@ -2679,10 +2870,10 @@ impl<'a> RawLambdaConverter<'a> {
 
         // Create parameter idents matching OCaml's naming
         let params: Vec<Ident> = if prim_arity == 1 {
-            vec![self.id_gen.create("prim")]
+            vec![self.fresh_ident("prim")]
         } else {
             (0..prim_arity)
-                .map(|i| self.id_gen.create(&format!("prim{}", i)))
+                .map(|i| self.fresh_ident(&format!("prim{}", i)))
                 .collect()
         };
 
@@ -3026,7 +3217,7 @@ impl<'a> RawLambdaConverter<'a> {
         if build_direct {
             // OCaml wraps the init expression in a let binding when there's a
             // base expression, so field accesses use Lvar(init_id) not the expr.
-            let init_id = base_lam.as_ref().map(|_| self.id_gen.create("init"));
+            let init_id = base_lam.as_ref().map(|_| self.fresh_ident("init"));
             let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
 
             let mut elems = Vec::with_capacity(fields.len());
@@ -3180,7 +3371,7 @@ impl<'a> RawLambdaConverter<'a> {
             return RawLambda::unit();
         };
 
-        let copy_id = self.id_gen.create("newrecord");
+        let copy_id = self.fresh_ident("newrecord");
         let mut body = RawLambda::var(copy_id.clone());
         // OCaml uses Array.fold_left which processes fields left-to-right.
         // Each Lsequence(upd, cont) wraps the update around the continuation,
@@ -3248,16 +3439,20 @@ impl<'a> RawLambdaConverter<'a> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
+        if structure_has_config_string(structure, "-bs-noassertfalse", self.arena) {
+            self.no_assert_false = true;
+        }
         self.register_signature_type_paths(None, &structure.str_type);
         let mut fields = Vec::new();
-        self.convert_structure_items_raw(
+        let result = self.convert_structure_items_raw(
             &mut fields,
             &structure.str_items,
             true,
             &self.global_path(),
             cc,
             Location::none(),
-        )
+        );
+        result
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -3275,7 +3470,7 @@ impl<'a> RawLambdaConverter<'a> {
         match arg {
             RawLambda::Lvar(id) => f(self, id),
             _ => {
-                let id = self.id_gen.create("let");
+                let id = self.fresh_ident("let");
                 let body = f(self, id.clone());
                 RawLambda::let_(strict, id, arg, body)
             }
@@ -3472,7 +3667,12 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn path_may_follow_mty_ident(path: &crate::types::Path) -> bool {
-        let head = path.head();
+        // OCaml `Path.head` asserts on functor applications, while
+        // `Path.flatten` reports `Contains_apply` (compiler/ml/path.ml:58-69).
+        // Alias following here is only valid for paths with a stable head.
+        let Ok((head, _)) = path.flatten() else {
+            return false;
+        };
         head.is_persistent() || head.is_global()
     }
 
@@ -3532,7 +3732,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         if Self::path_may_follow_mty_ident(&path) {
-            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
                 &path,
                 env,
                 &mut self.persistent_env,
@@ -3585,7 +3785,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         if Self::path_may_follow_mty_ident(&path) {
-            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
                 &path,
                 env,
                 &mut self.persistent_env,
@@ -3680,7 +3880,7 @@ impl<'a> RawLambdaConverter<'a> {
             dynamic_import: bool,
         ) {
             let normalized = this.normalize_module_path_in_env(env, path);
-            if let Some(alias_target) = crate::types::typecore::find_module_alias_target(
+            if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
                 &normalized,
                 env,
                 &mut this.persistent_env,
@@ -3844,13 +4044,19 @@ impl<'a> RawLambdaConverter<'a> {
     where
         F: FnMut(&mut Self, &str, usize) -> RawLambda,
     {
+        // OCaml's fold in compiler/ml/translmod.ml:112-127 leaves `lam`
+        // unchanged for an empty `id_pos_list`; avoid the free-variable walk.
+        if id_pos_list.is_empty() {
+            return lam;
+        }
+
         let fv = raw_free_variables(&lam);
         let mut lam = lam;
         let mut subst = HashMap::new();
 
         for (id, pos, coercion) in id_pos_list {
             if fv.contains(id) {
-                let rebound = self.id_gen.create(id.name());
+                let rebound = self.fresh_ident(id.name());
                 let field = get_field(self, id.name(), *pos);
                 let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
                 lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
@@ -3979,7 +4185,7 @@ impl<'a> RawLambdaConverter<'a> {
                 {
                     return arg;
                 }
-                let param = self.id_gen.create("funarg");
+                let param = self.fresh_ident("funarg");
                 let carg = self.apply_coercion_raw(
                     loc.clone(),
                     LetKind::Alias,
@@ -4887,7 +5093,8 @@ impl<'a> RawLambdaConverter<'a> {
             StructureItemDesc::Tstr_eval(expr, _) => {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
-                RawLambda::seq(self.convert_expr_raw(expr), body)
+                let expr = self.convert_expr_raw(expr);
+                RawLambda::seq(expr, body)
             }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
@@ -4918,12 +5125,13 @@ impl<'a> RawLambdaConverter<'a> {
                 let inline_attr =
                     Self::get_inline_attribute_from(&binding.mb_attributes, self.arena);
                 module_body = Self::apply_inline_attribute_raw(module_body, inline_attr);
-                RawLambda::let_(
+                let result = RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
                     binding.mb_id.clone(),
                     module_body,
                     body,
-                )
+                );
+                result
             }
             StructureItemDesc::Tstr_typext(tyext) => {
                 let old_len = fields.len();
@@ -4961,18 +5169,19 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 let old_len = fields.len();
                 fields.extend(ids.iter().map(|(id, _)| id.clone()));
+                let mid = self.fresh_ident("include");
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
-                let mid = self.id_gen.create("include");
                 let body =
                     self.rebind_included_idents_raw(&mid, &ids, body, self.loc(incl.incl_loc));
-                RawLambda::let_(
+                let result = RawLambda::let_(
                     Self::pure_module(&incl.incl_mod),
                     mid,
                     self.convert_module_expr_raw(&incl.incl_mod, &None),
                     body,
-                )
+                );
+                result
             }
             StructureItemDesc::Tstr_recmodule(bindings) => {
                 // OCaml: add all recursive module idents to fields, then generate letrec
@@ -5134,12 +5343,24 @@ impl<'a> RawLambdaConverter<'a> {
                 arity,
                 async_,
             } if body.len() == 1 && body[0].c_guard.is_none() => {
+                let directive =
+                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
+                if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
+                    params,
+                    &body[0],
+                    *partial,
+                    *arity,
+                    expr.exp_type,
+                    *async_,
+                    directive.clone(),
+                    self.loc(expr.exp_loc),
+                ) {
+                    return lambda;
+                }
                 let pushed_body = body
                     .iter()
                     .map(|case| self.push_defaults_case(Vec::new(), case))
                     .collect::<Vec<_>>();
-                let directive =
-                    Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 self.convert_function_raw(
                     params,
                     &pushed_body,
@@ -5347,9 +5568,9 @@ impl<'a> RawLambdaConverter<'a> {
                     ExpressionDesc::Texp_construct(_, ref cstr, ref args)
                         if cstr.cstr_name == "false" && args.is_empty()
                 ) {
-                    self.raw_assert_failure(self.loc(expr.exp_loc))
+                    self.raw_assert_false(self.loc(expr.exp_loc))
                 } else {
-                    let failure = self.raw_assert_failure(self.loc(expr.exp_loc));
+                    let failure = self.raw_assert_failed(self.loc(expr.exp_loc));
                     RawLambda::LifThenElse(
                         Box::new(self.convert_expr_raw(inner_expr)),
                         Box::new(RawLambda::unit()),
@@ -5694,7 +5915,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             Lambda::Lvar(id) => (id.clone(), Lambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create("match");
+                let scrut_id = self.fresh_ident("match");
                 (
                     scrut_id.clone(),
                     Lambda::var(scrut_id.clone()),
@@ -5833,7 +6054,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create(&scrut_name);
+                let scrut_id = self.fresh_ident(&scrut_name);
                 (
                     scrut_id.clone(),
                     RawLambda::var(scrut_id.clone()),
@@ -5965,7 +6186,9 @@ impl<'a> RawLambdaConverter<'a> {
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc {
+        if std::env::var_os("RUST_SKIP_FOR_MULTIPLE_MATCH").is_none()
+            && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
+        {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
             return self.for_multiple_match_with_synced_stamps(loc, paraml, pat_act_list, partial);
         }
@@ -6124,7 +6347,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {
                 // Non-variable scrutinee with complex pattern (record, tuple, etc.)
                 // OCaml's compile_matching binds with Strict via arg_to_var
-                let match_id = self.id_gen.create("match");
+                let match_id = self.fresh_ident("match");
                 let bound = self.bind_irrefutable_pattern_raw(
                     &cases[0].c_lhs,
                     RawLambda::Lvar(match_id.clone()),
@@ -6170,7 +6393,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => {
                 let id = self
                     .id_of_pattern(pat)
-                    .unwrap_or_else(|| self.id_gen.create("match"));
+                    .unwrap_or_else(|| self.fresh_ident("match"));
                 let bound =
                     self.bind_irrefutable_pattern_raw(pat, RawLambda::var(id.clone()), body);
                 RawLambda::let_(LetKind::Alias, id, arg, bound)
@@ -6371,7 +6594,7 @@ impl<'a> RawLambdaConverter<'a> {
         act: RawLambda,
         fallback: RawLambda,
     ) -> RawLambda {
-        let tag_id = self.id_gen.create("tag");
+        let tag_id = self.fresh_ident("tag");
         let cond = RawLambda::prim(
             Primitive::PextensionSlotEq,
             vec![
@@ -6438,7 +6661,7 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::prim(from_option, vec![RawLambda::var(scrut_id.clone())], pat_loc);
                 // For Tpat_any, OCaml's matching.ml still creates a binding
                 if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, payload, result);
                 } else {
                     // OCaml's matching.ml (line 2433): eliminates
@@ -6489,7 +6712,7 @@ impl<'a> RawLambdaConverter<'a> {
             // For Tpat_any, OCaml's matching.ml still creates a binding
             // (let (match/N =a (field:var/K scrut)) body). Match this behavior.
             if matches!(arg_pat.pat_desc, PatternDesc::Tpat_any) {
-                let match_id = self.id_gen.create("match");
+                let match_id = self.fresh_ident("match");
                 result = RawLambda::let_(LetKind::Alias, match_id, field, result);
             } else {
                 result = self.bind_irrefutable_pattern_raw(arg_pat, field, result);
@@ -6903,7 +7126,7 @@ impl<'a> RawLambdaConverter<'a> {
         let (scrut_id, scrut_var, wrap_let) = match &scrut_lam {
             RawLambda::Lvar(id) => (id.clone(), RawLambda::var(id.clone()), None),
             _ => {
-                let scrut_id = self.id_gen.create(&scrut_name);
+                let scrut_id = self.fresh_ident(&scrut_name);
                 (
                     scrut_id.clone(),
                     RawLambda::var(scrut_id.clone()),
@@ -7406,7 +7629,7 @@ impl<'a> RawLambdaConverter<'a> {
         body: Lambda,
     ) -> Lambda {
         let pat_loc = self.loc(pat.pat_loc);
-        let tmp = self.id_gen.create("ctor");
+        let tmp = self.fresh_ident("ctor");
         let mut result = body;
 
         for (idx, arg_pat) in args.iter().enumerate().rev() {
@@ -7470,7 +7693,7 @@ impl<'a> RawLambdaConverter<'a> {
                             }
                         })
                     })
-                    .unwrap_or_else(|| self.id_gen.create("match"))
+                    .unwrap_or_else(|| self.fresh_ident("match"))
             })
             .collect();
 
@@ -7848,7 +8071,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 })
             })
-            .unwrap_or_else(|| self.id_gen.create("match"));
+            .unwrap_or_else(|| self.fresh_ident("match"));
 
         let from_option = sub_cases
             .first()
@@ -7968,7 +8191,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 PatternDesc::Tpat_any => {
                     // OCaml's make_constr_matching still creates a binding for wildcards
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     result = RawLambda::let_(LetKind::Alias, match_id, field_read, result);
                 }
                 _ => {
@@ -8080,7 +8303,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, id.clone(), scrut, inner)
             }
             PatternDesc::Tpat_tuple(items) => {
-                let tmp = self.id_gen.create("tuple");
+                let tmp = self.fresh_ident("tuple");
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate().rev() {
@@ -8094,7 +8317,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
             PatternDesc::Tpat_record(fields, _) => {
-                let tmp = self.id_gen.create("match");
+                let tmp = self.fresh_ident("match");
                 let mut result = body;
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
                     let field = Lambda::prim(
@@ -8113,7 +8336,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
             PatternDesc::Tpat_array(items) => {
-                let tmp = self.id_gen.create("array");
+                let tmp = self.fresh_ident("array");
                 let pat_loc = self.loc(pat.pat_loc);
                 let mut result = body;
                 for (idx, item) in items.iter().enumerate().rev() {
@@ -8189,7 +8412,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("match");
+                        let tmp = self.fresh_ident("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8205,7 +8428,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // for ALL positions, even wildcards. The wildcard gets a
                     // fresh "match" ident that's never used.
                     if matches!(item.pat_desc, PatternDesc::Tpat_any) {
-                        let match_id = self.id_gen.create("match");
+                        let match_id = self.fresh_ident("match");
                         result = RawLambda::let_(LetKind::Alias, match_id, field, result);
                     } else {
                         result = self.bind_irrefutable_pattern_raw(item, field, result);
@@ -8230,7 +8453,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("match");
+                        let tmp = self.fresh_ident("match");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8371,7 +8594,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 }
                             } else {
                                 // Not mentioned: bind to a fresh match/N variable (OCaml's omega pattern)
-                                let fresh = self.id_gen.create("match");
+                                let fresh = self.fresh_ident("match");
                                 result = RawLambda::let_(field_let_kind, fresh, field, result);
                             }
                         }
@@ -8414,7 +8637,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
-                        let tmp = self.id_gen.create("array");
+                        let tmp = self.fresh_ident("array");
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
@@ -8471,7 +8694,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (scrut_id, wrap_let) = match &scrut {
                     RawLambda::Lvar(id) => (id.clone(), None),
                     _ => {
-                        let id = self.id_gen.create("match");
+                        let id = self.fresh_ident("match");
                         (id.clone(), Some((id, scrut)))
                     }
                 };
@@ -8508,7 +8731,7 @@ impl<'a> RawLambdaConverter<'a> {
             _ => match param {
                 RawLambda::Lvar(_) => self.bind_irrefutable_pattern_raw(pat, param, body),
                 _ => {
-                    let match_id = self.id_gen.create("match");
+                    let match_id = self.fresh_ident("match");
                     let body = self.bind_irrefutable_pattern_raw(
                         pat,
                         RawLambda::var(match_id.clone()),
@@ -8572,7 +8795,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let ids = (0..arity)
-            .map(|idx| self.id_gen.create(&format!("match{idx}")))
+            .map(|idx| self.fresh_ident(&format!("match{idx}")))
             .collect::<Vec<_>>();
         let states = expanded
             .into_iter()
@@ -8592,7 +8815,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Lambda::let_(LetKind::Strict, id.clone(), self.convert_expr(item), acc)
                 }),
             _ => {
-                let tuple_id = self.id_gen.create("tuple");
+                let tuple_id = self.fresh_ident("tuple");
                 let tuple_var = Lambda::var(tuple_id.clone());
                 let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
                     let field = Lambda::prim(
@@ -8628,7 +8851,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let ids = (0..arity)
-            .map(|_| self.id_gen.create("match"))
+            .map(|_| self.fresh_ident("match"))
             .collect::<Vec<_>>();
         let states = expanded
             .into_iter()
@@ -8653,7 +8876,7 @@ impl<'a> RawLambdaConverter<'a> {
                     )
                 }),
             _ => {
-                let tuple_id = self.id_gen.create("tuple");
+                let tuple_id = self.fresh_ident("tuple");
                 let tuple_var = RawLambda::var(tuple_id.clone());
                 let with_fields = ids.iter().enumerate().rev().fold(body, |acc, (idx, id)| {
                     let field = RawLambda::prim(
@@ -9384,6 +9607,146 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn convert_single_case_function_raw_borrowed(
+        &mut self,
+        params: &[FunctionParam],
+        case: &Case,
+        partial: Partial,
+        arity: Arity,
+        function_type: TypeExprRef,
+        async_: bool,
+        directive: Option<String>,
+        loc: Location,
+    ) -> Option<RawLambda> {
+        if case.c_guard.is_some() {
+            return None;
+        }
+
+        let target_arity = match self.arena.get_arity(arity) {
+            Some(n) => n as usize,
+            None => params.len(),
+        };
+
+        let mut all_params: Vec<&FunctionParam> = params.iter().collect();
+        let mut current_case = case;
+        let mut current_partial = partial;
+        let mut pushed_bindings = Vec::new();
+        let final_body = loop {
+            let (rhs, pending_bindings) =
+                self.strip_default_bindings_before_function(&current_case.c_rhs);
+            let stripped_defaults = !pending_bindings.is_empty();
+            Self::push_raw_function_binding_refs(&mut pushed_bindings, pending_bindings);
+
+            if all_params.len() < target_arity {
+                if let ExpressionDesc::Texp_function {
+                    params: inner_params,
+                    body: inner_cases,
+                    partial: inner_partial,
+                    arity: inner_arity,
+                    async_: inner_async,
+                } = &rhs.exp_desc
+                {
+                    let last_param = all_params.last()?;
+                    let last_pat = Self::param_pattern(last_param);
+                    if inner_cases.len() == 1
+                        && inner_cases[0].c_guard.is_none()
+                        // OCaml's transl_function flattens through nested function
+                        // cases only when Parmatch.inactive succeeds and the inner
+                        // function has no arity/async marker. See
+                        // compiler/ml/translcore.ml:1048-1076.
+                        && Self::parmatch_inactive(&last_pat, current_partial)
+                        && self.arena.get_arity(*inner_arity).is_none()
+                        && !inner_async
+                    {
+                        all_params.extend(inner_params.iter());
+                        current_partial = *inner_partial;
+                        current_case = &inner_cases[0];
+                        continue;
+                    }
+                }
+            }
+
+            if stripped_defaults && matches!(rhs.exp_desc, ExpressionDesc::Texp_function { .. }) {
+                return None;
+            }
+
+            break rhs;
+        };
+
+        if !pushed_bindings.is_empty()
+            && matches!(final_body.exp_desc, ExpressionDesc::Texp_function { .. })
+        {
+            // OCaml's push_defaults keeps pushing saved default/module-pattern
+            // bindings through nested function cases before transl_function
+            // decides arity flattening. Falling back preserves that exact
+            // placement for higher-order defaults. See
+            // compiler/ml/translcore.ml:544-607 and 668-688.
+            return None;
+        }
+
+        let mut param_ids = Vec::with_capacity(all_params.len());
+        for param in all_params.iter() {
+            param_ids.push(param.param_id.clone());
+        }
+
+        let return_unit = self.is_base_type(final_body.exp_type, "unit");
+        let mut body = self.convert_expr_raw(final_body);
+        // OCaml's push_defaults uses shallow record updates, so the huge body is
+        // shared while default/module-pattern bindings are pushed under function
+        // abstractions. Rust expression clones were deep-copying the body here;
+        // keep a borrowed binding stack and wrap the converted lambda instead.
+        // See compiler/ml/translcore.ml:544-589 and 668-688.
+        body = self.wrap_raw_function_binding_refs(body, &pushed_bindings);
+
+        for (param, id) in all_params.iter().zip(param_ids.iter()).rev() {
+            let pat = Self::param_pattern(param);
+            body = match &pat.pat_desc {
+                PatternDesc::Tpat_any => body,
+                PatternDesc::Tpat_var(bound, _) if bound.same(id) => body,
+                _ => {
+                    let loc = self.loc(pat.pat_loc);
+                    let pat_act = vec![(pat, body)];
+                    full_matching::for_function(
+                        self.type_ctx,
+                        self.arena,
+                        loc,
+                        RawLambda::var(id.clone()),
+                        pat_act,
+                        Partial::Total,
+                        &mut self.next_static_raise,
+                    )
+                }
+            };
+        }
+        let lambda = RawLambda::function_(
+            param_ids.len() as i32,
+            param_ids,
+            body,
+            FunctionAttribute {
+                return_unit,
+                async_,
+                directive,
+                ..FunctionAttribute::default()
+            },
+        );
+
+        match self.arena.get_arity(arity) {
+            Some(n) => {
+                let prim = if let Some((lhs, _)) = self.is_nolabel_function_type(function_type) {
+                    if self.is_base_type(lhs, "unit") {
+                        Primitive::PjsFnMakeUnit
+                    } else {
+                        Primitive::PjsFnMake(n as i32)
+                    }
+                } else {
+                    Primitive::PjsFnMake(n as i32)
+                };
+                Some(RawLambda::prim(prim, vec![lambda], loc))
+            }
+            None => Some(lambda),
+        }
+    }
+
     fn convert_apply_raw(
         &mut self,
         loc: Location,
@@ -9539,7 +9902,7 @@ impl<'a> RawLambdaConverter<'a> {
             let id = match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => id.clone(),
                 PatternDesc::Tpat_alias(_, id, _) => id.clone(),
-                _ => self.id_gen.create(&format!("param{idx}")),
+                _ => self.fresh_ident(&format!("param{idx}")),
             };
             param_ids.push(id);
         }
@@ -9789,7 +10152,7 @@ impl<'a> RawLambdaConverter<'a> {
                             if is_simple(&lam) {
                                 lam
                             } else {
-                                let id = conv.id_gen.create(name);
+                                let id = conv.fresh_ident(name);
                                 defs.push((id.clone(), lam));
                                 Lambda::var(id)
                             }
@@ -9822,7 +10185,7 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let id_arg = conv.id_gen.create("param");
+                    let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
                     next_args_rev.push((Lambda::var(id_arg.clone()), *optional));
                     next_args_rev.extend(remaining_args);
@@ -9929,7 +10292,7 @@ impl<'a> RawLambdaConverter<'a> {
                             if is_simple(&lam) {
                                 lam
                             } else {
-                                let id = conv.id_gen.create(name);
+                                let id = conv.fresh_ident(name);
                                 defs.push((id.clone(), lam));
                                 RawLambda::var(id)
                             }
@@ -9962,7 +10325,7 @@ impl<'a> RawLambdaConverter<'a> {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let id_arg = conv.id_gen.create("param");
+                    let id_arg = conv.fresh_ident("param");
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
                     next_args_rev.push((RawLambda::var(id_arg.clone()), *optional));
                     next_args_rev.extend(remaining_args);
@@ -10012,14 +10375,14 @@ impl<'a> RawLambdaConverter<'a> {
                     .filter_map(|arg| match &arg.expression {
                         Some(expr) => Some(self.convert_expr_raw(expr)),
                         None => {
-                            let id = self.id_gen.create("none");
+                            let id = self.fresh_ident("none");
                             none_ids.push(id.clone());
                             Some(RawLambda::var(id))
                         }
                     })
                     .collect::<Vec<_>>();
                 let extra_ids = (0..extra_arity)
-                    .map(|_| self.id_gen.create("extra"))
+                    .map(|_| self.fresh_ident("extra"))
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
@@ -10068,7 +10431,7 @@ impl<'a> RawLambdaConverter<'a> {
             return match prim.prim_arity {
                 0 => lam,
                 1 => {
-                    let param = self.id_gen.create("prim");
+                    let param = self.fresh_ident("prim");
                     RawLambda::function_(
                         1,
                         vec![param.clone()],
@@ -10115,11 +10478,11 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::prim(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {
-                vec![self.id_gen.create("prim")]
+                vec![self.fresh_ident("prim")]
             } else {
                 let mut params = (0..prim.prim_arity)
                     .rev()
-                    .map(|i| self.id_gen.create(&format!("prim{i}")))
+                    .map(|i| self.fresh_ident(&format!("prim{i}")))
                     .collect::<Vec<_>>();
                 params.reverse();
                 params
@@ -10155,11 +10518,11 @@ impl<'a> RawLambdaConverter<'a> {
             Lambda::prim(primitive, vec![], loc)
         } else {
             let params = if prim.prim_arity == 1 {
-                vec![self.id_gen.create("prim")]
+                vec![self.fresh_ident("prim")]
             } else {
                 let mut params = (0..prim.prim_arity)
                     .rev()
-                    .map(|i| self.id_gen.create(&format!("prim{i}")))
+                    .map(|i| self.fresh_ident(&format!("prim{i}")))
                     .collect::<Vec<_>>();
                 params.reverse();
                 params
@@ -11011,6 +11374,27 @@ mod tests {
 
         let post_match_raw = converter.id_gen.create("raw_post");
         assert_eq!(post_match_raw.stamp(), 203);
+    }
+
+    #[test]
+    fn fresh_ident_advances_past_lowered_converter_allocations() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::with_start_stamp(100);
+        let ctx = TypeContext::new(&id_gen);
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
+
+        converter.lowered.set_current_stamp(200);
+        let include_id = converter.fresh_ident("include");
+        assert_eq!(include_id.stamp(), 201);
+        assert_eq!(converter.current_stamp(), 201);
+        assert_eq!(ctx.current_stamp(), 201);
+
+        converter.lowered.set_current_stamp(250);
+        let match_id = converter.fresh_ident("match");
+        assert_eq!(match_id.stamp(), 251);
+        assert_eq!(converter.id_gen.current_stamp(), 251);
+        assert_eq!(ctx.current_stamp(), 251);
     }
 
     #[test]

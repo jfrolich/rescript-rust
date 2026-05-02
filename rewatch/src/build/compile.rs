@@ -7,23 +7,29 @@ use super::logs;
 use super::packages;
 use crate::config;
 use crate::config::Config;
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use crate::helpers;
 use crate::helpers::StrippedVerbatimPath;
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
+use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::cmi::portable_types::PortablePersStruct;
+use rescript_compiler::parse_arena::ParseArena;
+use rescript_compiler::parser::ast::{Signature, Structure};
+use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::SystemTime;
+use tracing::{Span, info_span};
 
 /// Execute js-post-build command for a compiled JavaScript file.
 /// The command runs in the directory containing the rescript.json that defines it.
@@ -110,6 +116,43 @@ struct CompletionMsg {
     interface_result: Option<Result<Option<String>>>,
     is_clean: bool,
     is_compiled: bool,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+struct PendingRegistryUpdate {
+    module_name: String,
+    pers_struct: Option<Arc<PortablePersStruct>>,
+    module_info: InMemoryModuleInfo,
+    alias_rewrites: AHashMap<String, TypePath>,
+}
+
+struct InProcessModuleResult {
+    warning: Option<String>,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+fn apply_pending_registry_updates(
+    build_command_state: &BuildCommandState,
+    updates: Vec<PendingRegistryUpdate>,
+) {
+    if updates.is_empty() {
+        return;
+    }
+
+    let mut registry = build_command_state.module_registry.lock().unwrap();
+    for update in updates {
+        if let Some(pers_struct) = update.pers_struct {
+            registry.register_module_arc(
+                &update.module_name,
+                pers_struct,
+                update.module_info,
+                update.alias_rewrites,
+            );
+        } else {
+            registry.insert_module_info(update.module_name, update.module_info);
+            registry.extend_alias_rewrites(update.alias_rewrites);
+        }
+    }
 }
 
 /// Compute the critical-path priority of every module in the universe:
@@ -177,11 +220,25 @@ fn compile_one(
     warn_error_override: Option<String>,
     subprocess: bool,
     dump_typed_sexp: bool,
+    parent_span: Span,
 ) -> CompletionMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
         .expect("Package not found");
+    let _span = if tracing::enabled!(tracing::Level::INFO) {
+        info_span!(
+            parent: &parent_span,
+            "build.compile_file",
+            module = %module_name,
+            package = %package.name,
+            in_process = build_command_state.build_mode().is_in_process(),
+            dirty = is_dirty
+        )
+        .entered()
+    } else {
+        Span::none().entered()
+    };
 
     if !is_dirty {
         return CompletionMsg {
@@ -190,6 +247,7 @@ fn compile_one(
             interface_result: Some(Ok(None)),
             is_clean: true,
             is_compiled: false,
+            registry_updates: Vec::new(),
         };
     }
 
@@ -200,6 +258,7 @@ fn compile_one(
     // is dispatched.
     if build_command_state.build_mode().is_in_process() {
         if let SourceType::SourceFile(_) = &module.source_type {
+            let interface_generation_before = build_command_state.get_interface_generation(module_name);
             let result = compile_module_in_process(
                 package,
                 module,
@@ -208,12 +267,21 @@ fn compile_one(
                 build_state,
                 build_command_state,
             );
+            let interface_generation_after = build_command_state.get_interface_generation(module_name);
+            let (result, registry_updates) = match result {
+                Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
+                Err(err) => (Err(err), Vec::new()),
+            };
+            let is_clean_interface = matches!(&result, Ok(None))
+                && interface_generation_before.is_some()
+                && interface_generation_before == interface_generation_after;
             return CompletionMsg {
                 module_name: module_name.to_string(),
                 result,
                 interface_result: None,
-                is_clean: false,
+                is_clean: is_clean_interface,
                 is_compiled: true,
+                registry_updates,
             };
         }
     }
@@ -228,6 +296,7 @@ fn compile_one(
                 interface_result: Some(Ok(None)),
                 is_clean: false,
                 is_compiled: false,
+                registry_updates: Vec::new(),
             }
         }
         SourceType::SourceFile(source_file) => {
@@ -280,6 +349,7 @@ fn compile_one(
                 interface_result,
                 is_clean: is_clean_cmi,
                 is_compiled: true,
+                registry_updates: Vec::new(),
             }
         }
     }
@@ -329,6 +399,14 @@ pub fn compile(
             }
         })
         .collect::<AHashSet<String>>();
+    let _span = info_span!(
+        "build.compile",
+        dirty_modules = dirty_modules.len(),
+        module_count = build_state.modules.len(),
+        in_process = build_state.build_mode().is_in_process()
+    )
+    .entered();
+    let compile_parent_span = Span::current();
 
     // In --in-process mode, purge deleted/renamed modules from the in-memory
     // registries so stale entries don't remain resolvable in watch mode.
@@ -342,33 +420,47 @@ pub fn compile(
     if build_state.build_mode().is_in_process() {
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
-        // Pre-compile all @rescript/runtime modules into the registry.
-        // In in-process mode, the registry is the sole source of truth —
-        // no CMI fallback. Every dependency must be in the registry.
-        let pre_compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    pre_compile_runtime_modules(build_state);
-                });
+
+        if build_includes_runtime_package(build_state) {
+            debug!("Skipping runtime pre-compilation because @rescript/runtime is in the build graph");
+        } else {
+            // Pre-compile all @rescript/runtime modules into the registry.
+            // In in-process mode, the registry is the sole source of truth —
+            // no CMI fallback. Every dependency must be in the registry.
+            let parent_span = compile_parent_span.clone();
+            let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+                let handle = std::thread::Builder::new()
+                    .name("rewatch-runtime-precompile".to_string())
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, || {
+                        let _parent = parent_span.enter();
+                        pre_compile_runtime_modules(build_state)
+                    })
+                    .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+
+                match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
+                        Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                    }
+                }
             });
-        }));
-        if let Err(e) = pre_compile_result {
-            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown".to_string()
-            };
-            eprintln!("Warning: runtime pre-compilation panicked: {}", msg);
+            pre_compile_result?;
         }
+
         // Clear source-fallback paths after pre-compilation.
         build_state
             .module_registry
             .lock()
             .unwrap()
-            .source_fallback_paths
-            .clear();
+            .set_source_fallback_paths(AHashMap::new());
     }
 
     // Expand the compile universe: every dirty module plus everything that
@@ -467,6 +559,7 @@ pub fn compile(
                 } else {
                     ModuleRegistry::new()
                 };
+                let parent_span = compile_parent_span.clone();
                 scope.spawn(move |_| {
                     let msg = compile_one(
                         build_state_ref,
@@ -477,6 +570,7 @@ pub fn compile(
                         warn_override,
                         subprocess,
                         dump_typed_sexp,
+                        parent_span,
                     );
                     if show_progress {
                         inc_ref();
@@ -498,37 +592,56 @@ pub fn compile(
                 break;
             }
 
-            let Ok(msg) = rx.recv() else { break };
-            in_flight -= 1;
+            let Ok(first_msg) = rx.recv() else { break };
+            let mut completed_messages = Vec::with_capacity(in_flight);
+            completed_messages.push(first_msg);
+            while completed_messages.len() < in_flight {
+                match rx.try_recv() {
+                    Ok(msg) => completed_messages.push(msg),
+                    Err(_) => break,
+                }
+            }
+            in_flight -= completed_messages.len();
 
-            if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
-                has_errors = true;
+            if in_process_mode {
+                let mut batched_updates = Vec::new();
+                for msg in &mut completed_messages {
+                    batched_updates.extend(std::mem::take(&mut msg.registry_updates));
+                }
+                apply_pending_registry_updates(build_command_state_ref, batched_updates);
             }
 
-            let is_clean = msg.is_clean;
-            let finished_name = msg.module_name.clone();
-            completed.insert(finished_name.clone());
-            results_buffer.push(msg);
-
-            // Look up dependents from the node the scheduler scheduled under —
-            // for mlmap, compile_one returns the namespace suffix, which is the
-            // key modules use to refer to the namespace entry.
-            let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
-
-            for dep in &dependents {
-                if !compile_universe.contains(dep) {
-                    continue;
+            for msg in completed_messages {
+                if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                    has_errors = true;
                 }
-                if !is_clean {
-                    dirty_set.insert(dep.clone());
-                }
-                let count = pending_deps.get_mut(dep).unwrap();
-                *count -= 1;
-                if *count == 0 && !completed.contains(dep) {
-                    ready_heap.push(WorkUnit {
-                        priority: priorities[dep],
-                        module_name: dep.clone(),
-                    });
+
+                let is_clean = msg.is_clean;
+                let finished_name = msg.module_name.clone();
+                completed.insert(finished_name.clone());
+
+                // Look up dependents from the node the scheduler scheduled under —
+                // for mlmap, compile_one returns the namespace suffix, which is the
+                // key modules use to refer to the namespace entry.
+                let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
+
+                results_buffer.push(msg);
+
+                for dep in &dependents {
+                    if !compile_universe.contains(dep) {
+                        continue;
+                    }
+                    if !is_clean {
+                        dirty_set.insert(dep.clone());
+                    }
+                    let count = pending_deps.get_mut(dep).unwrap();
+                    *count -= 1;
+                    if *count == 0 && !completed.contains(dep) {
+                        ready_heap.push(WorkUnit {
+                            priority: priorities[dep],
+                            module_name: dep.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -735,6 +848,13 @@ pub fn compile(
     }
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
+}
+
+fn build_includes_runtime_package(build_state: &BuildCommandState) -> bool {
+    build_state
+        .packages
+        .values()
+        .any(|package| package.name == "@rescript/runtime")
 }
 
 static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
@@ -1006,6 +1126,65 @@ fn get_dependency_paths(
         .concat()
 }
 
+struct InProcessCompilerFlags {
+    nopervasives: bool,
+    no_version_header: bool,
+    check_div_by_zero: bool,
+    cross_module_inline: bool,
+    no_assert_false: bool,
+    make_runtime: bool,
+    debug: bool,
+    jsx_preserve: bool,
+    jsx_version: Option<i32>,
+    open_modules: Vec<String>,
+}
+
+impl Default for InProcessCompilerFlags {
+    fn default() -> Self {
+        Self {
+            nopervasives: false,
+            no_version_header: false,
+            check_div_by_zero: true,
+            cross_module_inline: false,
+            no_assert_false: false,
+            make_runtime: false,
+            debug: false,
+            jsx_preserve: false,
+            jsx_version: None,
+            open_modules: Vec::new(),
+        }
+    }
+}
+
+fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
+    let mut parsed = InProcessCompilerFlags::default();
+    let mut iter = flags.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "-nopervasives" => parsed.nopervasives = true,
+            "-bs-no-version-header" => parsed.no_version_header = true,
+            "-bs-no-check-div-by-zero" => parsed.check_div_by_zero = false,
+            "-bs-cross-module-opt" => parsed.cross_module_inline = true,
+            "-bs-noassertfalse" => parsed.no_assert_false = true,
+            "-make-runtime" => parsed.make_runtime = true,
+            "-bs-g" => parsed.debug = true,
+            "-bs-jsx-preserve" => parsed.jsx_preserve = true,
+            "-bs-jsx" => {
+                if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
+                    parsed.jsx_version = Some(version);
+                }
+            }
+            "-open" => {
+                if let Some(mod_name) = iter.next() {
+                    parsed.open_modules.push(mod_name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
 /// Build `CompilerOptions` for an in-process compilation from the package config.
 fn build_compiler_options(
     package: &packages::Package,
@@ -1019,22 +1198,7 @@ fn build_compiler_options(
     // Parse package compiler-flags for flags the in-process compiler needs to honor.
     // In the subprocess path, these are passed as raw CLI args to bsc.
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
-    let mut nopervasives = false;
-    let mut flag_open_modules: Vec<String> = Vec::new();
-    {
-        let mut iter = bsc_flags.iter();
-        while let Some(flag) = iter.next() {
-            match flag.as_str() {
-                "-nopervasives" => nopervasives = true,
-                "-open" => {
-                    if let Some(mod_name) = iter.next() {
-                        flag_open_modules.push(mod_name.clone());
-                    }
-                }
-                _ => {} // Other flags (-nostdlib, -make-runtime, etc.) are not needed in-process
-            }
-        }
-    }
+    let parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
@@ -1055,16 +1219,17 @@ fn build_compiler_options(
         }
     }
 
-
     // Add dev dependency paths if the module is type:dev
     // (omitted for simplicity in first cut; can be added later)
 
     // Extract JSX version from root config
-    let jsx_version = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.version)
-        .filter(|&v| v == 4);
+    let jsx_version = parsed_flags.jsx_version.or_else(|| {
+        root_config
+            .jsx
+            .as_ref()
+            .and_then(|jsx| jsx.version)
+            .filter(|&v| v == 4)
+    });
 
     // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
     // In the file-based mode, `-bs-ns Namespace` is passed to all namespaced modules.
@@ -1078,7 +1243,7 @@ fn build_compiler_options(
     // Append explicit -open flags from package compiler-flags.
     // Self-open filtering (e.g., skip `-open Pervasives` when compiling Pervasives.res)
     // is handled inside load_pervasives via the module_name field.
-    open_modules.extend(flag_open_modules);
+    open_modules.extend(parsed_flags.open_modules);
 
     // Runtime path
     let runtime_path = get_runtime_path(&package.config, project_context).ok();
@@ -1086,16 +1251,10 @@ fn build_compiler_options(
     // Source filename for interface constraint resolution
     let source_filename = Some(source_file_path.to_string_lossy().to_string());
 
-    // Output path for JS import resolution
-    let output_path = root_config.get_package_specs().first().map(|spec| {
-        if spec.in_source {
-            PathBuf::from(source_file_path.parent().unwrap_or(Path::new(".")))
-        } else {
-            Path::new("lib")
-                .join(spec.get_out_of_source_dir())
-                .join(source_file_path.parent().unwrap_or(Path::new(".")))
-        }
-    });
+    // Output path and module format for JS import resolution.
+    let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
+    let output_module_format = js_output_targets.first().map(|target| target.module_format);
+    let output_path = js_output_targets.first().map(|target| target.path.clone());
 
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
@@ -1103,11 +1262,62 @@ fn build_compiler_options(
         open_modules,
         source_filename,
         output_path,
+        output_module_format,
+        js_output_targets,
         jsx_version,
-        nopervasives,
+        jsx_preserve: parsed_flags.jsx_preserve,
+        debug: parsed_flags.debug,
+        check_div_by_zero: parsed_flags.check_div_by_zero,
+        cross_module_inline: parsed_flags.cross_module_inline,
+        no_assert_false: parsed_flags.no_assert_false,
+        nopervasives: parsed_flags.nopervasives,
+        no_version_header: parsed_flags.no_version_header,
         module_name: Some(module_name.to_string()),
+        package_name: Some(package.config.name.clone()),
+        make_runtime: parsed_flags.make_runtime,
         ..Default::default()
     })
+}
+
+fn package_spec_to_module_format(spec: &config::PackageSpec) -> rescript_compiler::js_ir::ModuleFormat {
+    match &spec.module {
+        config::PackageModule::CommonJs => rescript_compiler::js_ir::ModuleFormat::CommonJs,
+        config::PackageModule::EsModule => rescript_compiler::js_ir::ModuleFormat::EsModule,
+    }
+}
+
+fn js_output_path_for_spec(
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+    spec: &config::PackageSpec,
+) -> PathBuf {
+    let suffix = root_config.get_suffix(spec);
+    if spec.in_source {
+        let source_abs = Path::new(&package.path).join(source_file_path);
+        helpers::get_source_file_from_rescript_file(&source_abs, &suffix)
+    } else {
+        let js_relative = helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
+        Path::new(&package.path)
+            .join("lib")
+            .join(spec.get_out_of_source_dir())
+            .join(js_relative)
+    }
+}
+
+fn js_output_targets_for_source(
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Vec<rescript_compiler::driver::JsOutputTarget> {
+    root_config
+        .get_package_specs()
+        .iter()
+        .map(|spec| rescript_compiler::driver::JsOutputTarget {
+            path: js_output_path_for_spec(package, source_file_path, root_config, spec),
+            module_format: package_spec_to_module_format(spec),
+        })
+        .collect()
 }
 
 /// Write JS output to the correct location(s) based on package specs.
@@ -1126,8 +1336,7 @@ fn write_js_output(
         } else {
             // Out-of-source: JS goes in lib/js/ or lib/es6/ preserving relative path
             let out_dir = spec.get_out_of_source_dir();
-            let js_relative =
-                helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
+            let js_relative = helpers::get_source_file_from_rescript_file(source_file_path, &suffix);
             Path::new(&package.path)
                 .join("lib")
                 .join(out_dir)
@@ -1138,6 +1347,26 @@ fn write_js_output(
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&js_path, js_output)?;
+    }
+    Ok(())
+}
+
+fn write_compiled_js_outputs(
+    js_outputs: &[rescript_compiler::driver::JsOutput],
+    fallback_js_output: &str,
+    package: &packages::Package,
+    source_file_path: &Path,
+    root_config: &config::Config,
+) -> Result<()> {
+    if js_outputs.is_empty() {
+        return write_js_output(fallback_js_output, package, source_file_path, root_config);
+    }
+
+    for output in js_outputs {
+        if let Some(parent) = output.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&output.path, &output.code)?;
     }
     Ok(())
 }
@@ -1157,10 +1386,7 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
         };
 
         let entry = match &package.namespace {
-            packages::Namespace::NamespaceWithEntry {
-                namespace: _,
-                entry,
-            } => Some(entry.as_str()),
+            packages::Namespace::NamespaceWithEntry { namespace: _, entry } => Some(entry.as_str()),
             _ => None,
         };
 
@@ -1173,9 +1399,7 @@ fn register_namespace_signatures(build_state: &BuildCommandState) {
 
         let module_aliases: Vec<(String, String)> = source_files
             .keys()
-            .map(|path| {
-                helpers::file_path_to_module_name(path, &packages::Namespace::NoNamespace)
-            })
+            .map(|path| helpers::file_path_to_module_name(path, &packages::Namespace::NoNamespace))
             .filter(|module_name| {
                 // Exclude the entry module (it's not aliased in the namespace)
                 if let Some(entry) = entry {
@@ -1230,7 +1454,12 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
     // resolved via RESCRIPT_RUNTIME. In file-based mode, runtime modules
     // are loaded from .cmi files on the load path. In --in-process mode,
     // we need source fallback paths so they can be type-checked on demand.
-    let runtime_path = &build_state.build_state.compiler_info.runtime_path;
+    let runtime_path = build_state
+        .build_state
+        .compiler_info
+        .runtime_path
+        .join("lib")
+        .join("ocaml");
     if let Ok(entries) = std::fs::read_dir(runtime_path) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1270,208 +1499,688 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
         .module_registry
         .lock()
         .unwrap()
-        .source_fallback_paths = fallback_paths;
+        .set_source_fallback_paths(fallback_paths);
 }
 
-/// Pre-compile all @rescript/runtime modules into the ModuleRegistry before the
-/// main compile loop. This eliminates source-fallback recursion during parallel
-/// compilation: without pre-compilation, every module that implicitly needs
-/// Pervasives (via `-open Pervasives`) would trigger recursive source-fallback
-/// type-checking, creating deep stack frames that overflow worker thread stacks.
+#[derive(Debug)]
+struct RuntimeInterfaceSource {
+    path: PathBuf,
+    arena: ParseArena,
+    signature: Signature,
+}
+
+#[derive(Debug)]
+struct RuntimeModuleSource {
+    module_name: String,
+    res_path: PathBuf,
+    res_arena: ParseArena,
+    structure: Structure,
+    resi: Option<RuntimeInterfaceSource>,
+    deps: AHashSet<String>,
+}
+
+#[derive(Debug)]
+struct RuntimeWorkUnit {
+    priority: i64,
+    idx: usize,
+}
+
+impl PartialEq for RuntimeWorkUnit {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.idx == other.idx
+    }
+}
+impl Eq for RuntimeWorkUnit {}
+impl PartialOrd for RuntimeWorkUnit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RuntimeWorkUnit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.idx.cmp(&self.idx))
+    }
+}
+
+struct RuntimeCompletionMsg {
+    idx: usize,
+    result: Result<()>,
+}
+
+/// Pre-compile all @rescript/runtime modules from their `.res/.resi` sources
+/// into the ModuleRegistry before the main compile loop.
 ///
-/// After this step, all runtime modules (Pervasives, Js, Belt, etc.) are in the
-/// registry and found directly without any source-fallback.
+/// This intentionally does not read `.cmi` or `.cmj`: the runtime package is
+/// bootstrapped with the same in-process compiler as user sources, and the
+/// resulting portable signatures plus JS metadata become the authoritative
+/// registry entries for later project compilation.
 ///
 /// Runs on a dedicated thread with a large stack to handle any remaining
 /// source-fallback chains during the pre-compilation itself.
-fn pre_compile_runtime_modules(build_state: &BuildCommandState) {
+fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
+    let _span = info_span!("build.runtime_precompile").entered();
     let runtime_root = &build_state.build_state.compiler_info.runtime_path;
-    // Runtime .res sources live in lib/ocaml/ alongside the .cmi/.cmj files
+    let runtime_config = packages::read_config(runtime_root)
+        .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     let runtime_path = runtime_root.join("lib").join("ocaml");
-
-    // Collect all runtime .res files and check for .resi siblings
-    let mut runtime_modules: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&runtime_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("res") {
-                continue;
-            }
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let module_name = {
-                    let mut chars = stem.chars();
-                    match chars.next() {
-                        None => continue,
-                        Some(ch) => format!("{}{}", ch.to_uppercase(), chars.as_str()),
-                    }
-                };
-                let resi_path = path.with_extension("resi");
-                let has_resi = resi_path.exists();
-                runtime_modules.push((
-                    module_name,
-                    path.clone(),
-                    if has_resi { Some(resi_path) } else { None },
-                ));
-            }
-        }
-    }
+    let mut runtime_modules = collect_runtime_sources(&runtime_path)?;
+    tracing::Span::current().record("runtime_modules", runtime_modules.len());
 
     if runtime_modules.is_empty() {
-        return;
+        return Ok(());
     }
 
-    // Sort for deterministic compilation order.
-    // Put Pervasives first since everything depends on it.
-    runtime_modules.sort_by(|a, b| {
-        let a_priority = if a.0 == "Pervasives" { 0 } else { 1 };
-        let b_priority = if b.0 == "Pervasives" { 0 } else { 1 };
-        a_priority.cmp(&b_priority).then_with(|| a.0.cmp(&b.0))
-    });
-
-    let root_config = build_state.get_root_config();
-    let runtime_path_for_opts = runtime_root.clone();
-    let jsx_version = root_config
-        .jsx
-        .as_ref()
-        .and_then(|jsx| jsx.version)
-        .filter(|&v| v == 4);
-
-    let module_count = runtime_modules.len();
-
-    // Compile sequentially. After each module compiles, its result is in
-    // the registry, so subsequent modules find deps directly without
-    // deep source-fallback chains. Pervasives compiles first (sorted above)
-    // so all other runtime modules find it immediately.
-    let mut compiled = 0;
-    for (module_name, res_path, resi_path) in &runtime_modules {
-        let options = rescript_compiler::driver::CompilerOptions {
-            include_paths: vec![runtime_path.clone()],
-            nopervasives: true,
-            open_modules: vec!["Pervasives".to_string()],
-            module_name: Some(module_name.clone()),
-            runtime_path: Some(runtime_path_for_opts.clone()),
-            jsx_version,
-            source_filename: Some(res_path.to_string_lossy().to_string()),
-            ..Default::default()
-        };
-
-        let registry = build_state.snapshot_module_registry();
-
-        // Register this module's metadata in the registry before compilation
-        // so the compiler can find its own source info
-        {
-            let mut reg = build_state.module_registry.lock().unwrap();
-            reg.module_info.insert(
-                module_name.clone(),
-                rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
-                    source_path: res_path.clone(),
-                    is_pure: true,
-                    is_runtime: true,
-                },
-            );
-        }
-
-        // Step 1: If .resi exists, typecheck the interface first
-        let mut local_registry = registry.clone();
-        if let Some(resi) = resi_path {
-            if let Ok(intf_source) = std::fs::read_to_string(resi) {
-                let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
-                    &intf_source,
-                    &resi.to_string_lossy(),
-                    module_name,
-                    &options,
-                    &local_registry,
-                );
-                match intf_result {
-                    Ok(result) => {
-                        if let Some(ps) = result.pers_struct {
-                            local_registry.cached_modules.insert(module_name.clone(), ps.clone());
-                            build_state.update_module_registry(
-                                module_name,
-                                ps,
-                                res_path.clone(),
-                                true,
-                                true,
-                                result.new_alias_rewrites,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Runtime interface typecheck failed for {}: {}", module_name, e);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Step 2: Type-check the implementation (no lambda/JS — we only need the interface)
-        let has_interface = resi_path.is_some();
-        if let Ok(impl_source) = std::fs::read_to_string(res_path) {
-            let typecheck_result = rescript_compiler::driver::typecheck_implementation_in_process(
-                &impl_source,
-                &res_path.to_string_lossy(),
-                module_name,
-                &options,
-                &local_registry,
-                has_interface,
-            );
-
-            match typecheck_result {
-                Ok(result) => {
-                    let rt_fingerprint = result
-                        .pers_struct
-                        .as_ref()
-                        .map(|ps| ps.fingerprint)
-                        .unwrap_or(0);
-                    if let Some(ps) = result.pers_struct {
-                        build_state.update_module_registry(
-                            module_name,
-                            ps,
-                            res_path.clone(),
-                            true,
-                            true,
-                            result.new_alias_rewrites,
-                        );
-                    }
-                    if !has_interface {
-                        build_state.register_in_memory_interface(
-                            module_name.clone(),
-                            result.signature,
-                            rt_fingerprint,
-                            true,
-                        );
-                    }
-                    compiled += 1;
-                }
-                Err(e) => {
-                    debug!("Runtime typecheck failed for {}: {}", module_name, e);
-                }
-            }
-        }
+    let already_registered = {
+        let registry = build_state.module_registry.lock().unwrap();
+        runtime_modules.iter().all(|module| {
+            registry.module_info_is_runtime(&module.module_name)
+                && registry.has_cached_module(&module.module_name)
+        })
+    };
+    if already_registered {
+        return Ok(());
     }
+
+    populate_runtime_deps(&mut runtime_modules);
+
+    seed_runtime_registry(build_state, &runtime_modules);
+    compile_runtime_modules_parallel(
+        build_state,
+        runtime_root,
+        &runtime_path,
+        &runtime_config,
+        &runtime_modules,
+    )?;
 
     debug!(
-        "Pre-compiled {}/{} runtime modules into registry",
-        compiled, module_count
+        "Compiled {} runtime modules from source into registry",
+        runtime_modules.len()
     );
+    Ok(())
+}
+
+fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[RuntimeModuleSource]) {
+    let mut registry = build_state.module_registry.lock().unwrap();
+    for module in runtime_modules {
+        let fallback_path = module
+            .resi
+            .as_ref()
+            .map(|interface| &interface.path)
+            .unwrap_or(&module.res_path)
+            .clone();
+        registry.insert_source_fallback_path(module.module_name.clone(), fallback_path);
+
+        // Seed runtime metadata for every runtime module up front. This lets
+        // JS import resolution classify runtime deps without disk probes even
+        // before each module's real signature and cmj metadata are compiled.
+        registry.insert_module_info(
+            module.module_name.clone(),
+            InMemoryModuleInfo {
+                source_path: module.res_path.clone(),
+                is_pure: true,
+                cmj_export_constants: AHashMap::new(),
+                is_runtime: true,
+            },
+        );
+    }
+}
+
+fn compile_runtime_modules_parallel(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_modules: &[RuntimeModuleSource],
+) -> Result<()> {
+    let (mut pending_deps, dependents) = runtime_dependency_graph(runtime_modules);
+    let priorities = runtime_critical_path_priorities(runtime_modules, &dependents);
+    let mut ready_heap: BinaryHeap<RuntimeWorkUnit> = pending_deps
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| {
+            (*count == 0).then_some(RuntimeWorkUnit {
+                priority: priorities[idx],
+                idx,
+            })
+        })
+        .collect();
+
+    let (tx, rx) = mpsc::channel::<RuntimeCompletionMsg>();
+    let capacity = rayon::current_num_threads().max(1);
+    let mut in_flight = 0usize;
+    let mut completed = vec![false; runtime_modules.len()];
+    let mut completed_count = 0usize;
+    let mut first_error: Option<anyhow::Error> = None;
+
+    rayon::in_place_scope(|scope| {
+        loop {
+            while in_flight < capacity && first_error.is_none() {
+                let Some(work) = ready_heap.pop() else { break };
+                let idx = work.idx;
+                let module = &runtime_modules[idx];
+                let registry_snapshot = build_state.snapshot_module_registry();
+                let tx = tx.clone();
+                in_flight += 1;
+                scope.spawn(move |_| {
+                    let result = compile_runtime_module_from_source(
+                        build_state,
+                        runtime_root,
+                        runtime_path,
+                        runtime_config,
+                        module,
+                        registry_snapshot,
+                    );
+                    let _ = tx.send(RuntimeCompletionMsg { idx, result });
+                });
+            }
+
+            if in_flight == 0 {
+                break;
+            }
+
+            let Ok(msg) = rx.recv() else { break };
+            in_flight -= 1;
+
+            if let Err(err) = msg.result {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                continue;
+            }
+
+            completed[msg.idx] = true;
+            completed_count += 1;
+
+            for &dependent in &dependents[msg.idx] {
+                pending_deps[dependent] -= 1;
+                if pending_deps[dependent] == 0 && !completed[dependent] {
+                    ready_heap.push(RuntimeWorkUnit {
+                        priority: priorities[dependent],
+                        idx: dependent,
+                    });
+                }
+            }
+        }
+    });
+    drop(tx);
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+
+    if completed_count != runtime_modules.len() {
+        compile_runtime_cycle_remainder_serial(
+            build_state,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            runtime_modules,
+            &completed,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn compile_runtime_cycle_remainder_serial(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    runtime_modules: &[RuntimeModuleSource],
+    completed: &[bool],
+) -> Result<()> {
+    debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
+    for idx in runtime_compile_order(runtime_modules) {
+        if completed[idx] {
+            continue;
+        }
+        let registry_snapshot = build_state.snapshot_module_registry();
+        compile_runtime_module_from_source(
+            build_state,
+            runtime_root,
+            runtime_path,
+            runtime_config,
+            &runtime_modules[idx],
+            registry_snapshot,
+        )?;
+    }
+    Ok(())
+}
+
+fn compile_runtime_module_from_source(
+    build_state: &BuildCommandState,
+    runtime_root: &Path,
+    runtime_path: &Path,
+    runtime_config: &config::Config,
+    module: &RuntimeModuleSource,
+    registry_snapshot: ModuleRegistry,
+) -> Result<()> {
+    let options = runtime_compiler_options(
+        runtime_root,
+        runtime_path,
+        &module.module_name,
+        &module.res_path,
+        runtime_config,
+    );
+
+    let mut local_registry = registry_snapshot;
+    let has_runtime_interface = module.resi.is_some();
+    let mut interface_pers_struct = None;
+    let mut interface_alias_rewrites = AHashMap::new();
+
+    if let Some(interface) = &module.resi {
+        let intf_result = rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+            &interface.arena,
+            &interface.signature,
+            &interface.path.to_string_lossy(),
+            &module.module_name,
+            &options,
+            &local_registry,
+        )
+        .with_context(|| {
+            format!(
+                "runtime interface typecheck failed for {}",
+                interface.path.display()
+            )
+        })?;
+
+        interface_alias_rewrites = intf_result.new_alias_rewrites;
+        if let Some(pers_struct) = intf_result.pers_struct {
+            let pers_struct = Arc::new(pers_struct);
+            local_registry.register_module_arc(
+                &module.module_name,
+                pers_struct.clone(),
+                InMemoryModuleInfo {
+                    source_path: module.res_path.clone(),
+                    is_pure: true,
+                    cmj_export_constants: AHashMap::new(),
+                    is_runtime: true,
+                },
+                interface_alias_rewrites.clone(),
+            );
+            interface_pers_struct = Some(pers_struct);
+        }
+    }
+
+    let compile_result = rescript_compiler::driver::compile_preprocessed_structure_in_process(
+        &module.res_arena,
+        &module.structure,
+        &module.res_path.to_string_lossy(),
+        &module.module_name,
+        &options,
+        &local_registry,
+        has_runtime_interface,
+    )
+    .map_err(|err| {
+        anyhow!(
+            "runtime implementation compile failed for {}: {err:#}",
+            module.res_path.display()
+        )
+    })?;
+
+    let module_info = InMemoryModuleInfo {
+        source_path: module.res_path.clone(),
+        is_pure: compile_result.is_pure,
+        cmj_export_constants: compile_result.cmj_export_constants,
+        is_runtime: true,
+    };
+
+    let mut shared_registry = build_state.module_registry.lock().unwrap();
+    if has_runtime_interface {
+        if let Some(pers_struct) = interface_pers_struct {
+            shared_registry.register_module_arc(
+                &module.module_name,
+                pers_struct,
+                module_info,
+                interface_alias_rewrites,
+            );
+        } else {
+            shared_registry.insert_module_info(module.module_name.clone(), module_info);
+            shared_registry.extend_alias_rewrites(interface_alias_rewrites);
+        }
+        shared_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
+    } else if let Some(pers_struct) = compile_result.pers_struct {
+        shared_registry.register_module(
+            &module.module_name,
+            pers_struct,
+            module_info,
+            compile_result.new_alias_rewrites,
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_runtime_sources(runtime_path: &Path) -> Result<Vec<RuntimeModuleSource>> {
+    let mut runtime_modules = Vec::new();
+    for entry in std::fs::read_dir(runtime_path)
+        .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read runtime directory entry in {}",
+                runtime_path.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("res") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(module_name) = module_name_from_stem(stem) else {
+            continue;
+        };
+
+        let res_source = read_source_latin1(&path)?;
+        let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
+        let resi_path = path.with_extension("resi");
+        let resi = if resi_path.exists() {
+            let source = read_source_latin1(&resi_path)?;
+            let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+            deps.extend(intf_deps);
+            Some(RuntimeInterfaceSource {
+                path: resi_path,
+                arena,
+                signature,
+            })
+        } else {
+            None
+        };
+
+        runtime_modules.push(RuntimeModuleSource {
+            module_name,
+            res_path: path,
+            res_arena,
+            structure,
+            resi,
+            deps,
+        });
+    }
+
+    runtime_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+    Ok(runtime_modules)
+}
+
+fn module_name_from_stem(stem: &str) -> Option<String> {
+    let mut chars = stem.chars();
+    chars
+        .next()
+        .map(|ch| format!("{}{}", ch.to_uppercase(), chars.as_str()))
+}
+
+fn read_source_latin1(path: &Path) -> Result<String> {
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
+        Ok(source_bytes_to_latin1(bytes))
+    })
+}
+
+fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
+    if bytes.is_ascii() {
+        String::from_utf8(bytes).expect("ASCII source bytes should always be valid UTF-8")
+    } else {
+        bytes.into_iter().map(|b| b as char).collect()
+    }
+}
+
+fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
+    let runtime_names: AHashSet<String> = runtime_modules
+        .iter()
+        .map(|module| module.module_name.clone())
+        .collect();
+    let has_pervasives = runtime_names.contains("Pervasives");
+
+    for module in runtime_modules {
+        module
+            .deps
+            .retain(|dep| runtime_names.contains(dep) && dep != &module.module_name);
+        if has_pervasives && module.module_name != "Pervasives" {
+            module.deps.insert("Pervasives".to_string());
+        }
+    }
+}
+
+fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Signature, AHashSet<String>)> {
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let filename = path.to_string_lossy();
+        let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
+        let signature = rescript_compiler::parser::module::parse_signature(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "failed to parse runtime interface {} with {} error(s)",
+                path.display(),
+                parser.diagnostics().len()
+            ));
+        }
+        let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
+            .map_err(|err| {
+                anyhow!(
+                    "runtime interface PPX rewrite failed for {}: {err}",
+                    path.display()
+                )
+            })?;
+        let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
+            .into_iter()
+            .collect();
+        Ok((parser.into_arena(), signature, deps))
+    })
+}
+
+fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Structure, AHashSet<String>)> {
+    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+        let filename = path.to_string_lossy();
+        let mut parser = rescript_compiler::parser::Parser::new(filename.as_ref(), source);
+        let structure = rescript_compiler::parser::module::parse_structure(&mut parser);
+        if parser.has_errors() {
+            return Err(anyhow!(
+                "failed to parse runtime implementation {} with {} error(s)",
+                path.display(),
+                parser.diagnostics().len()
+            ));
+        }
+        let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|err| {
+                anyhow!(
+                    "runtime implementation PPX rewrite failed for {}: {err}",
+                    path.display()
+                )
+            })?;
+        let structure =
+            rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+        let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
+            .into_iter()
+            .collect();
+        Ok((parser.into_arena(), structure, deps))
+    })
+}
+
+fn runtime_dependency_graph(runtime_modules: &[RuntimeModuleSource]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let index_by_name: AHashMap<String, usize> = runtime_modules
+        .iter()
+        .enumerate()
+        .map(|(idx, module)| (module.module_name.clone(), idx))
+        .collect();
+    let mut remaining_dep_count = vec![0usize; runtime_modules.len()];
+    let mut dependents = vec![Vec::<usize>::new(); runtime_modules.len()];
+
+    for (idx, module) in runtime_modules.iter().enumerate() {
+        for dep in &module.deps {
+            if let Some(&dep_idx) = index_by_name.get(dep) {
+                remaining_dep_count[idx] += 1;
+                dependents[dep_idx].push(idx);
+            }
+        }
+    }
+
+    (remaining_dep_count, dependents)
+}
+
+fn runtime_critical_path_priorities(
+    runtime_modules: &[RuntimeModuleSource],
+    dependents: &[Vec<usize>],
+) -> Vec<i64> {
+    let order = runtime_compile_order(runtime_modules);
+    let mut priorities = vec![1i64; runtime_modules.len()];
+
+    for idx in order.into_iter().rev() {
+        let dependent_priority = dependents[idx]
+            .iter()
+            .map(|dependent| priorities[*dependent])
+            .max()
+            .unwrap_or(0);
+        priorities[idx] = 1 + dependent_priority;
+    }
+
+    priorities
+}
+
+fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> {
+    let index_by_name: AHashMap<String, usize> = runtime_modules
+        .iter()
+        .enumerate()
+        .map(|(idx, module)| (module.module_name.clone(), idx))
+        .collect();
+    let mut remaining_dep_count = vec![0usize; runtime_modules.len()];
+    let mut dependents = vec![Vec::<usize>::new(); runtime_modules.len()];
+
+    for (idx, module) in runtime_modules.iter().enumerate() {
+        for dep in &module.deps {
+            if let Some(&dep_idx) = index_by_name.get(dep) {
+                remaining_dep_count[idx] += 1;
+                dependents[dep_idx].push(idx);
+            }
+        }
+    }
+
+    let mut ready: Vec<usize> = remaining_dep_count
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| (*count == 0).then_some(idx))
+        .collect();
+    ready.sort_by(|a, b| {
+        runtime_modules[*b]
+            .module_name
+            .cmp(&runtime_modules[*a].module_name)
+    });
+
+    let mut order = Vec::with_capacity(runtime_modules.len());
+    while let Some(idx) = ready.pop() {
+        order.push(idx);
+        for &dependent in &dependents[idx] {
+            remaining_dep_count[dependent] -= 1;
+            if remaining_dep_count[dependent] == 0 {
+                ready.push(dependent);
+                ready.sort_by(|a, b| {
+                    runtime_modules[*b]
+                        .module_name
+                        .cmp(&runtime_modules[*a].module_name)
+                });
+            }
+        }
+    }
+
+    if order.len() != runtime_modules.len() {
+        let mut remaining: Vec<usize> = (0..runtime_modules.len())
+            .filter(|idx| !order.contains(idx))
+            .collect();
+        remaining.sort_by(|a, b| {
+            runtime_modules[*a]
+                .module_name
+                .cmp(&runtime_modules[*b].module_name)
+        });
+        debug!(
+            "runtime source dependency cycle or unresolved dependency among: {}",
+            remaining
+                .iter()
+                .map(|idx| runtime_modules[*idx].module_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        order.extend(remaining);
+    }
+
+    order
+}
+
+fn runtime_compiler_options(
+    runtime_root: &Path,
+    runtime_path: &Path,
+    module_name: &str,
+    source_path: &Path,
+    runtime_config: &config::Config,
+) -> rescript_compiler::driver::CompilerOptions {
+    let bsc_flags = config::flatten_flags(&runtime_config.compiler_flags);
+    let mut parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
+    if parsed_flags.open_modules.is_empty() {
+        parsed_flags.open_modules.push("Pervasives".to_string());
+    }
+
+    let js_output_targets: Vec<rescript_compiler::driver::JsOutputTarget> = runtime_config
+        .get_package_specs()
+        .iter()
+        .map(|spec| rescript_compiler::driver::JsOutputTarget {
+            path: runtime_root
+                .join("lib")
+                .join(spec.get_out_of_source_dir())
+                .join(format!("{}{}", module_name, runtime_config.get_suffix(spec))),
+            module_format: package_spec_to_module_format(spec),
+        })
+        .collect();
+    let output_module_format = js_output_targets.first().map(|target| target.module_format);
+    let output_path = js_output_targets.first().map(|target| target.path.clone());
+
+    rescript_compiler::driver::CompilerOptions {
+        include_paths: vec![runtime_path.to_path_buf()],
+        runtime_path: Some(runtime_root.to_path_buf()),
+        open_modules: parsed_flags.open_modules,
+        source_filename: Some(source_path.to_string_lossy().into_owned()),
+        output_path,
+        output_module_format,
+        js_output_targets,
+        jsx_version: parsed_flags.jsx_version,
+        jsx_preserve: parsed_flags.jsx_preserve,
+        debug: parsed_flags.debug,
+        no_version_header: parsed_flags.no_version_header,
+        check_div_by_zero: parsed_flags.check_div_by_zero,
+        cross_module_inline: parsed_flags.cross_module_inline,
+        no_assert_false: parsed_flags.no_assert_false,
+        nopervasives: parsed_flags.nopervasives,
+        module_name: Some(module_name.to_string()),
+        package_name: Some(runtime_config.name.clone()),
+        make_runtime: parsed_flags.make_runtime,
+        skip_js_render: true,
+        ..Default::default()
+    }
 }
 
 /// Compile a single module fully in-process using the Rust compiler.
 ///
 /// This replaces the bsc subprocess path for `--in-process` mode:
-/// - Reads source from disk
-/// - If .resi exists, typechecks it first and registers the interface
-/// - Compiles the .res implementation
+/// - Consumes the preprocessed AST already stored by the parse phase
+/// - If .resi exists, typechecks the stored interface AST first and registers it
+/// - Compiles the stored .res implementation AST
 /// - Writes only JS output (no .cmi, .cmj, .cmt, .cmti)
 /// - Returns the finalized PersStruct and signature for the caller to
 ///   update the shared ModuleRegistry.
+///
+/// Missing stored ASTs are an in-process build invariant violation: the parse
+/// phase must have populated them before any module reaches compilation.
 ///
 /// Takes a `&ModuleRegistry` (read-only snapshot from the current wave)
 /// instead of a shared mutable `PersistentEnv`. Each call creates its own
 /// fresh `PersistentEnv` internally, enabling parallel compilation.
 ///
-/// Returns Ok(None) on success, Ok(Some(warning)) on success with warnings,
-/// Err on failure.
+/// Returns the user-visible warning state plus registry updates to publish
+/// after the worker returns, before dependents are scheduled. Actual compiler
+/// failures are returned as errors so the DAG scheduler stops dependents, like
+/// the bsc subprocess path does.
 fn compile_module_in_process(
     package: &packages::Package,
     module: &Module,
@@ -1479,10 +2188,21 @@ fn compile_module_in_process(
     registry: &ModuleRegistry,
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
-) -> Result<Option<String>> {
+) -> Result<InProcessModuleResult> {
+    let _span = info_span!(
+        "compiler.in_process_module",
+        module = %module_name,
+        package = %package.name
+    )
+    .entered();
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
-        _ => return Ok(None), // MlMap handled elsewhere
+        _ => {
+            return Ok(InProcessModuleResult {
+                warning: None,
+                registry_updates: Vec::new(),
+            });
+        } // MlMap handled elsewhere
     };
 
     let implementation_path = &source_file.implementation.path;
@@ -1490,53 +2210,64 @@ fn compile_module_in_process(
     let root_config = build_command_state.get_root_config();
 
     // Build compiler options from package config
-    let options =
-        build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let options = build_compiler_options(package, module_name, implementation_path, build_state)?;
 
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
-    let is_pure = true;
+    let provisional_is_pure = true;
 
     // For .resi + .res, we need the .resi to be in the registry before compiling .res.
     // Build a local registry that includes the .resi result (if any).
     let mut local_registry = registry.clone();
+    let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
 
     // Register this module's metadata in the local registry
-    local_registry.module_info.insert(
+    local_registry.insert_module_info(
         module_name.to_string(),
         rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path: source_abs.clone(),
-            is_pure,
+            is_pure: provisional_is_pure,
+            cmj_export_constants: AHashMap::new(),
             is_runtime,
         },
     );
 
     // Step 1: If .resi exists, typecheck the interface first
     if let Some(interface) = &source_file.interface {
-        let intf_source_abs = Path::new(&package.path).join(&interface.path);
-        let intf_source = std::fs::read_to_string(&intf_source_abs).map_err(|e| {
-            anyhow!(
-                "Failed to read interface file {}: {}",
-                intf_source_abs.display(),
-                e
-            )
-        })?;
-
-        let intf_result = rescript_compiler::driver::typecheck_interface_in_process(
-            &intf_source,
-            &intf_source_abs.to_string_lossy(),
-            module_name,
-            &options,
-            &local_registry,
+        let _interface_span = info_span!(
+            "compiler.in_process_interface",
+            module = %module_name,
+            path = %interface.path.display()
         )
+        .entered();
+        let intf_source_abs = Path::new(&package.path).join(&interface.path);
+        let intf_key = format!("{module_name}:intf");
+        let intf_result = match build_command_state.get_stored_ast(&intf_key) {
+            Some(StoredAst::Signature(stored)) => {
+                rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
+                    &stored.arena,
+                    &stored.signature,
+                    &intf_source_abs.to_string_lossy(),
+                    module_name,
+                    &options,
+                    &local_registry,
+                )
+            }
+            Some(StoredAst::Structure(_)) => panic!(
+                "in-process invariant violated: expected signature AST for {}, found structure AST",
+                intf_source_abs.display()
+            ),
+            None => panic!(
+                "in-process invariant violated: missing stored signature AST for {}",
+                intf_source_abs.display()
+            ),
+        }
         .map_err(|e| anyhow!("Interface typecheck failed for {}: {}", module_name, e));
 
         let intf_result = match intf_result {
             Ok(r) => r,
             Err(e) => {
-                let warning = format!("{}", e);
-                eprintln!("{}", warning);
-                return Ok(Some(warning));
+                return Err(e);
             }
         };
 
@@ -1547,19 +2278,39 @@ fn compile_module_in_process(
             .as_ref()
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
+        let intf_alias_rewrites = intf_result.new_alias_rewrites;
         if let Some(ps) = intf_result.pers_struct {
-            local_registry
-                .cached_modules
-                .insert(module_name.to_string(), ps.clone());
-            // Update the shared registry with the .resi result
-            build_command_state.update_module_registry(
-                module_name,
-                ps,
-                source_abs.clone(),
-                is_pure,
+            let ps = Arc::new(ps);
+            let module_info = InMemoryModuleInfo {
+                source_path: source_abs.clone(),
+                is_pure: provisional_is_pure,
+                cmj_export_constants: AHashMap::new(),
                 is_runtime,
-                intf_result.new_alias_rewrites,
+            };
+            local_registry.register_module_arc(
+                module_name,
+                ps.clone(),
+                module_info.clone(),
+                intf_alias_rewrites.clone(),
             );
+            interface_registry_update = Some(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: Some(ps),
+                module_info,
+                alias_rewrites: intf_alias_rewrites,
+            });
+        } else {
+            interface_registry_update = Some(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: None,
+                module_info: InMemoryModuleInfo {
+                    source_path: source_abs.clone(),
+                    is_pure: provisional_is_pure,
+                    cmj_export_constants: AHashMap::new(),
+                    is_runtime,
+                },
+                alias_rewrites: intf_alias_rewrites,
+            });
         }
 
         // Register the interface signature in rewatch's in-memory registry
@@ -1567,38 +2318,48 @@ fn compile_module_in_process(
             module_name.to_string(),
             intf_result.signature,
             intf_fingerprint,
-            is_pure,
+            provisional_is_pure,
         );
     }
 
     // Step 2: Compile the implementation
-    let impl_source = std::fs::read_to_string(&source_abs).map_err(|e| {
-        anyhow!(
-            "Failed to read source file {}: {}",
-            source_abs.display(),
-            e
+    let impl_key = format!("{module_name}:impl");
+    let compile_result = {
+        let _impl_span = info_span!(
+            "compiler.in_process_implementation",
+            module = %module_name,
+            path = %source_abs.display()
         )
-    })?;
-
-    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rescript_compiler::driver::compile_source_in_process(
-            &impl_source,
-            &source_abs.to_string_lossy(),
-            module_name,
-            &options,
-            &local_registry,
-            has_interface,
-        )
-    }));
+        .entered();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match build_command_state.get_stored_ast(&impl_key) {
+                Some(StoredAst::Structure(stored)) => {
+                    rescript_compiler::driver::compile_preprocessed_structure_in_process(
+                        &stored.arena,
+                        &stored.structure,
+                        &source_abs.to_string_lossy(),
+                        module_name,
+                        &options,
+                        &local_registry,
+                        has_interface,
+                    )
+                }
+                Some(StoredAst::Signature(_)) => panic!(
+                    "in-process invariant violated: expected structure AST for {}, found signature AST",
+                    source_abs.display()
+                ),
+                None => panic!(
+                    "in-process invariant violated: missing stored structure AST for {}",
+                    source_abs.display()
+                ),
+            }
+        }))
+    };
 
     let compile_result = match compile_result {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            // Return as a warning, not an error. The module won't produce JS
-            // output but the build should continue for other modules.
-            let warning = format!("Compilation failed for {}: {}", module_name, e);
-            eprintln!("{}", warning);
-            return Ok(Some(warning));
+            return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
         }
         Err(panic) => {
             let msg = if let Some(s) = panic.downcast_ref::<String>() {
@@ -1608,29 +2369,46 @@ fn compile_module_in_process(
             } else {
                 "unknown panic".to_string()
             };
-            // Return as a warning, not an error. The module won't produce JS
-            // output but the build should continue for other modules.
-            let warning = format!("Compilation panicked for {}: {}", module_name, msg);
-            eprintln!("{}", warning);
-            return Ok(Some(warning));
+            return Err(anyhow!("Compilation panicked for {}: {}", module_name, msg));
         }
     };
 
-    // Update the shared registry with the implementation's PersStruct
+    // Update the shared registry. When a .resi exists, the interface remains
+    // the published signature; the implementation only contributes JS metadata.
     let impl_fingerprint = compile_result
         .pers_struct
         .as_ref()
         .map(|ps| ps.fingerprint)
         .unwrap_or(0);
-    if let Some(ps) = compile_result.pers_struct {
-        build_command_state.update_module_registry(
-            module_name,
-            ps,
-            source_abs.clone(),
-            is_pure,
-            is_runtime,
-            compile_result.new_alias_rewrites,
-        );
+    let is_pure = compile_result.is_pure;
+    let cmj_export_constants = compile_result.cmj_export_constants.clone();
+    let mut registry_updates = Vec::new();
+    let module_info = InMemoryModuleInfo {
+        source_path: source_abs.clone(),
+        is_pure,
+        cmj_export_constants,
+        is_runtime,
+    };
+    if has_interface {
+        if let Some(mut update) = interface_registry_update {
+            update.module_info = module_info;
+            update.alias_rewrites.extend(compile_result.new_alias_rewrites);
+            registry_updates.push(update);
+        } else {
+            registry_updates.push(PendingRegistryUpdate {
+                module_name: module_name.to_string(),
+                pers_struct: None,
+                module_info,
+                alias_rewrites: compile_result.new_alias_rewrites,
+            });
+        }
+    } else if let Some(ps) = compile_result.pers_struct {
+        registry_updates.push(PendingRegistryUpdate {
+            module_name: module_name.to_string(),
+            pers_struct: Some(Arc::new(ps)),
+            module_info,
+            alias_rewrites: compile_result.new_alias_rewrites,
+        });
     }
 
     // Register the implementation's inferred signature if no .resi
@@ -1644,12 +2422,21 @@ fn compile_module_in_process(
     }
 
     // Step 3: Write only JS output (no compiler assets)
-    write_js_output(
-        &compile_result.js_output,
-        package,
-        implementation_path,
-        root_config,
-    )?;
+    {
+        let _write_span = info_span!(
+            "compiler.write_js",
+            module = %module_name,
+            outputs = compile_result.js_outputs.len()
+        )
+        .entered();
+        write_compiled_js_outputs(
+            &compile_result.js_outputs,
+            &compile_result.js_output,
+            package,
+            implementation_path,
+            root_config,
+        )?;
+    }
 
     // Execute js-post-build command if configured
     if let Some(js_post_build) = &package.config.js_post_build {
@@ -1662,8 +2449,7 @@ fn compile_module_in_process(
                 )
             } else {
                 let out_dir = spec.get_out_of_source_dir();
-                let js_relative =
-                    helpers::get_source_file_from_rescript_file(implementation_path, &suffix);
+                let js_relative = helpers::get_source_file_from_rescript_file(implementation_path, &suffix);
                 Path::new(&package.path)
                     .join("lib")
                     .join(out_dir)
@@ -1675,7 +2461,10 @@ fn compile_module_in_process(
         }
     }
 
-    Ok(None)
+    Ok(InProcessModuleResult {
+        warning: None,
+        registry_updates,
+    })
 }
 
 fn compile_file(
@@ -1742,9 +2531,6 @@ fn compile_file(
     // --subprocess: run bsc as subprocess with timeout (non-fatal on crash/timeout).
     // This REPLACES the normal bsc call — only one bsc runs per compile_file.
     if subprocess {
-        let module_name =
-            helpers::file_path_to_module_name(implementation_file_path, &package.namespace);
-
         // Redirect stderr to sexp file when dump_typed_sexp is set
         let sexp_file = if dump_typed_sexp {
             let path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
@@ -1783,9 +2569,7 @@ fn compile_file(
                             timed_out = true;
                             break;
                         }
-                        Ok(None) => {
-                            std::thread::sleep(std::time::Duration::from_millis(50))
-                        }
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
                         Err(_) => break,
                     }
                 }
@@ -1796,7 +2580,10 @@ fn compile_file(
                         let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
                         let _ = std::fs::write(&sexp_path, "");
                     }
-                    let msg = format!("Timeout ({:.0}s) compiling `{module_name}`", timeout.as_secs_f64());
+                    let msg = format!(
+                        "Timeout ({:.0}s) compiling `{module_name}`",
+                        timeout.as_secs_f64()
+                    );
                     log::warn!("{}", msg);
                     return Ok(Some(msg));
                 } else if exit_status.is_some_and(|s| !s.success()) {

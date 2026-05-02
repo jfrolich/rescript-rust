@@ -1003,8 +1003,11 @@ fn value_descriptions<'a>(
         modtype_subst,
     );
 
-    // Match OCaml Includecore.value_descriptions more closely: compare a
-    // fresh instance of the implementation scheme against the expected type.
+    // OCaml compiler/ml/includemod.ml:56-60 only substitutes the expected
+    // value description before calling compiler/ml/includecore.ml:43-48,
+    // where `Ctype.moregeneral` compares the two value types directly. Forcing
+    // manifest aliases up front changes Env.normalize_path side effects and
+    // shifts subsequent Ident stamps.
     let impl_ty = ctype::instance(type_ctx, impl_desc.val_type);
     let sig_ty = ctype::instance(type_ctx, expected_ty);
 
@@ -1344,6 +1347,28 @@ fn substitute_module_path(path: &Path, module_subst: &HashMap<String, Path>) -> 
     }
 }
 
+fn substitute_type_path(
+    path: &Path,
+    type_subst: &HashMap<String, Path>,
+    module_subst: &HashMap<String, Path>,
+) -> Path {
+    match path {
+        Path::Pident(id) => type_subst
+            .get(id.name())
+            .cloned()
+            .unwrap_or_else(|| path.clone()),
+        Path::Pdot(prefix, name, pos) => Path::Pdot(
+            Box::new(substitute_module_path(prefix, module_subst)),
+            name.clone(),
+            *pos,
+        ),
+        Path::Papply(functor, arg) => Path::Papply(
+            Box::new(substitute_type_path(functor, type_subst, module_subst)),
+            Box::new(substitute_module_path(arg, module_subst)),
+        ),
+    }
+}
+
 fn substitute_modtype_path(
     path: &Path,
     module_subst: &HashMap<String, Path>,
@@ -1400,6 +1425,9 @@ fn substitute_module_type_paths_no_freshen(
     module_subst: &HashMap<String, Path>,
     modtype_subst: &HashMap<String, Path>,
 ) -> ModuleType {
+    // Mirrors OCaml Subst.modtype/signature, including functor-result module
+    // substitution and nested signature component substitution.
+    // See compiler/ml/subst.ml:345-356 and compiler/ml/subst.ml:358-389.
     match mty {
         ModuleType::MtyIdent(path) => {
             ModuleType::MtyIdent(substitute_modtype_path(path, module_subst, modtype_subst))
@@ -1802,6 +1830,28 @@ fn close_matching_variant_rows_from_expected<'a>(
     use crate::types::btype;
     use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum ExpansionPathKey {
+        Ident(String),
+        Dot(Box<ExpansionPathKey>, String),
+        Apply(Box<ExpansionPathKey>, Box<ExpansionPathKey>),
+    }
+
+    fn expansion_path_key(path: &Path) -> ExpansionPathKey {
+        match path {
+            Path::Pident(id) => ExpansionPathKey::Ident(id.name().to_string()),
+            Path::Pdot(parent, name, _) => {
+                ExpansionPathKey::Dot(Box::new(expansion_path_key(parent)), name.clone())
+            }
+            Path::Papply(functor, arg) => ExpansionPathKey::Apply(
+                Box::new(expansion_path_key(functor)),
+                Box::new(expansion_path_key(arg)),
+            ),
+        }
+    }
+
+    type ExpansionPairKey = (ExpansionPathKey, usize, ExpansionPathKey, usize);
+
     fn align_rows<'a>(
         type_ctx: &'a TypeContext<'a>,
         env: &Env,
@@ -1809,13 +1859,21 @@ fn close_matching_variant_rows_from_expected<'a>(
         expected_ty: TypeExprRef,
         depth: usize,
         seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+        expanding_constr: &mut HashSet<ExpansionPairKey>,
     ) {
         // OCaml compiler/ml/includemod.ml:56-60 only substitutes the expected
         // value description before compiler/ml/includecore.ml:43-66 runs the
         // more-general check. This Rust-only row-sharing compensation must
         // therefore inspect existing representatives first and avoid forcing
-        // `Ctype.expand_head` from compiler/ml/ctype.ml:1426-1443 unless the
+        // `Ctype.expand_head` from compiler/ml/ctype.ml:1346-1372 unless the
         // current shapes cannot be aligned directly.
+        // OCaml's `moregen` records expanded physical pairs in `TypePairs`
+        // before descending (compiler/ml/ctype.ml:266-270, 2946-2967). This
+        // compensation pass can observe fresh Rust expansions outside that full
+        // path, so keep a bounded recursive-type guard around this pass only.
+        if depth > 64 {
+            return;
+        }
         let impl_ty = type_ctx.repr(impl_ty);
         let expected_ty = type_ctx.repr(expected_ty);
         if !seen.insert((impl_ty, expected_ty)) {
@@ -1824,6 +1882,34 @@ fn close_matching_variant_rows_from_expected<'a>(
 
         let impl_desc = type_ctx.get_desc(impl_ty);
         let expected_desc = type_ctx.get_desc(expected_ty);
+        let active_constr_key = match (&*impl_desc, &*expected_desc) {
+            (
+                TypeDesc::Tconstr {
+                    path: impl_path,
+                    args: impl_args,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: expected_path,
+                    args: expected_args,
+                    ..
+                },
+            ) => Some((
+                expansion_path_key(impl_path),
+                impl_args.len(),
+                expansion_path_key(expected_path),
+                expected_args.len(),
+            )),
+            _ => None,
+        };
+        let active_constr_inserted = if let Some(key) = active_constr_key.as_ref() {
+            if !expanding_constr.insert(key.clone()) {
+                return;
+            }
+            true
+        } else {
+            false
+        };
 
         match (&*impl_desc, &*expected_desc) {
             (
@@ -1845,14 +1931,31 @@ fn close_matching_variant_rows_from_expected<'a>(
                     expected_arg.typ,
                     depth + 1,
                     seen,
+                    expanding_constr,
                 );
-                align_rows(type_ctx, env, *impl_ret, *expected_ret, depth + 1, seen);
+                align_rows(
+                    type_ctx,
+                    env,
+                    *impl_ret,
+                    *expected_ret,
+                    depth + 1,
+                    seen,
+                    expanding_constr,
+                );
             }
             (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(expected_items))
                 if impl_items.len() == expected_items.len() =>
             {
                 for (impl_item, expected_item) in impl_items.iter().zip(expected_items.iter()) {
-                    align_rows(type_ctx, env, *impl_item, *expected_item, depth + 1, seen);
+                    align_rows(
+                        type_ctx,
+                        env,
+                        *impl_item,
+                        *expected_item,
+                        depth + 1,
+                        seen,
+                        expanding_constr,
+                    );
                 }
             }
             (
@@ -1877,7 +1980,15 @@ fn close_matching_variant_rows_from_expected<'a>(
                     )) =>
             {
                 for (impl_arg, expected_arg) in impl_args.iter().zip(expected_args.iter()) {
-                    align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                    align_rows(
+                        type_ctx,
+                        env,
+                        *impl_arg,
+                        *expected_arg,
+                        depth + 1,
+                        seen,
+                        expanding_constr,
+                    );
                 }
             }
             (TypeDesc::Tvariant(impl_row0), TypeDesc::Tvariant(expected_row0)) => {
@@ -1915,7 +2026,15 @@ fn close_matching_variant_rows_from_expected<'a>(
                             RowField::Rpresent(Some(impl_arg)),
                             RowField::Rpresent(Some(expected_arg)),
                         ) => {
-                            align_rows(type_ctx, env, impl_arg, expected_arg, depth + 1, seen);
+                            align_rows(
+                                type_ctx,
+                                env,
+                                impl_arg,
+                                expected_arg,
+                                depth + 1,
+                                seen,
+                                expanding_constr,
+                            );
                         }
                         (
                             RowField::Reither {
@@ -1936,6 +2055,7 @@ fn close_matching_variant_rows_from_expected<'a>(
                                     *expected_arg,
                                     depth + 1,
                                     seen,
+                                    expanding_constr,
                                 );
                             }
                         }
@@ -1989,9 +2109,25 @@ fn close_matching_variant_rows_from_expected<'a>(
                     vars: expected_vars,
                 },
             ) if impl_vars.len() == expected_vars.len() => {
-                align_rows(type_ctx, env, *impl_body, *expected_body, depth + 1, seen);
+                align_rows(
+                    type_ctx,
+                    env,
+                    *impl_body,
+                    *expected_body,
+                    depth + 1,
+                    seen,
+                    expanding_constr,
+                );
                 for (impl_var, expected_var) in impl_vars.iter().zip(expected_vars.iter()) {
-                    align_rows(type_ctx, env, *impl_var, *expected_var, depth + 1, seen);
+                    align_rows(
+                        type_ctx,
+                        env,
+                        *impl_var,
+                        *expected_var,
+                        depth + 1,
+                        seen,
+                        expanding_constr,
+                    );
                 }
             }
             (
@@ -2004,7 +2140,15 @@ fn close_matching_variant_rows_from_expected<'a>(
                 },
             ) if impl_args.len() == expected_args.len() => {
                 for (impl_arg, expected_arg) in impl_args.iter().zip(expected_args.iter()) {
-                    align_rows(type_ctx, env, *impl_arg, *expected_arg, depth + 1, seen);
+                    align_rows(
+                        type_ctx,
+                        env,
+                        *impl_arg,
+                        *expected_arg,
+                        depth + 1,
+                        seen,
+                        expanding_constr,
+                    );
                 }
             }
             _ => {
@@ -2024,14 +2168,29 @@ fn close_matching_variant_rows_from_expected<'a>(
                         expected_expanded,
                         depth + 1,
                         seen,
+                        expanding_constr,
                     );
                 }
+            }
+        }
+        if active_constr_inserted {
+            if let Some(key) = active_constr_key {
+                expanding_constr.remove(&key);
             }
         }
     }
 
     let mut seen = HashSet::new();
-    align_rows(type_ctx, env, impl_ty, expected_ty, 0, &mut seen);
+    let mut expanding_constr = HashSet::new();
+    align_rows(
+        type_ctx,
+        env,
+        impl_ty,
+        expected_ty,
+        0,
+        &mut seen,
+        &mut expanding_constr,
+    );
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.

@@ -6,7 +6,7 @@
 //! - Variable usage statistics for inlining and optimization decisions
 //! - Position tracking for safe substitution
 
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;

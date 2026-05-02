@@ -8,7 +8,7 @@
 //!
 //! These assumptions are typically ensured by alpha-renaming before substitution.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};

@@ -17,6 +17,7 @@
 #   --tella           Test tella-fusion, skipping large JSX-heavy files
 #   --tella-jsx       Test only large JSX-heavy tella files
 #   --tella-fast      Extra-fast tella mode (also skip files > 5000 bytes)
+#   --stdlib          Test the runtime/standard-library sources
 #   --tella-max-source-bytes N
 #                     In tella mode, skip source files larger than N bytes
 #   -h, --help        Show this help message
@@ -42,6 +43,9 @@
 #
 #   # Extra-fast tella run:
 #   ./scripts/test_typedtree_parity.sh --tella-fast
+#
+#   # Test runtime/standard-library sources:
+#   ./scripts/test_typedtree_parity.sh --stdlib
 
 set -e
 
@@ -53,6 +57,7 @@ FILE_ARG=""
 TELLA_MODE=false
 TELLA_JSX_MODE=false
 TELLA_MAX_SOURCE_BYTES=0
+STDLIB_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -93,13 +98,17 @@ while [[ $# -gt 0 ]]; do
             TELLA_MAX_SOURCE_BYTES=5000
             shift
             ;;
+        --stdlib)
+            STDLIB_MODE=true
+            shift
+            ;;
         --tella-max-source-bytes)
             TELLA_MODE=true
             TELLA_MAX_SOURCE_BYTES="$2"
             shift 2
             ;;
         -h|--help)
-            sed -n '10,44p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '10,48p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -126,10 +135,23 @@ RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
+STDLIB_PROJECT="$PROJECT_ROOT/packages/@rescript/runtime"
 
 # Tella mode configuration
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
-if [[ "$TELLA_MODE" == "true" ]]; then
+if [[ "$STDLIB_MODE" == "true" && "$TELLA_MODE" == "true" ]]; then
+    echo -e "Error: --stdlib cannot be combined with --tella"
+    exit 1
+fi
+
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    if [[ ! -f "$STDLIB_PROJECT/rescript.json" ]]; then
+        echo -e "Error: runtime rescript.json not found at $STDLIB_PROJECT"
+        exit 1
+    fi
+    BUILD_DIR="$STDLIB_PROJECT"
+    TEST_PROJECT="$STDLIB_PROJECT"
+elif [[ "$TELLA_MODE" == "true" ]]; then
     if [[ ! -d "$TELLA_DIR" ]]; then
         echo -e "Error: tella-fusion not found at $TELLA_DIR"
         echo "Set TELLA_DIR environment variable to the tella-fusion directory."
@@ -230,7 +252,9 @@ acquire_build_lock() {
 
 trap cleanup EXIT
 
-if [[ "$TELLA_MODE" == "true" ]]; then
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    echo -e "${BOLD}Typed Tree Parity Test (stdlib/runtime)${RESET}"
+elif [[ "$TELLA_MODE" == "true" ]]; then
     echo -e "${BOLD}Typed Tree Parity Test (tella-fusion)${RESET}"
 else
     echo -e "${BOLD}Typed Tree Parity Test${RESET}"
@@ -253,6 +277,9 @@ if [[ "$TELLA_MODE" == "true" ]]; then
         echo "Tella source-size cap: <= ${TELLA_MAX_SOURCE_BYTES} bytes"
     fi
 fi
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    echo "Stdlib project: $STDLIB_PROJECT"
+fi
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -261,7 +288,14 @@ echo ""
 echo -e "${BOLD}Step 1: Building project with rewatch...${RESET}"
 acquire_build_lock
 cd "$BUILD_DIR"
-if [[ "$TELLA_MODE" == "true" ]]; then
+if [[ "$STDLIB_MODE" == "true" ]]; then
+    # Runtime package artifacts are ignored, while JS outputs are checked in.
+    # Build without cleaning so this diagnostic mode does not delete snapshots.
+    echo "Building stdlib/runtime with OCaml bsc to generate AST artifacts..."
+    if ! RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build 2>&1 | tail -5; then
+        echo -e "${YELLOW}Warning: Some files may have failed to build${RESET}"
+    fi
+elif [[ "$TELLA_MODE" == "true" ]]; then
     # Build with OCaml bsc to ensure all .ast artifacts exist.
     # Rust parity is measured per-file below with the same compiler args.
     echo "Building with OCaml bsc to generate AST artifacts..."
@@ -291,7 +325,9 @@ if [[ -n "$FILE_ARG" ]]; then
         echo "$FILE_ARG" > "$TEMP_DIR/files.txt"
     else
         # Treat as a pattern
-        if [[ "$TELLA_MODE" == "true" ]]; then
+        if [[ "$STDLIB_MODE" == "true" ]]; then
+            find "$STDLIB_PROJECT" -maxdepth 1 \( -name "*.res" -o -name "*.resi" \) -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        elif [[ "$TELLA_MODE" == "true" ]]; then
             find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
                 -name "*.res" -type f 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
         else
@@ -303,6 +339,9 @@ if [[ -n "$FILE_ARG" ]]; then
             exit 1
         fi
     fi
+elif [[ "$STDLIB_MODE" == "true" ]]; then
+    # Include interfaces in typedtree parity; bsc prints typed signatures for .iast files.
+    find "$STDLIB_PROJECT" -maxdepth 1 \( -name "*.res" -o -name "*.resi" \) -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 elif [[ "$TELLA_MODE" == "true" ]]; then
     # Find all .res files in tella webapp source directories
     find "$TEST_PROJECT/src" "$TEST_PROJECT/lambda/src" "$TEST_PROJECT/chrome/src" "$TEST_PROJECT/scripts" \
@@ -381,7 +420,7 @@ mkdir -p "$RESULTS_DIR"
 mkdir -p "$TEMP_DIR/diffs"
 
 # Export variables for parallel execution
-export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE CACHE_DIR
+export OCAML_BSC RUST_BSC RESCRIPT_CLI TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE RUST_AVAILABLE PROJECT_ROOT RESULTS_DIR TEST_PROJECT TELLA_MODE STDLIB_MODE CACHE_DIR
 
 # Function to test a single file - writes results to a file
 test_single_file() {

@@ -4,7 +4,7 @@
 //! sites, eliminating the intermediate function wrapper. Also tracks used/dead
 //! status for variable declarations.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, UsedStats};
@@ -28,15 +28,28 @@ fn tailcall_inline_program(program: Program) -> Program {
         block: inliner.transform_block(program.block),
         exports: program.exports,
         export_set: program.export_set,
+        name_reservations: program.name_reservations,
     };
     apply_tailcall_used_stats_block(&mut program.block, &inliner.statuses);
     program
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct TailcallInlineState {
-    decls: HashMap<Ident, VariableDeclaration>,
+    inline_decls: HashMap<Ident, InlineFunctionDecl>,
     statuses: HashMap<Ident, UsedStats>,
+    active_decls: Vec<Ident>,
+}
+
+#[derive(Debug)]
+struct DeclUsageInfo {
+    pure: bool,
+}
+
+#[derive(Debug)]
+struct InlineFunctionDecl {
+    params: Vec<Ident>,
+    body: Block,
 }
 
 impl TailcallInlineState {
@@ -46,19 +59,18 @@ impl TailcallInlineState {
         collect_tailcall_use_counts_block(&program.block, &mut decls, &mut counts);
 
         let mut statuses = HashMap::with_capacity(decls.len());
-        for (ident, decl) in &decls {
+        for (ident, info) in &decls {
             let count = counts.get(ident).copied().unwrap_or(0);
             let exported = program.export_set.contains(ident);
-            let pure = decl.value.as_ref().is_some_and(js_expr_no_side_effects);
             let status = if exported {
                 UsedStats::Exported
             } else if count == 0 {
-                if pure {
+                if info.pure {
                     UsedStats::DeadPure
                 } else {
                     UsedStats::DeadNonPure
                 }
-            } else if count == 1 && pure {
+            } else if count == 1 && info.pure {
                 UsedStats::OncePure
             } else {
                 UsedStats::Used
@@ -66,24 +78,44 @@ impl TailcallInlineState {
             statuses.insert(ident.clone(), status);
         }
 
-        Self { decls, statuses }
+        // OCaml's stats table keeps the existing variable declarations by
+        // pointer (`compiler/core/js_pass_get_used.ml:55-77`) and the tailcall
+        // pass only needs function bodies for the Once_pure inline branch
+        // (`compiler/core/js_pass_tailcall_inline.ml:160-192`). Keep Rust's
+        // counted metadata lightweight, then clone only those inlineable
+        // function bodies instead of cloning every JS declaration tree.
+        let mut inline_decls = HashMap::new();
+        collect_once_pure_inline_decls_block(&program.block, &statuses, &mut inline_decls);
+
+        Self {
+            inline_decls,
+            statuses,
+            active_decls: Vec::new(),
+        }
     }
 
     fn transform_block(&mut self, block: Block) -> Block {
-        if block.len() == 1 {
-            if let Some(inlined) = self.try_inline_single_return_block(&block[0]) {
-                return inlined;
+        let len = block.len();
+        let mut transformed = Vec::with_capacity(len);
+        for (index, stmt) in block.into_iter().enumerate() {
+            // OCaml recurses as `x :: xs -> self.statement x :: self.block xs`
+            // before matching the one-statement tail-call inline case
+            // (`compiler/core/js_pass_tailcall_inline.ml:130-159,232`).
+            // Check the final suffix after preceding declarations have updated
+            // `inline_decls`, so `let aux; return aux(...)` can inline.
+            if index + 1 == len {
+                match self.try_inline_single_return_statement(stmt) {
+                    Ok(inlined) => {
+                        transformed.extend(inlined);
+                    }
+                    Err(stmt) => {
+                        transformed.extend(self.transform_statement(stmt));
+                    }
+                }
+            } else {
+                transformed.extend(self.transform_statement(stmt));
             }
         }
-
-        let mut iter = block.into_iter();
-        let Some(first) = iter.next() else {
-            return Vec::new();
-        };
-        let rest: Block = iter.collect();
-
-        let mut transformed = self.transform_statement(first);
-        transformed.extend(self.transform_block(rest));
         transformed
     }
 
@@ -96,7 +128,9 @@ impl TailcallInlineState {
             }],
             StatementDesc::Variable(mut decl) => {
                 if let Some(value) = decl.value.take() {
+                    self.active_decls.push(decl.ident.clone());
                     decl.value = Some(self.transform_expression(value));
+                    self.active_decls.pop();
                 }
 
                 let status = self
@@ -104,9 +138,17 @@ impl TailcallInlineState {
                     .get(&decl.ident)
                     .copied()
                     .unwrap_or(UsedStats::Used);
+                // OCaml rewrites a variable declaration first, then stores the
+                // rewritten declaration back into the stats table
+                // (`compiler/core/js_pass_tailcall_inline.ml:120-129`). Do the
+                // same for inlineable function bodies without cloning unrelated
+                // declarations.
+                if status == UsedStats::OncePure
+                    && let Some(inline_decl) = inline_function_decl_from_variable(&decl)
+                {
+                    self.inline_decls.insert(decl.ident.clone(), inline_decl);
+                }
                 decl.ident_info.used_stats = status;
-                self.decls.insert(decl.ident.clone(), decl.clone());
-
                 match status {
                     UsedStats::DeadPure => vec![],
                     UsedStats::DeadNonPure => decl
@@ -391,82 +433,125 @@ impl TailcallInlineState {
         Expression { desc, comment }
     }
 
-    fn try_inline_single_return_block(&mut self, stmt: &Statement) -> Option<Block> {
-        let StatementDesc::Return(expr) = &stmt.desc else {
-            return None;
+    fn try_inline_single_return_statement(&mut self, stmt: Statement) -> Result<Block, Statement> {
+        let Statement { desc, comment } = stmt;
+        let StatementDesc::Return(expr) = desc else {
+            return Err(Statement { desc, comment });
         };
-        let ExpressionDesc::Call(func, args, _) = &expr.desc else {
-            return None;
+        let Expression {
+            desc: expr_desc,
+            comment: expr_comment,
+        } = expr;
+        let ExpressionDesc::Call(func, args, info) = expr_desc else {
+            return Err(Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: expr_desc,
+                    comment: expr_comment,
+                }),
+                comment,
+            });
         };
 
-        match &func.desc {
-            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => self.inline_named_call(id, args),
+        let Expression {
+            desc: func_desc,
+            comment: func_comment,
+        } = *func;
+        match func_desc {
+            ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) => {
+                match self.inline_named_call_owned(&id, args) {
+                    Ok(block) => Ok(block),
+                    Err(args) => Err(Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Call(
+                                Box::new(Expression {
+                                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                                    comment: func_comment,
+                                }),
+                                args,
+                                info,
+                            ),
+                            comment: expr_comment,
+                        }),
+                        comment,
+                    }),
+                }
+            }
             ExpressionDesc::Fun {
                 is_method: false,
                 params,
                 body,
+                env: _,
+                return_unit: _,
                 async_: false,
                 directive: None,
-                ..
-            } if params.len() == args.len() => Some(self.inline_function_call(params, body, args)),
-            _ => None,
+            } if params.len() == args.len() => {
+                Ok(self.inline_function_call_owned(params, body, args))
+            }
+            func_desc => Err(Statement {
+                desc: StatementDesc::Return(Expression {
+                    desc: ExpressionDesc::Call(
+                        Box::new(Expression {
+                            desc: func_desc,
+                            comment: func_comment,
+                        }),
+                        args,
+                        info,
+                    ),
+                    comment: expr_comment,
+                }),
+                comment,
+            }),
         }
     }
 
-    fn inline_named_call(&mut self, ident: &Ident, args: &[Expression]) -> Option<Block> {
+    fn inline_named_call_owned(
+        &mut self,
+        ident: &Ident,
+        args: Vec<Expression>,
+    ) -> Result<Block, Vec<Expression>> {
         if self.statuses.get(ident).copied() != Some(UsedStats::OncePure) {
-            return None;
+            return Err(args);
+        }
+        // OCaml keeps the transformed declaration in the stats table while
+        // walking blocks, which avoids consuming a recursive function while
+        // traversing its own body (`compiler/core/js_pass_tailcall_inline.ml:81-105`,
+        // `compiler/core/js_pass_tailcall_inline.ml:120-129`). Only inline the
+        // stored declaration at an outer tail-call site (`compiler/core/js_pass_tailcall_inline.ml:150-192`).
+        if self.active_decls.iter().any(|active| active.same(ident)) {
+            return Err(args);
         }
 
-        let decl = self.decls.get(ident)?.clone();
-        if !is_lexical_binding_kind(decl.property) {
-            return None;
-        }
-
-        let Some(Expression {
-            desc:
-                ExpressionDesc::Fun {
-                    is_method: false,
-                    params,
-                    body,
-                    async_: false,
-                    directive: None,
-                    ..
-                },
-            ..
-        }) = decl.value
-        else {
-            return None;
+        let Some(decl) = self.inline_decls.remove(ident) else {
+            return Err(args);
         };
 
-        if params.len() != args.len() {
-            return None;
+        if decl.params.len() != args.len() {
+            return Err(args);
         }
 
         self.statuses.insert(ident.clone(), UsedStats::DeadPure);
-        Some(self.inline_function_call(&params, &body, args))
+        Ok(self.inline_function_call_owned(decl.params, decl.body, args))
     }
 
-    fn inline_function_call(
+    fn inline_function_call_owned(
         &mut self,
-        params: &[Ident],
-        body: &Block,
-        args: &[Expression],
+        params: Vec<Ident>,
+        body: Block,
+        args: Vec<Expression>,
     ) -> Block {
-        let processed_body = self.transform_block(body.clone());
-        let immutable_mask = immutable_param_mask(params, &processed_body);
+        let processed_body = self.transform_block(body);
+        let immutable_mask = immutable_param_mask(&params, &processed_body);
         let args = args
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|arg| self.transform_expression(arg))
             .collect();
-        inline_tailcall_call(&immutable_mask, params, args, processed_body)
+        inline_tailcall_call(&immutable_mask, &params, args, processed_body)
     }
 }
 
 fn collect_tailcall_use_counts_block(
     block: &Block,
-    decls: &mut HashMap<Ident, VariableDeclaration>,
+    decls: &mut HashMap<Ident, DeclUsageInfo>,
     counts: &mut HashMap<Ident, usize>,
 ) {
     for stmt in block {
@@ -476,13 +561,18 @@ fn collect_tailcall_use_counts_block(
 
 fn collect_tailcall_use_counts_statement(
     stmt: &Statement,
-    decls: &mut HashMap<Ident, VariableDeclaration>,
+    decls: &mut HashMap<Ident, DeclUsageInfo>,
     counts: &mut HashMap<Ident, usize>,
 ) {
     match &stmt.desc {
         StatementDesc::Block(block) => collect_tailcall_use_counts_block(block, decls, counts),
         StatementDesc::Variable(decl) => {
-            decls.insert(decl.ident.clone(), decl.clone());
+            decls.insert(
+                decl.ident.clone(),
+                DeclUsageInfo {
+                    pure: decl.value.as_ref().is_some_and(js_expr_no_side_effects),
+                },
+            );
             if let Some(value) = &decl.value {
                 collect_tailcall_use_counts_expression(value, decls, counts);
             }
@@ -544,7 +634,7 @@ fn collect_tailcall_use_counts_statement(
 
 fn collect_tailcall_use_counts_expression(
     expr: &Expression,
-    decls: &mut HashMap<Ident, VariableDeclaration>,
+    decls: &mut HashMap<Ident, DeclUsageInfo>,
     counts: &mut HashMap<Ident, usize>,
 ) {
     match &expr.desc {
@@ -628,6 +718,204 @@ fn collect_tailcall_use_counts_expression(
             }
             for (_, value) in props {
                 collect_tailcall_use_counts_expression(value, decls, counts);
+            }
+        }
+    }
+}
+
+fn inline_function_decl_from_variable(decl: &VariableDeclaration) -> Option<InlineFunctionDecl> {
+    if !is_lexical_binding_kind(decl.property) {
+        return None;
+    }
+
+    let Some(Expression {
+        desc:
+            ExpressionDesc::Fun {
+                is_method: false,
+                params,
+                body,
+                async_: false,
+                directive: None,
+                ..
+            },
+        ..
+    }) = &decl.value
+    else {
+        return None;
+    };
+
+    Some(InlineFunctionDecl {
+        params: params.clone(),
+        body: body.clone(),
+    })
+}
+
+fn collect_once_pure_inline_decls_block(
+    block: &Block,
+    statuses: &HashMap<Ident, UsedStats>,
+    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
+) {
+    for stmt in block {
+        collect_once_pure_inline_decls_statement(stmt, statuses, inline_decls);
+    }
+}
+
+fn collect_once_pure_inline_decls_statement(
+    stmt: &Statement,
+    statuses: &HashMap<Ident, UsedStats>,
+    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
+) {
+    match &stmt.desc {
+        StatementDesc::Block(block) => {
+            collect_once_pure_inline_decls_block(block, statuses, inline_decls)
+        }
+        StatementDesc::Variable(decl) => {
+            if statuses.get(&decl.ident).copied() == Some(UsedStats::OncePure)
+                && let Some(inline_decl) = inline_function_decl_from_variable(decl)
+            {
+                inline_decls.insert(decl.ident.clone(), inline_decl);
+            }
+            if let Some(value) = &decl.value {
+                collect_once_pure_inline_decls_expression(value, statuses, inline_decls);
+            }
+        }
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            collect_once_pure_inline_decls_expression(expr, statuses, inline_decls);
+        }
+        StatementDesc::If(cond, then_block, else_block) => {
+            collect_once_pure_inline_decls_expression(cond, statuses, inline_decls);
+            collect_once_pure_inline_decls_block(then_block, statuses, inline_decls);
+            collect_once_pure_inline_decls_block(else_block, statuses, inline_decls);
+        }
+        StatementDesc::While(_, cond, body) => {
+            collect_once_pure_inline_decls_expression(cond, statuses, inline_decls);
+            collect_once_pure_inline_decls_block(body, statuses, inline_decls);
+        }
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
+            if let Some(start) = start {
+                collect_once_pure_inline_decls_expression(start, statuses, inline_decls);
+            }
+            collect_once_pure_inline_decls_expression(finish, statuses, inline_decls);
+            collect_once_pure_inline_decls_block(body, statuses, inline_decls);
+        }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            collect_once_pure_inline_decls_expression(iterable, statuses, inline_decls);
+            collect_once_pure_inline_decls_block(body, statuses, inline_decls);
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            collect_once_pure_inline_decls_expression(test, statuses, inline_decls);
+            for (_, clause) in clauses {
+                collect_once_pure_inline_decls_block(&clause.body, statuses, inline_decls);
+            }
+            if let Some(default) = default {
+                collect_once_pure_inline_decls_block(default, statuses, inline_decls);
+            }
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            collect_once_pure_inline_decls_expression(test, statuses, inline_decls);
+            for clause in clauses {
+                collect_once_pure_inline_decls_block(&clause.clause.body, statuses, inline_decls);
+            }
+            if let Some(default) = default {
+                collect_once_pure_inline_decls_block(default, statuses, inline_decls);
+            }
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            collect_once_pure_inline_decls_block(body, statuses, inline_decls);
+            if let Some((_, block)) = catch {
+                collect_once_pure_inline_decls_block(block, statuses, inline_decls);
+            }
+            if let Some(block) = finally {
+                collect_once_pure_inline_decls_block(block, statuses, inline_decls);
+            }
+        }
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => {}
+    }
+}
+
+fn collect_once_pure_inline_decls_expression(
+    expr: &Expression,
+    statuses: &HashMap<Ident, UsedStats>,
+    inline_decls: &mut HashMap<Ident, InlineFunctionDecl>,
+) {
+    match &expr.desc {
+        ExpressionDesc::Var(_)
+        | ExpressionDesc::Undefined { .. }
+        | ExpressionDesc::Null
+        | ExpressionDesc::Bool(_)
+        | ExpressionDesc::Str { .. }
+        | ExpressionDesc::RawJsCode(_)
+        | ExpressionDesc::Number(_) => {}
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::Typeof(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::OptionalBlock(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::New(inner, None) => {
+            collect_once_pure_inline_decls_expression(inner, statuses, inline_decls)
+        }
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            collect_once_pure_inline_decls_expression(left, statuses, inline_decls);
+            collect_once_pure_inline_decls_expression(right, statuses, inline_decls);
+        }
+        ExpressionDesc::Cond(test, consequent, alternate) => {
+            collect_once_pure_inline_decls_expression(test, statuses, inline_decls);
+            collect_once_pure_inline_decls_expression(consequent, statuses, inline_decls);
+            collect_once_pure_inline_decls_expression(alternate, statuses, inline_decls);
+        }
+        ExpressionDesc::Call(func, args, _) => {
+            collect_once_pure_inline_decls_expression(func, statuses, inline_decls);
+            for arg in args {
+                collect_once_pure_inline_decls_expression(arg, statuses, inline_decls);
+            }
+        }
+        ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_once_pure_inline_decls_expression(tag, statuses, inline_decls);
+            for string in strings {
+                collect_once_pure_inline_decls_expression(string, statuses, inline_decls);
+            }
+            for value in values {
+                collect_once_pure_inline_decls_expression(value, statuses, inline_decls);
+            }
+        }
+        ExpressionDesc::New(target, Some(args)) => {
+            collect_once_pure_inline_decls_expression(target, statuses, inline_decls);
+            for arg in args {
+                collect_once_pure_inline_decls_expression(arg, statuses, inline_decls);
+            }
+        }
+        ExpressionDesc::Fun { body, .. } => {
+            collect_once_pure_inline_decls_block(body, statuses, inline_decls)
+        }
+        ExpressionDesc::Array(items, _) => {
+            for item in items {
+                collect_once_pure_inline_decls_expression(item, statuses, inline_decls);
+            }
+        }
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            for item in items {
+                collect_once_pure_inline_decls_expression(item, statuses, inline_decls);
+            }
+            collect_once_pure_inline_decls_expression(tag, statuses, inline_decls);
+        }
+        ExpressionDesc::Object(dup, props) => {
+            if let Some(dup) = dup {
+                collect_once_pure_inline_decls_expression(dup, statuses, inline_decls);
+            }
+            for (_, value) in props {
+                collect_once_pure_inline_decls_expression(value, statuses, inline_decls);
             }
         }
     }

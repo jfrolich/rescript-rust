@@ -18,6 +18,18 @@ use super::decl::{
 };
 use super::path::Path;
 
+fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
+    fn root_ident(path: &Path) -> Option<&Ident> {
+        match path {
+            Path::Pident(id) => Some(id),
+            Path::Pdot(prefix, _, _) => root_ident(prefix),
+            Path::Papply(_, _) => None,
+        }
+    }
+
+    root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
+}
+
 fn add_type_constructors(
     constructors: &mut HashMap<String, Vec<ConstructorDescription>>,
     access_path: &Path,
@@ -101,9 +113,31 @@ fn add_type_constructors(
         let cstr_res = if let Some(res_ty) = cd.cd_res {
             let desc = ctx.get_desc(res_ty);
             match &*desc {
-                super::type_expr::TypeDesc::Tconstr { args, .. } => {
+                super::type_expr::TypeDesc::Tconstr { path, args, .. } => {
+                    let old_result_module_path = path.parent();
+                    let new_result_module_path = type_path.parent();
                     let args = args.clone();
                     drop(desc);
+                    if let (Some(old_prefix), Some(new_prefix)) =
+                        (old_result_module_path, new_result_module_path)
+                    {
+                        if !old_prefix.same(&new_prefix) {
+                            // OCaml compiler/ml/env.ml:1542-1547 computes
+                            // constructors from `decl' = Subst.type_declaration
+                            // sub decl`, so the GADT result arguments have
+                            // already gone through compiler/ml/subst.ml:303-309.
+                            // Mirror that component-prefix substitution before
+                            // exposing the constructor description table.
+                            for arg in &args {
+                                crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix_pub(
+                                    *arg,
+                                    &old_prefix,
+                                    &new_prefix,
+                                    ctx,
+                                );
+                            }
+                        }
+                    }
                     ctx.new_generic_constr(type_path.clone(), args)
                 }
                 _ => {
@@ -147,14 +181,14 @@ fn add_type_constructors(
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
-    access_path: Path,
-    signature: Signature,
-    values: HashMap<String, (usize, usize)>,
-    constructors: HashMap<String, Vec<ConstructorDescription>>,
-    types: HashMap<String, usize>,
-    modules: HashMap<String, (usize, usize)>,
-    modtypes: HashMap<String, usize>,
-    component_modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
+    access_path: Arc<Path>,
+    signature: Arc<Signature>,
+    values: Arc<HashMap<String, (usize, usize)>>,
+    constructors: Arc<HashMap<String, Vec<ConstructorDescription>>>,
+    types: Arc<HashMap<String, usize>>,
+    modules: Arc<HashMap<String, (usize, usize)>>,
+    modtypes: Arc<HashMap<String, usize>>,
+    component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
     // env.ml:568-571/865-882 forces those thunks at most once per component
@@ -163,7 +197,7 @@ pub(crate) struct QualifiedModuleComponents {
     // those clones to preserve the same lazy identifier-renaming order.
     qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
     qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
-    child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+    child_components: Arc<HashMap<String, (usize, Arc<StoredModuleComponents>)>>,
 }
 
 fn build_child_components_from_signature(
@@ -403,30 +437,30 @@ impl QualifiedModuleComponents {
         }
 
         Self {
-            access_path,
-            signature,
-            values,
-            constructors,
-            types,
-            modules,
-            modtypes,
-            component_modtypes,
+            access_path: Arc::new(access_path),
+            signature: Arc::new(signature),
+            values: Arc::new(values),
+            constructors: Arc::new(constructors),
+            types: Arc::new(types),
+            modules: Arc::new(modules),
+            modtypes: Arc::new(modtypes),
+            component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
-            child_components,
+            child_components: Arc::new(child_components),
         }
     }
 
     pub(crate) fn access_path(&self) -> &Path {
-        &self.access_path
+        self.access_path.as_ref()
     }
 
     pub(crate) fn signature(&self) -> &[SignatureItem] {
-        &self.signature
+        self.signature.as_slice()
     }
 
     pub(crate) fn cloned_signature(&self) -> Signature {
-        self.signature.clone()
+        self.signature.as_ref().clone()
     }
 
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
@@ -475,6 +509,18 @@ impl QualifiedModuleComponents {
         if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
             return Some((runtime_pos, id, md));
         }
+        // OCaml compiler/ml/env.ml:1513-1514 stores component tables as lazy
+        // values, and env.ml:568-571/865-882 reuses the forced module-decl thunk
+        // for the selected parent path. Rust can reach the same parent through
+        // separate component views (`Stdlib.JSON` and `Stdlib_JSON`), so share the
+        // forced declaration at the TypeContext level to preserve the same stamp
+        // consumption.
+        if let Some((id, md)) = ctx.find_qualified_module_decl(self.access_path.as_ref(), name) {
+            self.qualified_modules
+                .borrow_mut()
+                .insert(name.to_string(), (id.clone(), md.clone()));
+            return Some((runtime_pos, id, md));
+        }
 
         let (id, mut md) = match &self.signature[idx] {
             SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
@@ -494,6 +540,7 @@ impl QualifiedModuleComponents {
         self.qualified_modules
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), md.clone()));
+        ctx.register_qualified_module_decl(self.access_path.as_ref(), name, id.clone(), md.clone());
         Some((runtime_pos, id, md))
     }
 
@@ -527,14 +574,12 @@ fn qualified_submodule_access_path(
     parent_access_path: &Path,
     module_name: &str,
     runtime_pos: usize,
-    _md: &ModuleDeclaration,
+    md: &ModuleDeclaration,
 ) -> Path {
-    if parent_access_path.head().is_persistent() || parent_access_path.head().stamp() == 0 {
-        // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents` derives every
-        // child module path from the selected component root. Even if the
-        // child declaration is an alias to a flattened unit, access through
-        // `AWS.DocumentClient` keeps the path rooted at `AWS`.
-        Path::pdot(parent_access_path.clone(), module_name.to_string())
+    if path_non_apply_root_is_persistent_or_global(parent_access_path) {
+        md.md_path
+            .clone()
+            .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
     } else {
         Path::pdot_pos(
             parent_access_path.clone(),
@@ -553,25 +598,14 @@ fn build_local_module_components<'a>(
 ) -> Option<QualifiedModuleComponents> {
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
-        // component tables, and env.ml:1441-1444 implements every
-        // `Mty_alias` case by forcing `find_module path env`. Preserve that
-        // alias-target force separately from resolving the alias signature,
-        // because env.ml:865-882/1568 run identifier-renaming side effects
-        // that later typedtree binder stamps observe.
+        // component tables. Dotted aliases are resolved by `resolve_module_type`
+        // below through env.ml:1440-1446's `find_module` path; do not force the
+        // env.ml:1568 module-declaration thunk early just to descend through
+        // env.ml:1573-1578 child components.
         match alias_path {
-            Path::Pdot(parent, name, _) => {
-                let _ = crate::types::typecore::lookup_module_in_resolved_path(
-                    parent, name, env, pers_env, ctx,
-                );
-            }
+            Path::Pdot(_, _, _) => {}
             Path::Pident(id) if id.is_persistent() => {
-                if ctx.has_raw_module_sig(id.name()) {
-                    // OCaml compiler/ml/env.ml:669-678 keeps `ps_comps`
-                    // separate from env.ml:865-882's `ps_sig` force. If Rust
-                    // already has the raw component table for an alias target,
-                    // let exact persistent component lookup use that path
-                    // instead of eagerly freshening the whole signature.
-                } else if let Some(pers) = pers_env.as_mut() {
+                if let Some(pers) = pers_env.as_mut() {
                     let _ = pers.get_renamed_sig(id.name(), ctx);
                 }
             }
@@ -579,8 +613,7 @@ fn build_local_module_components<'a>(
             Path::Papply(_, _) => {}
         }
     }
-    let resolved = env.resolve_module_type(&md.md_type, pers_env, ctx);
-    let (raw_sig, resolved_name) = resolved?;
+    let (raw_sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
     let qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
         access_path,
         &md.md_type,
@@ -755,12 +788,28 @@ impl StoredModuleComponents {
                     // thunk and freshens child binders before OCaml does.
                     module_decl.md_type = md_type;
                 } else {
-                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                        &mut module_decl.md_type,
-                        parent_sig,
-                        parent_access_path,
-                        ctx,
+                    let keep_alias_target_for_scrape = matches!(
+                        &module_decl.md_type,
+                        super::decl::ModuleType::MtyAlias(_, Path::Pdot(parent, _, _))
+                            if !parent.same(parent_access_path)
                     );
+                    if !keep_alias_target_for_scrape {
+                        // OCaml compiler/ml/env.ml:1573-1578 stores child
+                        // component thunks with the child module type, and
+                        // env.ml:1517 scrapes aliases before env.ml:1530-1538
+                        // prefixes the selected component path. Preserve
+                        // already-qualified alias targets such as
+                        // `Stdlib_Date.UTC`/`Js.Json.Kind` until scraping;
+                        // substituting them to the selected path first turns
+                        // the alias into a self-reference and skips the
+                        // component-forcing side effects OCaml observes.
+                        crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
+                            &mut module_decl.md_type,
+                            parent_sig,
+                            parent_access_path,
+                            ctx,
+                        );
+                    }
                 }
             }
             let components = build_local_module_components(

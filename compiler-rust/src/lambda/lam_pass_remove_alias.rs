@@ -4,25 +4,25 @@
 //! and boolean-constant folding using the `ident_tbl` populated by
 //! `Lam_pass_collect.collect_info`.
 //!
-//! Cross-module inlining (`Lam_compile_env.query_external_id_info`) has no
-//! Rust counterpart yet, so the corresponding `Lapply` arm short-circuits to
-//! the default fallthrough. This mirrors what OCaml does whenever the
-//! external info is missing — the application is left intact.
-//!
 //! Every line below must trace to a specific line in OCaml. No invented
 //! logic.
 
+use crate::ident::Ident;
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
 use crate::lambda::lam_closure::is_closed_with_map;
-use crate::lambda::lam_compat::Comparison;
+use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_compile_context::{BoxedNullable, IdKind, IdentTable, LamStats, RecFlag};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
-use crate::lambda::{Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
+
+/// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
+/// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:143-159).
+pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, bool, &str) -> Option<Lambda> + 'a;
 
 /// Direct port of `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +86,28 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
     }
 }
 
+fn module_field_apply_target(lam: &Lambda) -> Option<(&Ident, bool, &str)> {
+    let Lambda::Lprim(PrimInfo {
+        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+        args,
+        ..
+    }) = lam
+    else {
+        return None;
+    };
+    let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+        return None;
+    };
+    Some((id, *dynamic_import, name.as_str()))
+}
+
+fn external_inline_args_are_allowed(args: &[Lambda], ident_tbl: &IdentTable) -> bool {
+    args.iter().all(|arg| match arg {
+        Lambda::Lvar(param) => !matches!(ident_tbl.get(param), Some(IdKind::Parameter)),
+        _ => true,
+    })
+}
+
 /// Direct port of `Lam_pass_remove_alias.simplify_alias`
 /// (lam_pass_remove_alias.ml:50-290).
 ///
@@ -95,6 +117,24 @@ fn lam_not(loc: Location, x: Lambda) -> Lambda {
 /// Without this, blocks introduced by beta-reduced functor arguments remain
 /// opaque to subsequent `field_flatten_get` lookups.
 pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
+    simplify_alias_owned(meta, lam.clone())
+}
+
+/// Owned form of [`simplify_alias`]. The behavioral branch order remains the
+/// OCaml `Lam_pass_remove_alias.simplify_alias` order
+/// (compiler/core/lam_pass_remove_alias.ml:50-290); only the Rust tree plumbing
+/// changes so callers that already own the previous pass output do not clone it
+/// before this pass.
+pub fn simplify_alias_owned(meta: &mut LamStats, lam: Lambda) -> Lambda {
+    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    simplify_alias_with_external_inline_owned(meta, lam, &mut no_external_inline)
+}
+
+pub fn simplify_alias_with_external_inline_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    external_inline: &mut ExternalInlineResolver<'_>,
+) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
     let result = Simplifier {
@@ -102,8 +142,9 @@ pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
         export_idents: &export_idents,
         id_gen: &id_gen,
         jsx_preserve: false,
+        external_inline,
     }
-    .simpl(lam);
+    .simpl_owned(lam);
     meta.export_idents = export_idents;
     result
 }
@@ -112,6 +153,32 @@ pub fn simplify_alias(meta: &mut LamStats, lam: &Lambda) -> Lambda {
 /// of OCaml's `Js_config.jsx_preserve` global. The 7432-tagged Pjs_call arm
 /// inside `simpl` only fires when this flag is true (lam_pass_remove_alias.ml:54-62).
 pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: bool) -> Lambda {
+    simplify_alias_with_jsx_owned(meta, lam.clone(), jsx_preserve)
+}
+
+/// Owned form of [`simplify_alias_with_jsx`], following
+/// `compiler/core/lam_pass_remove_alias.ml:50-290` with the same JSX preserve
+/// guard at `lam_pass_remove_alias.ml:54-62`.
+pub fn simplify_alias_with_jsx_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    jsx_preserve: bool,
+) -> Lambda {
+    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    simplify_alias_with_jsx_and_external_inline_owned(
+        meta,
+        lam,
+        jsx_preserve,
+        &mut no_external_inline,
+    )
+}
+
+pub fn simplify_alias_with_jsx_and_external_inline_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    jsx_preserve: bool,
+    external_inline: &mut ExternalInlineResolver<'_>,
+) -> Lambda {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
     let result = Simplifier {
@@ -119,23 +186,472 @@ pub fn simplify_alias_with_jsx(meta: &mut LamStats, lam: &Lambda, jsx_preserve: 
         export_idents: &export_idents,
         id_gen: &id_gen,
         jsx_preserve,
+        external_inline,
     }
-    .simpl(lam);
+    .simpl_owned(lam);
     meta.export_idents = export_idents;
     result
 }
 
 struct Simplifier<'a> {
     ident_tbl: &'a mut crate::lambda::lam_compile_context::IdentTable,
-    export_idents: &'a std::collections::HashSet<crate::ident::Ident>,
+    export_idents: &'a ahash::AHashSet<crate::ident::Ident>,
     /// Shared stamp counter used for `Ident.rename` during beta reduction.
     /// Mirrors OCaml's global `Ident.rename` counter so fresh stamps never
     /// collide across independent beta reductions of the same function.
     id_gen: &'a crate::context::IdGenerator,
     jsx_preserve: bool,
+    external_inline: &'a mut ExternalInlineResolver<'a>,
 }
 
 impl<'a> Simplifier<'a> {
+    /// Owned port of `Lam_pass_remove_alias.simplify_alias`
+    /// (compiler/core/lam_pass_remove_alias.ml:50-290). Each branch mirrors
+    /// the borrowed `simpl` walker below but consumes unchanged Rust nodes.
+    fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
+        match lam {
+            // lam_pass_remove_alias.ml:53
+            Lambda::Lvar(_) => lam,
+
+            // lam_pass_remove_alias.ml:54-62 — JSX preserve guard for jsx/jsxs.
+            Lambda::Lprim(PrimInfo {
+                primitive,
+                args,
+                loc,
+            }) if self.jsx_preserve
+                && matches!(
+                    &primitive,
+                    Primitive::PjsCall { prim_name, .. }
+                        if prim_name == "jsx" || prim_name == "jsxs"
+                )
+                && matches!(
+                    args.first(),
+                    Some(Lambda::Lprim(PrimInfo {
+                        primitive: Primitive::Pfield(_, _),
+                        ..
+                    }))
+                ) =>
+            {
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut iter = args.into_iter();
+                if let Some(first) = iter.next() {
+                    new_args.push(first);
+                }
+                new_args.extend(iter.map(|arg| self.simpl_owned(arg)));
+                Lambda::prim(primitive, new_args, loc)
+            }
+
+            // lam_pass_remove_alias.ml:63-71 — Pfield [arg] with a known Lvar.
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pfield(i, info),
+                mut args,
+                loc,
+            }) if args.len() == 1 => {
+                let simplified = self.simpl_owned(args.pop().expect("checked one Pfield arg"));
+                match simplified {
+                    Lambda::Lvar(v) => {
+                        let fallback_v = v.clone();
+                        let fallback_info = info.clone();
+                        field_flatten_get(
+                            move || {
+                                Lambda::prim(
+                                    Primitive::Pfield(i, fallback_info),
+                                    vec![Lambda::Lvar(fallback_v)],
+                                    loc,
+                                )
+                            },
+                            &v,
+                            i,
+                            &info,
+                            self.ident_tbl,
+                        )
+                    }
+                    other => Lambda::prim(Primitive::Pfield(i, info), vec![other], loc),
+                }
+            }
+
+            // lam_pass_remove_alias.ml:72-79 — unwrap known optional blocks.
+            Lambda::Lprim(PrimInfo {
+                primitive: p @ (Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest),
+                mut args,
+                loc,
+            }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {
+                let Lambda::Lvar(v) = args.pop().expect("checked one optional arg") else {
+                    unreachable!()
+                };
+                match self.ident_tbl.get(&v).cloned() {
+                    Some(IdKind::OptionalBlock(l, _)) => l,
+                    _ if matches!(p, Primitive::PvalFromOptionNotNest) => Lambda::Lvar(v),
+                    _ => Lambda::Lprim(PrimInfo {
+                        primitive: p,
+                        args: vec![Lambda::Lvar(v)],
+                        loc,
+                    }),
+                }
+            }
+
+            // lam_pass_remove_alias.ml:80
+            Lambda::LglobalModule(_, _) => lam,
+
+            // lam_pass_remove_alias.ml:81-82 — fallback Lprim.
+            Lambda::Lprim(PrimInfo {
+                primitive,
+                args,
+                loc,
+            }) => Lambda::prim(
+                primitive,
+                args.into_iter().map(|arg| self.simpl_owned(arg)).collect(),
+                loc,
+            ),
+
+            // lam_pass_remove_alias.ml:83-117 — Lifthenelse special cases,
+            // followed by the generic boolean simplification fallback.
+            Lambda::LifThenElse(cond, then_, else_) => match *cond {
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PisNotNone,
+                    mut args,
+                    loc,
+                }) if matches!(args.as_slice(), [Lambda::Lvar(_)]) => {
+                    let Lambda::Lvar(id) = args.pop().expect("checked one Pis_not_none arg") else {
+                        unreachable!()
+                    };
+                    match self.ident_tbl.get(&id).cloned() {
+                        Some(IdKind::Constant(c)) if is_const_some(&c) => self.simpl_owned(*then_),
+                        Some(
+                            IdKind::ImmutableBlock(_)
+                            | IdKind::MutableBlock(_)
+                            | IdKind::NormalOptional(_),
+                        ) => self.simpl_owned(*then_),
+                        Some(IdKind::OptionalBlock(l, BoxedNullable::Null)) => Lambda::if_(
+                            lam_not(
+                                Location::none(),
+                                Lambda::prim(Primitive::PisNull, vec![l], Location::none()),
+                            ),
+                            self.simpl_owned(*then_),
+                            self.simpl_owned(*else_),
+                        ),
+                        Some(IdKind::OptionalBlock(l, BoxedNullable::Undefined)) => Lambda::if_(
+                            lam_not(
+                                Location::none(),
+                                Lambda::prim(Primitive::PisUndefined, vec![l], Location::none()),
+                            ),
+                            self.simpl_owned(*then_),
+                            self.simpl_owned(*else_),
+                        ),
+                        Some(IdKind::OptionalBlock(l, BoxedNullable::NullUndefined)) => {
+                            Lambda::if_(
+                                lam_not(
+                                    Location::none(),
+                                    Lambda::prim(
+                                        Primitive::PisNullUndefined,
+                                        vec![l],
+                                        Location::none(),
+                                    ),
+                                ),
+                                self.simpl_owned(*then_),
+                                self.simpl_owned(*else_),
+                            )
+                        }
+                        _ => Lambda::if_(
+                            Lambda::Lprim(PrimInfo {
+                                primitive: Primitive::PisNotNone,
+                                args: vec![Lambda::Lvar(id)],
+                                loc,
+                            }),
+                            self.simpl_owned(*then_),
+                            self.simpl_owned(*else_),
+                        ),
+                    }
+                }
+                Lambda::Lvar(id) => match id_is_for_sure_true_in_boolean(self.ident_tbl, &id) {
+                    Outcome::EvalTrue => self.simpl_owned(*then_),
+                    Outcome::EvalFalse => self.simpl_owned(*else_),
+                    Outcome::EvalUnknown => Lambda::if_(
+                        self.simpl_owned(Lambda::Lvar(id)),
+                        self.simpl_owned(*then_),
+                        self.simpl_owned(*else_),
+                    ),
+                },
+                other => Lambda::if_(
+                    self.simpl_owned(other),
+                    self.simpl_owned(*then_),
+                    self.simpl_owned(*else_),
+                ),
+            },
+
+            // lam_pass_remove_alias.ml:118
+            Lambda::Lconst(_) => lam,
+
+            // lam_pass_remove_alias.ml:119
+            Lambda::Llet(kind, v, l1, l2) => {
+                Lambda::let_(kind, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+
+            // lam_pass_remove_alias.ml:120-122
+            Lambda::Lletrec(bindings, body) => {
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(id, expr)| (id, self.simpl_owned(expr)))
+                    .collect();
+                Lambda::letrec(bindings, self.simpl_owned(*body))
+            }
+
+            // lam_pass_remove_alias.ml:131-246 — cross-module, local, and
+            // direct application inlining. The cross-module arm runs before
+            // local/direct application just like OCaml, and uses plain
+            // `propagate_beta_reduce` (lam_pass_remove_alias.ml:159), not
+            // the later with-map reducer from lam_compile.ml:289.
+            Lambda::Lapply(apply) => {
+                let Apply {
+                    ap_func,
+                    ap_args,
+                    ap_info,
+                    ap_transformed_jsx,
+                } = apply;
+
+                if let Some((module_id, dynamic_import, field_name)) =
+                    module_field_apply_target(ap_func.as_ref())
+                    && let Some(Lambda::Lfunction(func)) =
+                        (self.external_inline)(module_id, dynamic_import, field_name)
+                    && func.params.len() == ap_args.len()
+                    && external_inline_args_are_allowed(&ap_args, self.ident_tbl)
+                    && lfunction_can_be_inlined(&func)
+                {
+                    let reduced =
+                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                            self.ident_tbl,
+                            self.id_gen,
+                            &func.params,
+                            &func.body,
+                            &ap_args,
+                        );
+                    return self.simpl_owned(reduced);
+                }
+
+                match *ap_func {
+                    Lambda::Lvar(v) => {
+                        let ap_args: Vec<Lambda> = ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect();
+
+                        let func_info = match self.ident_tbl.get(&v) {
+                            Some(IdKind::FunctionId {
+                                lambda: Some((Lambda::Lfunction(func), rec_flag)),
+                                ..
+                            }) if lfunction_can_be_inlined(func)
+                                && ap_args.len() == func.params.len() =>
+                            {
+                                Some((func.clone(), *rec_flag))
+                            }
+                            _ => None,
+                        };
+
+                        match func_info {
+                            Some((func, _rec_flag)) if func.attr.is_a_functor => {
+                                // lam_pass_remove_alias.ml:188-197.
+                                let reduced =
+                                    crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                                        self.ident_tbl,
+                                        self.id_gen,
+                                        &func.params,
+                                        &func.body,
+                                        &ap_args,
+                                    );
+                                self.simpl_owned(reduced)
+                            }
+                            Some((func, rec_flag))
+                                if ok_to_inline_fun_when_app(&func, &ap_args) =>
+                            {
+                                // lam_pass_remove_alias.ml:198-231.
+                                let (param_ok, param_map) = is_closed_with_map(
+                                    self.export_idents,
+                                    &func.params,
+                                    &func.body,
+                                );
+                                let is_export_id = self.export_idents.contains(&v);
+                                let allow = match (is_export_id, param_ok) {
+                                    (false, _) => true,
+                                    (true, true) => true,
+                                    (true, false) => false,
+                                };
+                                if allow {
+                                    match rec_flag {
+                                        RecFlag::Rec => {
+                                            return crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                                                self.ident_tbl,
+                                                self.id_gen,
+                                                &param_map,
+                                                &func.params,
+                                                &func.body,
+                                                &ap_args,
+                                            );
+                                        }
+                                        RecFlag::SelfRec => {}
+                                        RecFlag::NonRec => {
+                                            if !ap_args.iter().any(|arg| hit_variable(&v, arg)) {
+                                                let reduced =
+                                                    crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                                                        self.ident_tbl,
+                                                        self.id_gen,
+                                                        &param_map,
+                                                        &func.params,
+                                                        &func.body,
+                                                        &ap_args,
+                                                    );
+                                                return self.simpl_owned(reduced);
+                                            }
+                                        }
+                                    }
+                                }
+                                Lambda::apply(
+                                    self.simpl_owned(Lambda::Lvar(v)),
+                                    ap_args,
+                                    ap_info,
+                                    ap_transformed_jsx,
+                                )
+                            }
+                            _ => Lambda::apply(
+                                self.simpl_owned(Lambda::Lvar(v)),
+                                ap_args,
+                                ap_info,
+                                ap_transformed_jsx,
+                            ),
+                        }
+                    }
+                    Lambda::Lfunction(func) => {
+                        let args: Vec<Lambda> = ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect();
+                        if args.len() == func.params.len() && lfunction_can_be_inlined(&func) {
+                            // lam_pass_remove_alias.ml:233-237.
+                            let reduced =
+                                crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                                    self.ident_tbl,
+                                    self.id_gen,
+                                    &func.params,
+                                    &func.body,
+                                    &args,
+                                );
+                            self.simpl_owned(reduced)
+                        } else {
+                            Lambda::apply(
+                                self.simpl_owned(Lambda::Lfunction(func)),
+                                args,
+                                ap_info,
+                                ap_transformed_jsx,
+                            )
+                        }
+                    }
+                    func => Lambda::apply(
+                        self.simpl_owned(func),
+                        ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect(),
+                        ap_info,
+                        ap_transformed_jsx,
+                    ),
+                }
+            }
+
+            // lam_pass_remove_alias.ml:247-248
+            Lambda::Lfunction(func) => Lambda::function_(
+                func.arity,
+                func.params,
+                self.simpl_owned(*func.body),
+                func.attr,
+            ),
+
+            // lam_pass_remove_alias.ml:249-267
+            Lambda::Lswitch(scrut, switch) => Lambda::switch(
+                self.simpl_owned(*scrut),
+                LambdaSwitch {
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(k, expr)| (k, self.simpl_owned(expr)))
+                        .collect(),
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(k, expr)| (k, self.simpl_owned(expr)))
+                        .collect(),
+                    sw_failaction: switch
+                        .sw_failaction
+                        .map(|expr| Box::new(self.simpl_owned(*expr))),
+                    sw_names: switch.sw_names,
+                },
+            ),
+
+            // lam_pass_remove_alias.ml:268-277
+            Lambda::LstringSwitch(scrut, sw, d) => {
+                let scrut = match *scrut {
+                    Lambda::Lvar(s) => match self.ident_tbl.get(&s).cloned() {
+                        Some(IdKind::Constant(c)) => Lambda::const_(c),
+                        _ => self.simpl_owned(Lambda::Lvar(s)),
+                    },
+                    other => self.simpl_owned(other),
+                };
+                Lambda::string_switch(
+                    scrut,
+                    sw.into_iter()
+                        .map(|(k, v)| (k, self.simpl_owned(v)))
+                        .collect(),
+                    d.map(|d| Box::new(self.simpl_owned(*d))),
+                )
+            }
+
+            // lam_pass_remove_alias.ml:278
+            Lambda::LstaticRaise(i, ls) => {
+                Lambda::static_raise(i, ls.into_iter().map(|arg| self.simpl_owned(arg)).collect())
+            }
+
+            // lam_pass_remove_alias.ml:279
+            Lambda::LstaticCatch(l1, ids, l2) => {
+                Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
+            }
+
+            // lam_pass_remove_alias.ml:280
+            Lambda::LtryWith(l1, v, l2) => {
+                Lambda::try_(self.simpl_owned(*l1), v, self.simpl_owned(*l2))
+            }
+
+            // lam_pass_remove_alias.ml:281
+            Lambda::Lsequence(l1, l2) => Lambda::seq(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+
+            // lam_pass_remove_alias.ml:282
+            Lambda::Lwhile(l1, l2) => Lambda::while_(self.simpl_owned(*l1), self.simpl_owned(*l2)),
+
+            // lam_pass_remove_alias.ml:283-284
+            Lambda::Lfor(var, l1, l2, dir, l3) => Lambda::for_(
+                var,
+                self.simpl_owned(*l1),
+                self.simpl_owned(*l2),
+                dir,
+                self.simpl_owned(*l3),
+            ),
+
+            // lam_pass_remove_alias.ml after #7887.
+            Lambda::Lfor_of(var, l1, l2) => {
+                Lambda::for_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+            Lambda::Lfor_await_of(var, l1, l2) => {
+                Lambda::for_await_of(var, self.simpl_owned(*l1), self.simpl_owned(*l2))
+            }
+
+            // OCaml `Lam_pass_remove_alias.simplify_alias` after #8348.
+            Lambda::Lbreak => Lambda::break_(),
+            Lambda::Lcontinue => Lambda::continue_(),
+
+            // lam_pass_remove_alias.ml:285-288
+            Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
+        }
+    }
+
     fn simpl(&mut self, lam: &Lambda) -> Lambda {
         match lam {
             // lam_pass_remove_alias.ml:53
@@ -340,11 +856,40 @@ impl<'a> Simplifier<'a> {
             }
 
             // lam_pass_remove_alias.ml:131-162 — cross-module fn inlining via
-            // `Lam_compile_env.query_external_id_info`. The Rust JS backend
-            // has no env counterpart, so we cannot resolve the foreign
-            // function's `persistent_closed_lambda`. Fall through to the
-            // default Lapply arm below by NOT catching this case here.
-            //
+            // `Lam_compile_env.query_external_id_info`. This pass uses plain
+            // `propagate_beta_reduce` at line 159, so complex arguments are
+            // let-bound here before the later compile-time with-map inliner
+            // (lam_compile.ml:289) ever sees the call.
+            Lambda::Lapply(apply)
+                if module_field_apply_target(apply.ap_func.as_ref()).is_some() =>
+            {
+                let (module_id, dynamic_import, field_name) =
+                    module_field_apply_target(apply.ap_func.as_ref()).expect("guarded above");
+                if let Some(Lambda::Lfunction(func)) =
+                    (self.external_inline)(module_id, dynamic_import, field_name)
+                    && func.params.len() == apply.ap_args.len()
+                    && external_inline_args_are_allowed(&apply.ap_args, self.ident_tbl)
+                    && lfunction_can_be_inlined(&func)
+                {
+                    let reduced =
+                        crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_meta_and_id_gen(
+                            self.ident_tbl,
+                            self.id_gen,
+                            &func.params,
+                            &func.body,
+                            &apply.ap_args,
+                        );
+                    self.simpl(&reduced)
+                } else {
+                    Lambda::apply(
+                        self.simpl(apply.ap_func.as_ref()),
+                        apply.ap_args.iter().map(|a| self.simpl(a)).collect(),
+                        apply.ap_info.clone(),
+                        apply.ap_transformed_jsx,
+                    )
+                }
+            }
+
             // lam_pass_remove_alias.ml:169-232 — local Lvar callee inlining.
             Lambda::Lapply(apply) if matches!(apply.ap_func.as_ref(), Lambda::Lvar(_)) => {
                 let Lambda::Lvar(v) = apply.ap_func.as_ref() else {

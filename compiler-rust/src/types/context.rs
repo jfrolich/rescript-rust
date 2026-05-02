@@ -29,6 +29,7 @@ use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
+use crate::parse_arena::LidentIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -242,11 +243,23 @@ pub struct TypeContext<'a> {
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
 
+    /// Cached forced module declarations from qualified component tables.
+    qualified_module_decl_cache:
+        RefCell<ahash::AHashMap<(Path, String), (Ident, super::decl::ModuleDeclaration)>>,
+
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
+
+    /// In-process persistent environment used by abbreviation expansion when a
+    /// persistent module root is not present in the local Env. OCaml resolves
+    /// persistent Pident module heads through Env.find_module_descr before
+    /// reading lazy components (compiler/ml/env.ml:800-808,
+    /// compiler/ml/env.ml:865-906); this gives Rust ctype the same lookup
+    /// source without falling back to disk in in-process builds.
+    persistent_env: RefCell<Option<crate::cmi::persistent_env::PersistentEnv>>,
 
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
@@ -304,6 +317,15 @@ pub struct TypeContext<'a> {
         >,
     >,
 
+    /// Reconstructed record label descriptions keyed by type path.
+    /// OCaml installs one shared `lbl_all` array for a record declaration and
+    /// reuses it from record typing (`compiler/ml/typecore.ml:2802,2833-2842`).
+    /// Rust reconstructs fallback label descriptions from declarations, so cache
+    /// that reconstructed array per TypeContext instead of rebuilding large
+    /// records such as `JsxDOM.domProps` for every JSX literal.
+    record_label_descriptions_cache:
+        RefCell<ahash::AHashMap<String, Vec<super::decl::LabelDescription>>>,
+
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
     /// pattern field is resolved; we model that with an append-only side table.
@@ -316,6 +338,11 @@ pub struct TypeContext<'a> {
             Vec<super::decl::Attribute>,
         )>,
     >,
+
+    /// Lident indices synthesized while filling omitted optional record fields.
+    /// This avoids repeated reverse scans through the parse arena for large JSX
+    /// DOM prop records while preserving the same index that the scan found.
+    synthesized_record_lidents: RefCell<ahash::AHashMap<String, LidentIdx>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Arc<Env>>>,
@@ -359,8 +386,10 @@ impl<'a> TypeContext<'a> {
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
+            persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
@@ -377,7 +406,9 @@ impl<'a> TypeContext<'a> {
             predef_option_type: Cell::new(None),
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
+            record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
+            synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
         }
@@ -430,6 +461,33 @@ impl<'a> TypeContext<'a> {
             .get(&idx.raw())
             .cloned()
             .unwrap_or_else(|| arena.get_string(idx).to_string())
+    }
+
+    pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
+        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+    }
+
+    /// Snapshot synthetic CMI longident component names so portable signatures
+    /// can move across TypeContexts without losing the side table.
+    pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
+        self.cmi_longident_names
+            .borrow()
+            .iter()
+            .map(|(raw, name)| (*raw, name.clone()))
+            .collect()
+    }
+
+    /// Import synthetic CMI longident names from a portable signature.
+    pub fn import_cmi_longident_names(&self, names: &[(u32, String)]) {
+        let mut table = self.cmi_longident_names.borrow_mut();
+        let mut next = self.next_cmi_longident_idx.get();
+        for (raw, name) in names {
+            table.insert(*raw, name.clone());
+            if *raw >= next {
+                next = raw.wrapping_add(1);
+            }
+        }
+        self.next_cmi_longident_idx.set(next);
     }
 
     /// Register a type declaration for type alias expansion.
@@ -519,8 +577,11 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Borrow a cached qualified module-components view.
-    /// Clones the components before calling `f` to avoid holding the borrow
-    /// across the callback (which may re-enter and register new components).
+    /// OCaml stores lazy module components once and keeps that table visible to
+    /// recursive lookup while forcing nested thunks (compiler/ml/env.ml:1513-1514,
+    /// 1516-1588). Clone only the Arc-backed view here so re-entrant lookups
+    /// observe the same cached component table instead of rebuilding and
+    /// freshening bound identifiers again.
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
@@ -669,6 +730,31 @@ impl<'a> TypeContext<'a> {
             .cloned()
     }
 
+    /// Cache a forced qualified module declaration.
+    pub(crate) fn register_qualified_module_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        id: Ident,
+        md: super::decl::ModuleDeclaration,
+    ) {
+        self.qualified_module_decl_cache
+            .borrow_mut()
+            .insert((parent_path.clone(), child_name.to_string()), (id, md));
+    }
+
+    /// Look up a forced qualified module declaration.
+    pub(crate) fn find_qualified_module_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<(Ident, super::decl::ModuleDeclaration)> {
+        self.qualified_module_decl_cache
+            .borrow()
+            .get(&(parent_path.clone(), child_name.to_string()))
+            .cloned()
+    }
+
     /// Cache a normalized path for a specific environment identity.
     pub(crate) fn register_normalized_path_full(
         &self,
@@ -701,6 +787,21 @@ impl<'a> TypeContext<'a> {
     /// Get the load paths.
     pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
         self.load_paths.borrow()
+    }
+
+    pub(crate) fn set_persistent_env(&self, env: crate::cmi::persistent_env::PersistentEnv) {
+        *self.persistent_env.borrow_mut() = Some(env);
+    }
+
+    pub(crate) fn persistent_env_clone(&self) -> Option<crate::cmi::persistent_env::PersistentEnv> {
+        self.persistent_env.borrow().clone()
+    }
+
+    pub(crate) fn persistent_env_is_in_process(&self) -> bool {
+        self.persistent_env
+            .borrow()
+            .as_ref()
+            .is_some_and(crate::cmi::persistent_env::PersistentEnv::is_in_process_mode)
     }
 
     /// Look up a type declaration by full qualified path string.
@@ -990,6 +1091,44 @@ impl<'a> TypeContext<'a> {
             .borrow()
             .get(type_path_name)
             .cloned()
+    }
+
+    /// Cache reconstructed record label descriptions for a type path.
+    pub fn register_record_label_descriptions(
+        &self,
+        type_path_name: &str,
+        labels: Vec<super::decl::LabelDescription>,
+    ) {
+        self.record_label_descriptions_cache
+            .borrow_mut()
+            .insert(type_path_name.to_string(), labels);
+    }
+
+    /// Look up reconstructed record label descriptions for a type path.
+    pub fn get_record_label_descriptions(
+        &self,
+        type_path_name: &str,
+    ) -> Option<Vec<super::decl::LabelDescription>> {
+        self.record_label_descriptions_cache
+            .borrow()
+            .get(type_path_name)
+            .cloned()
+    }
+
+    /// Return a cached synthesized record-field lident by label name.
+    pub fn get_synthesized_record_lident(&self, label_name: &str) -> Option<LidentIdx> {
+        self.synthesized_record_lidents
+            .borrow()
+            .get(label_name)
+            .copied()
+    }
+
+    /// Cache the lident chosen for a synthesized record field.
+    pub fn cache_synthesized_record_lident(&self, label_name: String, lid: LidentIdx) {
+        self.synthesized_record_lidents
+            .borrow_mut()
+            .entry(label_name)
+            .or_insert(lid);
     }
 
     /// Replace the synthetic dict-pattern label cache.
@@ -1540,11 +1679,16 @@ impl<'a> TypeContext<'a> {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: &str) -> Ident {
+        // OCaml compiler/ext/ident.ml:28-40 increments the active
+        // currentstamp directly in `Ident.create`/`Ident.rename`; unrelated
+        // helper-created local identifiers must not advance the typedtree
+        // context's stamp stream.
         self.id_gen.create(name)
     }
 
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
+        // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
         id.rename(self.id_gen)
     }
 

@@ -54,6 +54,8 @@ pub mod location;
 pub mod parse_arena;
 pub mod parser;
 pub mod raw_lambda;
+/// Optional aggregate compiler phase timings.
+pub mod timing;
 pub mod types;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_vfs;

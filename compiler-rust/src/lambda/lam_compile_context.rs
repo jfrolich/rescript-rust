@@ -5,8 +5,9 @@
 //! and compilation metadata.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 use crate::ident::Ident;
 use crate::lambda::Lambda;

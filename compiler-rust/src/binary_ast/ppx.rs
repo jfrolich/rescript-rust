@@ -4833,14 +4833,29 @@ fn rewrite_constructor_arguments(
 fn rewrite_label_declaration(label: &LabelDeclaration, arena: &mut ParseArena) -> LabelDeclaration {
     let label_type = arena.get_core_type(label.pld_type).clone();
     let rewritten_label_type = rewrite_core_type(&label_type, arena);
+    let mut pld_name = label.pld_name;
+    let mut pld_attributes = rewrite_attributes(&label.pld_attributes, arena);
+    if pld_attributes.len() == 1 && arena.get_string(pld_attributes[0].0.txt) == "internal" {
+        let capitalized = capitalize_ascii(arena.get_string(pld_name.txt));
+        pld_name.txt = arena.push_string(capitalized);
+        pld_attributes.clear();
+    }
     LabelDeclaration {
-        pld_name: label.pld_name.clone(),
+        pld_name,
         pld_mutable: label.pld_mutable,
         pld_type: arena.push_core_type(rewritten_label_type),
         pld_loc: label.pld_loc,
-        pld_attributes: rewrite_attributes(&label.pld_attributes, arena).into(),
+        pld_attributes: pld_attributes.into(),
         pld_optional: label.pld_optional,
     }
+}
+
+fn capitalize_ascii(s: &str) -> String {
+    let mut bytes = s.as_bytes().to_vec();
+    if let Some(first) = bytes.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+    String::from_utf8(bytes).expect("capitalizing ASCII cannot invalidate UTF-8")
 }
 
 // ============================================================================
@@ -10451,7 +10466,12 @@ fn try_rewrite_signature_items(
         let expanded_items =
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)?;
         for expanded in expanded_items {
-            rewritten.push(rewrite_signature_item_no_spice(&expanded, arena));
+            let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
+            rewritten.extend(expand_signature_deriving_items(
+                &expanded,
+                rewritten_item,
+                arena,
+            ));
         }
     }
     Ok(rewritten)
@@ -10461,9 +10481,43 @@ fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> V
     try_rewrite_signature_items(items, arena).unwrap_or_else(|_| {
         items
             .iter()
-            .map(|item| rewrite_signature_item_no_spice(item, arena))
+            .flat_map(|item| {
+                let rewritten_item = rewrite_signature_item_no_spice(item, arena);
+                expand_signature_deriving_items(item, rewritten_item, arena)
+            })
             .collect()
     })
+}
+
+fn expand_signature_deriving_items(
+    original: &SignatureItem,
+    rewritten: SignatureItem,
+    arena: &mut ParseArena,
+) -> Vec<SignatureItem> {
+    let SignatureItemDesc::Psig_type(inner) = &*original.psig_desc else {
+        return vec![rewritten];
+    };
+    let (_rec_flag, tdcls) = &**inner;
+    let Some(last_tdcl) = tdcls.last() else {
+        return vec![rewritten];
+    };
+    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if !actions
+        .iter()
+        .any(|action| matches!(action, DeriveAction::Accessors))
+    {
+        return vec![rewritten];
+    }
+
+    let mut items = vec![rewritten];
+    for tdcl in tdcls.iter() {
+        if let Some((_structure_items, signature_items)) =
+            generate_accessor_items_for_tdcl(tdcl, tdcl.ptype_loc, arena)
+        {
+            items.extend(signature_items);
+        }
+    }
+    items
 }
 
 fn try_rewrite_structure_item(

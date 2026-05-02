@@ -69,6 +69,13 @@ impl JsPrinter {
         }
     }
 
+    /// Create a new printer with a preallocated output buffer.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut printer = Self::new();
+        printer.output = String::with_capacity(capacity);
+        printer
+    }
+
     /// Create a new printer with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<&ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_options(module_path_resolver, false, false)
@@ -88,7 +95,20 @@ impl JsPrinter {
         debug: bool,
         jsx_preserve: bool,
     ) -> Self {
-        let mut printer = Self::new();
+        let mut printer = Self::with_capacity(0);
+        printer.module_path_resolver = module_path_resolver.cloned();
+        printer.debug = debug;
+        printer.jsx_preserve = jsx_preserve;
+        printer
+    }
+
+    pub(crate) fn with_module_path_resolver_options_and_capacity(
+        module_path_resolver: Option<&ModulePathResolver>,
+        debug: bool,
+        jsx_preserve: bool,
+        capacity: usize,
+    ) -> Self {
+        let mut printer = Self::with_capacity(capacity);
         printer.module_path_resolver = module_path_resolver.cloned();
         printer.debug = debug;
         printer.jsx_preserve = jsx_preserve;
@@ -315,7 +335,7 @@ impl JsPrinter {
     }
 
     /// Print statements
-    pub fn print_statements(&mut self, stmts: &Block, top_level: bool) {
+    pub fn print_statements(&mut self, stmts: &[Statement], top_level: bool) {
         for (index, stmt) in stmts.iter().enumerate() {
             if index > 0 {
                 if top_level {
@@ -750,6 +770,18 @@ impl JsPrinter {
             }
         }
 
+        if let Some(Expression {
+            desc: ExpressionDesc::Fun { params, body, .. },
+            ..
+        }) = &decl.value
+        {
+            // OCaml reserves the unbounded function environment plus the
+            // Name_non_top binding before printing it; see
+            // compiler/core/js_dump.ml:337-345 and 411-414.
+            let reserved_idents = function_reserved_idents(params, body, Some(&decl.ident));
+            self.reserve_idents_in_current_scope(&reserved_idents);
+        }
+
         let var_name = self.ident_name(&decl.ident);
         self.write("let ");
         self.write(&var_name);
@@ -786,15 +818,7 @@ impl JsPrinter {
         function_ident: Option<&Ident>,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let mut reserved_idents: Vec<Ident> =
-            free_variables_of_block_with_defined(body, params.iter().cloned())
-                .into_iter()
-                .collect();
-        if let Some(function_ident) = function_ident {
-            reserved_idents.push(function_ident.clone());
-        }
-        reserved_idents.sort();
-        reserved_idents.dedup();
+        let reserved_idents = function_reserved_idents(params, body, function_ident);
 
         let reserved_printed_names = reserved_idents
             .into_iter()
@@ -802,6 +826,20 @@ impl JsPrinter {
             .collect::<Vec<_>>();
 
         self.with_local_ident_scope(&reserved_printed_names, f)
+    }
+
+    pub(super) fn reserve_idents_in_current_scope(&mut self, idents: &[Ident]) {
+        for ident in idents {
+            if ident.stamp() == 0 {
+                // OCaml `Ext_pp_scope.merge` reserves the converted printed
+                // name for every id in a function environment, including
+                // stamp-0 JS globals; see compiler/ext/ext_pp_scope.ml:98-100.
+                let base = convert_ident_name(ident.name());
+                Self::reserve_printed_name(self.current_name_scope_mut(), &base);
+            } else {
+                let _ = self.ident_name(ident);
+            }
+        }
     }
 
     fn print_function_declaration(
@@ -830,6 +868,11 @@ impl JsPrinter {
             self.semi();
             return;
         }
+        // OCaml reserves the unbounded function environment plus the Name_top
+        // binding before printing the function id; see
+        // compiler/core/js_dump.ml:337-345 and 416-419.
+        let reserved_idents = function_reserved_idents(params, body, Some(ident));
+        self.reserve_idents_in_current_scope(&reserved_idents);
         if async_ {
             self.write("async ");
         }
@@ -2341,6 +2384,43 @@ impl JsPrinter {
 
     /// Print a string literal
     pub(super) fn print_string(&mut self, s: &str) {
+        if s.is_ascii() {
+            self.write_char('"');
+            let bytes = s.as_bytes();
+            let mut chunk_start = 0;
+            for (index, byte) in bytes.iter().copied().enumerate() {
+                let escaped = match byte {
+                    b'"' => Some("\\\""),
+                    b'\\' => Some("\\\\"),
+                    b'\n' => Some("\\n"),
+                    b'\r' => Some("\\r"),
+                    b'\t' => Some("\\t"),
+                    0..=31 => {
+                        if chunk_start < index {
+                            self.write(&s[chunk_start..index]);
+                        }
+                        write!(self.output, "\\x{byte:02x}").unwrap();
+                        self.last_new_line = false;
+                        chunk_start = index + 1;
+                        continue;
+                    }
+                    _ => None,
+                };
+                if let Some(escaped) = escaped {
+                    if chunk_start < index {
+                        self.write(&s[chunk_start..index]);
+                    }
+                    self.write(escaped);
+                    chunk_start = index + 1;
+                }
+            }
+            if chunk_start < s.len() {
+                self.write(&s[chunk_start..]);
+            }
+            self.write_char('"');
+            return;
+        }
+
         let decoded = decode_internal_utf8_string(s);
         self.write_char('"');
         for c in decoded.chars() {
@@ -3117,7 +3197,7 @@ fn try_unit_function_body_single_clean_negative_guard_merge(stmts: &Block) -> Op
     )))
 }
 
-fn try_function_body_shared_return_guard_chain_merge(stmts: &Block) -> Option<Statement> {
+fn try_function_body_shared_return_guard_chain_merge(stmts: &[Statement]) -> Option<Statement> {
     let (last, prefix) = stmts.split_last()?;
     if prefix.is_empty() {
         return None;
@@ -3155,8 +3235,8 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
-        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(&suffix) {
+        let suffix = &stmts[start..];
+        if let Some(merged) = try_function_body_shared_return_guard_chain_merge(suffix) {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(merged);
             return Some(rewritten);
@@ -3166,8 +3246,8 @@ fn try_function_body_shared_return_guard_chain_suffix_rewrite(stmts: &Block) -> 
     None
 }
 
-fn try_function_body_guard_return_fallthrough_else_merge(stmts: &Block) -> Option<Statement> {
-    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+fn try_function_body_guard_return_fallthrough_else_merge(stmts: &[Statement]) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts else {
         return None;
     };
 
@@ -3200,8 +3280,8 @@ fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block)
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
-        if let Some(merged) = try_function_body_guard_return_fallthrough_else_merge(&suffix) {
+        let suffix = &stmts[start..];
+        if let Some(merged) = try_function_body_guard_return_fallthrough_else_merge(suffix) {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(merged);
             return Some(rewritten);
@@ -3211,8 +3291,10 @@ fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block)
     None
 }
 
-fn try_function_body_positive_strict_undefined_tail_if_rewrite(stmts: &Block) -> Option<Statement> {
-    let [guard_stmt, success_stmt] = stmts.as_slice() else {
+fn try_function_body_positive_strict_undefined_tail_if_rewrite(
+    stmts: &[Statement],
+) -> Option<Statement> {
+    let [guard_stmt, success_stmt] = stmts else {
         return None;
     };
 
@@ -3252,9 +3334,9 @@ fn try_function_body_positive_strict_undefined_tail_suffix_rewrite(stmts: &Block
     }
 
     for start in 0..stmts.len() - 1 {
-        let suffix = stmts[start..].to_vec();
+        let suffix = &stmts[start..];
         if let Some(rewritten_stmt) =
-            try_function_body_positive_strict_undefined_tail_if_rewrite(&suffix)
+            try_function_body_positive_strict_undefined_tail_if_rewrite(suffix)
         {
             let mut rewritten = stmts[..start].to_vec();
             rewritten.push(rewritten_stmt);
@@ -4210,6 +4292,11 @@ fn is_hex_float_literal(float_str: &str) -> bool {
 }
 
 fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
+    let value = parse_hex_float_literal(float_str)?;
+    Some(js_number_to_string(value))
+}
+
+fn parse_hex_float_literal(float_str: &str) -> Option<f64> {
     let (negative, digits) = if let Some(rest) = float_str.strip_prefix('-') {
         (true, rest)
     } else if let Some(rest) = float_str.strip_prefix('+') {
@@ -4222,17 +4309,58 @@ fn normalize_hex_float_literal(float_str: &str) -> Option<String> {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))?;
     let digits = digits.replace('_', "");
-    if digits.is_empty() || digits.contains('.') || digits.contains('p') || digits.contains('P') {
+    if digits.is_empty() {
         return None;
     }
 
-    let value = u128::from_str_radix(&digits, 16).ok()?;
-    let rendered = value.to_string();
-    Some(if negative {
-        format!("-{rendered}")
+    let (mantissa, exponent) = if let Some((mantissa, exponent)) =
+        digits.split_once('p').or_else(|| digits.split_once('P'))
+    {
+        (mantissa, exponent.parse::<i32>().ok()?)
     } else {
-        rendered
-    })
+        (digits.as_str(), 0)
+    };
+
+    let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fractional.is_empty() {
+        return None;
+    }
+
+    let mut value = 0.0f64;
+    for byte in whole.bytes().chain(fractional.bytes()) {
+        value = value * 16.0 + hex_digit_value(byte)? as f64;
+    }
+    value *= 2.0f64.powi(exponent - (fractional.len() as i32 * 4));
+
+    Some(if negative { -value } else { value })
+}
+
+fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn js_number_to_string(value: f64) -> String {
+    // OCaml converts every hexadecimal float through float_of_string and then
+    // Js_number.to_string; see compiler/core/js_number.ml:42-57 and 93-97.
+    if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
+    } else if value.is_nan() {
+        "NaN".to_string()
+    } else {
+        let int_value = value as i64;
+        if int_value as f64 == value {
+            int_value.to_string()
+        } else {
+            value.to_string()
+        }
+    }
 }
 
 fn transform_float_literal(float_str: &str) -> String {
@@ -4387,6 +4515,23 @@ fn free_variables_of_block_with_defined(
     let mut stats = JsIdentStats::with_defined(defined);
     collect_block_idents(block, &mut stats);
     stats.free_variables()
+}
+
+fn function_reserved_idents(
+    params: &[Ident],
+    body: &Block,
+    function_ident: Option<&Ident>,
+) -> Vec<Ident> {
+    let mut reserved_idents: Vec<Ident> =
+        free_variables_of_block_with_defined(body, params.iter().cloned())
+            .into_iter()
+            .collect();
+    if let Some(function_ident) = function_ident {
+        reserved_idents.push(function_ident.clone());
+    }
+    reserved_idents.sort();
+    reserved_idents.dedup();
+    reserved_idents
 }
 
 fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {

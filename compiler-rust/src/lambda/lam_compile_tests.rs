@@ -289,7 +289,9 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
         None,
         Some(std::path::Path::new("/tmp/Effect.mjs")),
         None,
+        None,
         Some(persistent_env),
+        false,
     )
 }
 
@@ -810,6 +812,8 @@ fn compile_module_primitives_require_primitive_module_runtime_import() {
         Some(std::path::Path::new("/tmp/module_primitive.mjs")),
         None,
         None,
+        None,
+        false,
     );
     let rendered = print_deps_program(&deps, Some(&resolver));
     assert!(rendered.contains(
@@ -7317,7 +7321,6 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
         &[],
         false,
         true,
-        false,
     );
 
     assert!(
@@ -8692,6 +8695,8 @@ fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block
         Some(std::path::Path::new("/tmp/wrapped.mjs")),
         None,
         None,
+        None,
+        false,
     );
     let rendered = print_deps_program(&deps, Some(&resolver));
     assert!(rendered.contains(

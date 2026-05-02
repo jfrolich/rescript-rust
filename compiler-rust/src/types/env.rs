@@ -180,17 +180,10 @@ pub struct BindingTable<T> {
     /// Bindings indexed by name. The bool indicates whether the binding is
     /// local (true = from `add`, false = from `add_opened`).
     by_name: im_rc::HashMap<String, Vec<(Ident, T, bool)>>,
-    /// Bindings indexed by identifier stamp.
+    /// Bindings indexed by identifier stamp. The identifier is stored with the
+    /// value so long-lived in-process environments can reject stamp collisions
+    /// from different source units.
     by_stamp: im_rc::HashMap<i32, (Ident, T)>,
-}
-
-fn same_idtbl_binding(entry_id: &Ident, id: &Ident) -> bool {
-    // OCaml compiler/ext/ident.ml:52-54 `Ident.same` is stamp-only for
-    // non-persistent identifiers, but compiler/ext/ident.ml:156-163
-    // `IdTbl.find_same` first selects the name bucket and only then checks the
-    // stamp chain. Keep that name guard here so imported CMI stamps do not
-    // make an opened module alias look like an unrelated local type path.
-    entry_id.name() == id.name() && entry_id.same(id)
 }
 
 impl<T: Clone> BindingTable<T> {
@@ -282,37 +275,22 @@ impl<T: Clone> BindingTable<T> {
                 }
                 entries.last().map(|(_, value, _)| value)
             })
-        } else if let Some((entry_id, value)) = self.by_stamp.get(&stamp) {
-            if entry_id.same(id) {
-                Some(value)
-            } else {
-                self.by_name.get(id.name()).and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find(|(entry_id, _, _)| entry_id.same(id))
-                        .map(|(_, value, _)| value)
-                })
-            }
         } else {
+            if let Some((entry_id, value)) = self.by_stamp.get(&stamp)
+                && entry_id.same(id)
+                && entry_id.name() == id.name()
+            {
+                return Some(value);
+            }
+
             self.by_name.get(id.name()).and_then(|entries| {
                 entries
                     .iter()
                     .rev()
-                    .find(|(entry_id, _, _)| entry_id.same(id))
+                    .find(|(entry_id, _, _)| entry_id.same(id) && entry_id.name() == id.name())
                     .map(|(_, value, _)| value)
             })
         }
-    }
-
-    fn find_by_ident_in_name_bucket(&self, id: &Ident) -> Option<&T> {
-        self.by_name.get(id.name()).and_then(|entries| {
-            entries
-                .iter()
-                .rev()
-                .find(|(entry_id, _, _)| same_idtbl_binding(entry_id, id))
-                .map(|(_, value, _)| value)
-        })
     }
 
     /// Get all bindings with a given name.
@@ -390,7 +368,13 @@ pub struct Env {
     module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
 
     /// Summary of bindings.
-    summary: Arc<EnvSummary>,
+    ///
+    /// OCaml keeps `Env.summary` for paths that reconstruct environment
+    /// deltas. The Rust checker does not read summaries outside this module;
+    /// all semantic lookup state lives in the binding tables below. Keep the
+    /// public accessor stable but avoid building an unused persistent chain on
+    /// every binding addition.
+    summary: EnvSummary,
 
     /// Local constraints (for GADTs).
     local_constraints: im_rc::HashMap<Path, Arc<TypeDeclaration>>,
@@ -455,7 +439,7 @@ impl Env {
             modtypes: BindingTable::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
-            summary: Arc::new(EnvSummary::Empty),
+            summary: EnvSummary::Empty,
             local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
@@ -523,12 +507,10 @@ impl Env {
     }
 
     fn module_path_scope_cache_key(path: &Path) -> Option<String> {
-        let Ok((head, _)) = path.flatten() else {
-            // OCaml compiler/ml/env.ml:903-914 handles `Papply` while
-            // normalizing paths, but functor applications do not form a stable
-            // component-cache prefix key.
-            return None;
-        };
+        // Match `Path.flatten` in compiler/ml/path.ml:63-69: any nested
+        // `Papply` is `Contains_apply`, so env-scoped cache keys that need a
+        // single head identifier are only valid for regular dotted paths.
+        let (head, _) = path.flatten().ok()?;
         let name = path.name();
         if head.is_persistent() || head.stamp() == 0 {
             Some(name)
@@ -590,14 +572,7 @@ impl Env {
 
         let requires = self.with_current_local_module_aliases(|aliases| {
             aliases.iter().any(|(_, target_path)| {
-                let Ok((target_head, _)) = target_path.flatten() else {
-                    // OCaml compiler/ml/env.ml:903-914 normalizes
-                    // `Papply` paths structurally and only resolves aliases
-                    // through `find_module`. Rust's env-scoped component cache
-                    // is an optimization for ordinary module-prefix aliases;
-                    // functor applications are not valid component prefixes.
-                    return false;
-                };
+                let target_head = target_path.head();
                 self.find_module_with_origin(target_head.name())
                     .ok()
                     .is_some_and(|(origin_id, _, is_local)| {
@@ -621,16 +596,14 @@ impl Env {
     pub fn add_value(&mut self, id: Ident, desc: ValueDescription) {
         self.bump_id();
         let desc = Arc::new(desc);
-        self.values.add(id.clone(), desc.clone());
-        self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
+        self.values.add(id, desc);
     }
 
     /// Add a value binding from an opened module (lower priority than local bindings).
     pub fn add_opened_value(&mut self, id: Ident, desc: ValueDescription) {
         self.bump_id();
         let desc = Arc::new(desc);
-        self.values.add_opened(id.clone(), desc.clone());
-        self.summary = Arc::new(EnvSummary::Value(self.summary.clone(), id, desc));
+        self.values.add_opened(id, desc);
     }
 
     /// Find a value by name.
@@ -707,16 +680,14 @@ impl Env {
     pub fn add_type(&mut self, id: Ident, decl: TypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.types.add(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
+        self.types.add(id, decl);
     }
 
     /// Add a type binding from an opened module (lower priority than local bindings).
     pub fn add_opened_type(&mut self, id: Ident, decl: TypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.types.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Type(self.summary.clone(), id, decl));
+        self.types.add_opened(id, decl);
     }
 
     /// Find a type by name.
@@ -767,7 +738,12 @@ impl Env {
                 .types
                 .find_by_ident(id)
                 .or_else(|| {
-                    // Fallback: try name-based lookup for stamp mismatches
+                    // Some in-process callers still pass copied signature ids
+                    // whose stamp does not match the current table entry. Keep
+                    // the existing recovery here; expansion paths that must
+                    // mirror OCaml `IdTbl.find_same` use
+                    // `lookup_type_ident_exact` instead
+                    // (compiler/ml/env.ml:800-813,862).
                     self.types.find_by_name(id.name())
                 })
                 .map(|t| t.as_ref())
@@ -937,9 +913,8 @@ impl Env {
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
-        self.modules.add(id.clone(), decl.clone());
+        self.modules.add(id.clone(), decl);
         self.module_components.add(id.clone(), stored_components);
-        self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
     }
 
     /// Add a module binding.
@@ -952,8 +927,7 @@ impl Env {
         self.bump_id();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
-        self.modules.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::Module(self.summary.clone(), id, decl));
+        self.modules.add_opened(id, decl);
     }
 
     /// Find a module by name.
@@ -1101,67 +1075,13 @@ impl Env {
             _ => path.clone(),
         };
 
-        // Then check if the path itself is a module alias. OCaml
-        // compiler/ml/env.ml:865-875 `find_module` resolves Pident modules
-        // with `IdTbl.find_same`; normalize_path at env.ml:903-914 must not
-        // fall back by name, or a local type path like `t/1544` can be treated
-        // as an unrelated opened module named `t` and force its lazy signature.
-        if let Ok(md) = self.lookup_module_same_for_normalize_path(&path) {
+        // Then check if the path itself is a module alias
+        if let Ok(md) = self.lookup_module(&path) {
             if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
                 return self.normalize_path_inner(alias_path, depth + 1);
             }
         }
         path
-    }
-
-    fn lookup_module_same_for_normalize_path(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
-        fn lookup_submodule_in_module_type<'a>(
-            env: &'a Env,
-            mty: &'a ModuleType,
-            name: &str,
-            visiting: &mut HashSet<Path>,
-        ) -> Option<&'a ModuleDeclaration> {
-            match mty {
-                ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
-                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
-                    _ => None,
-                }),
-                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
-                    let md = lookup_module_inner(env, alias_path, visiting).ok()?;
-                    lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
-                }
-                ModuleType::MtyFunctor { .. } => None,
-            }
-        }
-
-        fn lookup_module_inner<'a>(
-            env: &'a Env,
-            path: &Path,
-            visiting: &mut HashSet<Path>,
-        ) -> EnvResult<&'a ModuleDeclaration> {
-            if !visiting.insert(path.clone()) {
-                return Err(EnvError::ModuleNotFound(path.name()));
-            }
-
-            match path {
-                Path::Pident(id) => env
-                    .modules
-                    .find_by_ident_in_name_bucket(id)
-                    .map(|m| m.as_ref())
-                    .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
-                Path::Pdot(parent, name, _) => {
-                    let parent_md = lookup_module_inner(env, parent, visiting)?;
-                    lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
-                        .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
-                }
-                Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
-                    "(functor application)".to_string(),
-                )),
-            }
-        }
-
-        let mut visiting = HashSet::new();
-        lookup_module_inner(self, path, &mut visiting)
     }
 
     // ========================================================================
@@ -1172,16 +1092,14 @@ impl Env {
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.modtypes.add(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
+        self.modtypes.add(id, decl);
     }
 
     /// Add a module type binding from an opened module (lower priority than local bindings).
     pub fn add_opened_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         self.bump_id();
         let decl = Arc::new(decl);
-        self.modtypes.add_opened(id.clone(), decl.clone());
-        self.summary = Arc::new(EnvSummary::ModType(self.summary.clone(), id, decl));
+        self.modtypes.add_opened(id, decl);
     }
 
     /// Find a module type by name.

@@ -4,13 +4,13 @@ use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
 use rescript_compiler::binary_ast::Dependencies;
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::cmi::persistent_env::{CmjExportConstant, ModuleRegistry};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::Signature as DeclSignature;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
 /// The three explicit build modes for rewatch.
@@ -141,16 +141,29 @@ impl Display for SourceType {
     }
 }
 
+#[derive(Debug)]
+pub struct StoredStructureAst {
+    pub arena: ParseArena,
+    pub structure: Structure,
+}
+
+#[derive(Debug)]
+pub struct StoredSignatureAst {
+    pub arena: ParseArena,
+    pub signature: Signature,
+}
+
+#[derive(Clone)]
 pub enum StoredAst {
-    Structure(ParseArena, Structure),
-    Signature(ParseArena, Signature),
+    Structure(Arc<StoredStructureAst>),
+    Signature(Arc<StoredSignatureAst>),
 }
 
 impl std::fmt::Debug for StoredAst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoredAst::Structure(_, _) => write!(f, "StoredAst::Structure(..)"),
-            StoredAst::Signature(_, _) => write!(f, "StoredAst::Signature(..)"),
+            StoredAst::Structure(_) => write!(f, "StoredAst::Structure(..)"),
+            StoredAst::Signature(_) => write!(f, "StoredAst::Signature(..)"),
         }
     }
 }
@@ -414,7 +427,7 @@ impl BuildCommandState {
     /// Take a snapshot of the module registry for use during a compilation wave.
     /// Each worker in a parallel wave gets a clone of this snapshot.
     pub fn snapshot_module_registry(&self) -> ModuleRegistry {
-        self.module_registry.lock().unwrap().clone()
+        self.module_registry.lock().unwrap().for_worker_snapshot()
     }
 
     /// Update the module registry with a compiled module's portable PersStruct.
@@ -424,26 +437,48 @@ impl BuildCommandState {
         pers_struct: PortablePersStruct,
         source_path: std::path::PathBuf,
         is_pure: bool,
+        cmj_export_constants: AHashMap<String, CmjExportConstant>,
+        is_runtime: bool,
+        new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
+    ) {
+        self.update_module_registry_arc(
+            module_name,
+            Arc::new(pers_struct),
+            source_path,
+            is_pure,
+            cmj_export_constants,
+            is_runtime,
+            new_alias_rewrites,
+        );
+    }
+
+    /// Update the module registry with a compiled module's shared portable PersStruct.
+    pub fn update_module_registry_arc(
+        &self,
+        module_name: &str,
+        pers_struct: Arc<PortablePersStruct>,
+        source_path: std::path::PathBuf,
+        is_pure: bool,
+        cmj_export_constants: AHashMap<String, CmjExportConstant>,
         is_runtime: bool,
         new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
         let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
             source_path,
             is_pure,
+            cmj_export_constants,
             is_runtime,
         };
-        self.module_registry
-            .lock()
-            .unwrap()
-            .register_module(module_name, pers_struct, info, new_alias_rewrites);
+        self.module_registry.lock().unwrap().register_module_arc(
+            module_name,
+            pers_struct,
+            info,
+            new_alias_rewrites,
+        );
     }
 
     /// Register a namespace in the module registry.
-    pub fn register_namespace_in_registry(
-        &self,
-        namespace_name: &str,
-        module_aliases: &[(String, String)],
-    ) {
+    pub fn register_namespace_in_registry(&self, namespace_name: &str, module_aliases: &[(String, String)]) {
         self.module_registry
             .lock()
             .unwrap()
@@ -460,6 +495,10 @@ impl BuildCommandState {
     /// Returns None if no deps have been stored (e.g., not in --in-process mode).
     pub fn get_in_memory_deps(&self, key: &str) -> Option<Dependencies> {
         self.in_memory_deps.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn get_stored_ast(&self, key: &str) -> Option<StoredAst> {
+        self.stored_asts.lock().unwrap().get(key).cloned()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

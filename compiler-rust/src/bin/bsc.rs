@@ -88,10 +88,26 @@ struct Options {
     input: Option<PathBuf>,
     include_paths: Vec<PathBuf>,
     runtime_path: Option<PathBuf>,
+    package_name: Option<String>,
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
     jsx_preserve: bool,
+    nopervasives: bool,
     no_version_header: bool,
+    no_check_div_by_zero: bool,
+    cross_module_inline: bool,
+    no_assert_false: bool,
+    make_runtime: bool,
+}
+
+impl Options {
+    fn has_dump_output(&self) -> bool {
+        self.dump_lambda
+            || self.dump_typed_sexp
+            || self.dump_typed_sexp_locs
+            || self.dump_lambda_sexp
+            || self.dump_lambda_sexp_locs
+    }
 }
 
 fn main() {
@@ -172,6 +188,11 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
+                "-bs-package-name" => {
+                    if let Some(val) = args.next() {
+                        opts.package_name = Some(val);
+                    }
+                }
                 "-open" => {
                     if let Some(val) = args.next() {
                         opts.open_modules.push(val);
@@ -183,11 +204,11 @@ fn run() -> Result<()> {
                     }
                 }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
-                // OCaml compiler/bsc/rescript_compiler_main.ml:372-374 maps
-                // this CLI flag directly to `Js_config.no_version_header`.
                 "-bs-no-version-header" => opts.no_version_header = true,
-                "-w" | "-warn-error" | "-color" | "-bs-package-name" | "-bs-jsx-mode" | "-pp"
-                | "-ppx" | "-ppxopt" => {
+                "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
+                "-bs-cross-module-opt" => opts.cross_module_inline = true,
+                "-bs-noassertfalse" => opts.no_assert_false = true,
+                "-w" | "-warn-error" | "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -201,6 +222,8 @@ fn run() -> Result<()> {
                 | "-bs-no-check-cmi" => {
                     // Boolean flags - no argument to consume
                 }
+                "-make-runtime" => opts.make_runtime = true,
+                "-nopervasives" => opts.nopervasives = true,
                 _ => {
                     // Unknown flag: ignore, but if it looks like a value flag, try to skip.
                 }
@@ -249,16 +272,23 @@ fn run() -> Result<()> {
         open_modules: opts.open_modules.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
-        package_output_module_format: package_output.as_ref().map(|output| output.module_format),
-        package_output_suffix: package_output.as_ref().map(|output| output.suffix.clone()),
+        output_module_format: package_output
+            .as_ref()
+            .map(|(module_format, _, _)| *module_format),
+        js_output_targets: Vec::new(),
         jsx_version: opts.jsx_version,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
         no_version_header: opts.no_version_header,
-        check_div_by_zero: true,
-        nopervasives: false,
+        check_div_by_zero: !opts.no_check_div_by_zero,
+        cross_module_inline: opts.cross_module_inline,
+        no_assert_false: opts.no_assert_false,
+        nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
+        package_name: opts.package_name.clone(),
+        make_runtime: opts.make_runtime,
         capture_intermediates: false,
+        skip_js_render: false,
     };
 
     if is_interface {
@@ -266,8 +296,7 @@ fn run() -> Result<()> {
         typecheck_interface_file(&source_path, &compiler_opts)?;
         Ok(())
     } else {
-        let js = compile_file_to_js_with_options(&source_path, &compiler_opts)?;
-        write_outputs(&source_path, &js, &opts)
+        write_outputs(&source_path, &compiler_opts, &opts)
     }
 }
 
@@ -400,7 +429,62 @@ fn read_ast_source_path(ast_path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(path_str.into_owned()))
 }
 
-fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
+fn write_outputs(
+    source_path: &Path,
+    compiler_opts: &CompilerOptions,
+    opts: &Options,
+) -> Result<()> {
+    if opts.has_dump_output() {
+        let js = compile_file_to_js_with_options(source_path, compiler_opts)?;
+        return write_precompiled_outputs(source_path, &js, opts);
+    }
+
+    if let Some(out) = &opts.output {
+        let mut output_opts = compiler_opts.clone();
+        output_opts.output_path = Some(out.clone());
+        let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out, js)?;
+        return Ok(());
+    }
+
+    if !opts.package_outputs.is_empty() {
+        for spec in &opts.package_outputs {
+            if let Some((format, dir, suffix)) = parse_package_output(spec) {
+                let module_name = module_name_for_file(
+                    source_path,
+                    opts.namespace.as_deref(),
+                    opts.module_name.as_deref(),
+                );
+                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
+                let mut output_opts = compiler_opts.clone();
+                output_opts.output_path = Some(out_path.clone());
+                output_opts.output_module_format = Some(format);
+                let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(out_path, js)?;
+            }
+        }
+        return Ok(());
+    }
+
+    let out = source_path.with_extension("js");
+    let mut output_opts = compiler_opts.clone();
+    output_opts.output_path = Some(out.clone());
+    output_opts.output_module_format = None;
+    let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, js)?;
+    Ok(())
+}
+
+fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     if let Some(out) = &opts.output {
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
@@ -411,14 +495,13 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
 
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
-            if let Some(output) = parse_package_output(spec) {
+            if let Some((_format, dir, suffix)) = parse_package_output(spec) {
                 let module_name = module_name_for_file(
                     source_path,
                     opts.namespace.as_deref(),
                     opts.module_name.as_deref(),
                 );
-                let out_path =
-                    Path::new(&output.dir).join(format!("{module_name}{}", output.suffix));
+                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -436,33 +519,27 @@ fn write_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
     Ok(())
 }
 
-struct PackageOutput {
-    module_format: ModuleFormat,
-    dir: String,
-    suffix: String,
-}
-
-fn parse_package_output(spec: &str) -> Option<PackageOutput> {
+fn parse_package_output(spec: &str) -> Option<(ModuleFormat, String, String)> {
     let parts = spec.split(':').collect::<Vec<_>>();
     // OCaml compiler/core/js_packages_info.ml:177-193 parses
     // `-bs-package-output` as `[path]`, `[module_system:path]`, or
     // `[module_system:path:suffix]`, defaulting the one-part form to ESModule.
     match parts.as_slice() {
-        [dir] => Some(PackageOutput {
-            module_format: ModuleFormat::EsModule,
-            dir: (*dir).to_string(),
-            suffix: ".js".to_string(),
-        }),
-        [module_system, dir] => Some(PackageOutput {
-            module_format: parse_module_format(module_system)?,
-            dir: (*dir).to_string(),
-            suffix: ".js".to_string(),
-        }),
-        [module_system, dir, suffix] => Some(PackageOutput {
-            module_format: parse_module_format(module_system)?,
-            dir: (*dir).to_string(),
-            suffix: (*suffix).to_string(),
-        }),
+        [dir] => Some((
+            ModuleFormat::EsModule,
+            (*dir).to_string(),
+            ".js".to_string(),
+        )),
+        [module_system, dir] => Some((
+            parse_module_format(module_system)?,
+            (*dir).to_string(),
+            ".js".to_string(),
+        )),
+        [module_system, dir, suffix] => Some((
+            parse_module_format(module_system)?,
+            (*dir).to_string(),
+            (*suffix).to_string(),
+        )),
         _ => None,
     }
 }

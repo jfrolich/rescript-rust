@@ -13,11 +13,14 @@
 //! as an unknown arity.
 
 use crate::ident::Ident;
+use crate::lambda::lam_analysis::{
+    SMALL_INLINE_SIZE, lfunction_can_be_inlined, no_side_effects, size,
+};
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{BoxedNullable, Element, IdKind, LamStats, RecFlag};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use crate::lambda::{Lambda, PrimInfo};
+use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 ///
@@ -226,14 +229,62 @@ fn all_lambdas(meta: &LamStats, xs: &[&Lambda]) -> Arity {
 }
 
 /// Direct port of `Lam_pass_collect.annotate` (lam_pass_collect.ml:34-37).
-fn annotate(meta: &mut LamStats, rec_flag: RecFlag, k: Ident, arity: Arity, lambda: Lambda) {
+fn annotate(
+    meta: &mut LamStats,
+    rec_flag: RecFlag,
+    k: Ident,
+    arity: Arity,
+    lambda: Option<Lambda>,
+) {
     meta.ident_tbl.insert(
         k,
         IdKind::FunctionId {
             arity,
-            lambda: Some((lambda, rec_flag)),
+            lambda: lambda.map(|lambda| (lambda, rec_flag)),
         },
     );
+}
+
+fn param_driven_destructuring_may_inline(func: &LFunction) -> bool {
+    fn is_param(params: &[Ident], test: &Lambda) -> bool {
+        match test {
+            Lambda::Lvar(v) => params.iter().any(|p| p == v),
+            _ => false,
+        }
+    }
+
+    match func.body.as_ref() {
+        Lambda::Lswitch(test, _) => is_param(&func.params, test),
+        Lambda::LifThenElse(test, _, _) => is_param(&func.params, test),
+        _ => false,
+    }
+}
+
+fn function_payload_needed(func: &LFunction) -> bool {
+    if !lfunction_can_be_inlined(func) {
+        return false;
+    }
+
+    // OCaml stores every lambda in collect (lam_pass_collect.ml:79-89)
+    // because that is only pointer sharing. In Rust it is a deep clone, so we
+    // keep payloads only for cases remove-alias can consume:
+    // functors are always beta-reduced (lam_pass_remove_alias.ml:185-197),
+    // and normal functions are gated by ok_to_inline_fun_when_app
+    // (lam_analysis.ml:250-260).
+    if func.attr.is_a_functor {
+        return true;
+    }
+
+    match func.attr.inline {
+        InlineAttribute::Always => true,
+        InlineAttribute::Never => false,
+        InlineAttribute::Default => {
+            let body_size = size(&func.body);
+            body_size < SMALL_INLINE_SIZE
+                || body_size < 10 && no_side_effects(&func.body)
+                || param_driven_destructuring_may_inline(func)
+        }
+    }
 }
 
 /// Direct port of `Lam_pass_collect.collect_bind` (lam_pass_collect.ml:58-93).
@@ -302,7 +353,8 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
                 meta.ident_tbl.insert(p.clone(), IdKind::Parameter);
             }
             let arity = get_arity(meta, lam);
-            annotate(meta, rec_flag, ident.clone(), arity, lam.clone());
+            let payload = function_payload_needed(func).then(|| lam.clone());
+            annotate(meta, rec_flag, ident.clone(), arity, payload);
             collect(meta, &func.body);
         }
         // lam_pass_collect.ml:90-93 — fallback: collect, annotate exports.
@@ -310,7 +362,7 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
             collect(meta, x);
             if meta.export_idents.contains(ident) {
                 let arity = get_arity(meta, x);
-                annotate(meta, rec_flag, ident.clone(), arity, lam.clone());
+                annotate(meta, rec_flag, ident.clone(), arity, Some(lam.clone()));
             }
         }
     }

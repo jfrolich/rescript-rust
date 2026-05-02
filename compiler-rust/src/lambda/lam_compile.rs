@@ -27,6 +27,8 @@ use crate::lambda::js_shake::{
     move_same_name_export_alias_to_export_tail, resolve_tail_move_replacement_expression,
 };
 use crate::lambda::lam_analysis;
+use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
@@ -38,6 +40,7 @@ use crate::lambda::{
     LambdaSwitch, SwitchCaseTag, TagInfo,
 };
 use crate::location::Location;
+use tracing::info_span;
 
 use super::js_exp_make::{
     block_with_return_expr_iife, direct_projection_from_pure_literal, int_expr, int_literal,
@@ -79,6 +82,16 @@ struct FlatHandler {
     label: i32,
     bindings: Vec<Ident>,
     handler: Lambda,
+}
+
+// OCaml's export coercion only reuses direct variables and module-field
+// projections while folding `pairs` (`compiler/core/lam_coercion.ml:99-121`).
+fn reusable_export_value_candidate(value: &Expression) -> bool {
+    match &value.desc {
+        ExpressionDesc::Var(_) => true,
+        ExpressionDesc::StaticIndex(target, _, _) => reusable_export_value_candidate(target),
+        _ => false,
+    }
 }
 
 /// Direct port of `Lam_compile.flat_catches` + `flatten_nested_caches`
@@ -254,7 +267,9 @@ pub struct LambdaCompiler {
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
+    pub(crate) cross_module_inline: bool,
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
+    pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -338,7 +353,9 @@ impl LambdaCompiler {
             module_path_resolver: None,
             jsx_preserve: false,
             check_div_by_zero: true,
+            cross_module_inline: false,
             cmj_constant_cache: HashMap::new(),
+            cmj_lambda_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -360,7 +377,7 @@ impl LambdaCompiler {
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
     ) -> Self {
-        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true)
+        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true, false)
     }
 
     /// Create a compiler with the JS-backend options that affect lowering.
@@ -368,13 +385,16 @@ impl LambdaCompiler {
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
         check_div_by_zero: bool,
+        cross_module_inline: bool,
     ) -> Self {
         Self {
             id_gen: IdGenerator::new(),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
+            cross_module_inline,
             cmj_constant_cache: HashMap::new(),
+            cmj_lambda_cache: HashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -391,10 +411,23 @@ impl LambdaCompiler {
         self.compile_deps_program(lam).program
     }
 
+    /// Compile an owned Lambda expression into a JS IR program.
+    pub fn compile_program_owned(&mut self, lam: Lambda) -> Program {
+        self.compile_deps_program_owned(lam).program
+    }
+
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
+        self.compile_deps_program_owned(lam.clone())
+    }
+
+    /// Compile an owned Lambda expression into a JS IR program with module metadata.
+    pub fn compile_deps_program_owned(&mut self, lam: Lambda) -> DepsProgram {
         let possible_required_modules = std::collections::HashSet::new();
-        self.compile_deps_program_with_possible_required_modules(lam, &possible_required_modules)
+        self.compile_deps_program_with_possible_required_modules_owned(
+            lam,
+            &possible_required_modules,
+        )
     }
 
     /// Compile a Lambda expression into a JS IR program with module metadata
@@ -405,56 +438,134 @@ impl LambdaCompiler {
         lam: &Lambda,
         extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
     ) -> DepsProgram {
+        self.compile_deps_program_with_possible_required_modules_owned(
+            lam.clone(),
+            extra_possible_required_modules,
+        )
+    }
+
+    /// Owned form of `compile_deps_program_with_possible_required_modules`.
+    ///
+    /// This follows the same `compiler/core/lam_compile_main.ml:148-200`
+    /// simplify pipeline, but passes ownership into the Rust lambda passes so
+    /// they can move the previous tree instead of cloning it first.
+    pub fn compile_deps_program_with_possible_required_modules_owned(
+        &mut self,
+        lam: Lambda,
+        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+    ) -> DepsProgram {
+        let _span = info_span!(
+            "compiler.lambda_to_js",
+            extra_possible_required_modules = extra_possible_required_modules.len(),
+            jsx_preserve = self.jsx_preserve
+        )
+        .entered();
         self.external_module_ids.clear();
-        let mut possible_required_modules = collect_possible_required_modules(lam);
+        let mut possible_required_modules =
+            crate::timing::measure(crate::timing::Phase::Codegen, || {
+                let _phase = info_span!("compiler.lambda_collect_possible_modules").entered();
+                collect_possible_required_modules(&lam)
+            });
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified = crate::lambda::lam_compile_main::simplify_for_js_backend_with_jsx_preserve(
-            lam,
-            self.jsx_preserve,
-        );
-        let compiled = self.compile_expr(&simplified);
-        let mut block = compiled.prelude;
-        let exports = if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block)
-        {
-            if block_terminates(&block) {
-                for value in &mut exports.values {
-                    *value = Expression::undefined(false);
+        let simplified = crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
+            let _phase = info_span!("compiler.lambda_simplify").entered();
+            let jsx_preserve = self.jsx_preserve;
+            let mut external_inline =
+                |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                    self.resolve_cmj_module_field_lambda(
+                        &ModuleId {
+                            id: module_id.clone(),
+                            kind: Kind::Ml,
+                            dynamic_import,
+                        },
+                        field_name,
+                    )
+                };
+            crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_owned(
+                lam,
+                jsx_preserve,
+                &mut external_inline,
+            )
+        });
+        // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
+        // same global `Ident.currentstamp` as the Lambda identifiers entering
+        // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
+        // 1614. Seed Rust's JS-lowering generator past every existing Lambda
+        // stamp before `compile_expr` creates temporary identifiers.
+        let js_lowering_start_stamp =
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&simplified)
+                .max(crate::ident::Ident::current_local_stamp());
+        self.id_gen.set_current_stamp(js_lowering_start_stamp);
+        crate::ident::Ident::set_current_time(js_lowering_start_stamp);
+        crate::timing::measure(crate::timing::Phase::Codegen, || {
+            let compiled = {
+                let _phase = info_span!("compiler.lambda_compile_expr").entered();
+                self.compile_expr(&simplified)
+            };
+            let mut block = compiled.prelude;
+            let (exports, name_reservations) = {
+                let _phase = info_span!("compiler.lambda_exports").entered();
+                if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+                    if block_terminates(&block) {
+                        for value in &mut exports.values {
+                            *value = Expression::undefined(false);
+                        }
+                    }
+                    self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
+                } else {
+                    (vec![], vec![])
+                }
+            };
+            rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
+                &mut block, &exports,
+            );
+            let exports = resolve_export_aliases(&block, exports);
+            let side_effect = module_side_effect_reason(&simplified);
+
+            let mut deps = DepsProgram {
+                program: Program::new_with_name_reservations(block, exports, name_reservations),
+                modules: vec![],
+                side_effect,
+            };
+            deps = {
+                let _phase = info_span!("compiler.js_pass_flatten").entered();
+                apply_js_flatten_pass(deps)
+            };
+            deps = {
+                let _phase = info_span!("compiler.js_pass_external_shadow").entered();
+                apply_external_shadow_pass(deps)
+            };
+            deps = {
+                let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
+                apply_js_tailcall_inline_pass(deps)
+            };
+            deps = {
+                let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
+                apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
+            };
+            deps = {
+                let _phase = info_span!("compiler.js_pass_shake").entered();
+                apply_js_shake_pass(deps)
+            };
+            {
+                let _phase = info_span!("compiler.js_required_modules").entered();
+                let mut required_modules = self.collect_required_module_set(&deps.program.block);
+                populate_required_modules(
+                    self.module_path_resolver.as_ref(),
+                    &possible_required_modules,
+                    &mut required_modules,
+                );
+                deps.modules = required_modules.to_vec();
+                ocaml_sort_modules(&mut deps.modules);
+                if deps.side_effect.is_none() {
+                    deps.side_effect = required_module_side_effect_reason(
+                        self.module_path_resolver.as_ref(),
+                        &deps.modules,
+                    );
                 }
             }
-            self.coerce_toplevel_exports(&mut block, exports)
-        } else {
-            vec![]
-        };
-        rewrite_toplevel_variable_initializers_through_rewriteable_aliases(&mut block, &exports);
-        let exports = resolve_export_aliases(&block, exports);
-        let side_effect = module_side_effect_reason(&simplified);
-
-        let mut deps = apply_js_flatten_and_mark_dead_pass(
-            apply_js_tailcall_inline_pass(apply_external_shadow_pass(apply_js_flatten_pass(
-                DepsProgram {
-                    program: Program::new(block, exports),
-                    modules: vec![],
-                    side_effect,
-                },
-            ))),
-            self.jsx_preserve,
-        );
-        deps = apply_js_shake_pass(deps);
-        let mut required_modules = self.collect_required_module_set(&deps.program.block);
-        populate_required_modules(
-            self.module_path_resolver.as_ref(),
-            &possible_required_modules,
-            &mut required_modules,
-        );
-        deps.modules = required_modules.to_vec();
-        ocaml_sort_modules(&mut deps.modules);
-        if deps.side_effect.is_none() {
-            deps.side_effect = required_module_side_effect_reason(
-                self.module_path_resolver.as_ref(),
-                &deps.modules,
-            );
-        }
-        deps
+            deps
+        })
     }
 
     fn coerce_toplevel_exports(
@@ -462,6 +573,15 @@ impl LambdaCompiler {
         block: &mut Block,
         extracted: ExtractedExports,
     ) -> Vec<Ident> {
+        self.coerce_toplevel_exports_with_name_reservations(block, extracted)
+            .0
+    }
+
+    fn coerce_toplevel_exports_with_name_reservations(
+        &mut self,
+        block: &mut Block,
+        extracted: ExtractedExports,
+    ) -> (Vec<Ident>, Vec<Ident>) {
         let mut max_stamp = max_ident_stamp_in_block(block);
         for export in &extracted.exports {
             max_stamp = max_stamp.max(export.stamp());
@@ -476,19 +596,31 @@ impl LambdaCompiler {
         let block_ended = block_terminates(block);
 
         let mut exports = Vec::with_capacity(extracted.exports.len());
+        // OCaml `lam_coercion.ml` can replace an original export id with a
+        // same-name different-stamp target (`compiler/core/lam_coercion.ml:100-110`)
+        // or with `Ident.rename original_export_id`
+        // (`compiler/core/lam_coercion.ml:140-156`). The JS printer then sees
+        // the original id as occupying the base name and prints the selected
+        // local as `$1`; carry those original ids as explicit reservations.
+        let mut name_reservations = Vec::new();
         let mut rebound_exports = Vec::new();
 
         let extracted_len = extracted.exports.len();
+        // OCaml's `compiler/core/lam_coercion.ml:82-121` folds over export ids
+        // and lambda values, only allocating a renamed export when the branch
+        // actually emits a rebound group (`compiler/core/lam_coercion.ml:113-120`
+        // and `compiler/core/lam_coercion.ml:140-156`). Mirror that here: borrow
+        // during classification and clone only for the selected output shape.
         for index in 0..extracted_len {
-            let export = extracted.exports[index].clone();
-            let value = extracted.values[index].clone();
+            let export = &extracted.exports[index];
+            let value = &extracted.values[index];
             let later_exports = &extracted.exports[index + 1..];
             if let Some((late_value, property)) =
-                move_same_name_export_alias_to_export_tail(block, &export, &value)
+                move_same_name_export_alias_to_export_tail(block, export, value)
             {
                 exports.push(export.clone());
                 rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export,
+                    ident: export.clone(),
                     value: Some(late_value),
                     property,
                     ident_info: IdentInfo::default(),
@@ -497,15 +629,18 @@ impl LambdaCompiler {
             }
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
-                    if declared.contains(&export) {
-                        exports.push(
-                            if keeps_declared_same_name_function_export_alias(block, &export) {
-                                export
+                    if declared.contains(export) {
+                        let selected =
+                            if keeps_declared_same_name_function_export_alias(block, export) {
+                                export.clone()
                             } else {
-                                resolve_declared_same_name_self_alias_target(block, &export)
-                                    .unwrap_or(export)
-                            },
-                        );
+                                resolve_declared_same_name_self_alias_target(block, export)
+                                    .unwrap_or_else(|| export.clone())
+                            };
+                        if !selected.same(export) {
+                            name_reservations.push(export.clone());
+                        }
+                        exports.push(selected);
                         continue;
                     }
                     if declared.contains(target) {
@@ -515,48 +650,55 @@ impl LambdaCompiler {
                             target,
                             false,
                         );
-                        match resolved.desc {
-                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => {
-                                exports.push(resolved_target);
-                            }
-                            _ => exports.push(target.clone()),
+                        let selected = match resolved.desc {
+                            ExpressionDesc::Var(VIdent::Id(resolved_target)) => resolved_target,
+                            _ => target.clone(),
+                        };
+                        if !selected.same(export) {
+                            name_reservations.push(export.clone());
                         }
+                        exports.push(selected);
                         continue;
                     }
                 }
             }
-            if matches!(value.desc, ExpressionDesc::Undefined { .. })
-                && ((declared.contains(&export)
-                    && can_reuse_existing_undefined_export_binding(block, &export))
+            if matches!(&value.desc, ExpressionDesc::Undefined { .. })
+                && ((declared.contains(export)
+                    && can_reuse_existing_undefined_export_binding(block, export))
                     || block_ended)
             {
-                exports.push(export);
-                continue;
-            }
-            if let Some((late_value, property)) =
-                move_reused_same_name_export_binding_to_export_tail(block, &export, &value)
-            {
                 exports.push(export.clone());
-                rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export,
-                    value: Some(late_value),
-                    property,
-                    ident_info: IdentInfo::default(),
-                }));
                 continue;
             }
-            if keeps_declared_same_name_reusable_export_binding(block, &export, &value) {
-                exports.push(export);
-                continue;
-            }
-            if let Some(reused) = reusable_same_name_export_binding(block, &export, &value) {
-                exports.push(reused);
-                continue;
+            if reusable_export_value_candidate(value) {
+                // Same OCaml export fold as above: reusable same-name bindings
+                // only arise from variable/module-field export values. See
+                // compiler/core/lam_coercion.ml:99-121.
+                if let Some((late_value, property)) =
+                    move_reused_same_name_export_binding_to_export_tail(block, export, value)
+                {
+                    exports.push(export.clone());
+                    rebound_exports.push(Statement::variable(VariableDeclaration {
+                        ident: export.clone(),
+                        value: Some(late_value),
+                        property,
+                        ident_info: IdentInfo::default(),
+                    }));
+                    continue;
+                }
+                if keeps_declared_same_name_reusable_export_binding(block, export, value) {
+                    exports.push(export.clone());
+                    continue;
+                }
+                if let Some(reused) = reusable_same_name_export_binding(block, export, value) {
+                    exports.push(reused);
+                    continue;
+                }
             }
             if let Some(inserted_export) = insert_rebound_export_before_equivalent_later_binding(
                 block,
-                &export,
-                &value,
+                export,
+                value,
                 later_exports,
             ) {
                 exports.push(inserted_export);
@@ -564,7 +706,8 @@ impl LambdaCompiler {
             }
 
             let rebound = self.id_gen.create(export.name());
-            let property = if matches!(value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
+            name_reservations.push(export.clone());
+            let property = if matches!(&value.desc, ExpressionDesc::Var(VIdent::Id(_))) {
                 LetKind::Alias
             } else {
                 LetKind::Strict
@@ -572,7 +715,7 @@ impl LambdaCompiler {
             exports.push(rebound.clone());
             rebound_exports.push(Statement::variable(VariableDeclaration {
                 ident: rebound,
-                value: Some(value),
+                value: Some(value.clone()),
                 property,
                 ident_info: IdentInfo::default(),
             }));
@@ -580,7 +723,7 @@ impl LambdaCompiler {
 
         block.extend(rebound_exports);
         reorder_trailing_export_bindings_by_export_order(block, &exports);
-        exports
+        (exports, name_reservations)
     }
 
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
@@ -605,6 +748,10 @@ impl LambdaCompiler {
             }
         }
 
+        if let Some(inlined) = self.try_compile_external_field_apply(apply) {
+            return inlined;
+        }
+
         let mut prelude = vec![];
         let func = self.compile_expr(&apply.ap_func);
         prelude.extend(func.prelude);
@@ -623,6 +770,80 @@ impl LambdaCompiler {
                 call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
             ),
         }
+    }
+
+    fn resolve_cmj_module_field_lambda(
+        &mut self,
+        module: &ModuleId,
+        field_name: &str,
+    ) -> Option<Lambda> {
+        if !self.cross_module_inline || !matches!(module.kind, Kind::Ml) {
+            return None;
+        }
+
+        if !self.cmj_lambda_cache.contains_key(module.id.name()) {
+            let lambdas = self
+                .module_path_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.module_cmj_export_lambdas(module.id.name()));
+            self.cmj_lambda_cache
+                .insert(module.id.name().to_string(), lambdas);
+        }
+
+        self.cmj_lambda_cache
+            .get(module.id.name())
+            .and_then(|exports| exports.as_ref())
+            .and_then(|exports| exports.get(field_name).cloned())
+    }
+
+    fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
+        let Lambda::Lprim(crate::lambda::PrimInfo {
+            primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
+            args,
+            ..
+        }) = lam
+        else {
+            return None;
+        };
+        let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+            return None;
+        };
+        Some((
+            ModuleId {
+                id: id.clone(),
+                kind: Kind::Ml,
+                dynamic_import: *dynamic_import,
+            },
+            name.as_str(),
+        ))
+    }
+
+    fn try_compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
+        let (module, field_name) = self.module_field_apply_target(&apply.ap_func)?;
+        let lambda = self.resolve_cmj_module_field_lambda(&module, field_name)?;
+        let Lambda::Lfunction(func) = lambda else {
+            return None;
+        };
+        if func.params.len() != apply.ap_args.len() || !lfunction_can_be_inlined(&func) {
+            return None;
+        }
+
+        // OCaml lam_compile.ml:275-290 inlines closed `persistent_closed_lambda`
+        // functions from `.cmj` during `compile_external_field_apply`, then
+        // beta-reduces them with Lam_beta_reduce.propagate_beta_reduce_with_map.
+        let exports = ahash::AHashSet::new();
+        let (_, param_map) = is_closed_with_map(&exports, &func.params, &func.body);
+        let mut ident_tbl = crate::lambda::lam_compile_context::IdentTable::new();
+        let reduced =
+            crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                &mut ident_tbl,
+                &self.id_gen,
+                &param_map,
+                &func.params,
+                &func.body,
+                &apply.ap_args,
+            );
+        Some(self.compile_expr(&reduced))
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
@@ -6170,81 +6391,88 @@ fn populate_required_modules(
     }
 }
 
-#[derive(Debug, Clone)]
-enum TopLevelEffectGroup {
-    Single(LetKind, Ident, Lambda),
-    Recursive(Vec<(Ident, Lambda)>),
-    Nop(Lambda),
+#[derive(Debug, Clone, Copy)]
+enum TopLevelEffectGroupRef<'a> {
+    Single(LetKind, &'a Ident, &'a Lambda),
+    Recursive(&'a [(Ident, Lambda)]),
+    Nop(&'a Lambda),
 }
 
-fn top_level_effect_group_single(kind: LetKind, ident: Ident, body: Lambda) -> TopLevelEffectGroup {
-    match (kind, &body) {
+fn top_level_effect_group_single_ref<'a>(
+    kind: LetKind,
+    ident: &'a Ident,
+    body: &'a Lambda,
+) -> TopLevelEffectGroupRef<'a> {
+    match (kind, body) {
         (LetKind::Strict | LetKind::StrictOpt, Lambda::Lvar(_) | Lambda::Lconst(_)) => {
-            TopLevelEffectGroup::Single(LetKind::Alias, ident, body)
+            TopLevelEffectGroupRef::Single(LetKind::Alias, ident, body)
         }
-        _ => TopLevelEffectGroup::Single(kind, ident, body),
+        _ => TopLevelEffectGroupRef::Single(kind, ident, body),
     }
 }
 
-fn push_top_level_effect_nop(lam: Lambda, groups: &mut Vec<TopLevelEffectGroup>) {
+fn push_top_level_effect_nop_ref<'a>(
+    lam: &'a Lambda,
+    groups: &mut Vec<TopLevelEffectGroupRef<'a>>,
+) {
     if !matches!(
         lam,
         Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)
     ) {
-        groups.push(TopLevelEffectGroup::Nop(lam));
+        groups.push(TopLevelEffectGroupRef::Nop(lam));
     }
 }
 
-fn flatten_top_level_effect_groups(
-    acc: Vec<TopLevelEffectGroup>,
-    lam: &Lambda,
-) -> (Lambda, Vec<TopLevelEffectGroup>) {
+fn collect_top_level_effect_group_refs<'a>(
+    lam: &'a Lambda,
+    groups: &mut Vec<TopLevelEffectGroupRef<'a>>,
+) -> &'a Lambda {
     match lam {
         Lambda::Llet(kind, id, value, body) => {
-            let (result, groups) = flatten_top_level_effect_groups(acc, value);
-            let mut next = Vec::with_capacity(groups.len() + 1);
-            next.push(top_level_effect_group_single(*kind, id.clone(), result));
-            next.extend(groups);
-            flatten_top_level_effect_groups(next, body)
+            let result = collect_top_level_effect_group_refs(value, groups);
+            groups.push(top_level_effect_group_single_ref(*kind, id, result));
+            collect_top_level_effect_group_refs(body, groups)
         }
         Lambda::Lletrec(bindings, body) => {
-            let mut next = Vec::with_capacity(acc.len() + 1);
-            next.push(TopLevelEffectGroup::Recursive(bindings.clone()));
-            next.extend(acc);
-            flatten_top_level_effect_groups(next, body)
+            groups.push(TopLevelEffectGroupRef::Recursive(bindings));
+            collect_top_level_effect_group_refs(body, groups)
         }
         Lambda::Lsequence(first, second) => {
-            let (result, groups) = flatten_top_level_effect_groups(acc, first);
-            let mut next = Vec::with_capacity(groups.len() + 1);
-            push_top_level_effect_nop(result, &mut next);
-            next.extend(groups);
-            flatten_top_level_effect_groups(next, second)
+            let result = collect_top_level_effect_group_refs(first, groups);
+            push_top_level_effect_nop_ref(result, groups);
+            collect_top_level_effect_group_refs(second, groups)
         }
-        _ => (lam.clone(), acc),
+        _ => lam,
     }
 }
 
 fn module_side_effect_reason(lam: &Lambda) -> Option<String> {
-    let (result, groups) = flatten_top_level_effect_groups(Vec::new(), lam);
+    // OCaml `Lam_coercion.flatten` builds top-level groups in source order
+    // before `Lam_compile_main.compile_lambda` asks `Lam_compile.no_side_effect`
+    // for each group (compiler/core/lam_coercion.ml:179-199,
+    // compiler/core/lam_compile_main.ml:210-236). The Rust Lambda backend walks
+    // one tree rather than OCaml's grouped list, so keep borrowed group refs in
+    // the same order and avoid cloning each top-level body just to inspect it.
+    let mut groups = Vec::new();
+    let result = collect_top_level_effect_group_refs(lam, &mut groups);
     groups
-        .into_iter()
-        .rev()
+        .iter()
         .find_map(|group| match group {
-            TopLevelEffectGroup::Single(kind, id, body) => {
-                (matches!(kind, LetKind::Strict | LetKind::Variable)
-                    && !lam_analysis::no_side_effects(&body))
+            TopLevelEffectGroupRef::Single(kind, id, body) => {
+                (matches!(*kind, LetKind::Strict | LetKind::Variable)
+                    && !lam_analysis::no_side_effects(body))
                 .then(|| id.name().to_string())
             }
-            TopLevelEffectGroup::Recursive(bindings) => {
-                bindings.into_iter().find_map(|(id, body)| {
-                    (!lam_analysis::no_side_effects(&body)).then(|| id.name().to_string())
+            TopLevelEffectGroupRef::Recursive(bindings) => {
+                bindings.iter().find_map(|(id, body)| {
+                    (!lam_analysis::no_side_effects(body)).then(|| id.name().to_string())
                 })
             }
-            TopLevelEffectGroup::Nop(body) => {
-                (!lam_analysis::no_side_effects(&body)).then(String::new)
+            TopLevelEffectGroupRef::Nop(body) => {
+                (!lam_analysis::no_side_effects(body)).then(String::new)
             }
         })
-        .or_else(|| (!lam_analysis::no_side_effects(&result)).then(String::new))
+        .or_else(|| (!lam_analysis::no_side_effects(result)).then(String::new))
 }
 
 fn required_module_side_effect_reason(

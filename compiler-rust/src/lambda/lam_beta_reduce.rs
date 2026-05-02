@@ -15,7 +15,7 @@
 //! We ensure that side effects happen in a consistent order by binding
 //! arguments to variables when needed.
 
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;

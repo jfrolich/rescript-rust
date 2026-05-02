@@ -24,11 +24,15 @@ use std::path::{Component, Path as FsPath, PathBuf};
 
 use crate::cmi::persistent_env::{CmjExportConstant, PersistentEnv};
 use crate::ident::Ident;
+use crate::lambda::Lambda;
 use crate::lambda::SwitchCaseTag;
 use crate::lambda::lam_tag_info::TagInfo;
 pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property, PropertyName};
 pub use printer::{JsPrinter, print_block, print_expression};
-pub use program_printer::{print_deps_program, print_deps_program_with_directives, print_program};
+pub use program_printer::{
+    print_deps_program, print_deps_program_with_directives,
+    print_deps_program_with_directives_and_options, print_program,
+};
 
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,6 +62,7 @@ pub struct ModulePathResolver {
     current_source_path: Option<PathBuf>,
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
+    current_package_is_runtime: bool,
     path_overrides: HashMap<String, String>,
 }
 
@@ -66,37 +71,20 @@ impl ModulePathResolver {
     pub fn from_compile_options(
         source_filename: Option<&str>,
         output_path: Option<&FsPath>,
+        output_module_format: Option<ModuleFormat>,
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
-    ) -> Self {
-        Self::from_compile_options_with_output_info(
-            source_filename,
-            output_path,
-            runtime_path,
-            persistent_env,
-            None,
-            None,
-        )
-    }
-
-    /// Build a resolver while honoring package-output module metadata.
-    pub fn from_compile_options_with_output_info(
-        source_filename: Option<&str>,
-        output_path: Option<&FsPath>,
-        runtime_path: Option<&FsPath>,
-        persistent_env: Option<PersistentEnv>,
-        module_format: Option<ModuleFormat>,
-        output_suffix: Option<&str>,
+        current_package_is_runtime: bool,
     ) -> Self {
         Self {
-            format: module_format.unwrap_or_else(|| module_format_from_output_path(output_path)),
-            output_suffix: output_suffix
-                .map(str::to_string)
-                .unwrap_or_else(|| output_suffix_from_path(output_path)),
+            format: output_module_format
+                .unwrap_or_else(|| module_format_from_output_path(output_path)),
+            output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
+            current_package_is_runtime,
             path_overrides: HashMap::new(),
         }
     }
@@ -106,8 +94,25 @@ impl ModulePathResolver {
         self.path_overrides.insert(module_name.to_string(), path);
     }
 
+    /// Module format for the current output target.
+    pub fn module_format(&self) -> ModuleFormat {
+        self.format
+    }
+
+    /// Whether module resolution is backed by the in-memory registry. In this
+    /// mode the build scheduler has already scanned source files, so JS
+    /// lowering must not probe sibling directories.
+    pub fn is_in_process_mode(&self) -> bool {
+        self.persistent_env
+            .as_ref()
+            .is_some_and(PersistentEnv::is_in_process_mode)
+    }
+
     /// Resolve a same-directory source fallback path for an ML module.
     pub fn resolve_local_module_fallback_path(&self, module_name: &str) -> Option<String> {
+        if self.is_in_process_mode() {
+            return None;
+        }
         let target_source = self.fallback_local_module_source(module_name)?;
         self.relative_output_path(&target_source)
     }
@@ -160,7 +165,22 @@ impl ModulePathResolver {
             .map(|exports| exports.into_iter().collect())
     }
 
+    /// Read closed lambda exports recorded in a module's companion `.cmj`.
+    pub fn module_cmj_export_lambdas(&self, module_name: &str) -> Option<HashMap<String, Lambda>> {
+        self.persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_export_lambdas(module_name))
+            .map(|exports| exports.into_iter().collect())
+    }
+
     fn runtime_module_path(&self, module_name: &str) -> String {
+        // OCaml emits sibling runtime imports while compiling the runtime
+        // package itself; see compiler/core/js_name_of_module_id.ml:68-84
+        // and compiler/core/js_packages_info.ml:49-50.
+        if self.current_package_is_runtime {
+            return format!("./{module_name}{}", self.output_suffix);
+        }
+
         // Mirror upstream PR #8207: runtime files use .mjs / .cjs extensions
         // matching the module system, not .js.
         let (dir, ext) = match self.format {
@@ -171,6 +191,15 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
+        if let Some(env) = &self.persistent_env {
+            if env.module_is_runtime(module_name) {
+                return true;
+            }
+            if env.is_in_process_mode() {
+                return false;
+            }
+        }
+
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };
@@ -263,6 +292,7 @@ fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {
         .and_then(|name| name.to_str())
     {
         Some(name) if name.ends_with(".mjs") => ".mjs".to_string(),
+        Some(name) if name.ends_with(".cjs") => ".cjs".to_string(),
         Some(name) if name.ends_with(".bs.js") => ".bs.js".to_string(),
         _ => ".js".to_string(),
     }
@@ -2922,6 +2952,8 @@ pub struct Program {
     pub exports: Exports,
     /// Set of exported identifiers
     pub export_set: std::collections::HashSet<Ident>,
+    /// Idents that occupy printed names without emitting statements.
+    pub name_reservations: Vec<Ident>,
 }
 
 impl Program {
@@ -2932,6 +2964,22 @@ impl Program {
             block,
             exports,
             export_set,
+            name_reservations: Vec::new(),
+        }
+    }
+
+    /// Create a program with additional printer name reservations.
+    pub fn new_with_name_reservations(
+        block: Block,
+        exports: Exports,
+        name_reservations: Vec<Ident>,
+    ) -> Self {
+        let export_set = exports.iter().cloned().collect();
+        Self {
+            block,
+            exports,
+            export_set,
+            name_reservations,
         }
     }
 
@@ -2941,6 +2989,7 @@ impl Program {
             block: vec![],
             exports: vec![],
             export_set: std::collections::HashSet::new(),
+            name_reservations: Vec::new(),
         }
     }
 }
@@ -3459,6 +3508,8 @@ mod tests {
             Some(source_dir.join("include_side_effect.mjs").as_path()),
             None,
             None,
+            None,
+            false,
         );
         let module = ModuleId {
             id: Ident::create_local("Side_effect"),

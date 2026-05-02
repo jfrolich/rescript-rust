@@ -7,7 +7,9 @@
 //!
 //! Unlike the OCaml implementation which uses a global `currentstamp` counter,
 //! this implementation requires an [`IdGenerator`] to be passed explicitly.
-//! This enables concurrent compilation of multiple files.
+//! This enables concurrent compilation of multiple files. The legacy
+//! [`Ident::create_local`] counter is thread-local so parallel in-process
+//! compilations can reset OCaml-style stamps without racing each other.
 //!
 //! # Example
 //!
@@ -28,11 +30,13 @@
 
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicI32, Ordering};
 
-static LOCAL_IDENT_COUNTER: AtomicI32 = AtomicI32::new(0);
+thread_local! {
+    static LOCAL_IDENT_COUNTER: Cell<i32> = const { Cell::new(0) };
+}
 
 /// Flags for identifier properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -132,14 +136,19 @@ impl Ident {
 
     /// Create a local identifier with an auto-incrementing stamp.
     ///
-    /// This uses a thread-safe global counter for stamp generation.
-    /// For concurrent compilation, prefer using [`IdGenerator`] explicitly.
+    /// This uses a thread-local counter for stamp generation. For new compiler
+    /// code, prefer using [`IdGenerator`] explicitly so the counter is tied to
+    /// the current compilation context.
     ///
     /// This is mainly useful for tests and simple cases where
-    /// thread isolation isn't required.
+    /// an explicit generator is not available.
     #[inline]
     pub fn create_local(name: impl Into<SmolStr>) -> Self {
-        let stamp = LOCAL_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        let stamp = LOCAL_IDENT_COUNTER.with(|counter| {
+            let stamp = counter.get() + 1;
+            counter.set(stamp);
+            stamp
+        });
         let name = name.into();
         Self {
             name,
@@ -151,13 +160,13 @@ impl Ident {
     /// Get the current stamp used by [`Ident::create_local`].
     #[inline]
     pub fn current_local_stamp() -> i32 {
-        LOCAL_IDENT_COUNTER.load(Ordering::Relaxed)
+        LOCAL_IDENT_COUNTER.with(Cell::get)
     }
 
     /// Set the local stamp counter (matches OCaml's `Ident.set_current_time`).
     #[inline]
     pub fn set_current_time(stamp: i32) {
-        LOCAL_IDENT_COUNTER.store(stamp, Ordering::Relaxed);
+        LOCAL_IDENT_COUNTER.with(|counter| counter.set(stamp));
     }
 
     /// Get the name of this identifier.

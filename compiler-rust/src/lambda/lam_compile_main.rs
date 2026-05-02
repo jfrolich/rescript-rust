@@ -9,12 +9,14 @@
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
-use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
+use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_owned;
 use crate::lambda::lam_pass_collect::collect_info;
-use crate::lambda::lam_pass_deep_flatten::deep_flatten;
-use crate::lambda::lam_pass_exits::simplify_exits;
-use crate::lambda::lam_pass_lets_dce::simplify_lets;
-use crate::lambda::lam_pass_remove_alias::simplify_alias_with_jsx;
+use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
+use crate::lambda::lam_pass_exits::simplify_exits_owned;
+use crate::lambda::lam_pass_lets_dce::simplify_lets_owned;
+use crate::lambda::lam_pass_remove_alias::{
+    ExternalInlineResolver, simplify_alias_with_jsx_and_external_inline_owned,
+};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Lambda, PrimInfo};
@@ -24,10 +26,35 @@ pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
 }
 
+pub fn simplify_for_js_backend_owned(lam: Lambda) -> Lambda {
+    simplify_for_js_backend_with_jsx_preserve_owned(lam, false)
+}
+
 /// `jsx_preserve` reaches `simplify_alias` here so that the JSX guard in
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:54-62)
 /// fires on the same callees OCaml does.
 pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: bool) -> Lambda {
+    simplify_for_js_backend_with_jsx_preserve_owned(lam.clone(), jsx_preserve)
+}
+
+/// Owned entry point for the same `compiler/core/lam_compile_main.ml:148-200`
+/// pipeline. OCaml values are immutable and rebuilt by each pass; Rust can move
+/// the previous pass result into owned ports such as `deep_flatten_owned`
+/// without changing the pass order or behavior.
+pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve: bool) -> Lambda {
+    let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
+    simplify_for_js_backend_with_external_inline_owned(lam, jsx_preserve, &mut no_external_inline)
+}
+
+/// Same JS-backend simplify pipeline, with the Rust counterpart to
+/// `Lam_compile_env.query_external_id_info` available to the three
+/// `simplify_alias` passes. OCaml uses that environment in
+/// `compiler/core/lam_pass_remove_alias.ml:131-162`.
+pub fn simplify_for_js_backend_with_external_inline_owned(
+    lam: Lambda,
+    jsx_preserve: bool,
+    external_inline: &mut ExternalInlineResolver<'_>,
+) -> Lambda {
     // OCaml constructs `meta` once at lam_compile_main.ml:150-153 with
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
     // entry point. The exports come from `Translmod.transl_implementation`. In
@@ -37,7 +64,7 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // `Lam_pass_collect.collect_info` (lam_pass_collect.ml:92-93) and the
     // `is_export_id` guard in `Lam_pass_remove_alias.simplify_alias`
     // (lam_pass_remove_alias.ml:211).
-    let mut meta = LamStats::new(extract_export_idents(lam));
+    let mut meta = LamStats::new(extract_export_idents(&lam));
     // Seed the shared rename counter past every stamp already present in the
     // lambda so `Ident.rename` (via beta-reduce) never collides with existing
     // stamps. OCaml's Ident.rename reads from a global mutable counter; this
@@ -47,59 +74,74 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
     // `coercion_module_alias_test`, which is invalid JS).
     meta.id_gen
         .set_current_stamp(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
-            lam,
+            &lam,
         ));
 
     // lam_compile_main.ml:148 — initial deep_flatten.
-    let lam = deep_flatten(lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:154 — collect_info into meta.
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:159 — simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:161 — collect_info before simplify_alias.
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:167 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_and_external_inline_owned(
+        &mut meta,
+        lam,
+        jsx_preserve,
+        external_inline,
+    );
 
     // lam_compile_main.ml:169 — deep_flatten.
-    let lam = deep_flatten(&lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:173 — collect_info.
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:174 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_and_external_inline_owned(
+        &mut meta,
+        lam,
+        jsx_preserve,
+        external_inline,
+    );
 
     // lam_compile_main.ml:175 — deep_flatten.
-    let lam = deep_flatten(&lam);
+    let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:176 — collect_info.
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:180 — alpha_conversion.
-    let lam = alpha_conversion(&meta, &lam);
+    let lam = alpha_conversion_owned(&meta, lam);
 
     // lam_compile_main.ml:182 — simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:183 — collect_info.
     collect_info(&mut meta, &lam);
 
     // lam_compile_main.ml:188 — simplify_alias.
-    let lam = simplify_alias_with_jsx(&mut meta, &lam, jsx_preserve);
+    let lam = simplify_alias_with_jsx_and_external_inline_owned(
+        &mut meta,
+        lam,
+        jsx_preserve,
+        external_inline,
+    );
 
     // lam_compile_main.ml:190 — alpha_conversion.
-    let lam = alpha_conversion(&meta, &lam);
+    let lam = alpha_conversion_owned(&meta, lam);
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
-    let lam = simplify_lets(&lam);
+    let lam = simplify_lets_owned(lam);
 
     // lam_compile_main.ml:200 — final simplify_exits.
-    let lam = simplify_exits(&lam, &meta.id_gen);
+    let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
     // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list
@@ -207,107 +249,22 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
     }
 }
 
-/// Walks `lam` and returns the idents carried in the top-level
-/// `Pmakeblock(_, TagInfo::ModuleExport(ids), _)` blocks. These mirror the
+/// Walks the same top-level spine as `Lam_coercion.flatten`
+/// (`compiler/core/lam_coercion.ml:179-199`) and returns the idents carried in
+/// the final `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`. These mirror the
 /// `exports` list `Translmod.transl_implementation` returns to
-/// `Lam_compile_main.compile` (js_implementation.ml:158-163). The lowering
-/// stage already collects the same set into `LoweringContext.exported_idents`
-/// (raw_lambda/lower.rs:502-577), so this helper applies the same shape match
-/// against the post-lowering Lambda.
+/// `Lam_compile_main.compile` (`compiler/core/js_implementation.ml:158-163`).
+/// Do not walk nested module values: OCaml's `meta.exports` contains the
+/// structure-level exports passed to `Lam_coercion.handle_exports`, not every
+/// nested module-export block reachable from the payload.
 fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
-    let mut exports: Vec<Ident> = Vec::new();
-    let mut seen: std::collections::HashSet<Ident> = std::collections::HashSet::new();
-    walk(lam, &mut exports, &mut seen);
-    exports
-}
-
-fn walk(lam: &Lambda, exports: &mut Vec<Ident>, seen: &mut std::collections::HashSet<Ident>) {
     match lam {
-        Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => {}
-        Lambda::Lapply(apply) => {
-            walk(&apply.ap_func, exports, seen);
-            for arg in &apply.ap_args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lfunction(func) => walk(&func.body, exports, seen),
-        Lambda::Llet(_, _, value, body) => {
-            walk(value, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lletrec(bindings, body) => {
-            for (_, lam) in bindings {
-                walk(lam, exports, seen);
-            }
-            walk(body, exports, seen);
-        }
+        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
+        Lambda::Lsequence(_, right) => extract_export_idents(right),
         Lambda::Lprim(PrimInfo {
             primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
-            args,
             ..
-        }) => {
-            for id in ids {
-                if seen.insert(id.clone()) {
-                    exports.push(id.clone());
-                }
-            }
-            for arg in args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lprim(prim) => {
-            for arg in &prim.args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::Lswitch(scrut, switch) => {
-            walk(scrut, exports, seen);
-            for (_, lam) in &switch.sw_consts {
-                walk(lam, exports, seen);
-            }
-            for (_, lam) in &switch.sw_blocks {
-                walk(lam, exports, seen);
-            }
-            if let Some(failaction) = &switch.sw_failaction {
-                walk(failaction, exports, seen);
-            }
-        }
-        Lambda::LstringSwitch(scrut, cases, default) => {
-            walk(scrut, exports, seen);
-            for (_, lam) in cases {
-                walk(lam, exports, seen);
-            }
-            if let Some(default) = default {
-                walk(default, exports, seen);
-            }
-        }
-        Lambda::LstaticRaise(_, args) => {
-            for arg in args {
-                walk(arg, exports, seen);
-            }
-        }
-        Lambda::LstaticCatch(body, _, handler)
-        | Lambda::LtryWith(body, _, handler)
-        | Lambda::Lsequence(body, handler)
-        | Lambda::Lwhile(body, handler) => {
-            walk(body, exports, seen);
-            walk(handler, exports, seen);
-        }
-        Lambda::LifThenElse(cond, then_, else_) => {
-            walk(cond, exports, seen);
-            walk(then_, exports, seen);
-            walk(else_, exports, seen);
-        }
-        Lambda::Lfor(_, start, end, _, body) => {
-            walk(start, exports, seen);
-            walk(end, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            walk(iterable, exports, seen);
-            walk(body, exports, seen);
-        }
-        Lambda::Lbreak | Lambda::Lcontinue => {}
-        Lambda::Lassign(_, value) => walk(value, exports, seen),
+        }) => ids.clone(),
+        _ => Vec::new(),
     }
 }
