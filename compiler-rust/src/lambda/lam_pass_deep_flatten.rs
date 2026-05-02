@@ -115,11 +115,44 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
         }
     }
 
-    fn eliminate_tuple_owned(
+    fn can_eliminate_tuple<'a>(
+        id: &Ident,
+        lam: &'a Lambda,
+        mut tuple_mapping: HashMap<i32, Ident>,
+    ) -> Option<(HashMap<i32, Ident>, &'a Lambda)> {
+        match lam {
+            Lambda::Llet(LetKind::Alias, projected, value, body) => match value.as_ref() {
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pfield(index, _),
+                    args,
+                    loc: _,
+                }) if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id)) => {
+                    tuple_mapping.insert(*index, projected.clone());
+                    can_eliminate_tuple(id, body, tuple_mapping)
+                }
+                _ => {
+                    if hit_variable(id, lam) {
+                        None
+                    } else {
+                        Some((tuple_mapping, lam))
+                    }
+                }
+            },
+            _ => {
+                if hit_variable(id, lam) {
+                    None
+                } else {
+                    Some((tuple_mapping, lam))
+                }
+            }
+        }
+    }
+
+    fn strip_tuple_owned(
         id: &Ident,
         lam: Lambda,
         tuple_mapping: HashMap<i32, Ident>,
-    ) -> Result<(HashMap<i32, Ident>, Lambda), Lambda> {
+    ) -> (HashMap<i32, Ident>, Lambda) {
         match lam {
             Lambda::Llet(LetKind::Alias, projected, value, body) => match *value {
                 Lambda::Lprim(PrimInfo {
@@ -129,24 +162,14 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                 }) if matches!(args.as_slice(), [Lambda::Lvar(tuple)] if tuple.same(id)) => {
                     let mut tuple_mapping = tuple_mapping;
                     tuple_mapping.insert(index, projected);
-                    eliminate_tuple_owned(id, *body, tuple_mapping)
+                    strip_tuple_owned(id, *body, tuple_mapping)
                 }
                 value => {
                     let lam = Lambda::Llet(LetKind::Alias, projected, Box::new(value), body);
-                    if hit_variable(id, &lam) {
-                        Err(lam)
-                    } else {
-                        Ok((tuple_mapping, lam))
-                    }
+                    (tuple_mapping, lam)
                 }
             },
-            _ => {
-                if hit_variable(id, &lam) {
-                    Err(lam)
-                } else {
-                    Ok((tuple_mapping, lam))
-                }
-            }
+            _ => (tuple_mapping, lam),
         }
     }
 
@@ -213,28 +236,33 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
                     )
                 );
                 if flatten_named_module_block {
-                    match eliminate_tuple_owned(&id, *body, HashMap::new()) {
-                        Ok((tuple_mapping, stripped_body)) => {
-                            let Lambda::Lprim(PrimInfo { args, .. }) = res else {
-                                unreachable!();
-                            };
-                            let mut flattened_args = args
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, arg)| match tuple_mapping.get(&(index as i32)) {
-                                    Some(projected) => {
-                                        FlattenGroup::Single(kind, projected.clone(), arg)
-                                    }
-                                    None => FlattenGroup::Nop(arg),
-                                })
-                                .collect::<Vec<_>>();
-                            acc.append(&mut flattened_args);
-                            return flatten(acc, stripped_body);
-                        }
-                        Err(body) => {
-                            acc.push(FlattenGroup::Single(kind, id, res));
-                            return flatten(acc, body);
-                        }
+                    let body = *body;
+                    if can_eliminate_tuple(&id, &body, HashMap::new()).is_some() {
+                        // OCaml's `eliminate_tuple` returns `None` without
+                        // consuming the original body, so the failure arm keeps
+                        // every projection intact (lam_pass_deep_flatten.ml:31-34,
+                        // 141-145). Mirror that in Rust by probing on borrows,
+                        // then doing the owned strip only after success.
+                        let (tuple_mapping, stripped_body) =
+                            strip_tuple_owned(&id, body, HashMap::new());
+                        let Lambda::Lprim(PrimInfo { args, .. }) = res else {
+                            unreachable!();
+                        };
+                        let mut flattened_args = args
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, arg)| match tuple_mapping.get(&(index as i32)) {
+                                Some(projected) => {
+                                    FlattenGroup::Single(kind, projected.clone(), arg)
+                                }
+                                None => FlattenGroup::Nop(arg),
+                            })
+                            .collect::<Vec<_>>();
+                        acc.append(&mut flattened_args);
+                        return flatten(acc, stripped_body);
+                    } else {
+                        acc.push(FlattenGroup::Single(kind, id, res));
+                        return flatten(acc, body);
                     }
                 }
 
@@ -348,4 +376,144 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
     }
 
     aux(lam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::{Ident, IdentFlags};
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::{Constant, TagInfo};
+
+    fn ident(name: &str, stamp: i32) -> Ident {
+        Ident::new(name, stamp, IdentFlags::NONE)
+    }
+
+    fn int(value: i32) -> Lambda {
+        Lambda::const_(Constant::int(value))
+    }
+
+    fn tuple(args: Vec<Lambda>) -> Lambda {
+        Lambda::prim(
+            Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+            args,
+            Location::none(),
+        )
+    }
+
+    fn field(index: i32, id: &Ident) -> Lambda {
+        Lambda::prim(
+            Primitive::Pfield(index, FieldDbgInfo::Tuple),
+            vec![Lambda::var(id.clone())],
+            Location::none(),
+        )
+    }
+
+    fn has_binding(lam: &Lambda, target: &Ident) -> bool {
+        match lam {
+            Lambda::Llet(_, id, value, body) => {
+                id.same(target) || has_binding(value, target) || has_binding(body, target)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .any(|(id, lam)| id.same(target) || has_binding(lam, target))
+                    || has_binding(body, target)
+            }
+            Lambda::Lprim(info) => info.args.iter().any(|arg| has_binding(arg, target)),
+            Lambda::Lapply(apply) => {
+                has_binding(&apply.ap_func, target)
+                    || apply.ap_args.iter().any(|arg| has_binding(arg, target))
+            }
+            Lambda::Lfunction(func) => has_binding(&func.body, target),
+            Lambda::Lswitch(arg, switch) => {
+                has_binding(arg, target)
+                    || switch
+                        .sw_consts
+                        .iter()
+                        .any(|(_, lam)| has_binding(lam, target))
+                    || switch
+                        .sw_blocks
+                        .iter()
+                        .any(|(_, lam)| has_binding(lam, target))
+                    || switch
+                        .sw_failaction
+                        .as_deref()
+                        .is_some_and(|lam| has_binding(lam, target))
+            }
+            Lambda::LstringSwitch(arg, cases, default) => {
+                has_binding(arg, target)
+                    || cases.iter().any(|(_, lam)| has_binding(lam, target))
+                    || default
+                        .as_deref()
+                        .is_some_and(|lam| has_binding(lam, target))
+            }
+            Lambda::LstaticRaise(_, args) => args.iter().any(|arg| has_binding(arg, target)),
+            Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+                has_binding(body, target) || has_binding(handler, target)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                has_binding(cond, target)
+                    || has_binding(then_, target)
+                    || has_binding(else_, target)
+            }
+            Lambda::Lsequence(first, second) | Lambda::Lwhile(first, second) => {
+                has_binding(first, target) || has_binding(second, target)
+            }
+            Lambda::Lfor(_, start, end, _, body) => {
+                has_binding(start, target) || has_binding(end, target) || has_binding(body, target)
+            }
+            Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+                has_binding(iterable, target) || has_binding(body, target)
+            }
+            Lambda::Lassign(_, value) => has_binding(value, target),
+            Lambda::Lvar(_)
+            | Lambda::LglobalModule(_, _)
+            | Lambda::Lconst(_)
+            | Lambda::Lbreak
+            | Lambda::Lcontinue => false,
+        }
+    }
+
+    #[test]
+    fn bailout_keeps_interleaved_projection_bindings() {
+        let tuple_id = ident("match", 1);
+        let right = ident("match", 2);
+        let y1 = ident("y1", 3);
+        let x1 = ident("x1", 4);
+        let left = ident("match", 5);
+        let y0 = ident("y0", 6);
+        let x0 = ident("x0", 7);
+
+        let result = tuple(vec![
+            Lambda::var(x1.clone()),
+            Lambda::var(y1.clone()),
+            Lambda::var(x0.clone()),
+            Lambda::var(y0.clone()),
+        ]);
+        let body = Lambda::let_(LetKind::Alias, x0, field(0, &left), result);
+        let body = Lambda::let_(LetKind::Alias, y0, field(1, &left), body);
+        let body = Lambda::let_(LetKind::Alias, left, field(0, &tuple_id), body);
+        let body = Lambda::let_(LetKind::Alias, x1, field(0, &right), body);
+        let body = Lambda::let_(LetKind::Alias, y1, field(1, &right), body);
+        let body = Lambda::let_(LetKind::Alias, right.clone(), field(1, &tuple_id), body);
+
+        let lam = Lambda::let_(
+            LetKind::Strict,
+            tuple_id,
+            tuple(vec![
+                tuple(vec![int(1), int(2)]),
+                tuple(vec![int(3), int(4)]),
+            ]),
+            body,
+        );
+
+        let flattened = deep_flatten_owned(lam);
+
+        // OCaml leaves the original body untouched when `eliminate_tuple`
+        // returns `None` (compiler/core/lam_pass_deep_flatten.ml:31-34,
+        // 141-145). Interleaved projections must therefore keep the first
+        // projection binding instead of stripping it and leaving free uses.
+        assert!(has_binding(&flattened, &right));
+    }
 }
