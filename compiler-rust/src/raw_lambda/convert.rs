@@ -2793,6 +2793,18 @@ impl<'a> RawLambdaConverter<'a> {
             "%string_safe_get" => Some(Primitive::Pstringrefs),
             "%string_unsafe_get" => Some(Primitive::Pstringrefu),
             "%powint" => Some(Primitive::Ppowint),
+            // OCaml translcore.ml:377-387 maps these runtime externals to
+            // dedicated primitives before lambda conversion.
+            "%function_arity" => Some(Primitive::PfnArity),
+            "%curry_apply1" => Some(Primitive::PjsApply),
+            "%curry_apply2" => Some(Primitive::PjsApply),
+            "%curry_apply3" => Some(Primitive::PjsApply),
+            "%curry_apply4" => Some(Primitive::PjsApply),
+            "%curry_apply5" => Some(Primitive::PjsApply),
+            "%curry_apply6" => Some(Primitive::PjsApply),
+            "%curry_apply7" => Some(Primitive::PjsApply),
+            "%curry_apply8" => Some(Primitive::PjsApply),
+            "%makemutablelist" => Some(Primitive::Pmakelist),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
             "#null" => Some(Primitive::Pnull),
             "#undefined" => Some(Primitive::Pundefined),
@@ -2801,6 +2813,7 @@ impl<'a> RawLambdaConverter<'a> {
             "#null_to_opt" => Some(Primitive::PnullToOpt),
             "#nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
             "#import" => Some(Primitive::Pimport),
+            "#makemutablelist" => Some(Primitive::Pmakelist),
             _ => {
                 // %fieldN -> Pfield(N, Fld_tuple)
                 if let Some(n_str) = prim_name.strip_prefix("%field") {

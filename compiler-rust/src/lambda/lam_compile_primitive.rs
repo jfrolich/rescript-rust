@@ -45,6 +45,20 @@ impl LambdaCompiler {
         let expr = match prim {
             Pstringlength => Expression::length(compiled_args[0].clone(), LengthObject::String),
             Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
+            // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
+            // direct call of the first argument with the remaining arguments.
+            PjsApply => match compiled_args.split_first() {
+                Some((func, args)) => {
+                    Expression::call(func.clone(), args.to_vec(), CallInfo::default())
+                }
+                None => Expression::undefined(false),
+            },
+            // OCaml lam_compile_primitive.ml:136 lowers Pfn_arity to
+            // function_length, i.e. `.length` on the function value.
+            PfnArity => match compiled_args.first() {
+                Some(func) => Expression::length(func.clone(), LengthObject::Function),
+                None => Expression::undefined(false),
+            },
             Pstringrefs | Pstringrefu => {
                 self.runtime_call_expr("Primitive_string", "getChar", compiled_args)
             }
@@ -448,6 +462,19 @@ impl LambdaCompiler {
                     tag_info.clone(),
                 ))
             }
+            // OCaml lam_compile_primitive.ml:560-564 builds the mutable list
+            // constructor block used by the runtime.
+            Pmakelist => Expression::new(ExpressionDesc::CamlBlock(
+                compiled_args,
+                MutableFlag::Mutable,
+                Box::new(Expression::number(Number::int(0))),
+                TagInfo::Constructor {
+                    name: "::".to_string(),
+                    num_nonconst: 1,
+                    tag: 0,
+                    attrs: Vec::new(),
+                },
+            )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
                     code: info.code.trim().to_string(),
