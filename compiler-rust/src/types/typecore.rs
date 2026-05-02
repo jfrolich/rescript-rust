@@ -17847,7 +17847,20 @@ impl Env {
             match path {
                 Path::Pident(id) => {
                     let mod_name = id.name();
-                    if let Ok(md) = env.find_module(mod_name) {
+                    let env_module = if id.is_persistent() {
+                        // OCaml compiler/ml/env.ml:865-875 uses
+                        // `IdTbl.find_same` for `Pident` before falling
+                        // through to `find_pers_struct`. A persistent alias
+                        // target like `ArrayExt` must not resolve through an
+                        // opened local module with the same name, otherwise
+                        // `module ArrayExt = ArrayExt` becomes a self-alias.
+                        env.has_module_ident(id)
+                            .then(|| env.lookup_module(path).ok())
+                            .flatten()
+                    } else {
+                        env.find_module(mod_name).ok()
+                    };
+                    if let Some(md) = env_module {
                         let result =
                             resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
                         visiting.remove(path);

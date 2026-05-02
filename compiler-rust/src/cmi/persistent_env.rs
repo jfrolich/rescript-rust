@@ -1666,6 +1666,15 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
     )
 }
 
+fn substitute_sig_module_path(
+    path: &Path,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+) -> Path {
+    let maps = build_subst_maps_for_module(sig_items, module_path);
+    substitute_module_path(path, &maps.module_stamp_map, &maps.module_name_map)
+}
+
 fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
     match module_type {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
@@ -3820,9 +3829,13 @@ fn add_signature_to_env_with_options(
                 pos += 1;
                 md.md_path = Some(access_path.clone());
                 // Rewrite module-type paths against the opened signature.
-                // Some CMI signatures use hidden self-alias heads (e.g. `ArrayExt!`)
-                // that are not directly resolvable from the current environment.
-                // Normalize those to the qualified access path.
+                // OCaml compiler/ml/subst.ml:345-357 applies
+                // `Subst.module_path` to `Mty_alias`, and subst.ml:69-75
+                // rewrites only paths present in the module substitution from
+                // env.ml:1530-1578. Keep unrelated persistent aliases like
+                // `module ArrayExt = ArrayExt` pointing at `ArrayExt.cmi`;
+                // rewriting them by name creates a self-alias and loses the
+                // component table that env.ml:865-875 would load.
                 let normalize_hidden_alias_path = |path: Path| -> Path {
                     fn go(
                         path: Path,
@@ -3832,10 +3845,10 @@ fn add_signature_to_env_with_options(
                     ) -> Path {
                         match path {
                             Path::Pident(alias_id) => {
-                                let clean = alias_id.name().trim_end_matches('!');
-                                if clean == module_name {
+                                let is_hidden = alias_id.stamp() == -1;
+                                if is_hidden && alias_id.name() == module_name {
                                     access_path.clone()
-                                } else if clean == module_path.last() {
+                                } else if is_hidden && alias_id.name() == module_path.last() {
                                     module_path.clone()
                                 } else {
                                     Path::Pident(alias_id)
@@ -3856,11 +3869,12 @@ fn add_signature_to_env_with_options(
                 };
                 md.md_type = match md.md_type {
                     ModuleType::MtyAlias(alias_presence, alias_path) => {
-                        let rewritten = substitute_sig_path(&alias_path, sig_items, module_path);
+                        let rewritten =
+                            substitute_sig_module_path(&alias_path, sig_items, module_path);
                         ModuleType::MtyAlias(alias_presence, normalize_hidden_alias_path(rewritten))
                     }
                     ModuleType::MtyIdent(path) => {
-                        let rewritten = substitute_sig_path(&path, sig_items, module_path);
+                        let rewritten = substitute_sig_module_path(&path, sig_items, module_path);
                         ModuleType::MtyIdent(normalize_hidden_alias_path(rewritten))
                     }
                     other => other,
