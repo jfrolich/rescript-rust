@@ -34,6 +34,17 @@ use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
 use crate::location::Location;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+
+fn in_process_module_resolution_env(
+    ctx: &TypeContext<'_>,
+) -> Option<crate::cmi::persistent_env::PersistentEnv> {
+    // OCaml compiler/ml/env.ml:1000-1007 resolves persistent units through
+    // the current persistent environment before any CMI lookup. In Rust's
+    // in-process build, TypeContext owns that environment and it is backed by
+    // registry/source entries rather than disk artifacts.
+    ctx.persistent_env_clone()
+        .filter(|env| env.is_in_process_mode())
+}
 // ============================================================================
 // Type Errors
 // ============================================================================
@@ -1137,23 +1148,12 @@ fn resolve_module_type_through_env_path<'a>(
     let result = match path {
         Path::Pident(id) => {
             let name = id.name();
-            if let Ok(md) = env.lookup_module(path) {
-                Some(md.md_type.clone())
-            } else if let Ok(md) = env.find_module(name) {
-                Some(md.md_type.clone())
-            } else if let Ok(mtd) = env.find_modtype(name) {
-                mtd.mtd_type.clone()
-            } else {
-                // Match OCaml Env.find_module: only persistent identifiers
-                // may resolve through the persistent environment.
-                if !id.is_persistent() {
-                    return None;
-                }
-                let mut no_persistent_env = None;
+            if id.is_persistent() {
+                let mut persistent_env = in_process_module_resolution_env(ctx);
                 crate::types::typecore::resolve_module_signature_for_path(
                     path,
                     env,
-                    &mut no_persistent_env,
+                    &mut persistent_env,
                     ctx,
                 )
                 .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
@@ -1176,10 +1176,18 @@ fn resolve_module_type_through_env_path<'a>(
                         .map(super::decl::ModuleType::MtySignature)
                     }
                 })
+            } else if let Ok(md) = env.lookup_module(path) {
+                Some(md.md_type.clone())
+            } else if let Ok(md) = env.find_module(name) {
+                Some(md.md_type.clone())
+            } else if let Ok(mtd) = env.find_modtype(name) {
+                mtd.mtd_type.clone()
+            } else {
+                None
             }
         }
         Path::Pdot(parent, name, _) => {
-            let mut no_persistent_env = None;
+            let mut persistent_env = in_process_module_resolution_env(ctx);
             let parent_root_name = path_root_ident(parent).map(|id| id.name());
             let parent_is_implicit_stdlib_component =
                 matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
@@ -1189,7 +1197,7 @@ fn resolve_module_type_through_env_path<'a>(
                 if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                     &selected_child_path,
                     env,
-                    &mut no_persistent_env,
+                    &mut persistent_env,
                     ctx,
                 ) {
                     // OCaml compiler/ml/env.ml:1094-1100 value lookup uses
@@ -1203,11 +1211,11 @@ fn resolve_module_type_through_env_path<'a>(
                     return Some(super::decl::ModuleType::MtySignature(sig));
                 }
             }
-            let mut no_persistent_env = None;
+            let mut persistent_env = in_process_module_resolution_env(ctx);
             let parent_alias_target = crate::types::typecore::module_alias_target_for_path(
                 parent,
                 env,
-                &mut no_persistent_env,
+                &mut persistent_env,
                 ctx,
             );
             if let Some((_, access_path, md)) =
@@ -1215,7 +1223,7 @@ fn resolve_module_type_through_env_path<'a>(
                     parent,
                     name,
                     env,
-                    &mut no_persistent_env,
+                    &mut persistent_env,
                     ctx,
                 )
             {
@@ -1244,7 +1252,7 @@ fn resolve_module_type_through_env_path<'a>(
                         crate::types::typecore::resolve_module_signature_for_path(
                             preferred_child_path.as_ref().unwrap_or(&access_path),
                             env,
-                            &mut no_persistent_env,
+                            &mut persistent_env,
                             ctx,
                         )
                         .or_else(|| {
@@ -1252,7 +1260,7 @@ fn resolve_module_type_through_env_path<'a>(
                                 crate::types::typecore::resolve_module_signature_for_path(
                                     &access_path,
                                     env,
-                                    &mut no_persistent_env,
+                                    &mut persistent_env,
                                     ctx,
                                 )
                             })
@@ -1280,7 +1288,7 @@ fn resolve_module_type_through_env_path<'a>(
                 parent,
                 name,
                 env,
-                &mut no_persistent_env,
+                &mut persistent_env,
                 ctx,
             ) {
                 mtd.mtd_type.clone()
@@ -1557,14 +1565,23 @@ fn lookup_raw_module_sig_type<'a>(
 
     let mut visiting = HashSet::new();
     let raw_sig = match module_path {
-        Path::Pident(id) => env
-            .lookup_module(module_path)
-            .or_else(|_| env.find_module(id.name()))
-            .ok()
-            .and_then(|md| match &md.md_type {
+        Path::Pident(id) => {
+            // OCaml compiler/ml/env.ml:781-788 path lookup uses exact
+            // `IdTbl.find_same` for persistent `Pident`s; only source
+            // Longident lookup uses name fallback before persistent lookup
+            // (compiler/ml/env.ml:1000-1007).
+            let module_decl = if id.is_persistent() {
+                env.lookup_module_ident_exact(id).ok()
+            } else {
+                env.lookup_module(module_path)
+                    .or_else(|_| env.find_module(id.name()))
+                    .ok()
+            };
+            module_decl.and_then(|md| match &md.md_type {
                 super::decl::ModuleType::MtySignature(sig) => Some(sig.clone()),
                 _ => None,
-            }),
+            })
+        }
         _ => None,
     }
     .or_else(|| {
@@ -1590,13 +1607,13 @@ fn resolve_type_item_through_env<'a>(
         _ => return None,
     };
 
-    let mut no_persistent_env = None;
+    let mut persistent_env = in_process_module_resolution_env(ctx);
     if let Some((qualified_module_path, id, decl)) =
         crate::types::typecore::lookup_type_in_resolved_path(
             module_path,
             type_name,
             env,
-            &mut no_persistent_env,
+            &mut persistent_env,
             ctx,
         )
     {
@@ -1610,11 +1627,11 @@ fn resolve_type_item_through_env<'a>(
         let alias_target_for_strengthening = if strengthen_alias_types {
             // Preserve local access paths like `L.t` / `V.t` instead of
             // collapsing them back to the alias target during expansion.
-            let mut no_persistent_env = None;
+            let mut persistent_env = in_process_module_resolution_env(ctx);
             crate::types::typecore::module_alias_target_for_path(
                 module_path,
                 env,
-                &mut no_persistent_env,
+                &mut persistent_env,
                 ctx,
             )
             .filter(|_| module_access_origin_is_persistent)

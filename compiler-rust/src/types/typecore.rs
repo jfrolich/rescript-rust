@@ -20990,20 +20990,14 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let local_module_path = match module_path {
-        Path::Pident(id) if id.is_persistent() || id.stamp() == 0 => env
-            .find_module_with_origin(id.name())
-            .ok()
-            .and_then(|(local_id, _, is_local)| {
-                // OCaml compiler/ml/env.ml:778-793 resolves source-level
-                // `Longident.Lident` module prefixes through the current env
-                // before falling back to persistent structures in env.ml:1000-1007.
-                // Some Rust package-modtype paths can still arrive here as a
-                // persistent Pident; if the current env has a local module with
-                // that name, use the local stamped identity so component forcing
-                // and env.ml:1581-1585 modtype freshening are shared with normal
-                // qualified lookups.
-                is_local.then(|| Path::pident(local_id.clone()))
-            }),
+        Path::Pident(_id) => {
+            // OCaml compiler/ml/env.ml:781-788 path-based `Pident` lookup is
+            // exact (`IdTbl.find_same`). Source `Longident.Lident` name lookup
+            // is handled before paths reach this helper
+            // (compiler/ml/env.ml:1000-1007), so keep persistent type paths from
+            // imported signatures independent from local/opened same-name modules.
+            None
+        }
         _ => None,
     };
     let module_path = local_module_path.as_ref().unwrap_or(module_path);
@@ -21423,6 +21417,25 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
     ))
 }
 
+fn lookup_pident_module_for_path<'a>(
+    env: &'a Env,
+    module_path: &Path,
+    id: &Ident,
+) -> Option<&'a crate::types::decl::ModuleDeclaration> {
+    // OCaml compiler/ml/env.ml:781-788 path lookup uses `IdTbl.find_same`
+    // for `Pident` and falls through to the persistent unit when that exact
+    // identity is not present. Name lookup belongs to source Longident lookup
+    // (`lookup_module_descr_aux`, compiler/ml/env.ml:1000-1007), so a local or
+    // opened `Dom` must not shadow the persistent `Dom` carried by a type path.
+    if id.is_persistent() {
+        env.lookup_module_ident_exact(id).ok()
+    } else {
+        env.lookup_module(module_path)
+            .or_else(|_| env.find_module(id.name()))
+            .ok()
+    }
+}
+
 fn build_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
@@ -21431,10 +21444,7 @@ fn build_module_signature_for_path<'a>(
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
-            if let Ok(md) = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-            {
+            if let Some(md) = lookup_pident_module_for_path(env, module_path, id) {
                 let access_path = if id.is_persistent() {
                     // OCaml compiler/ml/env.ml:1000-1007 resolves an exact
                     // persistent unit through that unit's `ps_comps` before
@@ -21813,10 +21823,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
-            let md = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-                .ok()?;
+            let md = lookup_pident_module_for_path(env, module_path, id)?;
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, target)
                 | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
@@ -21846,10 +21853,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
-            let md = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-                .ok()?;
+            let md = lookup_pident_module_for_path(env, module_path, id)?;
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
                 _ => None,
@@ -22106,9 +22110,8 @@ fn lookup_type_decl_for_path<'a>(
                 // remain visible to variant disambiguation.
                 if self_manifest {
                     if let Path::Pident(parent_id) = parent.as_ref() {
-                        if let Ok(md) = env
-                            .lookup_module(parent.as_ref())
-                            .or_else(|_| env.find_module(parent_id.name()))
+                        if let Some(md) =
+                            lookup_pident_module_for_path(env, parent.as_ref(), parent_id)
                         {
                             // Preserve local alias access paths. For bindings like
                             // `module Functions = WasmBindings__Functions`, deferring
@@ -22191,9 +22194,8 @@ fn lookup_type_decl_for_path<'a>(
         // -> look up "Nullable" module in env -> if it's MtyAlias(Stdlib_Nullable)
         // -> look up "Stdlib_Nullable.t" in the path store or try CMI resolution
         if let Path::Pident(parent_id) = parent.as_ref() {
-            if let Ok(md) = env
-                .lookup_module(parent.as_ref())
-                .or_else(|_| env.find_module(parent_id.name()))
+            if let Some(md) =
+                lookup_pident_module_for_path(env, parent.as_ref(), parent_id)
             {
                 use crate::types::decl::ModuleType;
                 match &md.md_type {

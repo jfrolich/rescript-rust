@@ -962,6 +962,17 @@ impl Env {
         self.modules.find_by_ident(id).is_some()
     }
 
+    pub(crate) fn lookup_module_ident_exact(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
+        // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
+        // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
+        // own name fallback in env.ml:1000-1007; exact paths must not resolve to
+        // a local/opened same-name module.
+        self.modules
+            .find_by_ident(id)
+            .map(|m| m.as_ref())
+            .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
+    }
+
     pub(crate) fn with_local_module_components<R>(
         &self,
         path: &Path,
