@@ -487,6 +487,16 @@ impl LambdaCompiler {
                 &mut external_inline,
             )
         });
+        // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
+        // same global `Ident.currentstamp` as the Lambda identifiers entering
+        // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
+        // 1614. Seed Rust's JS-lowering generator past every existing Lambda
+        // stamp before `compile_expr` creates temporary identifiers.
+        let js_lowering_start_stamp =
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&simplified)
+                .max(crate::ident::Ident::current_local_stamp());
+        self.id_gen.set_current_stamp(js_lowering_start_stamp);
+        crate::ident::Ident::set_current_time(js_lowering_start_stamp);
         crate::timing::measure(crate::timing::Phase::Codegen, || {
             let compiled = {
                 let _phase = info_span!("compiler.lambda_compile_expr").entered();

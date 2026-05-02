@@ -3499,8 +3499,10 @@ impl<'a> RawLambdaConverter<'a> {
             }
             crate::types::Path::Pdot(prefix, name, pos) => {
                 let prefix_lam = self.translate_normal_path_raw_in_env(env, prefix, loc);
-                // If position is -1 (from normalize_path alias following),
-                // try to resolve the correct position from the module's signature
+                // OCaml compiler/ml/lambda.ml:635-643 preserves the Pdot
+                // runtime position while translating paths. If Rust path
+                // normalization produced a synthetic -1, recover the same
+                // position from the module signature before emitting Pfield.
                 let resolved_pos = if *pos < 0 {
                     self.resolve_field_position_in_module(env, prefix, name)
                         .unwrap_or(*pos)
@@ -3529,49 +3531,139 @@ impl<'a> RawLambdaConverter<'a> {
         field_name: &str,
     ) -> Option<i32> {
         use crate::types::decl::{ModuleType, SignatureItem, ValueKind};
-        // Try to find the module's type from the env or persistent env
-        let md_type = env
-            .lookup_module(module_path)
-            .ok()
-            .map(|md| md.md_type.clone())
-            .or_else(|| {
-                // For persistent modules (Belt_Id, etc.), try the persistent env
-                if let crate::types::Path::Pident(id) = module_path {
-                    if id.is_persistent() || id.is_global() {
-                        if let Some(ref mut pers) = self.persistent_env {
-                            let sig = pers.read_raw_sig(id.name(), self.type_ctx)?;
-                            return Some(ModuleType::MtySignature(sig));
+
+        fn module_type_for_path(
+            this: &mut RawLambdaConverter<'_>,
+            env: &crate::types::env::Env,
+            module_path: &crate::types::Path,
+        ) -> Option<ModuleType> {
+            fn submodule_type_from_module_type(
+                this: &mut RawLambdaConverter<'_>,
+                env: &crate::types::env::Env,
+                module_path: &crate::types::Path,
+                mty: ModuleType,
+                name: &str,
+                depth: usize,
+            ) -> Option<ModuleType> {
+                if depth > 10 {
+                    return None;
+                }
+                match mty {
+                    ModuleType::MtySignature(sig) => sig.into_iter().find_map(|item| match item {
+                        SignatureItem::SigModule(id, md, _) if id.name() == name => {
+                            Some(md.md_type)
+                        }
+                        _ => None,
+                    }),
+                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                        if alias_path.same(module_path) {
+                            return None;
+                        }
+                        let alias_mty = module_type_for_path(this, env, &alias_path)?;
+                        submodule_type_from_module_type(
+                            this,
+                            env,
+                            &alias_path,
+                            alias_mty,
+                            name,
+                            depth + 1,
+                        )
+                    }
+                    ModuleType::MtyFunctor { .. } => None,
+                }
+            }
+
+            env.lookup_module(module_path)
+                .ok()
+                .map(|md| md.md_type.clone())
+                .or_else(|| {
+                    if let crate::types::Path::Pdot(prefix, name, _) = module_path {
+                        // OCaml compiler/ml/env.ml:903-913 normalizes dotted
+                        // paths through find_module; recover the same nested
+                        // module type from the parent signature when this env
+                        // has not stored the dotted path as a direct binding.
+                        let parent_mty = module_type_for_path(this, env, prefix)?;
+                        return submodule_type_from_module_type(
+                            this, env, prefix, parent_mty, name, 0,
+                        );
+                    }
+                    if let crate::types::Path::Pident(id) = module_path
+                        && (id.is_persistent() || id.is_global())
+                    {
+                        let sig = this
+                            .persistent_env
+                            .as_mut()?
+                            .read_raw_sig(id.name(), this.type_ctx)?;
+                        Some(ModuleType::MtySignature(sig))
+                    } else {
+                        None
+                    }
+                })
+        }
+
+        fn resolve_runtime_field_position(
+            this: &mut RawLambdaConverter<'_>,
+            env: &crate::types::env::Env,
+            module_path: &crate::types::Path,
+            mty: ModuleType,
+            field_name: &str,
+            depth: usize,
+        ) -> Option<i32> {
+            if depth > 10 {
+                return None;
+            }
+
+            match mty {
+                ModuleType::MtySignature(sig) => {
+                    // OCaml compiler/ml/lambda.ml:635-643 preserves the
+                    // normalized Pdot runtime position. When Rust receives a
+                    // synthetic -1 from alias normalization, count runtime
+                    // signature items in the same order used by
+                    // compiler/ml/translmod.ml:307/343 to build module blocks.
+                    let mut runtime_pos = 0i32;
+                    for item in sig {
+                        match item {
+                            SignatureItem::SigValue(id, desc)
+                                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
+                            {
+                                if id.name() == field_name {
+                                    return Some(runtime_pos);
+                                }
+                                runtime_pos += 1;
+                            }
+                            SignatureItem::SigModule(id, _, _)
+                            | SignatureItem::SigTypext(id, _, _) => {
+                                if id.name() == field_name {
+                                    return Some(runtime_pos);
+                                }
+                                runtime_pos += 1;
+                            }
+                            SignatureItem::SigValue(_, _) => {}
+                            _ => {}
                         }
                     }
+                    None
                 }
-                None
-            })?;
-        let sig = match &md_type {
-            ModuleType::MtySignature(sig) => sig,
-            _ => return None,
-        };
-        let mut runtime_pos = 0i32;
-        for item in sig {
-            match item {
-                SignatureItem::SigValue(id, desc)
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
-                {
-                    if id.name() == field_name {
-                        return Some(runtime_pos);
+                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    if alias_path.same(module_path) {
+                        return None;
                     }
-                    runtime_pos += 1;
+                    let alias_mty = module_type_for_path(this, env, &alias_path)?;
+                    resolve_runtime_field_position(
+                        this,
+                        env,
+                        &alias_path,
+                        alias_mty,
+                        field_name,
+                        depth + 1,
+                    )
                 }
-                SignatureItem::SigModule(id, _, _) | SignatureItem::SigTypext(id, _, _) => {
-                    if id.name() == field_name {
-                        return Some(runtime_pos);
-                    }
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigValue(_, _) => {} // primitive, not runtime
-                _ => {}                             // types, modtypes - not runtime
+                ModuleType::MtyFunctor { .. } => None,
             }
         }
-        None
+
+        let md_type = module_type_for_path(self, env, module_path)?;
+        resolve_runtime_field_position(self, env, module_path, md_type, field_name, 0)
     }
 
     fn path_may_follow_mty_ident(path: &crate::types::Path) -> bool {

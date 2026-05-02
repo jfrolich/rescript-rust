@@ -31,7 +31,14 @@ pub(crate) fn apply_js_flatten_and_mark_dead_pass(
     mut deps: DepsProgram,
     jsx_preserve: bool,
 ) -> DepsProgram {
-    let id_gen = IdGenerator::with_start_stamp(max_ident_stamp_in_program(&deps.program));
+    // OCaml's substitution pass allocates materialized block fields with
+    // `Ext_ident.create` from the process-wide Ident counter
+    // (compiler/core/js_pass_flatten_and_mark_dead.ml:188-204). Keep Rust's
+    // pass generator past both the JS program and the legacy local counter so
+    // newly materialized fields cannot share stamps with existing locals.
+    let start_stamp = max_ident_stamp_in_program(&deps.program).max(Ident::current_local_stamp());
+    let id_gen = IdGenerator::with_start_stamp(start_stamp);
+    Ident::set_current_time(start_stamp);
     deps.program = flatten_and_mark_dead_program(deps.program, &id_gen, jsx_preserve);
     deps
 }
