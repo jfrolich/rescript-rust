@@ -130,6 +130,95 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
     )
 }
 
+fn test_apply_info() -> ApInfo {
+    ApInfo {
+        loc: Location::none(),
+        inlined: InlineAttribute::Default,
+        status: ApplyStatus::Na,
+    }
+}
+
+fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
+    let param = Ident::create_local("param");
+    (
+        ident,
+        Lambda::function_(
+            1,
+            vec![param],
+            Lambda::Lapply(Apply {
+                ap_func: Box::new(Lambda::var(target.clone())),
+                ap_args: vec![],
+                ap_info: test_apply_info(),
+                ap_transformed_jsx: false,
+            }),
+            FunctionAttribute::default(),
+        ),
+    )
+}
+
+fn recursive_group_names(bindings: &[(Ident, Lambda)]) -> Vec<Vec<String>> {
+    let dependencies = recursive_binding_dependencies(bindings);
+    recursive_binding_groups(bindings, &dependencies)
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|index| bindings[index].0.name().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn recursive_binding_groups_keep_earlier_caller_before_later_self_recursive_helper() {
+    let copy_buckets = Ident::create_local("copyBuckets");
+    let copy_bucket = Ident::create_local("copyBucket");
+    let copy_aux = Ident::create_local("copyAuxCont");
+    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
+    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
+    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux.clone(), &copy_aux);
+
+    let bindings = vec![
+        (copy_buckets, copy_buckets_lam),
+        (copy_bucket, copy_bucket_lam),
+        (copy_aux, copy_aux_lam),
+    ];
+
+    assert_eq!(
+        recursive_group_names(&bindings),
+        vec![
+            vec!["copyBucket".to_string()],
+            vec!["copyAuxCont".to_string()],
+            vec!["copyBuckets".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn recursive_binding_groups_keep_earlier_self_recursive_helper_before_later_caller() {
+    let copy_buckets = Ident::create_local("copyBuckets");
+    let copy_bucket = Ident::create_local("copyBucket");
+    let copy_aux = Ident::create_local("copyAuxCont");
+    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux.clone(), &copy_aux);
+    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
+    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
+
+    let bindings = vec![
+        (copy_aux, copy_aux_lam),
+        (copy_buckets, copy_buckets_lam),
+        (copy_bucket, copy_bucket_lam),
+    ];
+
+    assert_eq!(
+        recursive_group_names(&bindings),
+        vec![
+            vec!["copyAuxCont".to_string()],
+            vec!["copyBucket".to_string()],
+            vec!["copyBuckets".to_string()],
+        ]
+    );
+}
+
 fn console_log_effect(arg: Lambda) -> Lambda {
     Lambda::seq(
         Lambda::prim(

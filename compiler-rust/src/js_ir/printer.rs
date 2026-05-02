@@ -2539,9 +2539,14 @@ impl JsPrinter {
             return;
         }
 
-        if let Some(merged) = try_function_body_negative_guard_chain_merge(stmts) {
-            self.print_function_tail_statement(&merged, return_unit);
-            return;
+        if return_unit {
+            // OCaml's `function_body` only drops/elides unit tails while walking
+            // statements; it does not rewrite non-unit early-return guard chains
+            // into a positive success guard (compiler/core/js_dump.ml:1675-1703).
+            if let Some(merged) = try_function_body_negative_guard_chain_merge(stmts) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
         }
 
         if return_unit {
@@ -2624,9 +2629,14 @@ impl JsPrinter {
     }
 
     fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
-        if let Some(merged) = try_function_tail_negative_guard_chain_merge(stmt) {
-            self.print_function_tail_statement(&merged, return_unit);
-            return;
+        if return_unit {
+            // Keep non-unit functions faithful to OCaml's `function_body`
+            // traversal (compiler/core/js_dump.ml:1675-1703); guard-chain
+            // inversion is only used to match unit-tail elision shapes.
+            if let Some(merged) = try_function_tail_negative_guard_chain_merge(stmt) {
+                self.print_function_tail_statement(&merged, return_unit);
+                return;
+            }
         }
 
         if return_unit {

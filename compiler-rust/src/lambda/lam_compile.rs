@@ -3123,11 +3123,31 @@ impl LambdaCompiler {
         // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
         // is non-recursive, so an unnested branch ending in `continue`/`return`/`throw`
         // lets rule 7 fire while a Block-wrapped branch keeps the if-else.
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            unnest_block(then_block),
-            unnest_block(else_block),
-        ));
+        let then_block = unnest_block(then_block);
+        let else_block = unnest_block(else_block);
+        let cond_expr = cond_compiled.expr;
+        let cond_is_conjunction = matches!(&cond_expr.desc, ExpressionDesc::Bin(BinOp::And, _, _));
+        if cond_is_conjunction
+            && block_last_is_continue(&then_block)
+            && block_last_is_non_continue_terminal(&else_block)
+        {
+            // OCaml's tail-call path marks self tail-calls `output_finished=True`
+            // and `S.if_` rule 5/7 interactions keep the terminal fallback under
+            // a negative guard before the `continue` tail
+            // (compiler/core/lam_compile.ml:1582-1629,
+            // compiler/core/js_stmt_make.ml:247-250). Rust represents the same
+            // tail call directly as assignment statements plus `Continue`, so
+            // build that shape explicitly before the generic `Statement::if_`
+            // simplifier flips it back to a positive guard.
+            block.push(Statement::new(StatementDesc::If(
+                Expression::not(cond_expr),
+                merge_terminal_guard_fallthrough_else(else_block),
+                vec![],
+            )));
+            block.extend(then_block);
+            return block;
+        }
+        block.push(Statement::if_(cond_expr, then_block, else_block));
         block
     }
 
@@ -5700,17 +5720,66 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
     state.components
 }
 
+fn binding_is_ocaml_scc_function(bindings: &[(Ident, Lambda)], index: usize) -> bool {
+    matches!(bindings[index].1, Lambda::Lfunction(_))
+}
+
 fn recursive_binding_group_is_function_only(bindings: &[(Ident, Lambda)], group: &[usize]) -> bool {
     group
         .iter()
-        .all(|&index| matches!(bindings[index].1, Lambda::Lfunction(_)))
+        .all(|&index| binding_is_ocaml_scc_function(bindings, index))
 }
 
 fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize]) {
     if recursive_binding_group_is_function_only(bindings, group) {
         return;
     }
-    group.sort_by_key(|index| !matches!(bindings[*index].1, Lambda::Lfunction(_)));
+    group.sort_by_key(|index| !binding_is_ocaml_scc_function(bindings, *index));
+}
+
+fn singleton_recursive_binding_group(group: &[usize]) -> Option<usize> {
+    match group {
+        [index] => Some(*index),
+        _ => None,
+    }
+}
+
+fn reorder_self_recursive_function_helpers_like_ocaml(
+    bindings: &[(Ident, Lambda)],
+    dependencies: &[Vec<usize>],
+    groups: &mut [Vec<usize>],
+) {
+    let mut index = 0;
+    while index + 1 < groups.len() {
+        let Some(helper) = singleton_recursive_binding_group(&groups[index]) else {
+            index += 1;
+            continue;
+        };
+        let Some(caller) = singleton_recursive_binding_group(&groups[index + 1]) else {
+            index += 1;
+            continue;
+        };
+
+        if caller < helper
+            && binding_is_ocaml_scc_function(bindings, helper)
+            && binding_is_ocaml_scc_function(bindings, caller)
+            && dependencies[helper].contains(&helper)
+            && dependencies[caller].contains(&helper)
+            && !dependencies[caller].contains(&caller)
+        {
+            // OCaml's recursive-let lowering runs the SCC split from
+            // `compiler/core/lam_scc.ml:109-128` using `Ext_scc.graph`
+            // (`compiler/ext/ext_scc.ml:39-96`), then compiles each resulting
+            // group in order (`compiler/core/lam_compile.ml:503-513`). For an
+            // earlier non-self-recursive function that calls a later
+            // self-recursive helper, that SCC walk preserves the caller before
+            // the helper while still placing upstream callers afterward.
+            groups.swap(index, index + 1);
+            index = index.saturating_sub(1);
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn recursive_binding_groups(
@@ -5728,6 +5797,7 @@ fn recursive_binding_groups(
             for group in &mut groups {
                 sort_recursive_binding_group(bindings, group);
             }
+            reorder_self_recursive_function_helpers_like_ocaml(bindings, dependencies, &mut groups);
             groups
         }
     }
@@ -5897,6 +5967,51 @@ fn single_return_expression(block: &Block) -> Option<Expression> {
         return None;
     };
     Some(expr.clone())
+}
+
+fn block_last_is_continue(block: &Block) -> bool {
+    matches!(
+        block.last(),
+        Some(Statement {
+            desc: StatementDesc::Continue(_),
+            ..
+        })
+    )
+}
+
+fn block_last_is_non_continue_terminal(block: &Block) -> bool {
+    matches!(
+        block.last(),
+        Some(Statement {
+            desc: StatementDesc::Return(_) | StatementDesc::Throw(_) | StatementDesc::Break(_),
+            ..
+        })
+    )
+}
+
+fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
+    let [first, rest @ ..] = block.as_slice() else {
+        return block;
+    };
+    let StatementDesc::If(cond, then_block, else_block) = &first.desc else {
+        return block;
+    };
+    if !else_block.is_empty()
+        || !block_last_is_terminal(then_block)
+        || !block_last_is_terminal(&rest.to_vec())
+    {
+        return block;
+    }
+
+    // OCaml's `S.if_` can preserve a terminal `if/else` when the branch reaches
+    // it as a block-wrapped statement (compiler/core/js_stmt_make.ml:247-250).
+    // Rust tail-loop lowering has already flattened that wrapper, so rebuild the
+    // same terminal fallback before placing it under the outer negative guard.
+    vec![Statement::new(StatementDesc::If(
+        cond.clone(),
+        then_block.clone(),
+        rest.to_vec(),
+    ))]
 }
 
 pub(crate) fn trailing_return_expression(block: &[Statement]) -> Option<&Expression> {
