@@ -133,6 +133,7 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
+RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
 STDLIB_PROJECT="$PROJECT_ROOT/packages/@rescript/runtime"
@@ -201,6 +202,13 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
+if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
+    echo -e "${RED}Error: ReScript runtime package not found at $RESCRIPT_RUNTIME${RESET}"
+    echo "Set RESCRIPT_RUNTIME to the runtime package matching the compiler under test."
+    exit 1
+fi
+export RESCRIPT_RUNTIME
+
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
@@ -266,6 +274,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
 else
     echo "Rust bsc:  (not available)"
 fi
+echo "Runtime:   $RESCRIPT_RUNTIME"
 if [[ "$TELLA_MODE" == "true" ]]; then
     echo "Tella dir: $TELLA_DIR"
     if [[ "$TELLA_JSX_MODE" == "true" ]]; then
