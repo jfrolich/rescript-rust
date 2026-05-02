@@ -1353,12 +1353,13 @@ impl PersistentEnv {
             return Some(());
         }
 
-        // OCaml's `ps_sig` lazy is `Subst.signature Subst.identity sign`: it
-        // first copies the signature graph, then freshens all bound identifiers
-        // and rewrites declaration references through the fresh identifiers.
-        let raw_sig = self.find_pers_struct(name, ctx)?.ps_sig.clone();
-        let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&raw_sig, ctx);
-        freshen_signature_bound_idents(&mut renamed, ctx);
+        // OCaml's `ps_sig` lazy is `Subst.signature Subst.identity sign`
+        // (compiler/ml/subst.ml:358-364): one copied signature pass plus bound
+        // identifier freshening. Do not pre-clone/pre-copy the persistent
+        // signature here; the helper below owns that single OCaml-equivalent
+        // copy.
+        let ps = self.find_pers_struct(name, ctx)?;
+        let renamed = freshened_signature_bound_idents_from(&ps.ps_sig, ctx);
         Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
@@ -2467,10 +2468,28 @@ pub(crate) fn freshen_signature_bound_idents(
     // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
     // then subst.ml:378-400 renames signature binders and applies that
     // substitution to the copied components.
-    let copied = crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx);
+    let copied = freshened_signature_bound_idents_from(sig_items, ctx);
     for (target, source) in sig_items.iter_mut().zip(copied) {
         *target = source;
     }
+}
+
+pub(crate) fn freshened_signature_bound_idents_from(
+    sig_items: &[SignatureItem],
+    ctx: &TypeContext<'_>,
+) -> Signature {
+    // Mirrors OCaml `Subst.signature` (compiler/ml/subst.ml:358-364):
+    // copy each component through the substitution, then rename bound
+    // identifiers and rewrite references within that copied signature.
+    let mut copied = crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx);
+    freshen_copied_signature_bound_idents(&mut copied, ctx);
+    copied
+}
+
+pub(crate) fn freshen_copied_signature_bound_idents(
+    sig_items: &mut [SignatureItem],
+    ctx: &TypeContext<'_>,
+) {
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 

@@ -1631,8 +1631,13 @@ impl<'a> TypeContext<'a> {
                 .borrow_mut()
                 .entry(module_name.to_string())
                 .or_insert_with(|| sig.clone());
-            let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&sig, self);
-            crate::cmi::persistent_env::freshen_signature_bound_idents(&mut renamed, self);
+            // OCaml `Subst.signature` copies and freshens in one traversal
+            // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
+            // to that single pass instead of copying before calling the
+            // freshening helper.
+            let renamed = crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+                &sig, self,
+            );
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);

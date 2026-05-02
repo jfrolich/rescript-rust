@@ -4048,9 +4048,10 @@ fn freshened_signature_from_module_type<'a>(
     mty: &crate::types::decl::ModuleType,
 ) -> Option<crate::types::decl::Signature> {
     let sig = resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)?;
-    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, tctx.type_ctx);
-    crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, tctx.type_ctx);
-    Some(sig)
+    Some(crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+        &sig,
+        tctx.type_ctx,
+    ))
 }
 
 fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], env: &mut Env) {
@@ -4096,7 +4097,7 @@ pub(crate) fn consume_fake_package_mty_freshening<'b>(
     ) else {
         return;
     };
-    let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(&sig, ctx);
+    let mut sig = sig;
 
     for _ in 0..constraint_count {
         crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, ctx);
@@ -14008,12 +14009,10 @@ fn type_structure_item<'a>(
                 tctx.type_ctx,
             );
             let stored_include_sig = final_include_sig.as_ref().map(|sig_items| {
-                let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from(
                     sig_items,
                     tctx.type_ctx,
-                );
-                crate::cmi::persistent_env::freshen_signature_bound_idents(&mut sig, tctx.type_ctx);
-                sig
+                )
             });
             let localized_include_sig = stored_include_sig.as_ref().map(|sig_items| {
                 let mut sig = crate::types::typecore::copy_lookup_signature_for_subst(
