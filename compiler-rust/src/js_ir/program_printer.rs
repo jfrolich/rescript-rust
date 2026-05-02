@@ -208,6 +208,13 @@ impl JsPrinter {
             self.write(" = ");
             self.write(&local_name);
             self.semi();
+            // OCaml inserts the CommonJS interop marker immediately after a
+            // default export; see compiler/core/js_dump_import_export.ml:51-53.
+            if export.name() == "default" {
+                self.newline();
+                self.write("exports.__esModule = true");
+                self.semi();
+            }
         }
     }
 }
