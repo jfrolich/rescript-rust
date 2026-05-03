@@ -5712,13 +5712,14 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_array(exprs) => {
-            // Array expression
-            let elem_ty = ctx.new_var(None);
-            let array_ty = env.type_array(ctx, elem_ty);
+            // OCaml compiler/ml/typecore.ml:3027-3029 uses `newgenvar ()`
+            // and `Predef.type_array`; compiler/ml/predef.ml:127 builds that
+            // array constructor at generic level.
+            let elem_ty = ctx.new_generic_var(None);
+            let array_ty =
+                ctx.new_generic_constr(crate::types::predef::path_array(), vec![elem_ty]);
 
-            // Instance generic expected_ty to avoid corruption
-            let eff_expected = instance_if_generic(ctx, expected_ty);
-            unify_expression_types(tctx, loc, array_ty, eff_expected, context)?;
+            unify_expression_types(tctx, loc, array_ty, expected_ty, context)?;
 
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {
@@ -5732,10 +5733,15 @@ pub fn type_expect<'a>(
                 typed_exprs.push(typed_e);
             }
 
+            // OCaml compiler/ml/typecore.ml:3027-3038 unifies
+            // `Predef.type_array ty` with `ty_expected`, types elements with
+            // `ty`, then stores `exp_type = instance env ty_expected` rather
+            // than the temporary array node.
+            let exp_type = crate::types::instance(ctx, expected_ty);
             Ok(Expression::new(
                 ExpressionDesc::Texp_array(typed_exprs),
                 loc,
-                array_ty,
+                exp_type,
                 exp_env_ref,
                 expr.pexp_attributes.clone(),
             ))
