@@ -11954,12 +11954,21 @@ fn record_labels_match_ids(
     field_names: &[String],
     closed_record: bool,
 ) -> bool {
-    let label_names: HashSet<&str> = labels.iter().map(|ld| ld.ld_id.name()).collect();
-    if !field_names
-        .iter()
-        .all(|name| label_names.contains(name.as_str()))
-    {
-        return false;
+    if field_names.len() <= 8 {
+        if !field_names
+            .iter()
+            .all(|name| labels.iter().any(|ld| ld.ld_id.name() == name.as_str()))
+        {
+            return false;
+        }
+    } else {
+        let label_names: HashSet<&str> = labels.iter().map(|ld| ld.ld_id.name()).collect();
+        if !field_names
+            .iter()
+            .all(|name| label_names.contains(name.as_str()))
+        {
+            return false;
+        }
     }
 
     if !closed_record {
@@ -11973,6 +11982,16 @@ fn record_labels_match_ids(
     } else {
         field_names.len() == labels.len()
     }
+}
+
+fn find_record_label_description_by_name(
+    labels: Option<&[crate::types::LabelDescription]>,
+    label_name: &str,
+) -> Option<crate::types::LabelDescription> {
+    labels?
+        .iter()
+        .find(|label| label.lbl_name == label_name)
+        .cloned()
 }
 
 fn select_record_type_for_fields<'a>(
@@ -12229,24 +12248,14 @@ fn type_record(
             .map(|expr| expr.exp_type)
             .unwrap_or(record_ty)
     });
-    let disambiguation_labels_by_name =
-        build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx).map(
-            |labels| {
-                labels
-                    .into_iter()
-                    .map(|label| (label.lbl_name.clone(), label))
-                    .collect::<HashMap<_, _>>()
-            },
-        );
-    let expected_labels_by_name =
-        build_record_label_descriptions(expected_ty, env, &mut tctx.persistent_env, ctx).map(
-            |labels| {
-                labels
-                    .into_iter()
-                    .map(|label| (label.lbl_name.clone(), label))
-                    .collect::<HashMap<_, _>>()
-            },
-        );
+    // OCaml record typing reads the shared `lbl_all` array directly
+    // (`compiler/ml/typecore.ml:2802, 2840-2842`). Keep the Rust fallback as a
+    // shared array too; building per-record name maps for JSX prop records
+    // turns every small JSX literal into a full-props allocation.
+    let disambiguation_label_descriptions =
+        build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx);
+    let expected_label_descriptions =
+        build_record_label_descriptions(expected_ty, env, &mut tctx.persistent_env, ctx);
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
@@ -12288,9 +12297,12 @@ fn type_record(
             Some(disambiguation_ty),
         )
         .or_else(|| {
-            disambiguation_labels_by_name
-                .as_ref()
-                .and_then(|labels| labels.get(&field_name).cloned())
+            find_record_label_description_by_name(
+                disambiguation_label_descriptions
+                    .as_deref()
+                    .map(Vec::as_slice),
+                &field_name,
+            )
         })
         .or_else(|| {
             disambiguate_label(
@@ -12343,9 +12355,10 @@ fn type_record(
             // Build label description (prefer env-disambiguated metadata).
             let (label_desc, field_input_ty, poly_vars) =
                 if let Some(env_label) = disambiguated {
-                    let expected_label = expected_labels_by_name
-                        .as_ref()
-                        .and_then(|labels| labels.get(&field_name).cloned());
+                    let expected_label = find_record_label_description_by_name(
+                        expected_label_descriptions.as_deref().map(Vec::as_slice),
+                        &field_name,
+                    );
                     let env_label = expected_label
                         .or_else(|| {
                             lookup_label_by_expected_type(
@@ -19130,7 +19143,7 @@ fn build_record_label_descriptions<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
-) -> Option<Vec<crate::types::LabelDescription>> {
+) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
     let (record_path, _actual_args, decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     let (labels, repr) = match &decl.type_kind {
@@ -19148,27 +19161,29 @@ fn build_record_label_descriptions<'a>(
     // (compiler/ml/typecore.ml:2802,2840-2842). This fallback reconstructs
     // descriptions for paths that did not come through the label environment;
     // do not register a fresh array for every record literal.
-    let descriptions = labels
-        .iter()
-        .enumerate()
-        .map(|(pos, ld)| crate::types::LabelDescription {
-            lbl_name: ld.ld_id.name().to_string(),
-            lbl_res: shared_res,
-            lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                ctx,
-                ld.ld_type,
-                &decl.type_params,
-            ),
-            lbl_mut: ld.ld_mutable,
-            lbl_optional: ld.ld_optional,
-            lbl_pos: pos as i32,
-            lbl_all: crate::types::LabelArrayRef(0),
-            lbl_repres: repr.clone(),
-            lbl_private: decl.type_private,
-            lbl_loc: ld.ld_loc.clone(),
-            lbl_attributes: ld.ld_attributes.clone(),
-        })
-        .collect::<Vec<_>>();
+    let descriptions = std::sync::Arc::new(
+        labels
+            .iter()
+            .enumerate()
+            .map(|(pos, ld)| crate::types::LabelDescription {
+                lbl_name: ld.ld_id.name().to_string(),
+                lbl_res: shared_res,
+                lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                    ctx,
+                    ld.ld_type,
+                    &decl.type_params,
+                ),
+                lbl_mut: ld.ld_mutable,
+                lbl_optional: ld.ld_optional,
+                lbl_pos: pos as i32,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: repr.clone(),
+                lbl_private: decl.type_private,
+                lbl_loc: ld.ld_loc.clone(),
+                lbl_attributes: ld.ld_attributes.clone(),
+            })
+            .collect::<Vec<_>>(),
+    );
     ctx.register_record_label_descriptions(&cache_key, descriptions.clone());
     Some(descriptions)
 }
@@ -22194,9 +22209,7 @@ fn lookup_type_decl_for_path<'a>(
         // -> look up "Nullable" module in env -> if it's MtyAlias(Stdlib_Nullable)
         // -> look up "Stdlib_Nullable.t" in the path store or try CMI resolution
         if let Path::Pident(parent_id) = parent.as_ref() {
-            if let Some(md) =
-                lookup_pident_module_for_path(env, parent.as_ref(), parent_id)
-            {
+            if let Some(md) = lookup_pident_module_for_path(env, parent.as_ref(), parent_id) {
                 use crate::types::decl::ModuleType;
                 match &md.md_type {
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {

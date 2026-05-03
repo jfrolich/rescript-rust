@@ -321,10 +321,11 @@ pub struct TypeContext<'a> {
     /// OCaml installs one shared `lbl_all` array for a record declaration and
     /// reuses it from record typing (`compiler/ml/typecore.ml:2802,2833-2842`).
     /// Rust reconstructs fallback label descriptions from declarations, so cache
-    /// that reconstructed array per TypeContext instead of rebuilding large
-    /// records such as `JsxDOM.domProps` for every JSX literal.
+    /// that reconstructed array per TypeContext and share it across record
+    /// literals instead of rebuilding or cloning large records such as
+    /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<String, Vec<super::decl::LabelDescription>>>,
+        RefCell<ahash::AHashMap<String, Arc<Vec<super::decl::LabelDescription>>>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -1097,7 +1098,7 @@ impl<'a> TypeContext<'a> {
     pub fn register_record_label_descriptions(
         &self,
         type_path_name: &str,
-        labels: Vec<super::decl::LabelDescription>,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
         self.record_label_descriptions_cache
             .borrow_mut()
@@ -1108,7 +1109,7 @@ impl<'a> TypeContext<'a> {
     pub fn get_record_label_descriptions(
         &self,
         type_path_name: &str,
-    ) -> Option<Vec<super::decl::LabelDescription>> {
+    ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
         self.record_label_descriptions_cache
             .borrow()
             .get(type_path_name)
@@ -1635,9 +1636,8 @@ impl<'a> TypeContext<'a> {
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
-            let renamed = crate::cmi::persistent_env::freshened_signature_bound_idents_from(
-                &sig, self,
-            );
+            let renamed =
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from(&sig, self);
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);

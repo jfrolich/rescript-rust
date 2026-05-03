@@ -4048,10 +4048,7 @@ fn freshened_signature_from_module_type<'a>(
     mty: &crate::types::decl::ModuleType,
 ) -> Option<crate::types::decl::Signature> {
     let sig = resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)?;
-    Some(crate::cmi::persistent_env::freshened_signature_bound_idents_from(
-        &sig,
-        tctx.type_ctx,
-    ))
+    Some(crate::cmi::persistent_env::freshened_signature_bound_idents_from(&sig, tctx.type_ctx))
 }
 
 fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], env: &mut Env) {
