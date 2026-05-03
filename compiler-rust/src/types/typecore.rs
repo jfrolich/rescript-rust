@@ -12637,31 +12637,6 @@ fn type_record(
         .iter()
         .any(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)) == "...");
 
-    // Resolve the full label set for this record type (OCaml builds definitions over lbl_all).
-    // Skip this path for object-like spread placeholders (`...`) and keep the
-    // explicit field representation in that case.
-    let mut all_labels = if has_dotdotdot_field {
-        None
-    } else {
-        get_record_labels(ctx, env, &mut tctx.persistent_env, record_ty)
-            .or_else(|| get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty))
-    };
-    if all_labels.is_none() {
-        if let Some(base_expr) = typed_base.as_ref() {
-            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, base_expr.exp_type);
-        }
-    }
-    if all_labels.is_none() {
-        if let Some(ref lbl) = first_disambiguated_label {
-            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res);
-        }
-    }
-    if all_labels
-        .as_ref()
-        .is_some_and(|labels| labels.iter().any(|ld| ld.ld_id.name() == "..."))
-    {
-        all_labels = None;
-    }
     let mut all_label_descriptions = if has_dotdotdot_field {
         None
     } else {
@@ -12698,6 +12673,34 @@ fn type_record(
     {
         all_label_descriptions = None;
     }
+
+    // Resolve the full label set for this record type (OCaml builds
+    // definitions over lbl_all). Prefer the shared LabelDescription array above:
+    // OCaml compiler/ml/typecore.ml:2802,2840-2842,2960-2978 reads `lbl_all`
+    // directly, while cloning the Rust declaration labels repeats a full record
+    // declaration copy for every JSX props literal.
+    let mut all_labels = if has_dotdotdot_field || all_label_descriptions.is_some() {
+        None
+    } else {
+        get_record_labels(ctx, env, &mut tctx.persistent_env, record_ty)
+            .or_else(|| get_record_labels(ctx, env, &mut tctx.persistent_env, disambiguation_ty))
+    };
+    if all_label_descriptions.is_none() && all_labels.is_none() {
+        if let Some(base_expr) = typed_base.as_ref() {
+            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, base_expr.exp_type);
+        }
+    }
+    if all_label_descriptions.is_none() && all_labels.is_none() {
+        if let Some(ref lbl) = first_disambiguated_label {
+            all_labels = get_record_labels(ctx, env, &mut tctx.persistent_env, lbl.lbl_res);
+        }
+    }
+    if all_labels
+        .as_ref()
+        .is_some_and(|labels| labels.iter().any(|ld| ld.ld_id.name() == "..."))
+    {
+        all_labels = None;
+    }
     let mut typed_fields = Vec::with_capacity(fields.len());
 
     // OCaml: unify_exp_types ty_record (instance env ty_expected)
@@ -12708,29 +12711,155 @@ fn type_record(
     // all fields are optional; only error when required fields are missing.
     // Do not synthesize explicit `None` overrides for the all-optional case.
     if typed_base.is_none() && fields.is_empty() {
-        match all_labels.as_ref() {
-            Some(labels) => {
-                let labels_missing: Vec<String> = labels
-                    .iter()
-                    .filter(|ld| !ld.ld_optional)
-                    .map(|ld| ld.ld_id.name().to_string())
-                    .collect();
-                if !labels_missing.is_empty() {
-                    return Err(TypeCoreError::LabelsMissing {
-                        labels: labels_missing,
-                        jsx_component_info: None,
-                    });
-                }
-                all_labels = Some(Vec::new());
+        if let Some(labels) = all_label_descriptions.as_ref() {
+            let labels_missing: Vec<String> = labels
+                .iter()
+                .filter(|ld| !ld.lbl_optional)
+                .map(|ld| ld.lbl_name.clone())
+                .collect();
+            if !labels_missing.is_empty() {
+                return Err(TypeCoreError::LabelsMissing {
+                    labels: labels_missing,
+                    jsx_component_info: None,
+                });
             }
-            None => {
-                // Keep the existing fallback for record shapes where Rust cannot
-                // reconstruct `lbl_all` yet (notably some inline-record paths).
+            all_label_descriptions = Some(Arc::new(Vec::new()));
+        } else {
+            match all_labels.as_ref() {
+                Some(labels) => {
+                    let labels_missing: Vec<String> = labels
+                        .iter()
+                        .filter(|ld| !ld.ld_optional)
+                        .map(|ld| ld.ld_id.name().to_string())
+                        .collect();
+                    if !labels_missing.is_empty() {
+                        return Err(TypeCoreError::LabelsMissing {
+                            labels: labels_missing,
+                            jsx_component_info: None,
+                        });
+                    }
+                    all_labels = Some(Vec::new());
+                }
+                None => {
+                    // Keep the existing fallback for record shapes where Rust cannot
+                    // reconstruct `lbl_all` yet (notably some inline-record paths).
+                }
             }
         }
     }
 
-    if let Some(all_labels) = all_labels {
+    if let Some(all_label_descriptions) = all_label_descriptions.clone() {
+        if all_label_descriptions.len() > typed_fields.capacity() {
+            typed_fields.reserve(
+                all_label_descriptions
+                    .len()
+                    .saturating_sub(typed_fields.len()),
+            );
+        }
+        let mut labels_missing = Vec::new();
+
+        for raw_label_desc in all_label_descriptions.iter() {
+            let label_name = raw_label_desc.lbl_name.clone();
+            let key_pos = raw_label_desc.lbl_pos;
+
+            if let Some(explicit_idx) = explicit_overrides.remove(&key_pos) {
+                explicit_overrides_by_name.remove(&label_name);
+                if let Some(explicit) = explicit_entries[explicit_idx].take() {
+                    typed_fields.push(explicit);
+                }
+                continue;
+            }
+            if let Some(explicit_idx) = explicit_overrides_by_name.remove(&label_name) {
+                if let Some(explicit) = explicit_entries[explicit_idx].take() {
+                    typed_fields.push(explicit);
+                }
+                continue;
+            }
+
+            if typed_base.is_some() {
+                let (_poly_vars, ty_arg, ty_res) =
+                    crate::types::ctype::instance_label(ctx, false, raw_label_desc);
+                let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
+                let label_desc = crate::types::LabelDescription {
+                    lbl_name: raw_label_desc.lbl_name.clone(),
+                    lbl_res: record_ty,
+                    lbl_arg: ty_arg,
+                    lbl_mut: raw_label_desc.lbl_mut.clone(),
+                    lbl_optional: raw_label_desc.lbl_optional,
+                    lbl_pos: raw_label_desc.lbl_pos,
+                    lbl_all: raw_label_desc.lbl_all,
+                    lbl_repres: raw_label_desc.lbl_repres.clone(),
+                    lbl_private: raw_label_desc.lbl_private.clone(),
+                    lbl_loc: raw_label_desc.lbl_loc.clone(),
+                    lbl_attributes: raw_label_desc.lbl_attributes.clone(),
+                };
+                typed_fields.push((
+                    placeholder_lid.clone(),
+                    label_desc.clone(),
+                    RecordLabelDefinition::Kept(label_desc.lbl_arg),
+                    false,
+                ));
+                continue;
+            }
+
+            if raw_label_desc.lbl_optional {
+                let option_ty = raw_label_desc.lbl_arg;
+                let none_cstr = make_none_constructor(ctx);
+                let none_lid = Located {
+                    txt: tctx.arena.none_lid(),
+                    loc,
+                };
+                let none_expr = Expression::new(
+                    ExpressionDesc::Texp_construct(none_lid.clone(), none_cstr, vec![]),
+                    loc,
+                    option_ty,
+                    EnvRef(0),
+                    Attributes::new(),
+                );
+                let label_desc = crate::types::LabelDescription {
+                    lbl_res: record_ty,
+                    ..raw_label_desc.clone()
+                };
+                let label_lid_idx = ctx
+                    .get_synthesized_record_lident(&label_name)
+                    .unwrap_or_else(|| {
+                        let lid = find_existing_lident_idx(tctx.arena, &label_name).unwrap_or_else(
+                            || {
+                                let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
+                                unsafe { (*arena_ptr).push_lident(&label_name) }
+                            },
+                        );
+                        ctx.cache_synthesized_record_lident(label_name.clone(), lid);
+                        lid
+                    });
+                let label_lid = Located {
+                    txt: label_lid_idx,
+                    loc,
+                };
+                typed_fields.push((
+                    label_lid.clone(),
+                    label_desc,
+                    RecordLabelDefinition::Overridden(label_lid, none_expr),
+                    false,
+                ));
+            } else {
+                labels_missing.push(label_name);
+            }
+        }
+
+        if !labels_missing.is_empty() {
+            return Err(TypeCoreError::LabelsMissing {
+                labels: labels_missing,
+                jsx_component_info: None,
+            });
+        }
+
+        typed_fields.extend(
+            explicit_overrides_by_name
+                .into_values()
+                .filter_map(|idx| explicit_entries[idx].take()),
+        );
+    } else if let Some(all_labels) = all_labels {
         if all_labels.len() > typed_fields.capacity() {
             typed_fields.reserve(all_labels.len().saturating_sub(typed_fields.len()));
         }
