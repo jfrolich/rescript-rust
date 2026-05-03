@@ -4819,11 +4819,23 @@ fn force_qualified_value_type_paths<'a>(
             }
             // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
             // exactly the selected component table, and compiler/ml/subst.ml:303-309
-            // applies that substitution to value descriptions. Do not rewrite
-            // sibling flattened aliases just because their signatures are known
-            // in Rust's global caches.
+            // applies that substitution to value descriptions. Keep that
+            // selected-module restriction for ordinary aliases, but allow the
+            // argument-side implicit Stdlib component path from env.ml:1491-1505:
+            // Rust in-process signatures can still carry the flattened backing
+            // unit (`Stdlib_JSON.t`) where OCaml's selected value description
+            // has already gone through the visible `Stdlib.JSON.t` component.
+            // If the selected value is itself under `Stdlib`, keep the exact
+            // selected-table restriction so sibling paths such as
+            // `Stdlib_RegExp.t` stay flattened like OCaml.
             if let Some(selected_module_path) = selected_module_path {
-                if !candidate_parent.same(selected_module_path) {
+                let selected_module_root_is_stdlib = path_root_ident(selected_module_path)
+                    .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+                let implicit_stdlib_component = infer_stdlib_root_from_flat_parent
+                    && !selected_module_root_is_stdlib
+                    && path_root_ident(&candidate_parent)
+                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+                if !candidate_parent.same(selected_module_path) && !implicit_stdlib_component {
                     continue;
                 }
             }

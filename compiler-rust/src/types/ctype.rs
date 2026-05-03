@@ -1175,10 +1175,6 @@ fn normalize_module_path_through_components<'a>(
         // under the original access path.
         normalize_module_path_through_components(ctx, load_paths, &alias_path, visiting)
             .or(Some(alias_path))
-    } else if let Some(flattened_path) =
-        flattened_alias_module_path_for_metadata(ctx, &normalized_path)
-    {
-        Some(flattened_path)
     } else {
         Some(normalized_path)
     }
@@ -1512,56 +1508,18 @@ fn qualify_type_decl_for_module_access_path(
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
 ) -> super::decl::TypeDeclaration {
-    if decl.type_path.is_some() {
-        return decl.clone();
-    }
-
     let qualified_type_path = Path::pdot(module_access_path.clone(), id.name());
 
     // OCaml `Env.find_type` resolves dotted paths through module components
-    // (compiler/ml/env.ml:800-823). Rust keeps the selected path as out-of-band
-    // metadata on TypeDeclaration. Preserve real paths already substituted from
-    // compiled signatures; otherwise attach the lookup path without allocating a
-    // strengthened self-manifest at this point.
+    // (compiler/ml/env.ml:800-823), and component construction substitutes
+    // signature type declarations under that component path
+    // (compiler/ml/env.ml:1530-1544). Rust keeps the selected path as
+    // out-of-band metadata on TypeDeclaration, so rewrite imported flattened
+    // cmi paths to the component lookup path without allocating a strengthened
+    // self-manifest at this point.
     let mut qualified = decl.clone();
     qualified.type_path = Some(qualified_type_path);
     qualified
-}
-
-fn flattened_alias_module_path_for_metadata(
-    ctx: &TypeContext<'_>,
-    module_path: &Path,
-) -> Option<Path> {
-    // OCaml component construction records paths after `prefix_idents`
-    // (compiler/ml/env.ml:1530-1578). For namespace aliases, Rust also records
-    // the flattened compile-unit head (`Stdlib_Date`) for the qualified
-    // component path (`Stdlib.Date`), so use that head for type metadata.
-    let mut flat_heads = ctx
-        .persistent_env_clone()
-        .map(|pers| pers.flattened_alias_heads_for_path(module_path))
-        .unwrap_or_default();
-
-    if let Ok((head, components)) = module_path.flatten()
-        && !components.is_empty()
-    {
-        let mut flat_name = head.name().to_string();
-        for component in components {
-            flat_name.push('_');
-            flat_name.push_str(component);
-        }
-        if !flat_heads.iter().any(|item| item == &flat_name)
-            && ctx
-                .find_flattened_alias_component_path(&flat_name)
-                .is_some_and(|component_path| component_path.same(module_path))
-        {
-            flat_heads.push(flat_name);
-        }
-    }
-
-    flat_heads
-        .into_iter()
-        .next()
-        .map(|flat_head| Path::pident(Ident::create_persistent(&flat_head)))
 }
 
 fn strengthen_module_type_for_module_access_path<'a>(
