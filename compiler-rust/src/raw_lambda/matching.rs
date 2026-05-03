@@ -2446,6 +2446,28 @@ impl StoreExp {
     }
 }
 
+fn materialize_resolved_action(
+    resolved_acts: &mut [Option<RawLambda>],
+    use_counts: &[usize],
+    idx: usize,
+) -> RawLambda {
+    // OCaml's switch store shares immutable action pointers
+    // (`compiler/ml/switch.ml:55-76`, used from
+    // `compiler/ml/matching.ml:1609-1659,1761-1833`). Once Rust has decided
+    // which actions are truly shared, single-use actions can be moved into the
+    // output switch instead of recursively cloning their raw-lambda bodies.
+    if use_counts[idx] == 1 {
+        resolved_acts[idx]
+            .take()
+            .expect("single-use resolved action should still be available")
+    } else {
+        resolved_acts[idx]
+            .as_ref()
+            .expect("shared resolved action should still be available")
+            .clone()
+    }
+}
+
 // ============================================================================
 // make_exit — Lstaticraise(i, [])
 // ============================================================================
@@ -5730,14 +5752,25 @@ fn share_actions_tree(
         })
         .collect();
 
+    let mut use_counts = vec![0usize; resolved_acts.len()];
+    if let Some(idx) = d_idx {
+        use_counts[idx] += 1;
+    }
+    for (_, idx) in &sw_indices {
+        use_counts[*idx] += 1;
+    }
+    let mut resolved_acts = resolved_acts.into_iter().map(Some).collect::<Vec<_>>();
+
     // Reconstruct default and switch list
-    let d = match d_idx {
-        None => None,
-        Some(idx) => Some(resolved_acts[idx].clone()),
-    };
+    let d = d_idx.map(|idx| materialize_resolved_action(&mut resolved_acts, &use_counts, idx));
     let sw: Vec<(Constant, RawLambda)> = sw_indices
         .into_iter()
-        .map(|(cst, j)| (cst, resolved_acts[j].clone()))
+        .map(|(cst, j)| {
+            (
+                cst,
+                materialize_resolved_action(&mut resolved_acts, &use_counts, j),
+            )
+        })
         .collect();
 
     // Extract only the actual catch handlers. When the wrapper is identity
@@ -6145,24 +6178,49 @@ pub fn share_actions_sw(
         })
         .collect();
 
+    let mut use_counts = vec![0usize; resolved_acts.len()];
+    if let Some(idx) = fail_idx {
+        use_counts[idx] += 1;
+    }
+    for (_, idx) in &consts {
+        use_counts[*idx] += 1;
+    }
+    for (_, idx) in &blocks {
+        use_counts[*idx] += 1;
+    }
+    let mut resolved_acts = resolved_acts.into_iter().map(Some).collect::<Vec<_>>();
+
     // Reconstruct fail
-    let fail = match fail_idx {
-        None => None,
-        Some(idx) => Some(Box::new(resolved_acts[idx].clone())),
-    };
+    let fail = fail_idx.map(|idx| {
+        Box::new(materialize_resolved_action(
+            &mut resolved_acts,
+            &use_counts,
+            idx,
+        ))
+    });
 
     let new_sw = RawLambdaSwitch {
         sw_numconsts,
         sw_consts_full,
         sw_consts: consts
             .into_iter()
-            .map(|(i, j)| (i, resolved_acts[j].clone()))
+            .map(|(i, j)| {
+                (
+                    i,
+                    materialize_resolved_action(&mut resolved_acts, &use_counts, j),
+                )
+            })
             .collect(),
         sw_numblocks,
         sw_blocks_full,
         sw_blocks: blocks
             .into_iter()
-            .map(|(i, j)| (i, resolved_acts[j].clone()))
+            .map(|(i, j)| {
+                (
+                    i,
+                    materialize_resolved_action(&mut resolved_acts, &use_counts, j),
+                )
+            })
             .collect(),
         sw_failaction: fail,
         sw_names,
