@@ -28,6 +28,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span};
 
@@ -129,6 +131,14 @@ struct PendingRegistryUpdate {
 struct InProcessModuleResult {
     warning: Option<String>,
     registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn duration_delta(after: Duration, before: Duration) -> Duration {
+    after.saturating_sub(before)
 }
 
 fn apply_pending_registry_updates(
@@ -2186,6 +2196,9 @@ fn compile_module_in_process(
         package = %package.name
     )
     .entered();
+    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_start = module_timing_enabled.then(Instant::now);
+    let module_timing_before = module_timing_enabled.then(rescript_compiler::timing::snapshot);
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {
@@ -2450,6 +2463,34 @@ fn compile_module_in_process(
                 execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
             }
         }
+    }
+
+    if let (Some(start), Some(before)) = (module_timing_start, module_timing_before) {
+        let after = rescript_compiler::timing::snapshot();
+        let wall = start.elapsed();
+        let parse = duration_delta(after.parse, before.parse);
+        let typecheck = duration_delta(after.typecheck, before.typecheck);
+        let lambda = duration_delta(after.lambda, before.lambda);
+        let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
+        let codegen = duration_delta(after.codegen, before.codegen);
+        let recorded = parse
+            .saturating_add(typecheck)
+            .saturating_add(lambda)
+            .saturating_add(lambda_optimization)
+            .saturating_add(codegen);
+        let overhead = wall.saturating_sub(recorded);
+        eprintln!(
+            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            module_name,
+            package.name,
+            duration_ms(wall),
+            duration_ms(parse),
+            duration_ms(typecheck),
+            duration_ms(lambda),
+            duration_ms(lambda_optimization),
+            duration_ms(codegen),
+            duration_ms(overhead)
+        );
     }
 
     Ok(InProcessModuleResult {
