@@ -1322,6 +1322,20 @@ fn js_output_targets_for_source(
 }
 
 /// Write JS output to the correct location(s) based on package specs.
+fn write_file_creating_parent_on_missing(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    match std::fs::write(path, contents.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, contents.as_ref())?;
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn write_js_output(
     js_output: &str,
     package: &packages::Package,
@@ -1344,10 +1358,7 @@ fn write_js_output(
                 .join(js_relative)
         };
 
-        if let Some(parent) = js_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&js_path, js_output)?;
+        write_file_creating_parent_on_missing(&js_path, js_output)?;
     }
     Ok(())
 }
@@ -1364,10 +1375,7 @@ fn write_compiled_js_outputs(
     }
 
     for output in js_outputs {
-        if let Some(parent) = output.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&output.path, &output.code)?;
+        write_file_creating_parent_on_missing(&output.path, &output.code)?;
     }
     Ok(())
 }
