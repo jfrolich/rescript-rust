@@ -293,6 +293,33 @@ impl<T: Clone> BindingTable<T> {
         }
     }
 
+    /// Find a binding by identifier in the local/current table only.
+    ///
+    /// OCaml compiler/ml/env.ml:285-290 `IdTbl.find_same` walks current
+    /// bindings across open scopes, but intentionally skips opened component
+    /// tables. Use this for exact `Path.Pident` lookups; source-level
+    /// `Longident.Lident` lookup still goes through name lookup so opened
+    /// modules remain visible.
+    pub fn find_local_by_ident(&self, id: &Ident) -> Option<&T> {
+        let stamp = id.stamp();
+        self.by_name.get(id.name()).and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|(entry_id, _, is_local)| {
+                    if !*is_local {
+                        return false;
+                    }
+                    if stamp == 0 {
+                        entry_id.is_persistent() && entry_id.name() == id.name()
+                    } else {
+                        entry_id.same(id) && entry_id.name() == id.name()
+                    }
+                })
+                .map(|(_, value, _)| value)
+        })
+    }
+
     /// Get all bindings with a given name.
     pub fn find_all(&self, name: &str) -> Vec<&T> {
         self.by_name
@@ -960,6 +987,18 @@ impl Env {
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
         self.modules.find_by_ident(id).is_some()
+    }
+
+    pub(crate) fn find_module_same(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
+        // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
+        // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
+        // skips opened components. This keeps alias scraping from resolving a
+        // persistent alias target through an unrelated opened component with
+        // the same name.
+        self.modules
+            .find_local_by_ident(id)
+            .map(|m| m.as_ref())
+            .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
     }
 
     pub(crate) fn with_local_module_components<R>(

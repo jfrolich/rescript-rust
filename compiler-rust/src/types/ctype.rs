@@ -1472,7 +1472,7 @@ fn strengthen_type_decl_for_module_access_path<'a>(
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
 ) -> super::decl::TypeDeclaration {
-    // Match OCaml mtype.ml strengthen_sig:
+    // Match OCaml compiler/ml/mtype.ml:55-70 `strengthen_sig`:
     // - Keep explicit manifests for public types
     // - Keep explicit manifests for private record/variant types
     // - Otherwise add `type t = <module_access_path>.t`
@@ -1756,12 +1756,14 @@ fn resolve_type_item_through_env<'a>(
         // env_lazy-qualified module view. Keep that declaration graph shared
         // instead of re-copying it on every lookup.
         let resolved_decl = decl.clone();
-        let module_access_origin_is_persistent = path_root_is_persistent(&qualified_module_path);
-        // For alias modules, expansion should expose the alias target path
-        // (e.g. Html.t -> Dom_html.t), not a self-manifest Html.t.
+        // OCaml compiler/ml/env.ml:1438-1444 scrapes `Mty_alias` by looking
+        // up the target module with `path`, compiler/ml/mtype.ml:55-70 then
+        // strengthens abstract types to that alias target, and
+        // compiler/ml/env.ml:1513-1552 prefixes the component lookup path
+        // separately. Keep the expansion body rooted at the alias target for
+        // local aliases too (e.g. `module ZoomT = Zoom`: `ZoomT.t` expands to
+        // `Zoom.t`), while the queried access path remains `ZoomT.t`.
         let alias_target_for_strengthening = if strengthen_alias_types {
-            // Preserve local access paths like `L.t` / `V.t` instead of
-            // collapsing them back to the alias target during expansion.
             let mut no_persistent_env = None;
             crate::types::typecore::module_alias_target_for_path(
                 module_path,
@@ -1769,7 +1771,6 @@ fn resolve_type_item_through_env<'a>(
                 &mut no_persistent_env,
                 ctx,
             )
-            .filter(|_| module_access_origin_is_persistent)
         } else {
             None
         };
@@ -1786,6 +1787,28 @@ fn resolve_type_item_through_env<'a>(
             )
         });
         if self_manifest {
+            if let Some(target_path) = alias_target_for_strengthening.as_ref() {
+                // OCaml compiler/ml/env.ml:1438-1444 scrapes `Mty_alias`
+                // with the alias target path before compiler/ml/mtype.ml:55-70
+                // strengthens abstract type manifests; compiler/ml/env.ml:1513-1552
+                // then prefixes the visible component lookup path separately.
+                // Rust may already be holding that visible, self-manifested
+                // component decl, so rewrite this alias-scrape case to the
+                // target manifest without changing general strengthening.
+                let mut target_decl = resolved_decl.clone();
+                target_decl.type_manifest = Some(ctx.new_generic_constr(
+                    Path::pdot(target_path.clone(), id.name()),
+                    resolved_decl.type_params.clone(),
+                ));
+                target_decl.type_path = Some(queried_type_path.clone());
+                if matches!(
+                    resolved_decl.type_kind,
+                    crate::types::TypeKind::TypeAbstract
+                ) {
+                    target_decl.type_private = PrivateFlag::Public;
+                }
+                return Some((id.clone(), target_decl));
+            }
             let raw_module_path = alias_target_for_strengthening
                 .as_ref()
                 .unwrap_or(module_path);
@@ -2439,8 +2462,13 @@ fn try_expand_head_with_mode<'a>(
 
             // 1b. For qualified paths, mirror OCaml `find_type` resolution by
             // descending through the current environment's module signatures
-            // before consulting global fallbacks.
-            let strengthen_alias_types = matches!(mode, ExpandHeadMode::General);
+            // before consulting global fallbacks. OCaml
+            // compiler/ml/ctype.ml:1346-1372 uses the same
+            // `Env.find_type_expansion` path for both `expand_head` and
+            // `expand_head_unif`, so alias-module strengthening from
+            // compiler/ml/env.ml:1438-1444 and compiler/ml/mtype.ml:55-70
+            // applies in both Rust expansion modes.
+            let strengthen_alias_types = true;
             let resolved_env_decl = if matches!(&path, Path::Pdot(..)) {
                 resolve_type_through_env(ctx, env, &path, strengthen_alias_types)
             } else {
@@ -3162,7 +3190,10 @@ fn package_longident_same_label(
             package_longident_same_label(ctx, left_prefix, right_prefix)
                 && component_same(ctx, *left, *right)
         }
-        (Longident::Lapply(left_functor, left_arg), Longident::Lapply(right_functor, right_arg)) => {
+        (
+            Longident::Lapply(left_functor, left_arg),
+            Longident::Lapply(right_functor, right_arg),
+        ) => {
             package_longident_same_label(ctx, left_functor, right_functor)
                 && package_longident_same_label(ctx, left_arg, right_arg)
         }

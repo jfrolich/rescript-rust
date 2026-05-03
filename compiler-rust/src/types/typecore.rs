@@ -4979,6 +4979,66 @@ fn force_qualified_value_type_paths<'a>(
             })
     }
 
+    fn selected_module_is_opened_component_path(env: &Env, selected_module_path: &Path) -> bool {
+        env.find_module_with_origin(selected_module_path.last())
+            .ok()
+            .is_some_and(|(_, md, is_local)| {
+                !is_local
+                    && md
+                        .md_path
+                        .as_ref()
+                        .is_some_and(|opened_path| opened_path.same(selected_module_path))
+            })
+    }
+
+    fn selected_opened_alias_type_path(
+        path: &Path,
+        value_access_root_is_local: bool,
+        selected_module_path: Option<&Path>,
+        selected_alias_targets: &[Path],
+    ) -> Option<Path> {
+        if value_access_root_is_local || selected_alias_targets.is_empty() {
+            return None;
+        }
+        let selected_module_path = selected_module_path?;
+        let Path::Pdot(parent, type_name, pos) = path else {
+            return None;
+        };
+
+        fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+            if path.same(old_prefix) {
+                return Some(new_prefix.clone());
+            }
+            match path {
+                Path::Pdot(prefix, name, pos) => {
+                    rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
+                        Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+                    })
+                }
+                _ => None,
+            }
+        }
+
+        selected_alias_targets.iter().find_map(|target| {
+            let candidate_parent = rewrite_path_prefix(parent, target, selected_module_path)?;
+            if candidate_parent.same(parent) {
+                return None;
+            }
+            // OCaml compiler/ml/env.ml:1841-1860 opens component tables under
+            // the opened root, env.ml:1091-1100 selects values from that table,
+            // and env.ml:1530-1538 applies compiler/ml/subst.ml:303-309
+            // `Subst.value_description`. For an opened alias such as
+            // `TellaStd.Response = Webapi.Fetch.Response`, the selected value
+            // scheme therefore exposes `TellaStd.Response.t`, not the alias
+            // target's `Webapi__Fetch.Response.t`.
+            Some(Path::Pdot(
+                Box::new(candidate_parent),
+                type_name.clone(),
+                *pos,
+            ))
+        })
+    }
+
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
@@ -5017,11 +5077,10 @@ fn force_qualified_value_type_paths<'a>(
                 // `JSON.Encode.string` flat when it is typed as an array
                 // element, while direct non-function values such as
                 // `JSON.Encode.null` still use the selected component path.
-                let selected_module_root_is_stdlib =
-                    selected_module_path.is_some_and(|selected| {
-                        path_root_ident(selected)
-                            .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-                    });
+                let selected_module_root_is_stdlib = selected_module_path.is_some_and(|selected| {
+                    path_root_ident(selected)
+                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+                });
                 let ret_allow_stdlib_flat_parent_inference =
                     allow_stdlib_flat_parent_inference || selected_module_root_is_stdlib;
                 visit(
@@ -5145,22 +5204,29 @@ fn force_qualified_value_type_paths<'a>(
                         crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
                     }
                 }
-                let allow_implicit_stdlib_flat_parent_inference =
-                    allow_stdlib_flat_parent_inference
-                        || selected_non_stdlib_persistent_module(
-                            selected_module_path,
-                            value_access_root_is_local,
-                        );
-                let rewritten_path = visible_local_alias_type_path(
-                    ctx,
-                    env,
-                    &tctx.persistent_env,
+                let allow_implicit_stdlib_flat_parent_inference = allow_stdlib_flat_parent_inference
+                    || selected_non_stdlib_persistent_module(
+                        selected_module_path,
+                        value_access_root_is_local,
+                    );
+                let rewritten_path = selected_opened_alias_type_path(
                     &path,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
                     selected_alias_targets,
                 )
+                .or_else(|| {
+                    visible_local_alias_type_path(
+                        ctx,
+                        env,
+                        &tctx.persistent_env,
+                        &path,
+                        value_access_root_is_local,
+                        value_access_root,
+                        selected_module_path,
+                        selected_alias_targets,
+                    )
+                })
                 .or_else(|| {
                     flattened_persistent_alias_type_path(
                         ctx,
@@ -5405,9 +5471,17 @@ fn force_qualified_value_type_paths<'a>(
                 && path_root_ident(path)
                     .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
         });
+    let selected_module_is_opened_component_path =
+        selected_module_path.as_ref().is_some_and(|path| {
+            selected_module_is_opened_component_path(env, path)
+                && !path_root_ident(path).is_some_and(|root| {
+                    root.is_persistent() && (root.name() == "Stdlib" || root.name() == "Pervasives")
+                })
+        });
     let should_collect_selected_alias_targets = value_access_root_is_local
         || matches!(selected_module_path.as_ref(), Some(Path::Pident(_)))
-        || selected_module_is_implicit_stdlib_path;
+        || selected_module_is_implicit_stdlib_path
+        || selected_module_is_opened_component_path;
     let selected_alias_targets = if should_collect_selected_alias_targets {
         // OCaml compiler/ml/env.ml:781-813 reaches component tables for
         // qualified value lookup without forcing env.ml:1568's module
@@ -5425,10 +5499,35 @@ fn force_qualified_value_type_paths<'a>(
                 selected_value_module_alias_target(path, env, &mut tctx.persistent_env, ctx)
             })
             .map(|target| {
-                let mut targets = vec![target.clone()];
+                let mut targets = Vec::new();
+                let mut push_target = |candidate: Path| {
+                    if !targets
+                        .iter()
+                        .any(|existing: &Path| existing.same(&candidate))
+                    {
+                        targets.push(candidate);
+                    }
+                };
+                push_target(target.clone());
                 let normalized = env.normalize_path(&target);
-                if !targets.iter().any(|candidate| candidate.same(&normalized)) {
-                    targets.push(normalized);
+                push_target(normalized);
+                if let Path::Pdot(parent, name, pos) = &target {
+                    if let Some(pers) = tctx.persistent_env.as_ref() {
+                        for flat_head in pers.flattened_alias_heads_for_path(parent) {
+                            // OCaml compiler/ml/env.ml:1530-1538 substitutes the
+                            // selected component path into value descriptions. A
+                            // ReScript namespace alias may still appear in Rust as
+                            // the flattened backing unit (`Webapi__Fetch.Response`);
+                            // map that backing parent to the same selected alias
+                            // target so `Response.t` can be rewritten to the
+                            // opened path.
+                            push_target(Path::Pdot(
+                                Box::new(Path::pident(Ident::create_persistent(flat_head))),
+                                name.clone(),
+                                *pos,
+                            ));
+                        }
+                    }
                 }
                 if let Path::Pident(flat_id) = &target
                     && flat_id.is_persistent()
@@ -17977,7 +18076,7 @@ impl Env {
             match path {
                 Path::Pident(id) => {
                     let mod_name = id.name();
-                    if let Ok(md) = env.find_module(mod_name) {
+                    if let Ok(md) = env.find_module_same(id) {
                         let result =
                             resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
                         visiting.remove(path);
@@ -21150,20 +21249,27 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let local_module_path = match module_path {
-        Path::Pident(id) if id.is_persistent() || id.stamp() == 0 => env
-            .find_module_with_origin(id.name())
-            .ok()
-            .and_then(|(local_id, _, is_local)| {
-                // OCaml compiler/ml/env.ml:778-793 resolves source-level
-                // `Longident.Lident` module prefixes through the current env
-                // before falling back to persistent structures in env.ml:1000-1007.
-                // Some Rust package-modtype paths can still arrive here as a
-                // persistent Pident; if the current env has a local module with
-                // that name, use the local stamped identity so component forcing
-                // and env.ml:1581-1585 modtype freshening are shared with normal
-                // qualified lookups.
-                is_local.then(|| Path::pident(local_id.clone()))
-            }),
+        Path::Pident(id) if id.is_persistent() || id.stamp() == 0 => {
+            let persistent_unit_is_available = id.is_persistent()
+                && pers_env
+                    .as_ref()
+                    .is_some_and(|pers| pers.has_known_module_without_loading(id.name()));
+            if persistent_unit_is_available {
+                None
+            } else {
+                env.find_module_with_origin(id.name())
+                    .ok()
+                    .and_then(|(local_id, _, is_local)| {
+                        // OCaml compiler/ml/env.ml:778-793 resolves source-level
+                        // `Longident.Lident` module prefixes through the current env
+                        // before falling back to persistent structures in env.ml:1000-1007.
+                        // This recovery is only for Rust paths that lost the local
+                        // stamp before reaching component lookup; exact persistent
+                        // paths that are known units keep their original identity.
+                        is_local.then(|| Path::pident(local_id.clone()))
+                    })
+            }
+        }
         _ => None,
     };
     let module_path = local_module_path.as_ref().unwrap_or(module_path);
@@ -21216,12 +21322,19 @@ fn qualified_submodule_access_path(
     parent_access_path: &Path,
     module_name: &str,
     runtime_pos: usize,
-    md: &crate::types::decl::ModuleDeclaration,
+    _md: &crate::types::decl::ModuleDeclaration,
 ) -> Path {
     if path_non_apply_root_is_persistent_or_global(parent_access_path) {
-        md.md_path
-            .clone()
-            .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
+        // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents` creates
+        // component paths as `Pdot(root, name, pos)`, and env.ml:1568-1578
+        // stores both module declarations and child components under that
+        // prefixed path. The declaration's own `md_path` may name an alias
+        // target, but it is not the selected path for a qualified lookup.
+        Path::pdot_pos(
+            parent_access_path.clone(),
+            module_name.to_string(),
+            runtime_pos as i32,
+        )
     } else {
         Path::pdot_pos(
             parent_access_path.clone(),
@@ -21591,28 +21704,13 @@ fn build_module_signature_for_path<'a>(
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
-            if let Ok(md) = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-            {
-                let access_path = if id.is_persistent() {
-                    // OCaml compiler/ml/env.ml:1000-1007 resolves an exact
-                    // persistent unit through that unit's `ps_comps` before
-                    // any alias recovery. Keep the selected path as the
-                    // requested unit (`Belt_Id`) even if an opened declaration
-                    // also carries a qualified alias path (`Belt.Id`); the
-                    // component substitution at env.ml:1530-1538 then prefixes
-                    // values and types with the exact unit.
-                    Path::pident(id.clone())
-                } else {
-                    match env.find_module_with_origin(id.name()) {
-                        Ok((origin_id, _, true)) if origin_id.same(id) => Path::pident(id.clone()),
-                        _ => md
-                            .md_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(id.clone())),
-                    }
-                };
+            if let Ok(md) = env.find_module_same(id) {
+                // OCaml compiler/ml/env.ml:1000-1007 and env.ml:865-875
+                // resolve exact `Path.Pident` module paths with
+                // `find_module_descr`/`find_module`, whose Pident case uses
+                // `IdTbl.find_same`; IdTbl.find_same at env.ml:285-290 does
+                // not fall back to a later same-name local or opened module.
+                let access_path = Path::pident(id.clone());
                 let sig = build_qualified_signature_for_access_path(
                     env,
                     &access_path,
