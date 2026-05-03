@@ -655,7 +655,9 @@ fn log_unknown_config_field(package_name: &str, field_name: &str) {
 pub fn write_build_ninja(build_state: &BuildCommandState) {
     for package in build_state.packages.values() {
         // write empty file:
-        let mut f = File::create(package.get_build_path().join("build.ninja")).expect("Unable to write file");
+        let build_path = package.get_build_path();
+        std::fs::create_dir_all(&build_path).expect("Unable to create build directory");
+        let mut f = File::create(build_path.join("build.ninja")).expect("Unable to write file");
         f.write_all(b"").expect("unable to write to ninja file");
     }
 }
