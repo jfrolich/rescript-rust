@@ -3,6 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
+use ahash::AHashSet;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
@@ -808,7 +809,7 @@ pub struct RawLambdaConverter<'a> {
     type_ctx: &'a TypeContext<'a>,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
-    possible_required_modules: std::collections::HashSet<ModuleId>,
+    possible_required_modules: AHashSet<ModuleId>,
     id_gen: IdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
@@ -829,7 +830,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -851,7 +852,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -874,7 +875,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -901,7 +902,7 @@ impl<'a> RawLambdaConverter<'a> {
             .max(self.lowered.current_stamp())
     }
 
-    pub fn take_possible_required_modules(&mut self) -> std::collections::HashSet<ModuleId> {
+    pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
@@ -4227,11 +4228,11 @@ impl<'a> RawLambdaConverter<'a> {
                 // only the final binding. Since Rust doesn't compute that coercion,
                 // we achieve the same result by deduplicating here.
                 let deduped_fields = {
-                    let mut seen = HashSet::new();
+                    let mut seen = AHashSet::with_capacity(fields.len());
                     let mut indices = Vec::new();
                     // Walk from the end to find which indices to keep
                     for i in (0..fields.len()).rev() {
-                        if seen.insert(fields[i].name().to_string()) {
+                        if seen.insert(fields[i].name()) {
                             indices.push(i);
                         }
                     }

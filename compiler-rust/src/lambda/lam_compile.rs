@@ -5,6 +5,7 @@
 //! clarity over aggressive optimization; it is intended as a correct baseline
 //! that can be extended with more advanced codegen passes.
 
+use ahash::AHashSet;
 use std::collections::{HashMap, HashSet};
 
 use crate::cmi::persistent_env::CmjExportConstant;
@@ -423,7 +424,7 @@ impl LambdaCompiler {
 
     /// Compile an owned Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program_owned(&mut self, lam: Lambda) -> DepsProgram {
-        let possible_required_modules = std::collections::HashSet::new();
+        let possible_required_modules = AHashSet::new();
         self.compile_deps_program_with_possible_required_modules_owned(
             lam,
             &possible_required_modules,
@@ -436,7 +437,7 @@ impl LambdaCompiler {
     pub fn compile_deps_program_with_possible_required_modules(
         &mut self,
         lam: &Lambda,
-        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+        extra_possible_required_modules: &AHashSet<ModuleId>,
     ) -> DepsProgram {
         self.compile_deps_program_with_possible_required_modules_owned(
             lam.clone(),
@@ -452,7 +453,7 @@ impl LambdaCompiler {
     pub fn compile_deps_program_with_possible_required_modules_owned(
         &mut self,
         lam: Lambda,
-        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+        extra_possible_required_modules: &AHashSet<ModuleId>,
     ) -> DepsProgram {
         let _span = info_span!(
             "compiler.lambda_to_js",
@@ -6391,13 +6392,16 @@ fn ocaml_sort_modules(modules: &mut [ModuleId]) {
     modules.swap(0, 1);
 }
 
-fn collect_possible_required_modules(lam: &Lambda) -> std::collections::HashSet<ModuleId> {
-    let mut seen = std::collections::HashSet::new();
+fn collect_possible_required_modules(lam: &Lambda) -> AHashSet<ModuleId> {
+    // OCaml compiler/core/lam_compile_main.ml:277-284 collects into a hash set
+    // and sorts after `populate_required_modules`, so the hash iteration order is
+    // intentionally unobservable here.
+    let mut seen = AHashSet::new();
     collect_modules_from_lambda(lam, &mut seen);
     seen
 }
 
-fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSet<ModuleId>) {
+fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         Lambda::LglobalModule(id, dynamic_import) => {
@@ -6490,7 +6494,7 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSe
 
 fn populate_required_modules(
     module_path_resolver: Option<&ModulePathResolver>,
-    extras: &std::collections::HashSet<ModuleId>,
+    extras: &AHashSet<ModuleId>,
     modules: &mut OcamlModuleSet,
 ) {
     for module in extras {

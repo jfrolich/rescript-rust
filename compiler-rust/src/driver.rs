@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
@@ -3223,7 +3224,7 @@ pub type InProcessSignatureReadyHook<'a> =
     dyn FnMut(InProcessSignatureReady) -> Result<Option<ModuleRegistry>> + 'a;
 
 pub type InProcessBeforeJsHook<'a> =
-    dyn FnMut(&std::collections::HashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
+    dyn FnMut(&AHashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
 
 /// Result of an in-process `.resi` interface type-check.
 pub struct InProcessInterfaceResult {
@@ -3297,7 +3298,7 @@ fn effective_js_output_targets(options: &CompilerOptions) -> Vec<JsOutputTarget>
 
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
-    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
@@ -3344,7 +3345,7 @@ fn compile_js_program_for_output(
 
 fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
-    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,

@@ -2542,7 +2542,7 @@ fn compile_module_in_process(
     let before_js_module_name = module_name.to_string();
     let before_js_declared_deps = module.deps.clone();
     let build_command_state_for_js = build_command_state;
-    let mut before_js_hook = move |possible_required_modules: &std::collections::HashSet<
+    let mut before_js_hook = move |possible_required_modules: &ahash::AHashSet<
         rescript_compiler::js_ir::ModuleId,
     >|
           -> Result<Option<ModuleRegistry>> {
