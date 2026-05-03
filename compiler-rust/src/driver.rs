@@ -2016,21 +2016,32 @@ pub fn load_pervasives<'a>(
     if !nopervasives {
         // Try to load and open Pervasives
         if pers_env.open_module("Pervasives", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Pervasives", sig.clone());
+            // OCaml `Res_compmisc.initial_env` opens implicit modules through
+            // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
+            // builds, the persistent registry remains available for explicit
+            // `Pervasives.X` lookup, so avoid cloning the whole raw signature a
+            // second time just to add a top-level module binding.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig("Pervasives", sig.clone());
+                    }
+                    env.add_module(Ident::create_persistent("Pervasives"), md);
                 }
-                env.add_module(Ident::create_persistent("Pervasives"), md);
             }
         }
 
         // Try to load and open Stdlib
         if pers_env.open_module("Stdlib", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Stdlib", sig.clone());
+            // Same implicit-open behavior as above; keep the opened bindings,
+            // but let explicit module lookup use the in-process registry.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig("Stdlib", sig.clone());
+                    }
+                    env.add_module(Ident::create_persistent("Stdlib"), md);
                 }
-                env.add_module(Ident::create_persistent("Stdlib"), md);
             }
         }
     }
