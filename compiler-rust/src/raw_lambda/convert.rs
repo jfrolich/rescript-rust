@@ -1746,10 +1746,20 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     let eid = self.next_raise_count();
                     exit_map.insert(key.clone(), eid);
-                    handlers.push((eid, action.clone()));
+                    // OCaml `share_actions_sw` stores the selected action once
+                    // and rewrites switch arms through that store
+                    // (compiler/ml/matching.ml:1761-1790). Rust owns the arm
+                    // slot here, so move the first shared action into the
+                    // handler instead of cloning the whole raw-lambda subtree.
+                    let original =
+                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
+                    handlers.push((eid, original));
                     eid
                 };
-                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
+                {
+                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                }
             }
         }
 
@@ -1766,10 +1776,17 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     let eid = self.next_raise_count();
                     exit_map.insert(key.clone(), eid);
-                    handlers.push((eid, action.clone()));
+                    // See the const-arm comment above and OCaml
+                    // `matching.ml:1761-1790`.
+                    let original =
+                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
+                    handlers.push((eid, original));
                     eid
                 };
-                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
+                {
+                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                }
             }
         }
 
