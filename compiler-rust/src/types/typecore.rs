@@ -8040,6 +8040,91 @@ fn type_application(
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
 
+    // Fast path for the overwhelmingly common non-labelled single-argument
+    // application. This preserves OCaml's typecore.ml:4133-4197 staging by
+    // first selecting the function arrow from `ty_fun`/`ty_fun0`, then typing
+    // the argument before the final Pexp_apply unifications at
+    // typecore.ml:4220-4240. Labelled, optional, arity-tracked, polymorphic
+    // tvar, and `%ignore` cases keep using the full matcher below.
+    if args.len() == 1
+        && function_arity.is_none()
+        && !force_tvar
+        && !is_ignore_fn
+        && matches!(args[0].0, ArgLabel::Nolabel)
+    {
+        let expanded_current_ty0 = if ctx.repr(current_ty0) == ctx.repr(current_ty) {
+            expanded_funct_ty
+        } else {
+            crate::types::ctype::expand_head(ctx, env, current_ty0)
+        };
+        if let (Some((fn_label, arg_ty, _ret_ty)), Some((fn_label0, arg_ty0, ret_ty0))) = (
+            crate::types::ctype::split_arrow_with_label(ctx, expanded_funct_ty),
+            crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
+        ) {
+            if matches!(fn_label, crate::types::ArgLabel::Nolabel)
+                && matches!(fn_label0, crate::types::ArgLabel::Nolabel)
+            {
+                let arg_expr = tctx.arena.get_expr(args[0].1);
+                let previous_force_fresh_local_float = tctx.force_fresh_local_float;
+                tctx.force_fresh_local_float = false;
+                let saved_unify_env = tctx
+                    .unify_state
+                    .env()
+                    .filter(|saved_env| saved_env.id() != env.id())
+                    .map(crate::types::env::Env::clone_preserve_id);
+                let typed_arg_result = type_expect(
+                    tctx,
+                    env,
+                    arg_expr,
+                    arg_ty,
+                    Some(TypeClashContext::FunctionCall),
+                );
+                tctx.force_fresh_local_float = previous_force_fresh_local_float;
+
+                let typed_arg = typed_arg_result?;
+                preserve_apply_argument_alias_representative(tctx, env, arg_ty, typed_arg.exp_type);
+                if let Some(saved_env) = saved_unify_env {
+                    tctx.unify_state.set_env(&saved_env);
+                } else {
+                    tctx.set_unify_env(env);
+                }
+                unify_expression_types(
+                    tctx,
+                    typed_arg.exp_loc,
+                    typed_arg.exp_type,
+                    arg_ty0,
+                    Some(TypeClashContext::FunctionCall),
+                )?;
+                preserve_apply_argument_alias_representative(
+                    tctx,
+                    env,
+                    arg_ty0,
+                    typed_arg.exp_type,
+                );
+
+                ctx.end_def();
+                unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
+                rue_unify(tctx, loc, ret_ty0, expected_ty, context)?;
+
+                return Ok(Expression::new(
+                    ExpressionDesc::Texp_apply {
+                        funct: Box::new(typed_funct),
+                        args: vec![ApplyArg {
+                            label: crate::types::ArgLabel::Nolabel,
+                            expression: Some(typed_arg),
+                        }],
+                        partial,
+                        transformed_jsx,
+                    },
+                    loc.clone(),
+                    ret_ty0,
+                    EnvRef(0),
+                    attributes.to_vec().into(),
+                ));
+            }
+        }
+    }
+
     // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
     // left-to-right.
     // OCaml's `extract_label` returns the remaining syntax-arg list without
