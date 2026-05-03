@@ -1136,6 +1136,7 @@ struct InProcessCompilerFlags {
     debug: bool,
     jsx_preserve: bool,
     jsx_version: Option<i32>,
+    experimental_let_unwrap: bool,
     open_modules: Vec<String>,
 }
 
@@ -1151,6 +1152,7 @@ impl Default for InProcessCompilerFlags {
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
+            experimental_let_unwrap: false,
             open_modules: Vec::new(),
         }
     }
@@ -1172,6 +1174,13 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
+                }
+            }
+            "-enable-experimental" => {
+                if let Some(feature) = iter.next() {
+                    if feature == "LetUnwrap" {
+                        parsed.experimental_let_unwrap = true;
+                    }
                 }
             }
             "-open" => {
@@ -1230,6 +1239,11 @@ fn build_compiler_options(
             .and_then(|jsx| jsx.version)
             .filter(|&v| v == 4)
     });
+    let experimental_let_unwrap = parsed_flags.experimental_let_unwrap
+        || package
+            .config
+            .has_experimental_feature(config::ExperimentalFeature::LetUnwrap)
+        || root_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap);
 
     // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
     // In the file-based mode, `-bs-ns Namespace` is passed to all namespaced modules.
@@ -1265,6 +1279,7 @@ fn build_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version,
+        experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         check_div_by_zero: parsed_flags.check_div_by_zero,
@@ -2159,6 +2174,8 @@ fn runtime_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
+        experimental_let_unwrap: parsed_flags.experimental_let_unwrap
+            || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         no_version_header: parsed_flags.no_version_header,

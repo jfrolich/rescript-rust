@@ -1176,6 +1176,8 @@ pub struct CompilerOptions {
     pub js_output_targets: Vec<JsOutputTarget>,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
+    /// Experimental LetUnwrap feature from `-enable-experimental LetUnwrap`.
+    pub experimental_let_unwrap: bool,
     /// Preserve transformed JSX syntax in the final JS dumper.
     pub jsx_preserve: bool,
     /// Enable debug-mode JS emission (like OCaml's -bs-g / Js_config.debug).
@@ -1221,6 +1223,7 @@ impl Default for CompilerOptions {
             output_module_format: None,
             js_output_targets: Vec::new(),
             jsx_version: None,
+            experimental_let_unwrap: false,
             jsx_preserve: false,
             debug: false,
             no_version_header: false,
@@ -1245,6 +1248,24 @@ pub fn jsx_version_for_structure(
     options
         .jsx_version
         .or_else(|| structure_has_config_string(structure, "-bs-jsx", arena).then_some(4))
+}
+
+pub fn experimental_let_unwrap_for_structure(
+    structure: &Structure,
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    options.experimental_let_unwrap
+        || extract_file_config_from_structure(structure, arena).let_unwrap
+}
+
+fn experimental_let_unwrap_for_signature(
+    signature: &Signature,
+    options: &CompilerOptions,
+    arena: &crate::parse_arena::ParseArena,
+) -> bool {
+    options.experimental_let_unwrap
+        || extract_file_config_from_signature(signature, arena).let_unwrap
 }
 
 pub(crate) fn debug_for_structure(
@@ -1300,6 +1321,8 @@ pub fn compile_source_to_js_with_options(
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
+    let experimental_let_unwrap =
+        experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
@@ -1325,6 +1348,7 @@ pub fn compile_source_to_js_with_options(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -1813,6 +1837,8 @@ pub fn typecheck_interface_source(
             parser.diagnostics().len()
         ));
     }
+    let experimental_let_unwrap =
+        experimental_let_unwrap_for_signature(&signature, options, parser.arena());
     let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
 
     // Type check
@@ -1823,6 +1849,7 @@ pub fn typecheck_interface_source(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -2065,6 +2092,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let experimental_let_unwrap =
+            experimental_let_unwrap_for_signature(&signature, options, parser.arena());
         let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
 
         // Type check
@@ -2075,6 +2104,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+        tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -2108,6 +2138,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let experimental_let_unwrap =
+            experimental_let_unwrap_for_structure(&structure, options, parser.arena());
 
         let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
@@ -2125,6 +2157,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(&id_gen);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+        tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -2869,6 +2902,9 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
+    let experimental_let_unwrap =
+        experimental_let_unwrap_for_structure(&structure, options, &arena);
+
     let jsx_version = jsx_version_for_structure(&structure, options, &arena);
     let structure = if let Some(jsx_version) = jsx_version {
         jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
@@ -2887,6 +2923,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+    tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -2921,6 +2958,9 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
+    let experimental_let_unwrap =
+        experimental_let_unwrap_for_signature(&signature, options, &arena);
+
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
@@ -2928,6 +2968,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+    tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -3240,6 +3281,8 @@ pub fn compile_source_in_process(
             parser.diagnostics().len()
         ));
     }
+    let experimental_let_unwrap =
+        experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
         jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
@@ -3251,12 +3294,15 @@ pub fn compile_source_in_process(
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
 
+    let mut effective_options = options.clone();
+    effective_options.experimental_let_unwrap = experimental_let_unwrap;
+
     compile_preprocessed_structure_in_process(
         parser.arena(),
         &structure,
         filename,
         module_name,
-        options,
+        &effective_options,
         registry,
         has_interface,
     )
@@ -3443,6 +3489,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -3858,6 +3905,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -3959,6 +4007,7 @@ pub fn typecheck_implementation_in_process(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(&id_gen);
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);

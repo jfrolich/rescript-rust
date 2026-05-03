@@ -726,6 +726,8 @@ pub struct TypeCheckContext<'a> {
     /// Scoped toggle used by type_application for OCaml-aligned local-float
     /// instantiation in repeated argument sites.
     pub force_fresh_local_float: bool,
+    /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
+    pub experimental_let_unwrap: bool,
     /// When inside Pexp_constraint, the GENERIC constraint type. Used by
     /// type_match_cases_batch_non_gadt to create fresh instances per case
     /// body, matching OCaml's behavior where ty_res is generic.
@@ -770,6 +772,7 @@ impl<'a> TypeCheckContext<'a> {
             persistent_env: None,
             persistent_manifest_type_lookup_depth: 0,
             force_fresh_local_float: false,
+            experimental_let_unwrap: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             comptime_functions: HashMap::new(),
@@ -16237,6 +16240,31 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
     }
 }
 
+fn let_unwrap_partial_match_hint_side_effect<'a>(
+    tctx: &TypeCheckContext<'a>,
+    env: &Env,
+    bindings: &[ValueBinding],
+) {
+    if !tctx.experimental_let_unwrap {
+        return;
+    }
+
+    let ctx = tctx.type_ctx;
+    for binding in bindings {
+        // OCaml compiler/ml/typecore.ml:4695-4707 computes the LetUnwrap
+        // partial-match warning hint with `repr (Ctype.expand_head env
+        // pat.pat_type)` before typecore.ml:4715 `end_def ()`. That
+        // expansion is observable because persistent type aliases may be
+        // forced while identifiers for later bindings have not been allocated.
+        let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
+        let desc = ctx.get_desc(ctx.repr(expanded));
+        if let TypeDesc::Tconstr { path, .. } = &*desc {
+            let _partial_match_warning_hint = path.same(&crate::types::predef::path_option())
+                || path.same(&crate::types::predef::path_result());
+        }
+    }
+}
+
 /// Type check let bindings.
 fn type_let_bindings(
     tctx: &mut TypeCheckContext<'_>,
@@ -16398,6 +16426,8 @@ fn type_let_bindings(
                 binding.pvb_attributes.clone(),
             ));
         }
+
+        let_unwrap_partial_match_hint_side_effect(tctx, env, &typed_bindings);
 
         // End definition level
         ctx.end_def();

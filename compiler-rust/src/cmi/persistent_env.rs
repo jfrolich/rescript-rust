@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, jsx_version_for_structure, load_pervasives, normalize_signature_types,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_version_for_structure,
+    load_pervasives, normalize_signature_types,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
@@ -1108,6 +1109,8 @@ impl PersistentEnv {
             jsx_version: self.jsx_version,
             ..CompilerOptions::default()
         };
+        let experimental_let_unwrap =
+            experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
             jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
@@ -1118,6 +1121,7 @@ impl PersistentEnv {
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
 
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
+        tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);
         let (typed_structure, final_env) =
             type_structure(&mut tctx, &env, parser.arena(), &structure).ok()?;
