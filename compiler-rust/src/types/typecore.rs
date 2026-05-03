@@ -16286,7 +16286,63 @@ fn copy_lookup_type_expr(
     ty: TypeExprRef,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
-    use crate::types::type_expr::{RowDesc, RowField};
+    use crate::types::type_expr::{FieldKind, RowDesc, RowField};
+
+    enum CopyRowFieldPlan {
+        Rpresent(Option<TypeExprRef>),
+        Reither {
+            constant: bool,
+            types: Vec<TypeExprRef>,
+            matched: bool,
+            link: crate::types::type_expr::RowFieldRef,
+        },
+        Rabsent,
+    }
+
+    enum CopyTypeExprPlan {
+        Tvar(Option<String>),
+        Tarrow {
+            lbl: crate::types::asttypes::ArgLabel,
+            arg: TypeExprRef,
+            ret: TypeExprRef,
+            arity: Option<i32>,
+        },
+        Ttuple(Vec<TypeExprRef>),
+        Tconstr {
+            path: Path,
+            args: Vec<TypeExprRef>,
+        },
+        Tobject {
+            fields: TypeExprRef,
+            name: Option<(Path, Vec<TypeExprRef>)>,
+        },
+        Tfield {
+            name: String,
+            kind: FieldKind,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
+        Tnil,
+        Tlink(TypeExprRef),
+        Tsubst(TypeExprRef),
+        Tvariant {
+            row_fields: Vec<(crate::types::asttypes::Label, CopyRowFieldPlan)>,
+            row_more: TypeExprRef,
+            row_closed: bool,
+            row_fixed: bool,
+            row_name: Option<(Path, Vec<TypeExprRef>)>,
+        },
+        Tunivar(Option<String>),
+        Tpoly {
+            body: TypeExprRef,
+            vars: Vec<TypeExprRef>,
+        },
+        Tpackage {
+            path: Path,
+            lids: Vec<Longident>,
+            args: Vec<TypeExprRef>,
+        },
+    }
 
     let ty = ctx.repr(ty);
     if let Some(&copied) = cache.get(&ty) {
@@ -16298,30 +16354,108 @@ fn copy_lookup_type_expr(
     ctx.set_level(placeholder, level);
     cache.insert(ty, placeholder);
 
-    let copied_desc = {
-        let desc = ctx.get_desc(ty).clone();
-        match desc {
-            TypeDesc::Tvar(name) => TypeDesc::Tvar(name),
+    let plan = {
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
             TypeDesc::Tarrow {
                 arg, ret, arity, ..
+            } => CopyTypeExprPlan::Tarrow {
+                lbl: arg.lbl.clone(),
+                arg: arg.typ,
+                ret: *ret,
+                arity: *arity,
+            },
+            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
+            TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
+                path: path.clone(),
+                args: args.clone(),
+            },
+            TypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
+                fields: *fields,
+                name: name.clone(),
+            },
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => CopyTypeExprPlan::Tfield {
+                name: name.clone(),
+                kind: kind.clone(),
+                typ: *typ,
+                rest: *rest,
+            },
+            TypeDesc::Tnil => CopyTypeExprPlan::Tnil,
+            TypeDesc::Tlink(target) => CopyTypeExprPlan::Tlink(*target),
+            TypeDesc::Tsubst(target) => CopyTypeExprPlan::Tsubst(*target),
+            TypeDesc::Tvariant(row) => CopyTypeExprPlan::Tvariant {
+                row_fields: row
+                    .row_fields
+                    .iter()
+                    .map(|(label, field)| {
+                        let field = match field {
+                            RowField::Rpresent(ty) => CopyRowFieldPlan::Rpresent(*ty),
+                            RowField::Reither {
+                                constant,
+                                types,
+                                matched,
+                                link,
+                            } => CopyRowFieldPlan::Reither {
+                                constant: *constant,
+                                types: types.clone(),
+                                matched: *matched,
+                                link: *link,
+                            },
+                            RowField::Rabsent => CopyRowFieldPlan::Rabsent,
+                        };
+                        (label.clone(), field)
+                    })
+                    .collect(),
+                row_more: row.row_more,
+                row_closed: row.row_closed,
+                row_fixed: row.row_fixed,
+                row_name: row.row_name.clone(),
+            },
+            TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
+            TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
+                body: *body,
+                vars: vars.clone(),
+            },
+            TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
+                path: path.clone(),
+                lids: lids.clone(),
+                args: args.clone(),
+            },
+        }
+    };
+
+    let copied_desc = {
+        match plan {
+            CopyTypeExprPlan::Tvar(name) => TypeDesc::Tvar(name),
+            CopyTypeExprPlan::Tarrow {
+                lbl,
+                arg,
+                ret,
+                arity,
             } => {
-                let copied_arg = copy_lookup_type_expr(ctx, arg.typ, cache);
+                let copied_arg = copy_lookup_type_expr(ctx, arg, cache);
                 let copied_ret = copy_lookup_type_expr(ctx, ret, cache);
                 TypeDesc::Tarrow {
-                    arg: TypeArg::new(arg.lbl, copied_arg),
+                    arg: TypeArg::new(lbl, copied_arg),
                     ret: copied_ret,
                     commutable: Commutable::Clink(ctx.alloc_commutable(Commutable::Cok)),
                     arity,
                 }
             }
-            TypeDesc::Ttuple(types) => {
+            CopyTypeExprPlan::Ttuple(types) => {
                 let copied_items = types
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                     .collect();
                 TypeDesc::Ttuple(copied_items)
             }
-            TypeDesc::Tconstr { path, args, .. } => {
+            CopyTypeExprPlan::Tconstr { path, args } => {
                 let copied_args = args
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
@@ -16332,7 +16466,7 @@ fn copy_lookup_type_expr(
                     abbrev: ctx.alloc_abbrev_nil(),
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            CopyTypeExprPlan::Tobject { fields, name } => {
                 let copied_fields = copy_lookup_type_expr(ctx, fields, cache);
                 let copied_name = name.map(|(path, args)| {
                     (
@@ -16347,7 +16481,7 @@ fn copy_lookup_type_expr(
                     name: copied_name,
                 }
             }
-            TypeDesc::Tfield {
+            CopyTypeExprPlan::Tfield {
                 name,
                 kind,
                 typ,
@@ -16362,50 +16496,56 @@ fn copy_lookup_type_expr(
                     rest: copied_rest,
                 }
             }
-            TypeDesc::Tnil => TypeDesc::Tnil,
-            TypeDesc::Tlink(target) => {
+            CopyTypeExprPlan::Tnil => TypeDesc::Tnil,
+            CopyTypeExprPlan::Tlink(target) => {
                 let copied = copy_lookup_type_expr(ctx, target, cache);
                 ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
                 cache.insert(ty, copied);
                 return copied;
             }
-            TypeDesc::Tsubst(target) => {
+            CopyTypeExprPlan::Tsubst(target) => {
                 let copied_target = copy_lookup_type_expr(ctx, target, cache);
                 TypeDesc::Tsubst(copied_target)
             }
-            TypeDesc::Tvariant(row) => {
+            CopyTypeExprPlan::Tvariant {
+                row_fields,
+                row_more,
+                row_closed,
+                row_fixed,
+                row_name,
+            } => {
                 let copied_row = RowDesc {
-                    row_fields: row
-                        .row_fields
-                        .iter()
+                    row_fields: row_fields
+                        .into_iter()
                         .map(|(label, field)| {
                             let copied_field = match field {
-                                RowField::Rpresent(Some(ty)) => {
-                                    RowField::Rpresent(Some(copy_lookup_type_expr(ctx, *ty, cache)))
+                                CopyRowFieldPlan::Rpresent(Some(ty)) => {
+                                    RowField::Rpresent(Some(copy_lookup_type_expr(ctx, ty, cache)))
                                 }
-                                RowField::Reither {
+                                CopyRowFieldPlan::Rpresent(None) => RowField::Rpresent(None),
+                                CopyRowFieldPlan::Reither {
                                     constant,
                                     types,
                                     matched,
                                     link,
                                 } => RowField::Reither {
-                                    constant: *constant,
+                                    constant,
                                     types: types
                                         .iter()
                                         .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                                         .collect(),
-                                    matched: *matched,
-                                    link: *link,
+                                    matched,
+                                    link,
                                 },
-                                other => other.clone(),
+                                CopyRowFieldPlan::Rabsent => RowField::Rabsent,
                             };
-                            (label.clone(), copied_field)
+                            (label, copied_field)
                         })
                         .collect(),
-                    row_more: copy_lookup_type_expr(ctx, row.row_more, cache),
-                    row_closed: row.row_closed,
-                    row_fixed: row.row_fixed,
-                    row_name: row.row_name.as_ref().map(|(path, args)| {
+                    row_more: copy_lookup_type_expr(ctx, row_more, cache),
+                    row_closed,
+                    row_fixed,
+                    row_name: row_name.as_ref().map(|(path, args)| {
                         (
                             path.clone(),
                             args.iter()
@@ -16416,8 +16556,8 @@ fn copy_lookup_type_expr(
                 };
                 TypeDesc::Tvariant(copied_row)
             }
-            TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
-            TypeDesc::Tpoly { body, vars } => {
+            CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
+            CopyTypeExprPlan::Tpoly { body, vars } => {
                 let copied_body = copy_lookup_type_expr(ctx, body, cache);
                 let copied_vars = vars
                     .iter()
@@ -16428,7 +16568,7 @@ fn copy_lookup_type_expr(
                     vars: copied_vars,
                 }
             }
-            TypeDesc::Tpackage { path, lids, args } => {
+            CopyTypeExprPlan::Tpackage { path, lids, args } => {
                 let copied_args = args
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
