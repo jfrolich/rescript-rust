@@ -3787,36 +3787,59 @@ fn collect_in_process_cmj_export_constants(
     program: &crate::js_ir::Program,
 ) -> ahash::AHashMap<String, CmjExportConstant> {
     let mut constants = ahash::AHashMap::new();
-    for export in &program.exports {
-        let Some(expr) = find_export_binding_expr(&program.block, export) else {
-            continue;
-        };
-        let Some(constant) = cmj_export_constant_from_expr(expr) else {
-            continue;
-        };
-        constants.insert(export.name().to_string(), constant);
+    if program.exports.is_empty() {
+        return constants;
     }
+
+    let mut export_names = ahash::AHashMap::<_, Vec<String>>::with_capacity(program.exports.len());
+    for export in &program.exports {
+        export_names
+            .entry(export.clone())
+            .or_default()
+            .push(export.name().to_string());
+    }
+    collect_export_binding_constants(
+        &program.block,
+        &export_names,
+        program.exports.len(),
+        &mut constants,
+    );
     constants
 }
 
-fn find_export_binding_expr<'a>(
-    block: &'a crate::js_ir::Block,
-    export: &crate::ident::Ident,
-) -> Option<&'a crate::js_ir::Expression> {
+fn collect_export_binding_constants(
+    block: &crate::js_ir::Block,
+    export_names: &ahash::AHashMap<crate::ident::Ident, Vec<String>>,
+    export_count: usize,
+    constants: &mut ahash::AHashMap<String, CmjExportConstant>,
+) {
+    if constants.len() == export_count {
+        return;
+    }
+
     for statement in block {
         match &statement.desc {
-            crate::js_ir::StatementDesc::Variable(decl) if decl.ident.same(export) => {
-                return decl.value.as_ref();
+            crate::js_ir::StatementDesc::Variable(decl) => {
+                if let Some(export_names) = export_names.get(&decl.ident) {
+                    for export_name in export_names {
+                        if !constants.contains_key(export_name)
+                            && let Some(expr) = &decl.value
+                            && let Some(constant) = cmj_export_constant_from_expr(expr)
+                        {
+                            constants.insert(export_name.clone(), constant);
+                        }
+                    }
+                }
             }
             crate::js_ir::StatementDesc::Block(inner) => {
-                if let Some(expr) = find_export_binding_expr(inner, export) {
-                    return Some(expr);
-                }
+                collect_export_binding_constants(inner, export_names, export_count, constants);
             }
             _ => {}
         }
+        if constants.len() == export_count {
+            return;
+        }
     }
-    None
 }
 
 fn cmj_export_constant_from_expr(expr: &crate::js_ir::Expression) -> Option<CmjExportConstant> {
