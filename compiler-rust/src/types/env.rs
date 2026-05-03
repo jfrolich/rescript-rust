@@ -400,14 +400,12 @@ impl Clone for Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(
-                self.local_module_aliases_cache.borrow().clone(),
-            ),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache
-                    .borrow()
-                    .clone(),
-            ),
+            // These are Rust-only memo tables derived from the binding tables.
+            // Do not duplicate them when snapshotting environments for unifier
+            // state; OCaml Env snapshots carry semantic bindings, not copied
+            // memoized lookup results.
+            local_module_aliases_cache: RefCell::new(None),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -464,14 +462,12 @@ impl Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(
-                self.local_module_aliases_cache.borrow().clone(),
-            ),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache
-                    .borrow()
-                    .clone(),
-            ),
+            // These are Rust-only memo tables derived from the binding tables.
+            // Do not duplicate them when snapshotting environments for unifier
+            // state; OCaml Env snapshots carry semantic bindings, not copied
+            // memoized lookup results.
+            local_module_aliases_cache: RefCell::new(None),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
