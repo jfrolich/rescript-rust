@@ -4,7 +4,7 @@ use ahash::AHashMap;
 use log::error;
 use rayon::prelude::*;
 use regex::Regex;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
 
@@ -53,7 +53,13 @@ fn write_to_log_file(mut file: File, package_name: &str, content: &str) {
 
 pub fn initialize(packages: &AHashMap<String, Package>) {
     packages.par_iter().for_each(|(name, package)| {
-        File::create(get_log_file_path(package, Location::Bs))
+        let log_path = get_log_file_path(package, Location::Bs);
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|err| {
+                panic!("Cannot create compiler log directory for package {name}: {err}");
+            });
+        }
+        File::create(log_path)
             .map(|file| write_to_log_file(file, name, &format!("#Start({})\n", helpers::get_system_time())))
             .unwrap_or_else(|err| {
                 panic!("Cannot create compiler log for package {name}: {err}");
@@ -62,28 +68,38 @@ pub fn initialize(packages: &AHashMap<String, Package>) {
 }
 
 pub fn append(package: &packages::Package, str: &str) {
+    let log_path = get_log_file_path(package, Location::Bs);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|err| {
+            panic!(
+                "Cannot create compiler log directory for package {}: {err}",
+                package.name
+            );
+        });
+    }
     File::options()
         .append(true)
-        .open(get_log_file_path(package, Location::Bs))
+        .create(true)
+        .open(&log_path)
         .map(|file| write_to_log_file(file, &package.name, str))
         .unwrap_or_else(|err| {
-            panic!(
-                "Cannot write compilerlog: {} ({err})",
-                get_log_file_path(package, Location::Bs).to_string_lossy()
-            );
+            panic!("Cannot write compilerlog: {} ({err})", log_path.to_string_lossy());
         });
 }
 
 pub fn finalize(packages: &AHashMap<String, Package>) {
     packages.par_iter().for_each(|(name, package)| {
+        let bs_log_path = get_log_file_path(package, Location::Bs);
+        let ocaml_log_path = get_log_file_path(package, Location::Ocaml);
         let _ = File::options()
             .append(true)
-            .open(get_log_file_path(package, Location::Bs))
+            .create(true)
+            .open(&bs_log_path)
             .map(|file| write_to_log_file(file, name, &format!("#Done({})\n", helpers::get_system_time())));
 
-        let _ = std::fs::copy(
-            get_log_file_path(package, Location::Bs),
-            get_log_file_path(package, Location::Ocaml),
-        );
+        if let Some(parent) = ocaml_log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(bs_log_path, ocaml_log_path);
     })
 }
