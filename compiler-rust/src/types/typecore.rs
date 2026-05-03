@@ -19098,16 +19098,22 @@ fn qualify_label_description_paths<'a>(
                 label.lbl_arg,
                 &mut probe_visited,
             );
+            // OCaml compiler/ml/env.ml:1095-1105 and 1138-1143 resolve
+            // qualified labels through `lookup_module_descr`/`comp_labels`;
+            // env.ml:1259-1272 only marks the result type afterward. That
+            // path does not force env.ml:865-882 `find_module`, so these
+            // label-qualification alias probes must not force component
+            // module declarations and freshen child signature binders.
             if let Some(parent) = res_path.parent() {
                 let parent_has_alias_target =
-                    alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
+                    raw_alias_target_for_module_path(&parent, env, pers_env, ctx).is_some();
                 if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
             }
             let root = path_root_module(res_path);
             let root_has_alias_target =
-                alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
+                raw_alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
             let is_top_level_alias_type = res_path
                 .parent()
                 .as_ref()
@@ -19125,7 +19131,7 @@ fn qualify_label_description_paths<'a>(
     if let Path::Pdot(_, _, _) = res_path {
         let root = path_root_module(res_path);
         if !root.same(res_path) {
-            if let Some(alias_target) = alias_target_for_module_path(&root, env, pers_env, ctx) {
+            if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx) {
                 if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
                     let mut visited = HashSet::new();
                     rewrite_direct_root_type_family_in_place(
