@@ -1677,6 +1677,10 @@ struct RuntimeCompletionMsg {
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
+    let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
+        || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
+    let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
     let runtime_root = &build_state.build_state.compiler_info.runtime_path;
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
@@ -1709,6 +1713,33 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         &runtime_config,
         &runtime_modules,
     )?;
+
+    if let (Some(start), Some(before)) = (runtime_timing_start, runtime_timing_before) {
+        let after = rescript_compiler::timing::snapshot();
+        let wall = start.elapsed();
+        let parse = duration_delta(after.parse, before.parse);
+        let typecheck = duration_delta(after.typecheck, before.typecheck);
+        let lambda = duration_delta(after.lambda, before.lambda);
+        let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
+        let codegen = duration_delta(after.codegen, before.codegen);
+        let recorded = parse
+            .saturating_add(typecheck)
+            .saturating_add(lambda)
+            .saturating_add(lambda_optimization)
+            .saturating_add(codegen);
+        let overhead = wall.saturating_sub(recorded);
+        eprintln!(
+            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            runtime_modules.len(),
+            duration_ms(wall),
+            duration_ms(parse),
+            duration_ms(typecheck),
+            duration_ms(lambda),
+            duration_ms(lambda_optimization),
+            duration_ms(codegen),
+            duration_ms(overhead)
+        );
+    }
 
     debug!(
         "Compiled {} runtime modules from source into registry",
