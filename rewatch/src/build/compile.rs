@@ -1841,6 +1841,10 @@ fn compile_runtime_module_from_source(
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
+        // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation
+        // against the already-saved interface `.cmi`; typemod.ml:1779-1787
+        // only saves an inferred `.cmi` in the no-interface branch. Keep
+        // implementation-local module aliases out of the published registry.
         if let Some(pers_struct) = interface_pers_struct {
             shared_registry.register_module_arc(
                 &module.module_name,
@@ -1852,7 +1856,6 @@ fn compile_runtime_module_from_source(
             shared_registry.insert_module_info(module.module_name.clone(), module_info);
             shared_registry.extend_alias_rewrites(interface_alias_rewrites);
         }
-        shared_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
     } else if let Some(pers_struct) = compile_result.pers_struct {
         shared_registry.register_module(
             &module.module_name,
@@ -2401,16 +2404,20 @@ fn compile_module_in_process(
         is_runtime,
     };
     if has_interface {
+        // OCaml compiler/ml/typemod.ml:1742-1758 reads the interface `.cmi`
+        // for the inclusion check and does not replace it with the
+        // implementation signature. Alias rewrites from the `.res` body are
+        // therefore private, unlike inferred-signature aliases from the
+        // no-interface branch at typemod.ml:1779-1787.
         if let Some(mut update) = interface_registry_update {
             update.module_info = module_info;
-            update.alias_rewrites.extend(compile_result.new_alias_rewrites);
             registry_updates.push(update);
         } else {
             registry_updates.push(PendingRegistryUpdate {
                 module_name: module_name.to_string(),
                 pers_struct: None,
                 module_info,
-                alias_rewrites: compile_result.new_alias_rewrites,
+                alias_rewrites: AHashMap::new(),
             });
         }
     } else if let Some(ps) = compile_result.pers_struct {
