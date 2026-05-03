@@ -6,7 +6,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -2274,7 +2273,13 @@ pub enum SharedAction {
 /// since RawLambda doesn't implement PartialEq/Ord.
 pub struct StoreExp {
     /// Map from normalized key string -> (shared, index).
-    map: BTreeMap<String, (bool, usize)>,
+    ///
+    /// OCaml uses `AMap` for lookup in `Switch.Store.store`
+    /// (`compiler/ml/switch.ml:55-65`) and iterates it only to mark shared
+    /// action slots (`compiler/ml/switch.ml:67-76`). That iteration order does
+    /// not feed the generated lambda, so Rust can keep the same semantics with
+    /// a hash map and avoid tree rotations/comparisons in the hot store path.
+    map: HashMap<String, (bool, usize)>,
     /// Next index to assign.
     next: usize,
     /// Accumulated actions in reverse order: (must_share, action).
@@ -2286,7 +2291,7 @@ impl StoreExp {
     /// Equivalent to OCaml's `mk_store`.
     pub fn mk_store() -> Self {
         StoreExp {
-            map: BTreeMap::new(),
+            map: HashMap::new(),
             next: 0,
             acts: Vec::new(),
         }
