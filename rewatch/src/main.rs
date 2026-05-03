@@ -146,7 +146,11 @@ fn run_main(otel_enabled: bool) -> Result<()> {
 
 fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
     if build_mode.is_in_process() {
-        rayon::ThreadPoolBuilder::new()
+        let mut builder = rayon::ThreadPoolBuilder::new();
+        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            builder = builder.num_threads(num_cpus::get().max(1));
+        }
+        builder
             .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
             .stack_size(IN_PROCESS_STACK_SIZE)
             .build_global()
