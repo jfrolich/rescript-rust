@@ -7273,11 +7273,18 @@ fn combine_constructor(
         let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
         let lambda1 = {
             let extension_cases = get_extension_cases(tag_lambda_list);
+            // OCaml compiler/ml/matching.ml:2118-2139 uses the first extension
+            // action as the default, then fold_rights remaining cases into
+            // Pextension_slot_eq tests. Consume the owned action list here so
+            // the Rust port preserves that shape without cloning action bodies.
             let (default, extension_cases) = match fail {
-                None => match extension_cases.split_first() {
-                    Some(((_, act), rem)) => (act.clone(), rem.to_vec()),
-                    None => panic!("combine_constructor: no extension cases"),
-                },
+                None => {
+                    let mut extension_cases = extension_cases.into_iter();
+                    let Some((_, default)) = extension_cases.next() else {
+                        panic!("combine_constructor: no extension cases");
+                    };
+                    (default, extension_cases.collect())
+                }
                 Some(fail) => (fail, extension_cases),
             };
             if extension_cases.is_empty() {
@@ -7285,17 +7292,17 @@ fn combine_constructor(
             } else {
                 let tag = ctx_ref.create_ident("tag");
                 let tests = extension_cases
-                    .iter()
+                    .into_iter()
                     .rev()
                     .fold(default, |rem, (path, act)| {
-                        let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, path);
+                        let ext = transl_extension_path(ctx_ref, ex_pat.pat_env, &path);
                         RawLambda::LifThenElse(
                             Box::new(RawLambda::Lprim(RawPrimInfo {
                                 primitive: Primitive::PextensionSlotEq,
                                 args: vec![RawLambda::Lvar(tag.clone()), ext],
                                 loc: loc.clone(),
                             })),
-                            Box::new(act.clone()),
+                            Box::new(act),
                             Box::new(rem),
                         )
                     });
@@ -7330,89 +7337,76 @@ fn combine_constructor(
         let lambda1 = if let Some(act) = one_action {
             act // Identical actions, no failure
         } else {
-            let (consts, nonconsts) = split_cases(actions);
+            let (mut consts, mut nonconsts) = split_cases(actions);
+            let is_option = constructor_has_optional_shape(cstr)
+                || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
+                    && cstr.cstr_consts == 1
+                    && cstr.cstr_nonconsts == 1);
+            if cstr.cstr_consts == 1
+                && cstr.cstr_nonconsts == 1
+                && consts.len() == 1
+                && nonconsts.len() == 1
+                && consts[0].0 == 0
+                && nonconsts[0].0 == 0
+                && (cstr.cstr_name == "::" || cstr.cstr_name == "[]" || is_option)
             {
-                match (
-                    cstr.cstr_consts,
-                    cstr.cstr_nonconsts,
-                    consts.as_slice(),
-                    nonconsts.as_slice(),
-                ) {
-                    (1, 1, [(0, act1)], [(0, act2)])
-                        if cstr.cstr_name == "::"
-                            || cstr.cstr_name == "[]"
-                            || constructor_has_optional_shape(cstr)
-                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
-                                && cstr.cstr_consts == 1
-                                && cstr.cstr_nonconsts == 1) =>
-                    {
-                        // Typically, match on lists or options
-                        let is_option = constructor_has_optional_shape(cstr)
-                            || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
-                                && cstr.cstr_consts == 1
-                                && cstr.cstr_nonconsts == 1);
-                        let test_arg = if is_option {
-                            RawLambda::Lprim(RawPrimInfo {
-                                primitive: Primitive::PisNotNone,
-                                args: vec![arg.clone()],
-                                loc: loc.clone(),
-                            })
-                        } else {
-                            RawLambda::Lprim(RawPrimInfo {
-                                primitive: Primitive::Pjscomp(Comparison::Neq),
-                                args: vec![
-                                    arg.clone(),
-                                    RawLambda::Lconst(crate::lambda::Constant::int(0)),
-                                ],
-                                loc: loc.clone(),
-                            })
-                        };
-                        RawLambda::LifThenElse(
-                            Box::new(test_arg),
-                            Box::new(act2.clone()),
-                            Box::new(act1.clone()),
-                        )
-                    }
-                    (2, 0, [(i1, act1), (_, act2)], [])
-                        if cstr.cstr_name == "true" || cstr.cstr_name == "false" =>
-                    {
-                        if *i1 == 0 {
-                            RawLambda::LifThenElse(
-                                Box::new(arg),
-                                Box::new(act2.clone()),
-                                Box::new(act1.clone()),
-                            )
-                        } else {
-                            RawLambda::LifThenElse(
-                                Box::new(arg),
-                                Box::new(act1.clone()),
-                                Box::new(act2.clone()),
-                            )
-                        }
-                    }
-                    (_n, _, _, _) => {
-                        // Emit a switch. OCaml computes `act0` at
-                        // compiler/ml/matching.ml:2179-2189, but the only arm
-                        // that can consume it is guarded by `when false` at
-                        // matching.ml:2190. Skipping that pure computation
-                        // avoids normalizing/cloning switch actions without
-                        // changing the emitted lambda.
-                        let sw = RawLambdaSwitch {
-                            sw_numconsts: cstr.cstr_consts as usize,
-                            sw_consts_full: false,
-                            sw_consts: consts,
-                            sw_numblocks: cstr.cstr_nonconsts as usize,
-                            sw_blocks_full: false,
-                            sw_blocks: nonconsts,
-                            sw_failaction: fail_opt.map(Box::new),
-                            sw_names,
-                        };
-                        let (handlers, sw) = share_actions_sw(sw, next_raise_count);
-                        let sw = reintroduce_fail(sw);
-                        let result = RawLambda::Lswitch(Box::new(arg), sw, loc.clone());
-                        apply_handlers(result, handlers)
-                    }
+                // OCaml compiler/ml/matching.ml:2156-2173 emits a two-way test
+                // for lists/options. `consts` and `nonconsts` are owned here, so
+                // move the branch actions instead of cloning whole RawLambda
+                // bodies out of borrowed slice patterns.
+                let (_, act1) = consts.pop().expect("one constant constructor case");
+                let (_, act2) = nonconsts.pop().expect("one block constructor case");
+                let test_arg = if is_option {
+                    RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::PisNotNone,
+                        args: vec![arg],
+                        loc: loc.clone(),
+                    })
+                } else {
+                    RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pjscomp(Comparison::Neq),
+                        args: vec![arg, RawLambda::Lconst(crate::lambda::Constant::int(0))],
+                        loc: loc.clone(),
+                    })
+                };
+                RawLambda::LifThenElse(Box::new(test_arg), Box::new(act2), Box::new(act1))
+            } else if cstr.cstr_consts == 2
+                && cstr.cstr_nonconsts == 0
+                && consts.len() == 2
+                && nonconsts.is_empty()
+                && (cstr.cstr_name == "true" || cstr.cstr_name == "false")
+            {
+                // OCaml compiler/ml/matching.ml:2174-2178 emits direct bool
+                // conditionals. Consume the owned action list instead of
+                // cloning the branch lambdas.
+                let (_, act2) = consts.pop().expect("second bool constructor case");
+                let (i1, act1) = consts.pop().expect("first bool constructor case");
+                if i1 == 0 {
+                    RawLambda::LifThenElse(Box::new(arg), Box::new(act2), Box::new(act1))
+                } else {
+                    RawLambda::LifThenElse(Box::new(arg), Box::new(act1), Box::new(act2))
                 }
+            } else {
+                // Emit a switch. OCaml computes `act0` at
+                // compiler/ml/matching.ml:2179-2189, but the only arm
+                // that can consume it is guarded by `when false` at
+                // matching.ml:2190. Skipping that pure computation
+                // avoids normalizing/cloning switch actions without
+                // changing the emitted lambda.
+                let sw = RawLambdaSwitch {
+                    sw_numconsts: cstr.cstr_consts as usize,
+                    sw_consts_full: false,
+                    sw_consts: consts,
+                    sw_numblocks: cstr.cstr_nonconsts as usize,
+                    sw_blocks_full: false,
+                    sw_blocks: nonconsts,
+                    sw_failaction: fail_opt.map(Box::new),
+                    sw_names,
+                };
+                let (handlers, sw) = share_actions_sw(sw, next_raise_count);
+                let sw = reintroduce_fail(sw);
+                let result = RawLambda::Lswitch(Box::new(arg), sw, loc.clone());
+                apply_handlers(result, handlers)
             }
         };
         (lambda1, jumps_union(&local_jumps, &total1))
