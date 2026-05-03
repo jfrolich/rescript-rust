@@ -3110,9 +3110,10 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
     // Matches the same-label path through compiler/ml/ctype.ml:2199-2206:
     // `complete_type_list` first allocates `Pkg` and calls `Env.add_module`
     // (compiler/ml/ctype.ml:2200-2201), then returns existing entries when
-    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206). This helper is
-    // intentionally limited to that exact path; missing-label completion at
-    // compiler/ml/ctype.ml:2207-2231 needs a full Longident string comparator.
+    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206). CMI package
+    // labels are reconstructed with synthetic StrIdx values, so compare their
+    // resolved component names like OCaml's structural Longident comparison
+    // instead of raw arena ids.
     let pkg_id = ctx.create_ident("Pkg");
     if let Some(env) = env {
         let mut env_prime = env.clone_preserve_id();
@@ -3126,7 +3127,47 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
             },
         );
     }
-    required_lids == existing_lids
+    required_lids.len() == existing_lids.len()
+        && required_lids
+            .iter()
+            .zip(existing_lids.iter())
+            .all(|(required, existing)| package_longident_same_label(ctx, required, existing))
+}
+
+fn package_longident_same_label(
+    ctx: &TypeContext<'_>,
+    left: &crate::parser::longident::Longident,
+    right: &crate::parser::longident::Longident,
+) -> bool {
+    use crate::parser::longident::Longident;
+
+    fn component_same(
+        ctx: &TypeContext<'_>,
+        left: crate::intern::StrIdx,
+        right: crate::intern::StrIdx,
+    ) -> bool {
+        left == right
+            || match (
+                ctx.resolve_cmi_longident_component(left),
+                ctx.resolve_cmi_longident_component(right),
+            ) {
+                (Some(left), Some(right)) => left == right,
+                _ => false,
+            }
+    }
+
+    match (left, right) {
+        (Longident::Lident(left), Longident::Lident(right)) => component_same(ctx, *left, *right),
+        (Longident::Ldot(left_prefix, left), Longident::Ldot(right_prefix, right)) => {
+            package_longident_same_label(ctx, left_prefix, right_prefix)
+                && component_same(ctx, *left, *right)
+        }
+        (Longident::Lapply(left_functor, left_arg), Longident::Lapply(right_functor, right_arg)) => {
+            package_longident_same_label(ctx, left_functor, right_functor)
+                && package_longident_same_label(ctx, left_arg, right_arg)
+        }
+        _ => false,
+    }
 }
 
 /// Unify two types.
