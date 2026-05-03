@@ -26,6 +26,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -121,6 +123,27 @@ struct CompletionMsg {
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
+struct SignatureReadyMsg {
+    module_name: String,
+    signature: rescript_compiler::types::Signature,
+    fingerprint: u64,
+    is_pure: bool,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+enum WorkerMsg {
+    SignatureReady(SignatureReadyMsg),
+    Completed(CompletionMsg),
+}
+
+#[derive(Clone)]
+struct InProcessSchedulerHooks {
+    tx: mpsc::Sender<WorkerMsg>,
+    completed_modules: Arc<(Mutex<AHashSet<String>>, Condvar)>,
+    compile_universe: Arc<AHashSet<String>>,
+}
+
+#[derive(Clone)]
 struct PendingRegistryUpdate {
     module_name: String,
     pers_struct: Option<Arc<PortablePersStruct>>,
@@ -161,6 +184,54 @@ fn apply_pending_registry_updates(
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
             registry.extend_alias_rewrites(update.alias_rewrites);
+        }
+    }
+}
+
+fn apply_signature_ready(build_command_state: &BuildCommandState, msg: SignatureReadyMsg) -> bool {
+    apply_pending_registry_updates(build_command_state, msg.registry_updates);
+    let generation_before = build_command_state.get_interface_generation(&msg.module_name);
+    let generation_after = build_command_state.register_in_memory_interface(
+        msg.module_name,
+        msg.signature,
+        msg.fingerprint,
+        msg.is_pure,
+    );
+    generation_before.is_some() && generation_before == Some(generation_after)
+}
+
+fn unblock_dependents(
+    build_state: &BuildState,
+    compile_universe: &AHashSet<String>,
+    priorities: &AHashMap<String, i64>,
+    pending_deps: &mut AHashMap<String, usize>,
+    dirty_set: &mut AHashSet<String>,
+    signature_ready: &mut AHashSet<String>,
+    ready_heap: &mut BinaryHeap<WorkUnit>,
+    module_name: &str,
+    is_clean: bool,
+) {
+    if !signature_ready.insert(module_name.to_string()) {
+        return;
+    }
+
+    let Some(module) = build_state.get_module(module_name) else {
+        return;
+    };
+    for dep in &module.dependents {
+        if !compile_universe.contains(dep) {
+            continue;
+        }
+        if !is_clean {
+            dirty_set.insert(dep.clone());
+        }
+        let count = pending_deps.get_mut(dep).unwrap();
+        *count -= 1;
+        if *count == 0 && !signature_ready.contains(dep) {
+            ready_heap.push(WorkUnit {
+                priority: priorities[dep],
+                module_name: dep.clone(),
+            });
         }
     }
 }
@@ -231,6 +302,7 @@ fn compile_one(
     subprocess: bool,
     dump_typed_sexp: bool,
     parent_span: Span,
+    in_process_hooks: Option<InProcessSchedulerHooks>,
 ) -> CompletionMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
@@ -276,6 +348,7 @@ fn compile_one(
                 registry_snapshot,
                 build_state,
                 build_command_state,
+                in_process_hooks.as_ref(),
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
             let (result, registry_updates) = match result {
@@ -493,6 +566,7 @@ pub fn compile(
     let compile_universe_count = compile_universe.len();
     set_length(compile_universe_count as u64);
 
+    let compile_universe = Arc::new(compile_universe);
     let priorities = compute_critical_path_priorities(&compile_universe, &build_state.build_state);
 
     // Count of not-yet-completed in-universe dependencies for each module.
@@ -537,15 +611,17 @@ pub fn compile(
     // at spawn time. (Taking one per spawn is cheap vs. type-checking.)
     let in_process_mode = build_state.build_mode().is_in_process();
 
-    let (tx, rx) = mpsc::channel::<CompletionMsg>();
+    let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
     // orders work — dumping everything into rayon's deque would defeat #2.
     let capacity = rayon::current_num_threads().max(1);
 
     let mut completed: AHashSet<String> = AHashSet::new();
+    let mut signature_ready: AHashSet<String> = AHashSet::new();
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
     let mut has_errors = false;
     let mut stalled = false;
+    let completed_modules = Arc::new((Mutex::new(AHashSet::new()), Condvar::new()));
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
@@ -568,6 +644,11 @@ pub fn compile(
                     ModuleRegistry::new()
                 };
                 let parent_span = compile_parent_span.clone();
+                let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
+                    tx: tx.clone(),
+                    completed_modules: completed_modules.clone(),
+                    compile_universe: compile_universe.clone(),
+                });
                 scope.spawn(move |_| {
                     let msg = compile_one(
                         build_state_ref,
@@ -579,13 +660,14 @@ pub fn compile(
                         subprocess,
                         dump_typed_sexp,
                         parent_span,
+                        in_process_hooks,
                     );
                     if show_progress {
                         inc_ref();
                     }
                     // Receiver lives for the full scope, so send cannot fail
                     // unless the dispatcher has already hung up on purpose.
-                    let _ = tx.send(msg);
+                    let _ = tx.send(WorkerMsg::Completed(msg));
                 });
             }
 
@@ -601,54 +683,79 @@ pub fn compile(
             }
 
             let Ok(first_msg) = rx.recv() else { break };
-            let mut completed_messages = Vec::with_capacity(in_flight);
-            completed_messages.push(first_msg);
-            while completed_messages.len() < in_flight {
-                match rx.try_recv() {
-                    Ok(msg) => completed_messages.push(msg),
-                    Err(_) => break,
-                }
-            }
-            in_flight -= completed_messages.len();
-
-            if in_process_mode {
-                let mut batched_updates = Vec::new();
-                for msg in &mut completed_messages {
-                    batched_updates.extend(std::mem::take(&mut msg.registry_updates));
-                }
-                apply_pending_registry_updates(build_command_state_ref, batched_updates);
+            let mut worker_messages = vec![first_msg];
+            while let Ok(msg) = rx.try_recv() {
+                worker_messages.push(msg);
             }
 
-            for msg in completed_messages {
-                if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
-                    has_errors = true;
-                }
-
-                let is_clean = msg.is_clean;
-                let finished_name = msg.module_name.clone();
-                completed.insert(finished_name.clone());
-
-                // Look up dependents from the node the scheduler scheduled under —
-                // for mlmap, compile_one returns the namespace suffix, which is the
-                // key modules use to refer to the namespace entry.
-                let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
-
-                results_buffer.push(msg);
-
-                for dep in &dependents {
-                    if !compile_universe.contains(dep) {
-                        continue;
+            for worker_msg in worker_messages {
+                match worker_msg {
+                    WorkerMsg::SignatureReady(msg) => {
+                        let module_name = msg.module_name.clone();
+                        let is_clean = apply_signature_ready(build_command_state_ref, msg);
+                        unblock_dependents(
+                            build_state_ref,
+                            &compile_universe,
+                            &priorities,
+                            &mut pending_deps,
+                            &mut dirty_set,
+                            &mut signature_ready,
+                            &mut ready_heap,
+                            &module_name,
+                            is_clean,
+                        );
                     }
-                    if !is_clean {
-                        dirty_set.insert(dep.clone());
-                    }
-                    let count = pending_deps.get_mut(dep).unwrap();
-                    *count -= 1;
-                    if *count == 0 && !completed.contains(dep) {
-                        ready_heap.push(WorkUnit {
-                            priority: priorities[dep],
-                            module_name: dep.clone(),
-                        });
+                    WorkerMsg::Completed(mut msg) => {
+                        in_flight -= 1;
+                        if in_process_mode {
+                            apply_pending_registry_updates(
+                                build_command_state_ref,
+                                std::mem::take(&mut msg.registry_updates),
+                            );
+                            let (completed_lock, completed_cvar) = &*completed_modules;
+                            completed_lock.lock().unwrap().insert(msg.module_name.clone());
+                            completed_cvar.notify_all();
+                        }
+
+                        if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                            has_errors = true;
+                        }
+
+                        let is_clean = msg.is_clean;
+                        let finished_name = msg.module_name.clone();
+                        completed.insert(finished_name.clone());
+
+                        if in_process_mode {
+                            let completed_without_signature =
+                                !signature_ready.contains(&finished_name) && !has_errors;
+                            if completed_without_signature {
+                                unblock_dependents(
+                                    build_state_ref,
+                                    &compile_universe,
+                                    &priorities,
+                                    &mut pending_deps,
+                                    &mut dirty_set,
+                                    &mut signature_ready,
+                                    &mut ready_heap,
+                                    &finished_name,
+                                    is_clean,
+                                );
+                            }
+                        } else {
+                            unblock_dependents(
+                                build_state_ref,
+                                &compile_universe,
+                                &priorities,
+                                &mut pending_deps,
+                                &mut dirty_set,
+                                &mut signature_ready,
+                                &mut ready_heap,
+                                &finished_name,
+                                is_clean,
+                            );
+                        }
+
+                        results_buffer.push(msg);
                     }
                 }
             }
@@ -2197,6 +2304,7 @@ fn compile_module_in_process(
     registry: &ModuleRegistry,
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
+    scheduler_hooks: Option<&InProcessSchedulerHooks>,
 ) -> Result<InProcessModuleResult> {
     let _span = info_span!(
         "compiler.in_process_module",
@@ -2325,18 +2433,120 @@ fn compile_module_in_process(
             });
         }
 
-        // Register the interface signature in rewatch's in-memory registry
-        build_command_state.register_in_memory_interface(
-            module_name.to_string(),
-            intf_result.signature,
-            intf_fingerprint,
-            provisional_is_pure,
-        );
+        if let Some(hooks) = scheduler_hooks {
+            hooks
+                .tx
+                .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
+                    module_name: module_name.to_string(),
+                    signature: intf_result.signature,
+                    fingerprint: intf_fingerprint,
+                    is_pure: provisional_is_pure,
+                    registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
+                }))
+                .map_err(|err| anyhow!("failed to publish interface signature for {module_name}: {err}"))?;
+        } else {
+            // Register the interface signature in rewatch's in-memory registry.
+            build_command_state.register_in_memory_interface(
+                module_name.to_string(),
+                intf_result.signature,
+                intf_fingerprint,
+                provisional_is_pure,
+            );
+        }
     }
 
     // Step 2: Compile the implementation
     let impl_key = format!("{module_name}:impl");
     options.publish_in_process_signature = !has_interface;
+    let publish_implementation_signature = scheduler_hooks.is_some() && !has_interface;
+    let signature_hooks = scheduler_hooks.cloned();
+    let signature_module_name = module_name.to_string();
+    let signature_source_abs = source_abs.clone();
+    let mut signature_hook =
+        move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
+            let Some(hooks) = signature_hooks.as_ref() else {
+                return Ok(None);
+            };
+            let fingerprint = ready.pers_struct.as_ref().map(|ps| ps.fingerprint).unwrap_or(0);
+            let module_info = InMemoryModuleInfo {
+                source_path: signature_source_abs.clone(),
+                is_pure: provisional_is_pure,
+                cmj_export_constants: AHashMap::new(),
+                is_runtime,
+            };
+            let registry_updates = if let Some(pers_struct) = ready.pers_struct {
+                vec![PendingRegistryUpdate {
+                    module_name: signature_module_name.clone(),
+                    pers_struct: Some(Arc::new(pers_struct)),
+                    module_info,
+                    alias_rewrites: ready.new_alias_rewrites,
+                }]
+            } else {
+                vec![PendingRegistryUpdate {
+                    module_name: signature_module_name.clone(),
+                    pers_struct: None,
+                    module_info,
+                    alias_rewrites: ready.new_alias_rewrites,
+                }]
+            };
+            hooks
+                .tx
+                .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
+                    module_name: signature_module_name.clone(),
+                    signature: ready.signature,
+                    fingerprint,
+                    is_pure: provisional_is_pure,
+                    registry_updates,
+                }))
+                .map_err(|err| {
+                    anyhow!(
+                        "failed to publish implementation signature for {}: {err}",
+                        signature_module_name
+                    )
+                })?;
+            Ok(None)
+        };
+
+    let before_js_hooks = scheduler_hooks.cloned();
+    let before_js_module_name = module_name.to_string();
+    let before_js_declared_deps = module.deps.clone();
+    let build_command_state_for_js = build_command_state;
+    let mut before_js_hook = move |possible_required_modules: &std::collections::HashSet<
+        rescript_compiler::js_ir::ModuleId,
+    >|
+          -> Result<Option<ModuleRegistry>> {
+        let Some(hooks) = before_js_hooks.as_ref() else {
+            return Ok(None);
+        };
+        let needed_modules = possible_required_modules
+            .iter()
+            .filter_map(|module| {
+                if !matches!(module.kind, rescript_compiler::js_ir::Kind::Ml) {
+                    return None;
+                }
+                let name = module.id.name();
+                (name != before_js_module_name
+                    && before_js_declared_deps.contains(name)
+                    && hooks.compile_universe.contains(name))
+                .then(|| name.to_string())
+            })
+            .collect::<Vec<_>>();
+        if needed_modules.is_empty() {
+            return Ok(None);
+        }
+
+        let (completed_lock, completed_cvar) = &*hooks.completed_modules;
+        let mut completed = completed_lock.lock().unwrap();
+        while needed_modules
+            .iter()
+            .any(|module_name| !completed.contains(module_name))
+        {
+            completed = completed_cvar.wait(completed).unwrap();
+        }
+        drop(completed);
+
+        Ok(Some(build_command_state_for_js.snapshot_module_registry()))
+    };
 
     let compile_result = {
         let _impl_span = info_span!(
@@ -2348,7 +2558,20 @@ fn compile_module_in_process(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match build_command_state.get_stored_ast(&impl_key) {
                 Some(StoredAst::Structure(stored)) => {
-                    rescript_compiler::driver::compile_preprocessed_structure_in_process(
+                    let signature_hook: Option<
+                        &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
+                    > = if publish_implementation_signature {
+                        Some(&mut signature_hook)
+                    } else {
+                        None
+                    };
+                    let before_js_hook: Option<&mut rescript_compiler::driver::InProcessBeforeJsHook<'_>> =
+                        if scheduler_hooks.is_some() {
+                            Some(&mut before_js_hook)
+                        } else {
+                            None
+                        };
+                    rescript_compiler::driver::compile_preprocessed_structure_in_process_with_signature_hook(
                         &stored.arena,
                         &stored.structure,
                         &source_abs.to_string_lossy(),
@@ -2356,6 +2579,8 @@ fn compile_module_in_process(
                         &options,
                         &local_registry,
                         has_interface,
+                        signature_hook,
+                        before_js_hook,
                     )
                 }
                 Some(StoredAst::Signature(_)) => panic!(
@@ -2426,7 +2651,7 @@ fn compile_module_in_process(
     }
 
     // Register the implementation's inferred signature if no .resi
-    if !has_interface {
+    if !has_interface && scheduler_hooks.is_none() {
         build_command_state.register_in_memory_interface(
             module_name.to_string(),
             compile_result.signature,
