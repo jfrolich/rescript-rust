@@ -9641,24 +9641,27 @@ pub fn do_for_multiple_match(
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let partial = check_partial_single(&pat_act_list, partial);
+    // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
+    // incoming action list directly. Rust owns `pat_act_list` here, so move
+    // actions into the shared `MatchAction` wrapper instead of recursively
+    // cloning each raw-lambda action before the matrix transformations.
+    let cases: Vec<Clause> = pat_act_list
+        .into_iter()
+        .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
+        .collect();
+    let tuple_arg = RawLambda::Lprim(RawPrimInfo {
+        primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+        args: paraml.clone(),
+        loc: loc.clone(),
+    });
     let (raise_num, pm1) = match &partial {
         Partial::Partial => {
             let raise_num = bump_raise_count(next_raise_count, "matching::do_for_multiple_match");
             (
                 raise_num,
                 PatternMatching {
-                    cases: pat_act_list
-                        .iter()
-                        .map(|(pat, act)| (vec![pat.clone()], MatchAction::new(act.clone())))
-                        .collect(),
-                    args: MatchArgs::new(vec![(
-                        RawLambda::Lprim(RawPrimInfo {
-                            primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
-                            args: paraml.clone(),
-                            loc: loc.clone(),
-                        }),
-                        LetKind::Strict,
-                    )]),
+                    cases,
+                    args: MatchArgs::new(vec![(tuple_arg, LetKind::Strict)]),
                     default: vec![(vec![vec![omega()]], raise_num)],
                 },
             )
@@ -9666,18 +9669,8 @@ pub fn do_for_multiple_match(
         Partial::Total => (
             -1,
             PatternMatching {
-                cases: pat_act_list
-                    .iter()
-                    .map(|(pat, act)| (vec![pat.clone()], MatchAction::new(act.clone())))
-                    .collect(),
-                args: MatchArgs::new(vec![(
-                    RawLambda::Lprim(RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
-                        args: paraml.clone(),
-                        loc: loc.clone(),
-                    }),
-                    LetKind::Strict,
-                )]),
+                cases,
+                args: MatchArgs::new(vec![(tuple_arg, LetKind::Strict)]),
                 default: Vec::new(),
             },
         ),
