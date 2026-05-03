@@ -2019,7 +2019,7 @@ pub(crate) fn resolved_type_items_share_identity(
 /// 1. Recursively normalizes the prefix `p`
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
-fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
+pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
     let env_id = env.id();
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;

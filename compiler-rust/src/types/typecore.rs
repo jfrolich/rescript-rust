@@ -4017,45 +4017,49 @@ fn type_pattern_record(
 
     let mut typed_fields = Vec::new();
     for field in pending_fields {
-        // Create fresh type variable for the field after sorting, matching
-        // OCaml compiler/ml/typecore.ml:1623-1627's `type_label_pat` /
-        // `instance_label` point.
-        let field_ty = ctx.new_var(None);
-
-        let label_desc = if let Some(env_label) = field.label {
-            let (_poly_vars, ty_arg, ty_res) =
-                crate::types::ctype::instance_label(ctx, false, &env_label);
-            // Best-effort unification to propagate type info
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_res, record_ty);
-            let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg, field_ty);
-            crate::types::LabelDescription {
-                lbl_name: env_label.lbl_name.clone(),
-                lbl_res: record_ty,
-                lbl_arg: field_ty,
-                lbl_mut: env_label.lbl_mut.clone(),
-                lbl_optional: env_label.lbl_optional,
-                lbl_pos: env_label.lbl_pos,
-                lbl_all: env_label.lbl_all,
-                lbl_repres: env_label.lbl_repres.clone(),
-                lbl_private: env_label.lbl_private.clone(),
-                lbl_loc: env_label.lbl_loc.clone(),
-                lbl_attributes: env_label.lbl_attributes.clone(),
-            }
-        } else {
-            crate::types::LabelDescription {
-                lbl_name: field.field_name,
-                lbl_res: record_ty,
-                lbl_arg: field_ty,
-                lbl_mut: crate::types::MutableFlag::Immutable,
-                lbl_optional: field.opt,
-                lbl_pos: field.source_pos,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                lbl_private: crate::types::PrivateFlag::Public,
-                lbl_loc: tctx.arena.to_location(field.lid.loc),
-                lbl_attributes: vec![],
-            }
-        };
+        let field_lid_for_error = tctx.arena.get_longident(field.lid.txt).clone();
+        let (label_desc, field_ty, poly_vars, force_label_arg_paths) =
+            if let Some(env_label) = field.label {
+                // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
+                // creates `(vars, ty_arg, ty_res) = instance_label false label`,
+                // unifies `ty_res` with the record type, then types the field
+                // pattern directly against `ty_arg`. Do not insert an extra fresh
+                // field variable here; that changes both sharing and lazy forcing.
+                ctx.begin_def();
+                let (vars, ty_arg, ty_res) =
+                    crate::types::ctype::instance_label(ctx, false, &env_label);
+                if vars.is_empty() {
+                    ctx.end_def();
+                }
+                if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
+                    if !vars.is_empty() {
+                        ctx.end_def();
+                    }
+                    return Err(match err {
+                        TypeCoreError::PatternTypeClash(trace) => {
+                            TypeCoreError::LabelMismatch(field_lid_for_error, trace)
+                        }
+                        err => err,
+                    });
+                }
+                (env_label, ty_arg, vars, true)
+            } else {
+                let field_ty = ctx.new_var(None);
+                let label_desc = crate::types::LabelDescription {
+                    lbl_name: field.field_name,
+                    lbl_res: record_ty,
+                    lbl_arg: field_ty,
+                    lbl_mut: crate::types::MutableFlag::Immutable,
+                    lbl_optional: field.opt,
+                    lbl_pos: field.source_pos,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                    lbl_private: crate::types::PrivateFlag::Public,
+                    lbl_loc: tctx.arena.to_location(field.lid.loc),
+                    lbl_attributes: vec![],
+                };
+                (label_desc, field_ty, Vec::new(), false)
+            };
 
         // process_optional_label: if the label is optional and the user did NOT write '?',
         // wrap the pattern in Some(...) before type checking.
@@ -4082,6 +4086,39 @@ fn type_pattern_record(
         } else {
             type_pattern_inner(tctx, env, parsed_pat, field_ty, mode, state, 0)?
         };
+        if force_label_arg_paths {
+            // OCaml compiler/ml/typecore.ml:1623-1632 types the field
+            // subpattern through `type_label_pat`, after labels have been
+            // selected by `Label.disambiguate` (typecore.ml:990-1018) from
+            // environment component labels built at compiler/ml/env.ml:1542-1559.
+            // Rust keeps label argument types more direct, so force nested paths
+            // immediately after the field subpattern is typed: this preserves
+            // OCaml's binder-before-label-argument module-load order.
+            force_type_paths_for_lookup_from_type(
+                ctx,
+                env,
+                &mut tctx.persistent_env,
+                field_ty,
+                &mut HashSet::new(),
+            );
+        }
+        if !poly_vars.is_empty() {
+            ctx.end_def();
+            crate::types::generalize(ctx, field_ty);
+            for var in &poly_vars {
+                crate::types::generalize(ctx, *var);
+            }
+            for var in &poly_vars {
+                let expanded = crate::types::ctype::expand_head(ctx, env, *var);
+                let desc = ctx.get_desc(ctx.repr(expanded));
+                let instantiated = !matches!(&*desc, TypeDesc::Tvar(_))
+                    || ctx.get_level(ctx.repr(expanded)) != crate::types::GENERIC_LEVEL;
+                drop(desc);
+                if instantiated {
+                    return Err(TypeCoreError::PolymorphicLabel(field_lid_for_error.clone()));
+                }
+            }
+        }
         typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
     }
 
@@ -13576,6 +13613,18 @@ fn type_field(
 
     // Match OCaml Pexp_field: unify record expression type against label result.
     unify_expression_types(tctx, loc, ty_exp, ty_res, None)?;
+    // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
+    // `type_label_access`, `instance_label`, then `unify_exp` before returning
+    // the field expression with `exp_type = ty_arg`. Its label descriptors come
+    // from component tables built at compiler/ml/env.ml:1542-1559, so nested
+    // field argument paths are forced before the next enclosing `let` binder.
+    force_type_paths_for_lookup_from_type(
+        tctx.type_ctx,
+        env,
+        &mut tctx.persistent_env,
+        field_ty,
+        &mut HashSet::new(),
+    );
 
     Ok(Expression::new(
         ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
@@ -18556,6 +18605,7 @@ fn expand_type_path_for_compare<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     depth: usize,
     visiting: &mut HashSet<String>,
+    force_env_normalize: bool,
 ) -> Path {
     if depth > 50 {
         return path.clone();
@@ -18589,6 +18639,7 @@ fn expand_type_path_for_compare<'a>(
                                 ctx,
                                 depth + 1,
                                 visiting,
+                                force_env_normalize,
                             );
                             visiting.remove(&visit_key);
                             return expanded;
@@ -18606,6 +18657,7 @@ fn expand_type_path_for_compare<'a>(
                                 ctx,
                                 depth + 1,
                                 visiting,
+                                force_env_normalize,
                             );
                             visiting.remove(&visit_key);
                             return expanded;
@@ -18619,6 +18671,7 @@ fn expand_type_path_for_compare<'a>(
                     ctx,
                     depth + 1,
                     visiting,
+                    force_env_normalize,
                 );
                 visiting.remove(&visit_key);
                 return expanded;
@@ -18626,10 +18679,27 @@ fn expand_type_path_for_compare<'a>(
         }
     }
 
-    let normalized = env.normalize_path(path);
+    let normalized = if force_env_normalize {
+        // OCaml compiler/ml/typecore.ml:776-784 `expand_path` falls back to
+        // `Env.normalize_path`; compiler/ml/env.ml:903-914 then reaches
+        // env.ml:865-875, forcing persistent `ps_sig` lazies at that exact
+        // compare point. Use ctype's side-effectful normalization for the
+        // direct Label.disambiguate-by-type path, while callers that mirror
+        // component-only lookup keep the pure alias rewrite below.
+        crate::types::ctype::normalize_path_full(ctx, env, path)
+    } else {
+        env.normalize_path(path)
+    };
     if !normalized.same(path) {
-        let expanded =
-            expand_type_path_for_compare(&normalized, env, pers_env, ctx, depth + 1, visiting);
+        let expanded = expand_type_path_for_compare(
+            &normalized,
+            env,
+            pers_env,
+            ctx,
+            depth + 1,
+            visiting,
+            force_env_normalize,
+        );
         visiting.remove(&visit_key);
         return expanded;
     }
@@ -18697,15 +18767,60 @@ fn compare_type_paths_for_disambiguation<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> bool {
-    if left.same(right) {
+    compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, false)
+}
+
+fn compare_type_paths_for_label_disambiguation<'a>(
+    left: &Path,
+    right: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, true)
+}
+
+fn compare_type_paths_for_constructor_disambiguation<'a>(
+    left: &Path,
+    right: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, true)
+}
+
+fn compare_type_paths_for_disambiguation_impl<'a>(
+    left: &Path,
+    right: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    force_env_normalize: bool,
+) -> bool {
+    if !force_env_normalize && left.same(right) {
         return true;
     }
     let mut left_visiting = HashSet::new();
     let mut right_visiting = HashSet::new();
-    let left_expanded =
-        expand_type_path_for_compare(left, env, pers_env, ctx, 0, &mut left_visiting);
-    let right_expanded =
-        expand_type_path_for_compare(right, env, pers_env, ctx, 0, &mut right_visiting);
+    let left_expanded = expand_type_path_for_compare(
+        left,
+        env,
+        pers_env,
+        ctx,
+        0,
+        &mut left_visiting,
+        force_env_normalize,
+    );
+    let right_expanded = expand_type_path_for_compare(
+        right,
+        env,
+        pers_env,
+        ctx,
+        0,
+        &mut right_visiting,
+        force_env_normalize,
+    );
     left_expanded.same(&right_expanded)
 }
 
@@ -19161,7 +19276,8 @@ fn qualify_label_description_paths<'a>(
     if let Path::Pdot(_, _, _) = res_path {
         let root = path_root_module(res_path);
         if !root.same(res_path) {
-            if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx) {
+            if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
+            {
                 if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
                     let mut visited = HashSet::new();
                     rewrite_direct_root_type_family_in_place(
@@ -19231,15 +19347,18 @@ fn disambiguate_constructor<'a>(
                 path: cstr_path, ..
             } = &*cstr_desc
             {
-                if cstr_path.same(target_path)
-                    || compare_type_paths_for_disambiguation(
-                        cstr_path,
-                        target_path,
-                        env,
-                        pers_env,
-                        ctx,
-                    )
-                {
+                // OCaml compiler/ml/typecore.ml:1238-1247 instantiates the
+                // same `NameChoice.disambiguate_by_type` functor as labels;
+                // typecore.ml:982-988 then calls `compare_type_path`, whose
+                // `expand_path` (typecore.ml:776-784) uses side-effectful
+                // `Env.normalize_path` even for already-equal paths.
+                if compare_type_paths_for_constructor_disambiguation(
+                    cstr_path,
+                    target_path,
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
                     let path = Path::pident(Ident::create_persistent(cstr_name));
                     return Some((path, (*cstr).clone()));
                 }
@@ -19565,11 +19684,127 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
             };
+            // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
+            // reaches compiler/ml/env.ml:862-863 `find_type_descrs`; component
+            // construction at env.ml:1542-1548 runs `Subst.type_declaration`
+            // over record labels before returning the label descriptor. Mirror
+            // that traversal side effect for Rust's direct expected-type
+            // fallback so nested field type paths force at the same point.
+            force_type_paths_for_lookup_from_type(
+                ctx,
+                env,
+                pers_env,
+                selected.lbl_arg,
+                &mut HashSet::new(),
+            );
             qualify_label_description_paths(&mut selected, env, pers_env, ctx);
             return Some(selected);
         }
     }
     None
+}
+
+fn force_type_paths_for_lookup_from_type<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    use crate::types::type_expr::RowField;
+
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            force_type_path_for_lookup_from_type(ctx, env, pers_env, &path);
+            for arg in args {
+                force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg.typ, seen);
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, ret, seen);
+        }
+        TypeDesc::Ttuple(args) | TypeDesc::Tpackage { args, .. } => {
+            for arg in args {
+                force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
+            }
+        }
+        TypeDesc::Tobject { fields, name } => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, fields, seen);
+            if let Some((_path, args)) = name {
+                for arg in args {
+                    force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
+                }
+            }
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, typ, seen);
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, rest, seen);
+        }
+        TypeDesc::Tvariant(row) => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, row.row_more, seen);
+            for (_label, field) in row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        force_type_paths_for_lookup_from_type(ctx, env, pers_env, ty, seen);
+                    }
+                    RowField::Reither { types, .. } => {
+                        for ty in types {
+                            force_type_paths_for_lookup_from_type(ctx, env, pers_env, ty, seen);
+                        }
+                    }
+                    RowField::Rpresent(None) | RowField::Rabsent => {}
+                }
+            }
+            if let Some((_path, args)) = row.row_name {
+                for arg in args {
+                    force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
+                }
+            }
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, body, seen);
+            for var in vars {
+                force_type_paths_for_lookup_from_type(ctx, env, pers_env, var, seen);
+            }
+        }
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            force_type_paths_for_lookup_from_type(ctx, env, pers_env, target, seen);
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
+fn force_type_path_for_lookup_from_type<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+) {
+    if let Path::Pdot(parent, type_name, _) = path {
+        // OCaml compiler/ml/env.ml:1542-1548 builds record component labels
+        // from `Datarepr.labels_of_type`, and later typecore.ml:1623-1632
+        // instantiates the selected field type. For a type path like `M.N.t`,
+        // the reference path reaches the owning module component and its
+        // `comp_types` entry, not a broad `Env.normalize_path` over every
+        // sibling component.
+        let found_component_type =
+            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                let found = components.lookup_type(type_name.as_str()).is_some();
+                found
+            })
+            .unwrap_or(false);
+        if found_component_type {
+            return;
+        }
+    }
+    let _ = crate::types::ctype::normalize_path_full(ctx, env, path);
 }
 
 fn materialize_dict_pattern_label(
@@ -19655,15 +19890,19 @@ fn disambiguate_label<'a>(
             let lbl_ty = ctx.repr(label.lbl_res);
             let lbl_desc = ctx.get_desc(lbl_ty);
             if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
-                if lbl_path.same(target_path)
-                    || compare_type_paths_for_disambiguation(
-                        lbl_path,
-                        target_path,
-                        env,
-                        pers_env,
-                        ctx,
-                    )
-                {
+                // OCaml compiler/ml/typecore.ml:982-988 calls
+                // `disambiguate_by_type`, whose `compare_type_path` reaches
+                // typecore.ml:776-784 `expand_path`. That path uses
+                // `Env.normalize_path` even for already-equal paths, so
+                // preserve its lazy persistent-signature force here for
+                // direct label disambiguation.
+                if compare_type_paths_for_label_disambiguation(
+                    lbl_path,
+                    target_path,
+                    env,
+                    pers_env,
+                    ctx,
+                ) {
                     selected = Some((*label).clone());
                     break;
                 }
