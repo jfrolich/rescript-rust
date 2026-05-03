@@ -495,6 +495,22 @@ test_single_file() {
         args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
+            # Tella keeps some checked-in JS outputs that a normal build can
+            # consider up to date without regenerating lib/bs/*.ast. Generate
+            # the parser artifact on demand so this harness measures typedtree
+            # parity, not whether rewatch happened to rebuild the source file.
+            local ast_arg parser_args
+            ast_arg=$(echo "$compiler_args_json" | python3 -c "import sys, json; args=json.load(sys.stdin).get('compiler_args', []); print(args[-1] if args else '')" 2>/dev/null) || ast_arg=""
+            if [[ -n "$ast_arg" && ! -f "$TEST_PROJECT/lib/bs/$ast_arg" ]]; then
+                parser_args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('parser_args', [])))" 2>/dev/null) || parser_args=""
+                if [[ -n "$parser_args" ]]; then
+                    (
+                        cd "$TEST_PROJECT/lib/bs"
+                        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $parser_args 2> "$file_temp/parser.err" 1>/dev/null
+                    ) || true
+                fi
+            fi
+
             # Run OCaml compiler with the args + -dtyped-sexp
             cd "$TEST_PROJECT/lib/bs"
             if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then
