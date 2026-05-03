@@ -1486,7 +1486,7 @@ impl<'a> TypeContext<'a> {
     // ========================================================================
 
     /// Allocate a commutable reference.
-    fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
+    pub(crate) fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
         let mut commutables = self.commutables.borrow_mut();
         let idx = commutables.len();
         commutables.push(RefCell::new(c));

@@ -38,8 +38,8 @@ use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, ValueBinding,
 };
 use crate::types::{
-    Env, Path, RowField, TypeContext, TypeDesc, TypeError, TypeExprRef, UnifyState,
-    ValueDescription,
+    Commutable, Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
+    UnifyState, ValueDescription,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
@@ -16284,40 +16284,39 @@ fn copy_lookup_type_expr(
     ctx.set_level(placeholder, level);
     cache.insert(ty, placeholder);
 
-    let copied = {
+    let copied_desc = {
         let desc = ctx.get_desc(ty).clone();
         match desc {
-            TypeDesc::Tvar(name) => {
-                let t = ctx.new_var(name);
-                ctx.set_level(t, level);
-                t
-            }
+            TypeDesc::Tvar(name) => TypeDesc::Tvar(name),
             TypeDesc::Tarrow {
                 arg, ret, arity, ..
             } => {
                 let copied_arg = copy_lookup_type_expr(ctx, arg.typ, cache);
                 let copied_ret = copy_lookup_type_expr(ctx, ret, cache);
-                let t = ctx.new_arrow(arg.lbl, copied_arg, copied_ret, arity);
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Tarrow {
+                    arg: TypeArg::new(arg.lbl, copied_arg),
+                    ret: copied_ret,
+                    commutable: Commutable::Clink(ctx.alloc_commutable(Commutable::Cok)),
+                    arity,
+                }
             }
             TypeDesc::Ttuple(types) => {
                 let copied_items = types
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                     .collect();
-                let t = ctx.new_tuple(copied_items);
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Ttuple(copied_items)
             }
             TypeDesc::Tconstr { path, args, .. } => {
                 let copied_args = args
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                     .collect();
-                let t = ctx.new_constr(path, copied_args);
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Tconstr {
+                    path,
+                    args: copied_args,
+                    abbrev: ctx.alloc_abbrev_nil(),
+                }
             }
             TypeDesc::Tobject { fields, name } => {
                 let copied_fields = copy_lookup_type_expr(ctx, fields, cache);
@@ -16329,12 +16328,10 @@ fn copy_lookup_type_expr(
                             .collect(),
                     )
                 });
-                let t = ctx.new_type(TypeDesc::Tobject {
+                TypeDesc::Tobject {
                     fields: copied_fields,
                     name: copied_name,
-                });
-                ctx.set_level(t, level);
-                t
+                }
             }
             TypeDesc::Tfield {
                 name,
@@ -16344,26 +16341,23 @@ fn copy_lookup_type_expr(
             } => {
                 let copied_typ = copy_lookup_type_expr(ctx, typ, cache);
                 let copied_rest = copy_lookup_type_expr(ctx, rest, cache);
-                let t = ctx.new_type(TypeDesc::Tfield {
+                TypeDesc::Tfield {
                     name,
                     kind,
                     typ: copied_typ,
                     rest: copied_rest,
-                });
-                ctx.set_level(t, level);
-                t
+                }
             }
-            TypeDesc::Tnil => {
-                let t = ctx.new_type(TypeDesc::Tnil);
-                ctx.set_level(t, level);
-                t
+            TypeDesc::Tnil => TypeDesc::Tnil,
+            TypeDesc::Tlink(target) => {
+                let copied = copy_lookup_type_expr(ctx, target, cache);
+                ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
+                cache.insert(ty, copied);
+                return copied;
             }
-            TypeDesc::Tlink(target) => copy_lookup_type_expr(ctx, target, cache),
             TypeDesc::Tsubst(target) => {
                 let copied_target = copy_lookup_type_expr(ctx, target, cache);
-                let t = ctx.new_type(TypeDesc::Tsubst(copied_target));
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Tsubst(copied_target)
             }
             TypeDesc::Tvariant(row) => {
                 let copied_row = RowDesc {
@@ -16406,44 +16400,40 @@ fn copy_lookup_type_expr(
                         )
                     }),
                 };
-                let t = ctx.new_variant(copied_row);
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Tvariant(copied_row)
             }
-            TypeDesc::Tunivar(name) => {
-                let t = ctx.new_type(TypeDesc::Tunivar(name));
-                ctx.set_level(t, level);
-                t
-            }
+            TypeDesc::Tunivar(name) => TypeDesc::Tunivar(name),
             TypeDesc::Tpoly { body, vars } => {
                 let copied_body = copy_lookup_type_expr(ctx, body, cache);
                 let copied_vars = vars
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                     .collect();
-                let t = ctx.new_poly(copied_body, copied_vars);
-                ctx.set_level(t, level);
-                t
+                TypeDesc::Tpoly {
+                    body: copied_body,
+                    vars: copied_vars,
+                }
             }
             TypeDesc::Tpackage { path, lids, args } => {
                 let copied_args = args
                     .iter()
                     .map(|t| copy_lookup_type_expr(ctx, *t, cache))
                     .collect();
-                let t = ctx.new_type(TypeDesc::Tpackage {
+                TypeDesc::Tpackage {
                     path,
                     lids,
                     args: copied_args,
-                });
-                ctx.set_level(t, level);
-                t
+                }
             }
         }
     };
 
-    ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
-    cache.insert(ty, copied);
-    copied
+    // OCaml compiler/ml/ctype.ml:893-925 creates one stub with `newvar`,
+    // stores it in `Tsubst`, then fills `t.desc` in place. Returning the same
+    // placeholder preserves that sharing and avoids allocating a second node
+    // plus a Tlink for every copied type.
+    ctx.set_desc(placeholder, copied_desc);
+    placeholder
 }
 
 fn copy_lookup_constructor_args(
