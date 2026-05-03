@@ -3362,11 +3362,11 @@ fn insert_or_append(
     }
 
     let ors_len = ors.len();
-    let ors_slice = ors.make_contiguous();
 
     for index in 0..ors_len {
-        let cl = &ors_slice[index];
-        let rem = &ors_slice[index + 1..];
+        let cl = ors
+            .get(index)
+            .expect("insert_or_append: index within deque length");
         let (q_head, qs) = match cl.0.split_first() {
             Some((q, qs)) => (q, qs),
             None => panic!("insert_or_append: empty pattern row"),
@@ -3375,35 +3375,46 @@ fn insert_or_append(
 
         if is_or(q_head) && may_compat(p, q_head) {
             if !pattern_binds_vars(p) && !pattern_binds_vars(q_head) && equiv_pat(p, q_head) {
-                // OCaml compiler/ml/matching.ml:743-756 keeps `seen` in
-                // reversed cons order and reconstructs with `List.rev_append`.
-                let (_, not_e) = get_equiv(q_head, rem);
-                if or_ok(p, ps, &not_e)
-                    && ors_slice[..index]
+                // OCaml compiler/ml/matching.ml:743-756 checks the tail after
+                // the equivalent-prefix group. Keep that as deque iteration so
+                // we do not force VecDeque::make_contiguous on a push_front-built
+                // accumulator.
+                let equivalent_tail_len = ors
+                    .iter()
+                    .skip(index + 1)
+                    .take_while(|cl| match cl.0.first() {
+                        Some(q) => equiv_pat(q_head, q),
+                        None => false,
+                    })
+                    .count();
+                let not_e_start = index + 1 + equivalent_tail_len;
+                if or_ok_iter(p, ps, ors.iter().skip(not_e_start))
+                    && ors
                         .iter()
+                        .take(index)
                         .all(|seen_cl| match seen_cl.0.first() {
                             Some(q) => !may_compat(p, q),
                             None => panic!("insert_or_append: empty seen row"),
                         })
                 {
                     // OCaml compiler/ml/matching.ml:733-756 builds `seen` as a
-                    // shared list prefix. Keep the Rust equivalent as a slice
+                    // shared list prefix. Keep the Rust equivalent as a deque
                     // prefix and only clone rows when reconstructing the result.
-                    let mut result = VecDeque::with_capacity(index + 2 + rem.len());
-                    result.extend(ors_slice[..index].iter().cloned());
+                    let mut result = VecDeque::with_capacity(ors_len + 1);
+                    result.extend(ors.iter().take(index).cloned());
                     result.push_back(clause_from_head(p, ps, act));
                     result.push_back(cl.clone());
-                    result.extend(rem.iter().cloned());
+                    result.extend(ors.iter().skip(index + 1).cloned());
                     return (result, no);
                 }
 
                 no.push_front(clause_from_head(p, ps, act));
-                return (ors_slice.iter().cloned().collect(), no);
+                return (ors, no);
             }
 
             if !condb(act_q, ps, qs) {
                 no.push_front(clause_from_head(p, ps, act));
-                return (ors_slice.iter().cloned().collect(), no);
+                return (ors, no);
             }
         }
 
