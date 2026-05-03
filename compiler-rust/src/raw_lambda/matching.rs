@@ -9,6 +9,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
@@ -1963,7 +1964,10 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
 /// Convert a RawLambda to a string key for comparison purposes.
 /// Returns None if the lambda cannot be normalized.
 fn make_key_string(e: &RawLambda) -> Option<String> {
-    make_key(e).map(|k| format!("{k:?}"))
+    let mut writer = MakeKeyWriter::new();
+    let mut out = String::with_capacity(128);
+    writer.write_raw(e, &mut out)?;
+    Some(out)
 }
 
 /// Convert a delayed match action to the same structural key as
@@ -1975,283 +1979,355 @@ fn make_key_string(e: &RawLambda) -> Option<String> {
 /// traverses those wrappers as if they were `Llet` nodes while keeping the
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
 fn make_key_string_action(action: &MatchAction) -> Option<String> {
-    fn make_key_action(action: &MatchAction) -> Option<RawLambda> {
-        enum KeyBody<'a> {
-            Raw(&'a RawLambda),
-            Action(&'a MatchAction),
+    let mut writer = MakeKeyWriter::new();
+    let mut out = String::with_capacity(128);
+    writer.write_action(action, &mut out)?;
+    Some(out)
+}
+
+enum KeyBody<'a> {
+    Raw(&'a RawLambda),
+    Action(&'a MatchAction),
+}
+
+struct MakeKeyWriter {
+    count: i32,
+    next_id: i32,
+    env: Vec<(Ident, String)>,
+}
+
+impl MakeKeyWriter {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            next_id: 0,
+            env: Vec::new(),
         }
-
-        let mut count = 0i32;
-        type KeyEnv = Vec<(Ident, RawLambda)>;
-
-        fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
-            match body {
-                KeyBody::Raw(RawLambda::Lvar(v)) => v.same(id),
-                KeyBody::Action(action) => {
-                    matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
-                }
-                _ => false,
-            }
-        }
-
-        fn tr_body(
-            env: &mut KeyEnv,
-            body: KeyBody<'_>,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambda> {
-            match body {
-                KeyBody::Raw(raw) => tr_rec(env, raw, count, next_id),
-                KeyBody::Action(action) => tr_action(env, action, count, next_id),
-            }
-        }
-
-        fn tr_let(
-            env: &mut KeyEnv,
-            kind: LetKind,
-            x: &Ident,
-            ex: &RawLambda,
-            body: KeyBody<'_>,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambda> {
-            if kind == LetKind::Alias {
-                let ex = tr_rec(env, ex, count, next_id)?;
-                env.push((x.clone(), ex));
-                let result = tr_body(env, body, count, next_id);
-                env.pop();
-                return result;
-            }
-
-            if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && same_var_body(&body, x) {
-                return tr_rec(env, ex, count, next_id);
-            }
-
-            let ex_norm = tr_rec(env, ex, count, next_id)?;
-            let y = Ident::new(x.name(), *next_id, IdentFlags::NONE);
-            *next_id += 1;
-            env.push((x.clone(), RawLambda::Lvar(y.clone())));
-            let body_norm = tr_body(env, body, count, next_id)?;
-            env.pop();
-            Some(RawLambda::Llet(
-                kind,
-                y,
-                Box::new(ex_norm),
-                Box::new(body_norm),
-            ))
-        }
-
-        fn tr_action(
-            env: &mut KeyEnv,
-            action: &MatchAction,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambda> {
-            *count += 1;
-            if *count > MAX_RAW {
-                return None;
-            }
-
-            match &action.0.kind {
-                MatchActionKind::Raw(raw) => tr_rec_after_count(env, raw, count, next_id),
-                MatchActionKind::Bind {
-                    kind,
-                    id,
-                    arg,
-                    action,
-                } => tr_let(env, *kind, id, arg, KeyBody::Action(action), count, next_id),
-            }
-        }
-
-        fn tr_rec(
-            env: &mut KeyEnv,
-            e: &RawLambda,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambda> {
-            *count += 1;
-            if *count > MAX_RAW {
-                return None;
-            }
-            tr_rec_after_count(env, e, count, next_id)
-        }
-
-        fn tr_rec_after_count(
-            env: &mut KeyEnv,
-            e: &RawLambda,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambda> {
-            match e {
-                RawLambda::Lvar(id) => {
-                    if let Some((_, replacement)) = env.iter().rev().find(|(key, _)| key.same(id)) {
-                        Some(replacement.clone())
-                    } else {
-                        Some(e.clone())
-                    }
-                }
-                RawLambda::Lconst(crate::lambda::Constant::String { .. }) => None,
-                RawLambda::Lconst(_) => Some(e.clone()),
-                RawLambda::LglobalModule(_, _) => Some(e.clone()),
-                RawLambda::Lapply(ap) => {
-                    let func = tr_rec(env, &ap.ap_func, count, next_id)?;
-                    let args = tr_recs(env, &ap.ap_args, count, next_id)?;
-                    Some(RawLambda::Lapply(RawApply {
-                        ap_func: Box::new(func),
-                        ap_args: args,
-                        ap_info: crate::lambda::ApInfo {
-                            loc: Location::none(),
-                            ..ap.ap_info.clone()
-                        },
-                        ap_transformed_jsx: ap.ap_transformed_jsx,
-                    }))
-                }
-                RawLambda::Llet(kind, x, ex, body) => {
-                    tr_let(env, *kind, x, ex, KeyBody::Raw(body), count, next_id)
-                }
-                RawLambda::Lprim(info) => {
-                    let args = tr_recs(env, &info.args, count, next_id)?;
-                    Some(RawLambda::Lprim(RawPrimInfo {
-                        primitive: info.primitive.clone(),
-                        args,
-                        loc: Location::none(),
-                    }))
-                }
-                RawLambda::Lswitch(scrut, sw, loc) => {
-                    let scrut_norm = tr_rec(env, scrut, count, next_id)?;
-                    let sw_norm = tr_sw(env, sw, count, next_id)?;
-                    Some(RawLambda::Lswitch(
-                        Box::new(scrut_norm),
-                        sw_norm,
-                        loc.clone(),
-                    ))
-                }
-                RawLambda::LstringSwitch(scrut, cases, default) => {
-                    let scrut_norm = tr_rec(env, scrut, count, next_id)?;
-                    let mut norm_cases = Vec::new();
-                    for (s, act) in cases {
-                        norm_cases.push((s.clone(), tr_rec(env, act, count, next_id)?));
-                    }
-                    let norm_default = tr_opt(env, default.as_deref(), count, next_id)?;
-                    Some(RawLambda::LstringSwitch(
-                        Box::new(scrut_norm),
-                        norm_cases,
-                        norm_default.map(Box::new),
-                    ))
-                }
-                RawLambda::LstaticRaise(i, es) => {
-                    let args = tr_recs(env, es, count, next_id)?;
-                    Some(RawLambda::LstaticRaise(*i, args))
-                }
-                RawLambda::LstaticCatch(e1, xs, e2) => {
-                    let e1_norm = tr_rec(env, e1, count, next_id)?;
-                    let e2_norm = tr_rec(env, e2, count, next_id)?;
-                    Some(RawLambda::LstaticCatch(
-                        Box::new(e1_norm),
-                        xs.clone(),
-                        Box::new(e2_norm),
-                    ))
-                }
-                RawLambda::LtryWith(e1, x, e2) => {
-                    let e1_norm = tr_rec(env, e1, count, next_id)?;
-                    let e2_norm = tr_rec(env, e2, count, next_id)?;
-                    Some(RawLambda::LtryWith(
-                        Box::new(e1_norm),
-                        x.clone(),
-                        Box::new(e2_norm),
-                    ))
-                }
-                RawLambda::LifThenElse(cond, ifso, ifnot) => {
-                    let cond_norm = tr_rec(env, cond, count, next_id)?;
-                    let ifso_norm = tr_rec(env, ifso, count, next_id)?;
-                    let ifnot_norm = tr_rec(env, ifnot, count, next_id)?;
-                    Some(RawLambda::LifThenElse(
-                        Box::new(cond_norm),
-                        Box::new(ifso_norm),
-                        Box::new(ifnot_norm),
-                    ))
-                }
-                RawLambda::Lsequence(e1, e2) => {
-                    let e1_norm = tr_rec(env, e1, count, next_id)?;
-                    let e2_norm = tr_rec(env, e2, count, next_id)?;
-                    Some(RawLambda::Lsequence(Box::new(e1_norm), Box::new(e2_norm)))
-                }
-                RawLambda::Lassign(x, e) => {
-                    let e_norm = tr_rec(env, e, count, next_id)?;
-                    Some(RawLambda::Lassign(x.clone(), Box::new(e_norm)))
-                }
-                RawLambda::Lsend(m, e1, _loc) => {
-                    let e1_norm = tr_rec(env, e1, count, next_id)?;
-                    Some(RawLambda::Lsend(
-                        m.clone(),
-                        Box::new(e1_norm),
-                        Location::none(),
-                    ))
-                }
-                RawLambda::Lbreak => Some(RawLambda::Lbreak),
-                RawLambda::Lcontinue => Some(RawLambda::Lcontinue),
-                RawLambda::Lletrec(..)
-                | RawLambda::Lfunction(..)
-                | RawLambda::Lfor(..)
-                | RawLambda::Lfor_of(..)
-                | RawLambda::Lfor_await_of(..)
-                | RawLambda::Lwhile(..) => None,
-            }
-        }
-
-        fn tr_recs(
-            env: &mut KeyEnv,
-            es: &[RawLambda],
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<Vec<RawLambda>> {
-            es.iter().map(|e| tr_rec(env, e, count, next_id)).collect()
-        }
-
-        fn tr_sw(
-            env: &mut KeyEnv,
-            sw: &RawLambdaSwitch,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<RawLambdaSwitch> {
-            let mut consts = Vec::new();
-            for (tag, act) in &sw.sw_consts {
-                consts.push((*tag, tr_rec(env, act, count, next_id)?));
-            }
-            let mut blocks = Vec::new();
-            for (tag, act) in &sw.sw_blocks {
-                blocks.push((*tag, tr_rec(env, act, count, next_id)?));
-            }
-            let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
-            Some(RawLambdaSwitch {
-                sw_numconsts: sw.sw_numconsts,
-                sw_consts_full: sw.sw_consts_full,
-                sw_consts: consts,
-                sw_numblocks: sw.sw_numblocks,
-                sw_blocks_full: sw.sw_blocks_full,
-                sw_blocks: blocks,
-                sw_failaction: fail.map(Box::new),
-                sw_names: sw.sw_names.clone(),
-            })
-        }
-
-        fn tr_opt(
-            env: &mut KeyEnv,
-            e: Option<&RawLambda>,
-            count: &mut i32,
-            next_id: &mut i32,
-        ) -> Option<Option<RawLambda>> {
-            match e {
-                None => Some(None),
-                Some(e) => Some(Some(tr_rec(env, e, count, next_id)?)),
-            }
-        }
-
-        let mut next_id = 0i32;
-        tr_action(&mut Vec::new(), action, &mut count, &mut next_id)
     }
 
-    make_key_action(action).map(|k| format!("{k:?}"))
+    fn write_raw(&mut self, e: &RawLambda, out: &mut String) -> Option<()> {
+        self.count += 1;
+        if self.count > MAX_RAW {
+            return None;
+        }
+        self.write_raw_after_count(e, out)
+    }
+
+    fn write_action(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+        self.count += 1;
+        if self.count > MAX_RAW {
+            return None;
+        }
+        match &action.0.kind {
+            MatchActionKind::Raw(raw) => self.write_raw_after_count(raw, out),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => self.write_let(*kind, id, arg, KeyBody::Action(action), out),
+        }
+    }
+
+    fn write_body(&mut self, body: KeyBody<'_>, out: &mut String) -> Option<()> {
+        match body {
+            KeyBody::Raw(raw) => self.write_raw(raw, out),
+            KeyBody::Action(action) => self.write_action(action, out),
+        }
+    }
+
+    fn write_raw_after_count(&mut self, e: &RawLambda, out: &mut String) -> Option<()> {
+        match e {
+            RawLambda::Lvar(id) => {
+                if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(id))
+                {
+                    out.push_str(replacement);
+                } else {
+                    out.push_str("Lvar(");
+                    write_ident_key(out, id);
+                    out.push(')');
+                }
+                Some(())
+            }
+            RawLambda::Lconst(crate::lambda::Constant::String { .. }) => None,
+            RawLambda::Lconst(c) => {
+                write!(out, "Lconst({c:?})").ok()?;
+                Some(())
+            }
+            RawLambda::LglobalModule(id, dynamic_import) => {
+                out.push_str("LglobalModule(");
+                write_ident_key(out, id);
+                write!(out, ",{dynamic_import})").ok()?;
+                Some(())
+            }
+            RawLambda::Lapply(ap) => {
+                out.push_str("Lapply(");
+                self.write_raw(&ap.ap_func, out)?;
+                out.push_str(",[");
+                self.write_raw_list(&ap.ap_args, out)?;
+                write!(
+                    out,
+                    "],{:?},{:?},{})",
+                    ap.ap_info.inlined, ap.ap_info.status, ap.ap_transformed_jsx
+                )
+                .ok()?;
+                Some(())
+            }
+            RawLambda::Llet(kind, x, ex, body) => {
+                self.write_let(*kind, x, ex, KeyBody::Raw(body), out)
+            }
+            RawLambda::Lprim(info) => {
+                write!(out, "Lprim({:?},[", info.primitive).ok()?;
+                self.write_raw_list(&info.args, out)?;
+                out.push_str("])");
+                Some(())
+            }
+            RawLambda::Lswitch(scrut, sw, loc) => {
+                out.push_str("Lswitch(");
+                self.write_raw(scrut, out)?;
+                write!(
+                    out,
+                    ",numc={},fullc={},consts=[",
+                    sw.sw_numconsts, sw.sw_consts_full
+                )
+                .ok()?;
+                for (idx, (tag, act)) in sw.sw_consts.iter().enumerate() {
+                    if idx > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{tag}:").ok()?;
+                    self.write_raw(act, out)?;
+                }
+                write!(
+                    out,
+                    "],numb={},fullb={},blocks=[",
+                    sw.sw_numblocks, sw.sw_blocks_full
+                )
+                .ok()?;
+                for (idx, (tag, act)) in sw.sw_blocks.iter().enumerate() {
+                    if idx > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{tag}:").ok()?;
+                    self.write_raw(act, out)?;
+                }
+                out.push_str("],fail=");
+                self.write_raw_opt(sw.sw_failaction.as_deref(), out)?;
+                write!(out, ",names={:?},loc={loc:?})", sw.sw_names).ok()?;
+                Some(())
+            }
+            RawLambda::LstringSwitch(scrut, cases, default) => {
+                out.push_str("LstringSwitch(");
+                self.write_raw(scrut, out)?;
+                out.push_str(",[");
+                for (idx, (label, act)) in cases.iter().enumerate() {
+                    if idx > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{label:?}:").ok()?;
+                    self.write_raw(act, out)?;
+                }
+                out.push_str("],");
+                self.write_raw_opt(default.as_deref(), out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::LstaticRaise(i, args) => {
+                write!(out, "LstaticRaise({i},[").ok()?;
+                self.write_raw_list(args, out)?;
+                out.push_str("])");
+                Some(())
+            }
+            RawLambda::LstaticCatch(e1, (i, vars), e2) => {
+                write!(out, "LstaticCatch(").ok()?;
+                self.write_raw(e1, out)?;
+                write!(out, ",({i},[").ok()?;
+                for (idx, var) in vars.iter().enumerate() {
+                    if idx > 0 {
+                        out.push(',');
+                    }
+                    write_ident_key(out, var);
+                }
+                out.push_str("]),");
+                self.write_raw(e2, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::LtryWith(e1, x, e2) => {
+                out.push_str("LtryWith(");
+                self.write_raw(e1, out)?;
+                out.push(',');
+                write_ident_key(out, x);
+                out.push(',');
+                self.write_raw(e2, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::LifThenElse(cond, ifso, ifnot) => {
+                out.push_str("LifThenElse(");
+                self.write_raw(cond, out)?;
+                out.push(',');
+                self.write_raw(ifso, out)?;
+                out.push(',');
+                self.write_raw(ifnot, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::Lsequence(e1, e2) => {
+                out.push_str("Lsequence(");
+                self.write_raw(e1, out)?;
+                out.push(',');
+                self.write_raw(e2, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::Lassign(x, e) => {
+                out.push_str("Lassign(");
+                write_ident_key(out, x);
+                out.push(',');
+                self.write_raw(e, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::Lsend(m, e1, _loc) => {
+                write!(out, "Lsend({m:?},").ok()?;
+                self.write_raw(e1, out)?;
+                out.push(')');
+                Some(())
+            }
+            RawLambda::Lbreak => {
+                out.push_str("Lbreak");
+                Some(())
+            }
+            RawLambda::Lcontinue => {
+                out.push_str("Lcontinue");
+                Some(())
+            }
+            RawLambda::Lletrec(..)
+            | RawLambda::Lfunction(..)
+            | RawLambda::Lfor(..)
+            | RawLambda::Lfor_of(..)
+            | RawLambda::Lfor_await_of(..)
+            | RawLambda::Lwhile(..) => None,
+        }
+    }
+
+    fn write_let(
+        &mut self,
+        kind: LetKind,
+        x: &Ident,
+        ex: &RawLambda,
+        body: KeyBody<'_>,
+        out: &mut String,
+    ) -> Option<()> {
+        if kind == LetKind::Alias {
+            let ex_key = self.raw_to_string(ex)?;
+            self.env.push((x.clone(), ex_key));
+            let result = self.write_body(body, out);
+            self.env.pop();
+            return result;
+        }
+
+        if matches!(kind, LetKind::Strict | LetKind::StrictOpt) && same_var_body(&body, x) {
+            return self.write_raw(ex, out);
+        }
+
+        out.push_str("Llet(");
+        write!(out, "{kind:?},").ok()?;
+        let synthetic_stamp = self.next_id;
+        self.next_id += 1;
+        write_synthetic_ident_key(out, x.name(), synthetic_stamp);
+        out.push(',');
+        self.write_raw(ex, out)?;
+        out.push(',');
+        let mut replacement = String::with_capacity(x.name().len() + 16);
+        replacement.push_str("Lvar(");
+        write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
+        replacement.push(')');
+        self.env.push((x.clone(), replacement));
+        let result = self.write_body(body, out);
+        self.env.pop();
+        result?;
+        out.push(')');
+        Some(())
+    }
+
+    fn raw_to_string(&mut self, e: &RawLambda) -> Option<String> {
+        let mut out = String::with_capacity(64);
+        self.write_raw(e, &mut out)?;
+        Some(out)
+    }
+
+    fn write_raw_list(&mut self, items: &[RawLambda], out: &mut String) -> Option<()> {
+        for (idx, item) in items.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            self.write_raw(item, out)?;
+        }
+        Some(())
+    }
+
+    fn write_raw_opt(&mut self, item: Option<&RawLambda>, out: &mut String) -> Option<()> {
+        match item {
+            None => out.push_str("None"),
+            Some(item) => {
+                out.push_str("Some(");
+                self.write_raw(item, out)?;
+                out.push(')');
+            }
+        }
+        Some(())
+    }
+}
+
+fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
+    match body {
+        KeyBody::Raw(RawLambda::Lvar(v)) => v.same(id),
+        KeyBody::Action(action) => {
+            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
+        }
+        _ => false,
+    }
+}
+
+fn write_ident_key(out: &mut String, id: &Ident) {
+    match id.stamp() {
+        0 => {
+            out.push_str(id.name());
+            out.push('!');
+        }
+        -1 => {
+            out.push_str(id.name());
+            out.push('#');
+        }
+        stamp => write_synthetic_ident_key_with_global(out, id.name(), stamp, id.is_global()),
+    }
+}
+
+fn write_synthetic_ident_key(out: &mut String, name: &str, stamp: i32) {
+    write_synthetic_ident_key_with_global(out, name, stamp, false);
+}
+
+fn write_synthetic_ident_key_with_global(
+    out: &mut String,
+    name: &str,
+    stamp: i32,
+    is_global: bool,
+) {
+    if stamp == 0 {
+        out.push_str(name);
+        out.push('!');
+    } else if stamp == -1 {
+        out.push_str(name);
+        out.push('#');
+    } else {
+        out.push_str(name);
+        write!(out, "/{stamp}").expect("writing to String cannot fail");
+        if is_global {
+            out.push('g');
+        }
+    }
 }
 
 // ============================================================================
