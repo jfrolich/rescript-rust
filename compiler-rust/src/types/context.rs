@@ -235,19 +235,22 @@ pub struct TypeContext<'a> {
     flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
-    resolved_module_value_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Path, super::decl::ValueDescription)>>,
+    resolved_module_value_cache: RefCell<
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
+    >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
-    resolved_module_type_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Path, Ident, super::decl::TypeDeclaration)>>,
+    resolved_module_type_cache: RefCell<
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, Ident, super::decl::TypeDeclaration)>>,
+    >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
-    resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+    resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
 
     /// Cached forced module declarations from qualified component tables.
-    qualified_module_decl_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Ident, super::decl::ModuleDeclaration)>>,
+    qualified_module_decl_cache: RefCell<
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Ident, super::decl::ModuleDeclaration)>>,
+    >,
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
@@ -670,7 +673,9 @@ impl<'a> TypeContext<'a> {
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
-            .insert((module_path.clone(), value_name.to_string()), (path, desc));
+            .entry(module_path.clone())
+            .or_default()
+            .insert(value_name.to_string(), (path, desc));
     }
 
     /// Look up a cached dotted value lookup for a resolved module access path.
@@ -681,7 +686,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<(Path, super::decl::ValueDescription)> {
         self.resolved_module_value_cache
             .borrow()
-            .get(&(module_path.clone(), value_name.to_string()))
+            .get(module_path)
+            .and_then(|values| values.get(value_name))
             .cloned()
     }
 
@@ -694,10 +700,11 @@ impl<'a> TypeContext<'a> {
         id: Ident,
         decl: super::decl::TypeDeclaration,
     ) {
-        self.resolved_module_type_cache.borrow_mut().insert(
-            (module_path.clone(), type_name.to_string()),
-            (access_path, id, decl),
-        );
+        self.resolved_module_type_cache
+            .borrow_mut()
+            .entry(module_path.clone())
+            .or_default()
+            .insert(type_name.to_string(), (access_path, id, decl));
     }
 
     /// Look up a cached dotted type lookup for a resolved module access path.
@@ -708,7 +715,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
         self.resolved_module_type_cache
             .borrow()
-            .get(&(module_path.clone(), type_name.to_string()))
+            .get(module_path)
+            .and_then(|types| types.get(type_name))
             .cloned()
     }
 
@@ -721,7 +729,9 @@ impl<'a> TypeContext<'a> {
     ) {
         self.resolved_child_module_path_cache
             .borrow_mut()
-            .insert((parent_path.clone(), child_name.to_string()), child_path);
+            .entry(parent_path.clone())
+            .or_default()
+            .insert(child_name.to_string(), child_path);
     }
 
     /// Look up a cached resolved child-module access path.
@@ -732,7 +742,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<Path> {
         self.resolved_child_module_path_cache
             .borrow()
-            .get(&(parent_path.clone(), child_name.to_string()))
+            .get(parent_path)
+            .and_then(|children| children.get(child_name))
             .cloned()
     }
 
@@ -746,7 +757,9 @@ impl<'a> TypeContext<'a> {
     ) {
         self.qualified_module_decl_cache
             .borrow_mut()
-            .insert((parent_path.clone(), child_name.to_string()), (id, md));
+            .entry(parent_path.clone())
+            .or_default()
+            .insert(child_name.to_string(), (id, md));
     }
 
     /// Look up a forced qualified module declaration.
@@ -757,7 +770,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<(Ident, super::decl::ModuleDeclaration)> {
         self.qualified_module_decl_cache
             .borrow()
-            .get(&(parent_path.clone(), child_name.to_string()))
+            .get(parent_path)
+            .and_then(|modules| modules.get(child_name))
             .cloned()
     }
 
