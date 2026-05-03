@@ -26,6 +26,49 @@ pub enum Shared<A> {
     Single(A),
 }
 
+/// OCaml `compiler/ml/switch.ml:511-560` stores actions as closures and
+/// invokes each leaf action without copying the lambda tree. Rust stores owned
+/// `RawLambda` values, so keep single-use actions movable and clone only the
+/// action slots that the generated case tree can reach more than once.
+enum SwitchAction {
+    Shared(RawLambda),
+    Single(Option<RawLambda>),
+}
+
+impl SwitchAction {
+    fn take(&mut self) -> RawLambda {
+        match self {
+            SwitchAction::Shared(action) => action.clone(),
+            SwitchAction::Single(action) => action
+                .take()
+                .expect("single-use switch action was consumed more than once"),
+        }
+    }
+}
+
+fn action_use_counts(action_count: usize, cases: &[(i32, i32, usize)]) -> Vec<usize> {
+    let mut counts = vec![0usize; action_count];
+    for &(_, _, action) in cases {
+        counts[action] += 1;
+    }
+    counts
+}
+
+fn actions_for_cases(actions: Vec<RawLambda>, cases: &[(i32, i32, usize)]) -> Vec<SwitchAction> {
+    let counts = action_use_counts(actions.len(), cases);
+    actions
+        .into_iter()
+        .enumerate()
+        .map(|(idx, action)| {
+            if counts[idx] == 1 {
+                SwitchAction::Single(Some(action))
+            } else {
+                SwitchAction::Shared(action)
+            }
+        })
+        .collect()
+}
+
 /// Action store that deduplicates actions by structural key.
 /// Port of OCaml's `Switch.Store`.
 pub struct ActionStore {
@@ -80,28 +123,28 @@ impl ActionStore {
     }
 
     /// Retrieve all stored actions with sharing information.
-    pub fn act_get_shared(&self) -> Vec<Shared<RawLambda>> {
-        let mut acts: Vec<Shared<RawLambda>> = self
-            .acts
-            .iter()
-            .map(|(shared, act)| {
-                if *shared {
-                    Shared::Shared(act.clone())
-                } else {
-                    Shared::Single(act.clone())
-                }
-            })
-            .collect();
+    pub fn act_get_shared(self) -> Vec<Shared<RawLambda>> {
+        let ActionStore { map, acts, .. } = self;
+        let mut share_flags: Vec<bool> = acts.iter().map(|(shared, _)| *shared).collect();
 
         // Mark actions that are shared in the map
-        for (_, &(shared, i)) in &self.map {
+        for (_, (shared, i)) in map {
             if shared {
-                if let Shared::Single(act) = &acts[i] {
-                    acts[i] = Shared::Shared(act.clone());
+                if let Some(flag) = share_flags.get_mut(i) {
+                    *flag = true;
                 }
             }
         }
-        acts
+        acts.into_iter()
+            .zip(share_flags)
+            .map(|((_, act), shared)| {
+                if shared {
+                    Shared::Shared(act)
+                } else {
+                    Shared::Single(act)
+                }
+            })
+            .collect()
     }
 }
 
@@ -219,13 +262,19 @@ fn build_lswitch(
     loc: &Location,
     arg: RawLambda,
     tbl: &[usize],
-    acts: &[RawLambda],
+    acts: Vec<RawLambda>,
     offset: i32,
     sw_names: Option<SwitchNames>,
 ) -> RawLambda {
+    let cases_for_counts: Vec<(i32, i32, usize)> = tbl
+        .iter()
+        .enumerate()
+        .map(|(i, &act_idx)| (offset + i as i32, offset + i as i32, act_idx))
+        .collect();
+    let mut acts = actions_for_cases(acts, &cases_for_counts);
     let mut cases: Vec<(i32, RawLambda)> = Vec::with_capacity(tbl.len());
     for (i, &act_idx) in tbl.iter().enumerate().rev() {
-        cases.push((offset + i as i32, acts[act_idx].clone()));
+        cases.push((offset + i as i32, acts[act_idx].take()));
     }
     cases.reverse();
     RawLambda::Lswitch(
@@ -702,36 +751,30 @@ impl SwitchCompiler {
         off: i32,
         arg: &RawLambda,
         cases: &[(i32, i32, usize)],
-        actions: &[RawLambda],
+        actions: &mut [SwitchAction],
     ) -> RawLambda {
         let lcases = cases.len();
         assert!(lcases > 0);
         if lcases == 1 {
-            return actions[cases[0].2].clone();
+            return actions[cases[0].2].take();
         }
 
         let (w, cost) = self.opt_count(cases);
         match w {
-            TRet::No => actions[cases[0].2].clone(),
+            TRet::No => actions[cases[0].2].take(),
             TRet::Inter(i, j) => {
                 let (low, high, inside, outside) = coupe_inter(i as usize, j as usize, cases);
                 let (_, (cinside, _)) = self.opt_count(&inside);
                 let (_, (coutside, _)) = self.opt_count(&outside);
                 if low == high {
                     if less_tests(coutside, cinside) {
-                        make_if_eq(
-                            arg,
-                            low + off,
-                            self.c_test(off, arg, &inside, actions),
-                            self.c_test(off, arg, &outside, actions),
-                        )
+                        let ifso = self.c_test(off, arg, &inside, actions);
+                        let ifnot = self.c_test(off, arg, &outside, actions);
+                        make_if_eq(arg, low + off, ifso, ifnot)
                     } else {
-                        make_if_ne(
-                            arg,
-                            low + off,
-                            self.c_test(off, arg, &outside, actions),
-                            self.c_test(off, arg, &inside, actions),
-                        )
+                        let ifso = self.c_test(off, arg, &outside, actions);
+                        let ifnot = self.c_test(off, arg, &inside, actions);
+                        make_if_ne(arg, low + off, ifso, ifnot)
                     }
                 } else if less_tests(coutside, cinside) {
                     let offset_arg = if low + off == 0 {
@@ -759,26 +802,17 @@ impl SwitchCompiler {
                 let (_, (cright, _)) = self.opt_count(&right);
 
                 if i == 1 && lim + off == 1 && cases[0].0 + off == 0 {
-                    make_if_ne(
-                        arg,
-                        0,
-                        self.c_test(off, arg, &right, actions),
-                        self.c_test(off, arg, &left, actions),
-                    )
+                    let ifso = self.c_test(off, arg, &right, actions);
+                    let ifnot = self.c_test(off, arg, &left, actions);
+                    make_if_ne(arg, 0, ifso, ifnot)
                 } else if less_tests(cright, cleft) {
-                    make_if_lt(
-                        arg,
-                        lim + off,
-                        self.c_test(off, arg, &left, actions),
-                        self.c_test(off, arg, &right, actions),
-                    )
+                    let ifso = self.c_test(off, arg, &left, actions);
+                    let ifnot = self.c_test(off, arg, &right, actions);
+                    make_if_lt(arg, lim + off, ifso, ifnot)
                 } else {
-                    make_if_ge(
-                        arg,
-                        lim + off,
-                        self.c_test(off, arg, &right, actions),
-                        self.c_test(off, arg, &left, actions),
-                    )
+                    let ifso = self.c_test(off, arg, &right, actions);
+                    let ifnot = self.c_test(off, arg, &left, actions);
+                    make_if_ge(arg, lim + off, ifso, ifnot)
                 }
             }
         }
@@ -939,7 +973,7 @@ fn build_clustered_test(
                 // But we don't have arg here. Let me restructure.
                 RawLambda::unit(), // placeholder
                 &tbl,
-                &switch_acts,
+                switch_acts,
                 ll, // offset will be adjusted
                 sw_names.clone(),
             );
@@ -1000,7 +1034,8 @@ fn build_clustered_test(
         fix_switch_arg(act, arg);
     }
 
-    compiler.c_test(0, arg, &cluster_cases, &cluster_actions)
+    let mut cluster_actions = actions_for_cases(cluster_actions, &cluster_cases);
+    compiler.c_test(0, arg, &cluster_cases, &mut cluster_actions)
 }
 
 /// Fix up any Lswitch nodes that have a unit placeholder as their arg.
@@ -1067,7 +1102,7 @@ pub fn zyva(
     edges: (i32, i32),
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
-    store: &ActionStore,
+    store: ActionStore,
     sw_names: Option<SwitchNames>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
@@ -1107,7 +1142,7 @@ pub fn zyva_with_shared_actions(
 pub fn test_sequence(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
-    store: &ActionStore,
+    store: ActionStore,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
@@ -1116,7 +1151,8 @@ pub fn test_sequence(
     let (handlers, actions) = abstract_shared(shared_actions, next_raise);
 
     let mut compiler = SwitchCompiler::new(false);
-    let result = compiler.c_test(0, &arg, cases, &actions);
+    let mut actions = actions_for_cases(actions, cases);
+    let result = compiler.c_test(0, &arg, cases, &mut actions);
     wrap_handlers(result, handlers)
 }
 
@@ -1298,5 +1334,5 @@ pub fn call_switcher(
     sorted.sort_by_key(|(i, _)| *i);
 
     let (edges, cases, store) = as_interval(fail, low, high, &sorted);
-    zyva(loc, edges, arg, &cases, &store, sw_names, next_raise)
+    zyva(loc, edges, arg, &cases, store, sw_names, next_raise)
 }
