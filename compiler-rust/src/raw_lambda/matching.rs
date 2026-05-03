@@ -3592,61 +3592,54 @@ fn split_or(
 fn do_split_or(
     ctx_ref: Option<&TypeContext<'_>>,
     argo: &Option<Ident>,
-    before: VecDeque<Clause>,
-    ors: VecDeque<Clause>,
-    no: VecDeque<Clause>,
+    mut before: VecDeque<Clause>,
+    mut ors: VecDeque<Clause>,
+    mut no: VecDeque<Clause>,
     mut rest: VecDeque<Clause>,
     args: &MatchArgs,
     def: &DefaultEnv,
     next_raise: &mut i32,
 ) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    match rest.pop_front() {
-        None => {
+    // OCaml `compiler/ml/matching.ml:817-828` is tail-recursive. Rust does not
+    // guarantee tail-call elimination, and large generated matches build very
+    // deep `do_split_or` stacks. Keep the exact branch order but run it as an
+    // explicit loop.
+    loop {
+        let Some(cl) = rest.pop_front() else {
             let before = rev_deque_to_vec(before);
             let ors = rev_deque_to_vec(ors);
             let no = rev_deque_to_vec(no);
-            cons_next_or(ctx_ref, argo, before, ors, no, args, def, next_raise)
-        }
-        Some(cl) => match cl.0.split_first() {
-            Some((p, ps)) => {
-                let act = &cl.1;
-                if up_ok_iter(cl.0.as_slice(), act, no.iter()) {
-                    if is_or(p) {
-                        let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
-                        do_split_or(
-                            ctx_ref, argo, before, new_ors, new_no, rest, args, def, next_raise,
-                        )
-                    } else if up_ok_iter(cl.0.as_slice(), act, ors.iter()) {
-                        let mut new_before = before;
-                        new_before.push_front(cl);
-                        // OCaml `do_split` moves the current row into
-                        // `before` with `(cl :: before)` (compiler/ml/matching.ml:820-826).
-                        do_split_or(
-                            ctx_ref, argo, new_before, ors, no, rest, args, def, next_raise,
-                        )
-                    } else if or_ok_iter(p, ps, ors.iter()) {
-                        let mut new_ors = ors;
-                        new_ors.push_front(cl);
-                        do_split_or(
-                            ctx_ref, argo, before, new_ors, no, rest, args, def, next_raise,
-                        )
-                    } else {
-                        let mut new_no = no;
-                        new_no.push_front(cl);
-                        do_split_or(
-                            ctx_ref, argo, before, ors, new_no, rest, args, def, next_raise,
-                        )
-                    }
+            return cons_next_or(ctx_ref, argo, before, ors, no, args, def, next_raise);
+        };
+
+        let push_to_before_or_ors = {
+            let (p, ps) = cl.0.split_first().expect("split_or: empty pattern row");
+            let act = &cl.1;
+            if up_ok_iter(cl.0.as_slice(), act, no.iter()) {
+                if is_or(p) {
+                    let (new_ors, new_no) = insert_or_append(p, ps, act, ors, no);
+                    ors = new_ors;
+                    no = new_no;
+                    continue;
+                } else if up_ok_iter(cl.0.as_slice(), act, ors.iter()) {
+                    // OCaml `do_split` moves the current row into `before` with
+                    // `(cl :: before)` (compiler/ml/matching.ml:820-826).
+                    Some(true)
+                } else if or_ok_iter(p, ps, ors.iter()) {
+                    Some(false)
                 } else {
-                    let mut new_no = no;
-                    new_no.push_front(cl);
-                    do_split_or(
-                        ctx_ref, argo, before, ors, new_no, rest, args, def, next_raise,
-                    )
+                    None
                 }
+            } else {
+                None
             }
-            None => panic!("split_or: empty pattern row"),
-        },
+        };
+
+        match push_to_before_or_ors {
+            Some(true) => before.push_front(cl),
+            Some(false) => ors.push_front(cl),
+            None => no.push_front(cl),
+        }
     }
 }
 
