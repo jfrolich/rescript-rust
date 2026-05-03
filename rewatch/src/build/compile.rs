@@ -2376,7 +2376,7 @@ fn compile_module_in_process(
     .entered();
     let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let module_timing_start = module_timing_enabled.then(Instant::now);
-    let module_timing_before = module_timing_enabled.then(rescript_compiler::timing::snapshot);
+    let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {
@@ -2762,14 +2762,14 @@ fn compile_module_in_process(
         }
     }
 
-    if let (Some(start), Some(before)) = (module_timing_start, module_timing_before) {
-        let after = rescript_compiler::timing::snapshot();
+    if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
+        let timings = guard.snapshot();
         let wall = start.elapsed();
-        let parse = duration_delta(after.parse, before.parse);
-        let typecheck = duration_delta(after.typecheck, before.typecheck);
-        let lambda = duration_delta(after.lambda, before.lambda);
-        let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
-        let codegen = duration_delta(after.codegen, before.codegen);
+        let parse = timings.parse;
+        let typecheck = timings.typecheck;
+        let lambda = timings.lambda;
+        let lambda_optimization = timings.lambda_optimization;
+        let codegen = timings.codegen;
         let recorded = parse
             .saturating_add(typecheck)
             .saturating_add(lambda)
