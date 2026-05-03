@@ -4599,7 +4599,7 @@ fn add_signature_to_env_with_options(
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
                     pos += 1;
                 }
-                if std::env::var_os("RUST_DEBUG_OPEN_SIG_VALUES").is_some()
+                if crate::debug_flags::debug_open_sig_values()
                     && (id.name() == "someElement"
                         || id.name() == "element"
                         || id.name() == "stringToJson"

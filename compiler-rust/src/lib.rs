@@ -44,6 +44,8 @@ pub mod cache;
 pub mod cmi;
 pub mod config;
 pub mod context;
+/// Cached debug environment flags.
+pub mod debug_flags;
 pub mod diagnostics;
 pub mod driver;
 pub mod ident;

@@ -2221,7 +2221,7 @@ impl LambdaCompiler {
                 // entries goes through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=flatten-multi count={} bindings={} body_kind={} handler_kind={}",
                         handlers.len(),
@@ -2235,7 +2235,7 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2250,7 +2250,7 @@ impl LambdaCompiler {
                     body, *label, bindings, handler,
                 ) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=pseudo-fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2270,7 +2270,7 @@ impl LambdaCompiler {
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=nested-fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2285,7 +2285,7 @@ impl LambdaCompiler {
                     && !bindings.is_empty())
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path={} bindings={} body_kind={} handler_kind={}",
                         if requires_explicit_jump {
@@ -3782,7 +3782,7 @@ impl LambdaCompiler {
     }
 
     fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
-        if std::env::var_os("RUST_DEBUG_TAKE_RETURN_TAIL").is_some() {
+        if crate::debug_flags::debug_take_return_tail() {
             let rendered = crate::js_ir::print_block(&block);
             if rendered.contains("Invalid_argument")
                 || rendered.contains("RE_EXN_ID === A")
@@ -3914,7 +3914,7 @@ impl LambdaCompiler {
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
-        if std::env::var_os("RUST_DEBUG_COMPILE_TEST_RETURN").is_some() {
+        if crate::debug_flags::debug_compile_test_return() {
             let cond_text = crate::js_ir::print_expression(&cond);
             if cond_text.contains("RE_EXN_ID") || cond_text.contains("_1 === \"x\"") {
                 eprintln!(

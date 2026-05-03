@@ -626,7 +626,7 @@ fn inlined_record_representation(
 }
 
 fn trace_raw_fallback(kind: &'static str) {
-    if std::env::var_os("RUST_RAW_FALLBACK_TRACE").is_none() {
+    if !crate::debug_flags::raw_fallback_trace() {
         return;
     }
 
@@ -639,7 +639,7 @@ fn trace_raw_fallback(kind: &'static str) {
 }
 
 fn trace_raw_match_fallback(loc: &Location, scrut: &Expression, cases: &[Case]) {
-    if std::env::var_os("RUST_RAW_FALLBACK_TRACE").is_none() {
+    if !crate::debug_flags::raw_fallback_trace() {
         return;
     }
 
@@ -6186,7 +6186,7 @@ impl<'a> RawLambdaConverter<'a> {
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if std::env::var_os("RUST_SKIP_FOR_MULTIPLE_MATCH").is_none()
+        if !crate::debug_flags::skip_for_multiple_match()
             && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
         {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
