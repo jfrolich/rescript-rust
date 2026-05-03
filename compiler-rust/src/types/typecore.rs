@@ -4608,12 +4608,13 @@ fn force_qualified_value_type_paths<'a>(
         ctx: &TypeContext<'_>,
         ty: TypeExprRef,
         root_name: &str,
-        seen: &mut HashSet<TypeExprRef>,
+        seen: &mut Vec<TypeExprRef>,
     ) -> bool {
         let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
+        if seen.contains(&ty) {
             return false;
         }
+        seen.push(ty);
         let desc = ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
@@ -4685,7 +4686,7 @@ fn force_qualified_value_type_paths<'a>(
         root_name: &str,
     ) -> bool {
         decl.type_manifest.is_some_and(|manifest| {
-            type_expr_mentions_path_root(ctx, manifest, root_name, &mut HashSet::new())
+            type_expr_mentions_path_root(ctx, manifest, root_name, &mut Vec::new())
         })
     }
 
@@ -4870,13 +4871,14 @@ fn force_qualified_value_type_paths<'a>(
         selected_module_path: Option<&Path>,
         selected_alias_targets: &[Path],
         allow_stdlib_flat_parent_inference: bool,
-        seen: &mut HashSet<TypeExprRef>,
+        seen: &mut Vec<TypeExprRef>,
     ) {
         let ctx = tctx.type_ctx;
         let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
+        if seen.contains(&ty) {
             return;
         }
+        seen.push(ty);
 
         let desc = ctx.get_desc(ty);
         match &*desc {
@@ -5300,7 +5302,7 @@ fn force_qualified_value_type_paths<'a>(
     } else {
         Vec::new()
     };
-    let mut seen = HashSet::new();
+    let mut seen = Vec::new();
     visit(
         tctx,
         env,
