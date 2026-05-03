@@ -7395,6 +7395,29 @@ pub fn type_expect<'a>(
 }
 
 /// Unify expression types, raising ExprTypeClash on error.
+fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Path>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let Some(env) = tctx
+        .unify_state
+        .env()
+        .map(crate::types::env::Env::clone_preserve_id)
+    else {
+        return;
+    };
+
+    for path in paths {
+        // OCaml compiler/ml/typecore.ml:345-349 calls `Ctype.unify`,
+        // whose ctype.ml:666-673/688-749 `get_level` path reaches
+        // `Env.find_type`; for dotted paths env.ml:800-813 forces parent
+        // module components. Rust ctype records those exact lookup points
+        // because persistent component forcing lives in typecore.
+        let _ = lookup_type_decl_for_path(&path, &env, &mut tctx.persistent_env, tctx.type_ctx);
+    }
+}
+
 fn unify_expression_types(
     tctx: &mut TypeCheckContext<'_>,
     loc: LocIdx,
@@ -7404,7 +7427,14 @@ fn unify_expression_types(
 ) -> TypeCoreResult<()> {
     use crate::types::unify;
 
-    match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
+    let previous_capture = tctx.unify_state.begin_type_lookup_capture();
+    let result = unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2);
+    let pending_type_lookup_paths = tctx
+        .unify_state
+        .finish_type_lookup_capture(previous_capture);
+    force_unify_type_lookup_paths(tctx, pending_type_lookup_paths);
+
+    match result {
         Ok(()) => Ok(()),
         Err(err) => {
             // Retry when one side is a type constructor that expands exactly

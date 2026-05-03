@@ -126,6 +126,13 @@ pub struct UnifyState {
     /// temporarily switches environments.
     env: Option<Env>,
 
+    /// Dotted type paths whose OCaml `Env.find_type` lookup would force
+    /// persistent module components while lowering levels.
+    pending_type_lookup_paths: Vec<Path>,
+
+    /// Whether the current caller wants to collect those lookup side effects.
+    capture_type_lookup_paths: bool,
+
     /// Current recursive call depth in `unify`.
     recursion_depth: usize,
 }
@@ -139,6 +146,8 @@ impl UnifyState {
             generate_equations: false,
             assume_injective: false,
             env: None,
+            pending_type_lookup_paths: Vec::new(),
+            capture_type_lookup_paths: false,
             recursion_depth: 0,
         }
     }
@@ -151,6 +160,8 @@ impl UnifyState {
             generate_equations: true,
             assume_injective: false,
             env: None,
+            pending_type_lookup_paths: Vec::new(),
+            capture_type_lookup_paths: false,
             recursion_depth: 0,
         }
     }
@@ -175,6 +186,29 @@ impl UnifyState {
     /// Get a mutable reference to the environment, if set.
     pub fn env_mut(&mut self) -> Option<&mut Env> {
         self.env.as_mut()
+    }
+
+    /// Start collecting type lookup paths reached through OCaml-equivalent
+    /// `ctype.ml` level lowering.
+    pub fn begin_type_lookup_capture(&mut self) -> bool {
+        let previous = self.capture_type_lookup_paths;
+        self.capture_type_lookup_paths = true;
+        previous
+    }
+
+    /// Restore the previous capture state and return paths collected while it
+    /// was active.
+    pub fn finish_type_lookup_capture(&mut self, previous: bool) -> Vec<Path> {
+        self.capture_type_lookup_paths = previous;
+        std::mem::take(&mut self.pending_type_lookup_paths)
+    }
+
+    fn should_capture_type_lookup_paths(&self) -> bool {
+        self.capture_type_lookup_paths
+    }
+
+    fn extend_type_lookup_paths(&mut self, paths: Vec<Path>) {
+        self.pending_type_lookup_paths.extend(paths);
     }
 
     /// Check if two types have already been unified.
@@ -314,11 +348,26 @@ fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) ->
 }
 
 fn get_level(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> i32 {
+    let mut pending_type_lookup_paths = None;
+    get_level_with_lookup_capture(ctx, env, path, &mut pending_type_lookup_paths)
+}
+
+fn get_level_with_lookup_capture(
+    ctx: &TypeContext<'_>,
+    env: &Env,
+    path: &Path,
+    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
+) -> i32 {
     // OCaml compiler/ml/ctype.ml:666-673 `get_level env p` calls
     // `Env.find_type p env` before falling back to `Path.binding_time p`.
     // For dotted paths, compiler/ml/env.ml:800-813 builds parent component
     // tables as a lookup side effect; `lower_args` depends on that happening
     // before local binders are created.
+    if matches!(path, Path::Pdot(_, _, _)) {
+        if let Some(paths) = pending_type_lookup_paths.as_deref_mut() {
+            paths.push(path.clone());
+        }
+    }
     let found_decl = match path {
         Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
         Path::Pdot(parent, type_name, _) => {
@@ -738,6 +787,17 @@ pub fn update_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) {
 /// to its expansion. This normalizes module-alias paths (e.g.,
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
 pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, ty: TypeExprRef) {
+    let mut pending_type_lookup_paths = None;
+    update_level_expand_with_lookup_capture(ctx, env, level, ty, &mut pending_type_lookup_paths);
+}
+
+fn update_level_expand_with_lookup_capture<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+    level: i32,
+    ty: TypeExprRef,
+    pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
+) {
     let ty = ctx.repr(ty);
     let current = ctx.get_level(ty);
 
@@ -749,7 +809,8 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
                 // here. Keep the same lookup side effects even when the
                 // numeric result falls back to `Path.binding_time`.
-                let path_level = get_level(ctx, env, &path);
+                let path_level =
+                    get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths);
                 let should_try_expand = current != GENERIC_LEVEL && level < path_level;
                 drop(desc);
                 // Guard: skip expansion for all local Pident types (not predef).
@@ -786,14 +847,26 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                         ) {
                             ctx.set_level(ty, level);
                             iter_type_expr(ctx, ty, |child| {
-                                update_level_expand(ctx, env, level, child);
+                                update_level_expand_with_lookup_capture(
+                                    ctx,
+                                    env,
+                                    level,
+                                    child,
+                                    pending_type_lookup_paths,
+                                );
                             });
                             return;
                         }
                         if expanded != ty && !deep_occur(ctx, ty, expanded) {
                             link_type(ctx, ty, expanded);
                             // Recursively update the expansion
-                            update_level_expand(ctx, env, level, expanded);
+                            update_level_expand_with_lookup_capture(
+                                ctx,
+                                env,
+                                level,
+                                expanded,
+                                pending_type_lookup_paths,
+                            );
                             return;
                         }
                     }
@@ -801,14 +874,26 @@ pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, 
                 // Couldn't expand; just set level and recurse
                 ctx.set_level(ty, level);
                 iter_type_expr(ctx, ty, |child| {
-                    update_level_expand(ctx, env, level, child);
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        child,
+                        pending_type_lookup_paths,
+                    );
                 });
             }
             _ => {
                 drop(desc);
                 ctx.set_level(ty, level);
                 iter_type_expr(ctx, ty, |child| {
-                    update_level_expand(ctx, env, level, child);
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        child,
+                        pending_type_lookup_paths,
+                    );
                 });
             }
         }
@@ -3294,11 +3379,19 @@ pub fn unify_var<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             let level = ctx.get_level(t1);
+            let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
+            let mut pending_type_lookup_paths = Vec::new();
             if let Some(env) = state.env() {
-                update_level_expand(ctx, env, level, t2);
+                if capture_type_lookup_paths {
+                    let mut capture = Some(&mut pending_type_lookup_paths);
+                    update_level_expand_with_lookup_capture(ctx, env, level, t2, &mut capture);
+                } else {
+                    update_level_expand(ctx, env, level, t2);
+                }
             } else {
                 update_level(ctx, level, t2);
             }
+            state.extend_type_lookup_paths(pending_type_lookup_paths);
             link_type(ctx, t1, t2);
             Ok(())
         }
@@ -3606,8 +3699,17 @@ fn unify_types<'a>(
         let lv1 = ctx.get_level(t1);
         let lv2 = ctx.get_level(t2);
         let lv = std::cmp::min(lv1, lv2);
-        update_level_expand(ctx, env, lv, t2);
-        update_level_expand(ctx, env, lv, t1);
+        let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
+        let mut pending_type_lookup_paths = Vec::new();
+        if capture_type_lookup_paths {
+            let mut capture = Some(&mut pending_type_lookup_paths);
+            update_level_expand_with_lookup_capture(ctx, env, lv, t2, &mut capture);
+            update_level_expand_with_lookup_capture(ctx, env, lv, t1, &mut capture);
+        } else {
+            update_level_expand(ctx, env, lv, t2);
+            update_level_expand(ctx, env, lv, t1);
+        }
+        state.extend_type_lookup_paths(pending_type_lookup_paths);
     }
 
     // Re-repr after update_level_expand may have linked types.
