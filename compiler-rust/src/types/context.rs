@@ -325,7 +325,7 @@ pub struct TypeContext<'a> {
     /// literals instead of rebuilding or cloning large records such as
     /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<String, Arc<Vec<super::decl::LabelDescription>>>>,
+        RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -1097,22 +1097,22 @@ impl<'a> TypeContext<'a> {
     /// Cache reconstructed record label descriptions for a type path.
     pub fn register_record_label_descriptions(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
         labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
         self.record_label_descriptions_cache
             .borrow_mut()
-            .insert(type_path_name.to_string(), labels);
+            .insert(type_path.clone(), labels);
     }
 
     /// Look up reconstructed record label descriptions for a type path.
     pub fn get_record_label_descriptions(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
     ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
         self.record_label_descriptions_cache
             .borrow()
-            .get(type_path_name)
+            .get(type_path)
             .cloned()
     }
 

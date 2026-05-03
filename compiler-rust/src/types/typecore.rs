@@ -19227,18 +19227,25 @@ fn build_record_label_descriptions<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    // OCaml reuses the installed `lbl_all` array during record typing
+    // (compiler/ml/typecore.ml:2802,2840-2842). Rust reconstructs that array
+    // lazily, so a constructor-path cache hit can return before cloning the
+    // full record declaration again.
+    if let Some(cached) = cached_record_label_descriptions_for_constr(record_ty, ctx) {
+        return Some(cached);
+    }
+
     let (record_path, _actual_args, decl) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)?;
     let (labels, repr) = match &decl.type_kind {
         crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
         _ => return None,
     };
-    let cache_key = format!("{:?}", record_path);
-    if let Some(cached) = ctx.get_record_label_descriptions(&cache_key) {
+    if let Some(cached) = ctx.get_record_label_descriptions(&record_path) {
         return Some(cached);
     }
 
-    let shared_res = ctx.new_generic_constr(record_path, decl.type_params.clone());
+    let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
     // OCaml assigns `lbl_all` when label descriptions are installed in the
     // environment, then reuses that array in `type_record`
     // (compiler/ml/typecore.ml:2802,2840-2842). This fallback reconstructs
@@ -19267,8 +19274,29 @@ fn build_record_label_descriptions<'a>(
             })
             .collect::<Vec<_>>(),
     );
-    ctx.register_record_label_descriptions(&cache_key, descriptions.clone());
+    ctx.register_record_label_descriptions(&record_path, descriptions.clone());
     Some(descriptions)
+}
+
+fn cached_record_label_descriptions_for_constr(
+    record_ty: TypeExprRef,
+    ctx: &crate::types::context::TypeContext<'_>,
+) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    let mut current = ctx.repr(record_ty);
+    for _ in 0..32 {
+        let next = {
+            let desc = ctx.borrow_desc(current);
+            match &*desc {
+                TypeDesc::Tconstr { path, .. } => {
+                    return ctx.get_record_label_descriptions(path);
+                }
+                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
+                _ => return None,
+            }
+        };
+        current = ctx.repr(next?);
+    }
+    None
 }
 
 fn specialize_label_for_record_ty<'a>(
