@@ -782,7 +782,7 @@ impl PersistentEnv {
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
             }
-            register_types_by_stamp_recursive(&ModuleType::MtySignature(ps.ps_sig.clone()), ctx);
+            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
             if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
                 ctx.register_raw_module_sig(name, ps.ps_sig.clone());
             }
@@ -2202,18 +2202,22 @@ fn decode_cmj_list<T>(
 /// during type unification, even when the type comes from a deeply nested module.
 pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
     if let ModuleType::MtySignature(sig) = md_type {
-        for item in sig {
-            match item {
-                SignatureItem::SigType(id, decl, _) => {
-                    if id.stamp() != 0 {
-                        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
-                    }
+        register_types_by_stamp_in_signature_recursive(sig, ctx);
+    }
+}
+
+fn register_types_by_stamp_in_signature_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, decl, _) => {
+                if id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
                 }
-                SignatureItem::SigModule(_, md, _) => {
-                    register_types_by_stamp_recursive(&md.md_type, ctx);
-                }
-                _ => {}
             }
+            SignatureItem::SigModule(_, md, _) => {
+                register_types_by_stamp_recursive(&md.md_type, ctx);
+            }
+            _ => {}
         }
     }
 }
