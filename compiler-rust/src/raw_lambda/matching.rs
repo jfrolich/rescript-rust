@@ -7172,7 +7172,6 @@ fn normalize_path_via_ctx(
     ctx_ref: &TypeContext<'_>,
     path: &crate::types::path::Path,
 ) -> crate::types::path::Path {
-    use crate::types::decl::{ModuleType, SignatureItem};
     use crate::types::path::Path;
 
     match path {
@@ -7224,18 +7223,8 @@ fn normalize_module_path_via_ctx(
 
             // Strategy 2: try to find the parent module's signature from sig caches.
             let prefix_name = prefix.name();
-            let sig_opt = ctx_ref
-                .find_resolved_module_sig(&prefix_name)
-                .map(|(_, sig)| sig)
-                .or_else(|| {
-                    ctx_ref
-                        .renamed_module_sigs
-                        .borrow()
-                        .get(&prefix_name)
-                        .cloned()
-                });
-            if let Some(sig) = sig_opt {
-                for item in &sig {
+            if let Some((_, sig)) = ctx_ref.find_resolved_module_sig(&prefix_name) {
+                for item in sig.iter() {
                     if let SignatureItem::SigModule(id, md, _) = item {
                         if id.name() == name {
                             if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
@@ -7243,6 +7232,24 @@ fn normalize_module_path_via_ctx(
                             }
                         }
                     }
+                }
+            } else {
+                let alias_path = {
+                    let renamed_sigs = ctx_ref.renamed_module_sigs.borrow();
+                    renamed_sigs.get(&prefix_name).and_then(|sig| {
+                        sig.iter().find_map(|item| match item {
+                            SignatureItem::SigModule(id, md, _) if id.name() == name => {
+                                match &md.md_type {
+                                    ModuleType::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                    })
+                };
+                if let Some(alias_path) = alias_path {
+                    return normalize_module_path_via_ctx(ctx_ref, &alias_path);
                 }
             }
             path

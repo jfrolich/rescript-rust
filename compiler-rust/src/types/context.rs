@@ -214,9 +214,11 @@ pub struct TypeContext<'a> {
     resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
-    /// Prevents repeated calls to resolve_module_signature_for_path from
-    /// creating fresh type copies via copy_lookup_signature_for_subst.
-    resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
+    /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
+    /// components behind lazy cells; cache hits share the already-substituted
+    /// signature snapshot instead of cloning every `SignatureItem`.
+    resolved_module_sig_cache:
+        RefCell<ahash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
@@ -554,7 +556,7 @@ impl<'a> TypeContext<'a> {
         &self,
         path: &str,
         access_path: Path,
-        sig: super::decl::Signature,
+        sig: Arc<super::decl::Signature>,
     ) {
         self.resolved_module_sig_cache
             .borrow_mut()
@@ -562,7 +564,10 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Look up a cached resolved module signature.
-    pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
+    pub fn find_resolved_module_sig(
+        &self,
+        path: &str,
+    ) -> Option<(Path, Arc<super::decl::Signature>)> {
         self.resolved_module_sig_cache.borrow().get(path).cloned()
     }
 

@@ -7439,7 +7439,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 tctx.type_ctx,
                             ) {
                                 crate::cmi::persistent_env::add_signature_to_env(
-                                    &sig_items,
+                                    sig_items.as_ref(),
                                     &resolved_path,
                                     &mut sig_env,
                                     tctx.type_ctx,
@@ -7811,7 +7811,7 @@ fn approx_modtype<'a>(
                         tctx.type_ctx,
                     ) {
                         crate::cmi::persistent_env::add_signature_to_env(
-                            &sig_items,
+                            sig_items.as_ref(),
                             &resolved_path,
                             &mut sig_env,
                             tctx.type_ctx,
@@ -10464,7 +10464,7 @@ pub fn transl_signature<'a>(
                     tctx.type_ctx,
                 ) {
                     crate::cmi::persistent_env::add_signature_to_env(
-                        &sig_items,
+                        sig_items.as_ref(),
                         &resolved_path,
                         &mut sig_env,
                         tctx.type_ctx,
@@ -13952,7 +13952,7 @@ fn type_structure_item<'a>(
                             pers.find_pers_struct(mod_name, tctx.type_ctx).map(|ps| {
                                 (
                                     Path::pident(Ident::create_persistent(mod_name)),
-                                    ps.ps_sig.clone(),
+                                    std::sync::Arc::new(ps.ps_sig.clone()),
                                 )
                             })
                         })
@@ -13967,7 +13967,7 @@ fn type_structure_item<'a>(
                     env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
                 }) {
                 crate::cmi::persistent_env::add_signature_to_env(
-                    &sig_items,
+                    sig_items.as_ref(),
                     &resolved_path,
                     &mut new_env,
                     tctx.type_ctx,

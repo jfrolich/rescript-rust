@@ -34,6 +34,7 @@ use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
 use crate::location::Location;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use std::sync::Arc;
 
 fn in_process_module_resolution_env(
     ctx: &TypeContext<'_>,
@@ -989,7 +990,7 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     let cache_key = module_path.name();
     if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
         if cached_path.same(module_path) {
-            return Some(cached_sig);
+            return Some(cached_sig.as_ref().clone());
         }
     }
 
@@ -1057,7 +1058,7 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), sig.clone());
+        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), Arc::new(sig.clone()));
     }
 
     result

@@ -44,6 +44,7 @@ use crate::types::{
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 const DICT_PATTERN_ATTRIBUTE: &str = "res.dictPattern";
 const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
@@ -12152,7 +12153,7 @@ fn select_record_type_from_qualified_fields<'a>(
         env.resolve_module_lid(module_lid.as_ref(), arena, pers_env, ctx)?;
     let mut matches: Vec<TypeExprRef> = Vec::new();
 
-    for sig_item in &signature {
+    for sig_item in signature.iter() {
         let SignatureItem::SigType(type_id, type_decl, _) = sig_item else {
             continue;
         };
@@ -13744,7 +13745,7 @@ fn type_open(
         tctx.type_ctx,
     ) {
         crate::cmi::persistent_env::add_signature_to_env(
-            &sig_items,
+            sig_items.as_ref(),
             &resolved_path,
             &mut open_env,
             tctx.type_ctx,
@@ -17104,7 +17105,7 @@ impl Env {
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
-    ) -> Option<(Path, crate::types::decl::Signature)> {
+    ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true)
     }
 
@@ -17199,7 +17200,7 @@ impl Env {
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
-    ) -> Option<(Path, crate::types::decl::Signature)> {
+    ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
     }
 
@@ -17241,7 +17242,7 @@ impl Env {
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext<'b>,
         apply_subst: bool,
-    ) -> Option<(Path, crate::types::decl::Signature)> {
+    ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         match lid {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
@@ -17274,18 +17275,19 @@ impl Env {
                         return Some(cached);
                     }
                     if apply_subst {
-                        let resolved = resolve_module_signature_for_path(
+                        let (resolved_path, resolved_sig) = resolve_module_signature_for_path(
                             &access_path_hint,
                             self,
                             pers_env,
                             ctx,
                         )?;
+                        let resolved_sig = Arc::new(resolved_sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
-                            resolved.0.clone(),
-                            resolved.1.clone(),
+                            resolved_path.clone(),
+                            resolved_sig.clone(),
                         );
-                        return Some(resolved);
+                        return Some((resolved_path, resolved_sig));
                     }
                     let result = self.resolve_module_type(&md.md_type, pers_env, ctx);
                     // Some opened submodules carry alias module types with hidden
@@ -17297,7 +17299,7 @@ impl Env {
                             if let Some((resolved_path, sig)) =
                                 resolve_module_signature_for_path(access_path, self, pers_env, ctx)
                             {
-                                return Some((resolved_path, sig));
+                                return Some((resolved_path, Arc::new(sig)));
                             }
                         }
                     }
@@ -17458,6 +17460,7 @@ impl Env {
                                 crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                             }
                         }
+                        let sig = Arc::new(sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
                             path.clone(),
@@ -17482,7 +17485,7 @@ impl Env {
                             );
                         }
                         crate::types::ctype::force_generalize_signature_values(ctx, &sig);
-                        return Some((module_path, sig));
+                        return Some((module_path, Arc::new(sig)));
                     }
                 }
                 None
@@ -17496,12 +17499,7 @@ impl Env {
                         self,
                         pers_env,
                         ctx,
-                        |components| {
-                            (
-                                components.access_path().clone(),
-                                components.cloned_signature(),
-                            )
-                        },
+                        |components| (components.access_path().clone(), components.signature_arc()),
                     ) {
                         return Some(result);
                     }
@@ -17519,12 +17517,7 @@ impl Env {
                         self,
                         pers_env,
                         ctx,
-                        |components| {
-                            (
-                                components.access_path().clone(),
-                                components.cloned_signature(),
-                            )
-                        },
+                        |components| (components.access_path().clone(), components.signature_arc()),
                     );
                 }
                 // Recursively resolve the prefix to get a signature
@@ -17533,9 +17526,10 @@ impl Env {
                 {
                     // Search for the sub-module in the parent's signature using
                     // OCaml runtime slot accounting.
-                    if let Some((pos, sub_md)) =
-                        crate::types::decl::signature_runtime_module(&parent_sig, submod_name)
-                    {
+                    if let Some((pos, sub_md)) = crate::types::decl::signature_runtime_module(
+                        parent_sig.as_ref(),
+                        submod_name,
+                    ) {
                         let sub_path = Path::Pdot(
                             Box::new(parent_path.clone()),
                             submod_name.to_string(),
@@ -17544,7 +17538,8 @@ impl Env {
                         if apply_subst {
                             return resolve_module_signature_for_path(
                                 &sub_path, self, pers_env, ctx,
-                            );
+                            )
+                            .map(|(path, sig)| (path, Arc::new(sig)));
                         }
                         let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                         if let Some((sig, resolved_name)) = result {
@@ -17697,7 +17692,7 @@ impl Env {
                                 }
                                 crate::types::ctype::force_generalize_signature_values(ctx, &sig);
                             }
-                            return Some((sub_path, sig));
+                            return Some((sub_path, Arc::new(sig)));
                         }
                         return None;
                     }
@@ -19089,7 +19084,7 @@ fn lookup_label_by_lid<'a>(
     let (module_path, signature) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
     let mut candidates = Vec::new();
 
-    for sig_item in &signature {
+    for sig_item in signature.iter() {
         if let SignatureItem::SigType(type_id, type_decl, _) = sig_item {
             let (labels, repr) = match &type_decl.type_kind {
                 crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
