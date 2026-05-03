@@ -804,6 +804,7 @@ fn generate_ast_with_rust_parser(
                     super::build_types::StoredSignatureAst {
                         arena: parser.into_arena(),
                         signature,
+                        source_len: source.len(),
                     },
                 )))
             } else {
@@ -865,6 +866,7 @@ fn generate_ast_with_rust_parser(
                     super::build_types::StoredStructureAst {
                         arena: parser.into_arena(),
                         structure,
+                        source_len: source.len(),
                     },
                 )))
             } else {

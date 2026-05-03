@@ -236,14 +236,40 @@ fn unblock_dependents(
     }
 }
 
-/// Compute the critical-path priority of every module in the universe:
-/// `priority(m) = 1 + max(priority(d) for d in in-universe dependents of m)`.
+/// Estimate module cost from parse-phase source buffers that are already held
+/// in memory for `--in-process`. This keeps the scheduler from doing extra
+/// filesystem reads while still prioritizing large ready modules over tiny
+/// leaf work.
+fn compute_module_costs(
+    build_state: &BuildCommandState,
+    universe: &AHashSet<String>,
+) -> AHashMap<String, i64> {
+    let stored_asts = build_state.stored_asts.lock().unwrap();
+    let mut costs = AHashMap::with_capacity(universe.len());
+    for name in universe {
+        let impl_key = format!("{name}:impl");
+        let intf_key = format!("{name}:intf");
+        let mut source_len = 0usize;
+        if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
+            source_len = source_len.saturating_add(stored.source_len);
+        }
+        if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
+            source_len = source_len.saturating_add(stored.source_len);
+        }
+        costs.insert(name.clone(), source_len.max(1) as i64);
+    }
+    costs
+}
+
+/// Compute the weighted critical-path priority of every module in the universe:
+/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
 fn compute_critical_path_priorities(
     universe: &AHashSet<String>,
     build_state: &BuildState,
+    costs: &AHashMap<String, i64>,
 ) -> AHashMap<String, i64> {
     let mut priorities: AHashMap<String, i64> = AHashMap::with_capacity(universe.len());
     let mut remaining_dependents: AHashMap<String, usize> = AHashMap::with_capacity(universe.len());
@@ -267,7 +293,10 @@ fn compute_critical_path_priorities(
             .filter_map(|d| priorities.get(d).copied())
             .max()
             .unwrap_or(0);
-        priorities.insert(name.clone(), max_dep_priority + 1);
+        priorities.insert(
+            name.clone(),
+            max_dep_priority + costs.get(&name).copied().unwrap_or(1),
+        );
 
         for dep in &module.deps {
             if !universe.contains(dep) {
@@ -567,7 +596,9 @@ pub fn compile(
     set_length(compile_universe_count as u64);
 
     let compile_universe = Arc::new(compile_universe);
-    let priorities = compute_critical_path_priorities(&compile_universe, &build_state.build_state);
+    let module_costs = compute_module_costs(build_state, &compile_universe);
+    let priorities =
+        compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
 
     // Count of not-yet-completed in-universe dependencies for each module.
     // Only touched on the main thread.

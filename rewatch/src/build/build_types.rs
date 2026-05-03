@@ -145,12 +145,14 @@ impl Display for SourceType {
 pub struct StoredStructureAst {
     pub arena: ParseArena,
     pub structure: Structure,
+    pub source_len: usize,
 }
 
 #[derive(Debug)]
 pub struct StoredSignatureAst {
     pub arena: ParseArena,
     pub signature: Signature,
+    pub source_len: usize,
 }
 
 #[derive(Clone)]
