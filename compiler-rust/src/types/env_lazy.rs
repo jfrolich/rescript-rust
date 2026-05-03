@@ -467,6 +467,10 @@ impl QualifiedModuleComponents {
         self.signature.as_slice()
     }
 
+    pub(crate) fn signature_arc(&self) -> Arc<Signature> {
+        self.signature.clone()
+    }
+
     pub(crate) fn cloned_signature(&self) -> Signature {
         self.signature.as_ref().clone()
     }

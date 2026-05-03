@@ -2214,7 +2214,7 @@ fn compile_module_in_process(
     let root_config = build_command_state.get_root_config();
 
     // Build compiler options from package config
-    let options = build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
 
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
@@ -2328,6 +2328,8 @@ fn compile_module_in_process(
 
     // Step 2: Compile the implementation
     let impl_key = format!("{module_name}:impl");
+    options.publish_in_process_signature = !has_interface;
+
     let compile_result = {
         let _impl_span = info_span!(
             "compiler.in_process_implementation",

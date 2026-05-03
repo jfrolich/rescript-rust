@@ -20963,7 +20963,7 @@ fn build_module_components_from_parent_path<'a>(
                         access_path,
                         md.clone(),
                         components.access_path().clone(),
-                        std::sync::Arc::new(components.cloned_signature()),
+                        components.signature_arc(),
                     )
                 })
         })

@@ -289,6 +289,7 @@ fn run() -> Result<()> {
         make_runtime: opts.make_runtime,
         capture_intermediates: false,
         skip_js_render: false,
+        publish_in_process_signature: true,
     };
 
     if is_interface {

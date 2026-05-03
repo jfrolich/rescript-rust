@@ -1203,6 +1203,13 @@ pub struct CompilerOptions {
     /// Used by runtime seeding, which only needs signatures, purity, and
     /// closed constants in memory.
     pub skip_js_render: bool,
+    /// Publish a portable in-process signature for downstream module lookup.
+    /// Rewatch can disable this for implementations whose interface already
+    /// supplies the published signature. OCaml still saves before Lambda translation
+    /// (`compiler/ml/typemod.ml:1779-1788`; `compiler/ml/translmod.ml:267`);
+    /// this only skips the Rust-only portable registry extraction when no
+    /// downstream lookup can observe it.
+    pub publish_in_process_signature: bool,
 }
 
 impl Default for CompilerOptions {
@@ -1233,6 +1240,7 @@ impl Default for CompilerOptions {
             make_runtime: false,
             capture_intermediates: false,
             skip_js_render: false,
+            publish_in_process_signature: true,
         }
     }
 }
@@ -3529,12 +3537,16 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         });
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
-        let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-            module_name,
-            original_alias_count,
-            &type_ctx,
-            Some(arena),
-        );
+        let (pers_struct, new_alias_rewrites) = if options.publish_in_process_signature {
+            internal_env.extract_module_update(
+                module_name,
+                original_alias_count,
+                &type_ctx,
+                Some(arena),
+            )
+        } else {
+            (None, ahash::AHashMap::new())
+        };
         internal_env.unregister_in_memory_signature(module_name);
         (pers_struct, new_alias_rewrites, internal_env)
     };
