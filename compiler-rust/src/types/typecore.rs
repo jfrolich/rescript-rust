@@ -20460,6 +20460,46 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     }
 }
 
+fn lookup_constructor_from_type_descrs<'b>(
+    cstr_name: &str,
+    type_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext<'b>,
+) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+    let Path::Pdot(parent, type_name, _) = type_path else {
+        return None;
+    };
+
+    // OCaml compiler/ml/typecore.ml:942-959 implements
+    // `NameChoice.lookup_from_type` by calling `Env.find_type_descrs`.
+    // For dotted paths, compiler/ml/env.ml:804-813 reaches the parent module
+    // component table before selecting constructors for exactly this type; the
+    // dotted prefix can also observe env.ml:865-882's `find_module` side effect
+    // through the same alias-scraping path described by ctype.ml:1367-1372.
+    force_find_module_path_for_lookup(parent, env, pers_env, ctx);
+    let desc = with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+        let (_, _) = components.lookup_type(type_name.as_str())?;
+        let component_type_path = Path::pdot(components.access_path().clone(), type_name.as_str());
+        components
+            .lookup_constructors(cstr_name)?
+            .iter()
+            .find_map(|desc| {
+                let res_repr = ctx.repr(desc.cstr_res);
+                let res_desc = ctx.get_desc(res_repr);
+                let matches = match &*res_desc {
+                    TypeDesc::Tconstr { path, .. } => path.same(&component_type_path),
+                    _ => false,
+                };
+                drop(res_desc);
+                matches.then(|| desc.clone())
+            })
+    })
+    .flatten()?;
+
+    Some((Path::pident(Ident::create_persistent(cstr_name)), desc))
+}
+
 fn lookup_constructor_by_expected_type<'b>(
     cstr_name: &str,
     expected_ty: TypeExprRef,
@@ -20475,6 +20515,12 @@ fn lookup_constructor_by_expected_type<'b>(
         pers_env,
         ctx,
     )?;
+
+    if let Some(result) =
+        lookup_constructor_from_type_descrs(cstr_name, &type_path, env, pers_env, ctx)
+    {
+        return Some(result);
+    }
 
     // Look up the type declaration.
     let Some(concrete_type_decl) = lookup_type_decl_for_path(&type_path, env, pers_env, ctx) else {
