@@ -8132,12 +8132,14 @@ fn type_application(
     // same logical list here as indices into `args` so each application avoids
     // cloning parser labels.
     let mut remaining_args: Vec<usize> = (0..args.len()).collect();
+    let mut remaining_start = 0usize;
     let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
     let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut consumed_optional_count = 0usize;
     let mut synthesized_optional_count = 0usize;
 
-    while !remaining_args.is_empty() {
+    while remaining_start < remaining_args.len() {
+        let remaining = &remaining_args[remaining_start..];
         let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
         let expanded_current_ty0 = if ctx.repr(current_ty0) == ctx.repr(current_ty) {
             expanded_current_ty
@@ -8154,7 +8156,7 @@ fn type_application(
             // consumed by the next positional parameter.
             if consumed_optional_count > 0
                 && omitted.is_empty()
-                && remaining_args.len() == 1
+                && remaining.len() == 1
                 && pending_args.len() == synthesized_optional_count
                 && matches!(fn_label, crate::types::ArgLabel::Nolabel)
             {
@@ -8168,7 +8170,7 @@ fn type_application(
                     )
                 };
                 if !param_is_unit {
-                    let arg_index = remaining_args[0];
+                    let arg_index = remaining[0];
                     if let (ArgLabel::Nolabel, arg_expr_idx) = &args[arg_index] {
                         let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
                         if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
@@ -8183,10 +8185,15 @@ fn type_application(
             }
 
             let fn_label_name = fn_label.label_name().unwrap_or("");
-            if let Some(match_idx) =
-                extract_label_index(args, &remaining_args, fn_label_name, tctx.arena)
+            if let Some(match_idx) = extract_label_index(args, remaining, fn_label_name, tctx.arena)
             {
-                let arg_index = remaining_args.remove(match_idx);
+                let absolute_match_idx = remaining_start + match_idx;
+                let arg_index = remaining_args[absolute_match_idx];
+                if match_idx == 0 {
+                    remaining_start += 1;
+                } else {
+                    remaining_args.remove(absolute_match_idx);
+                }
                 let (call_label, arg_expr_idx) = &args[arg_index];
                 let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
                 let call_is_optional = call_label.is_optional();
@@ -8214,7 +8221,7 @@ fn type_application(
                 continue;
             }
 
-            if fn_label.is_optional() && (total_app || has_nolabel_arg(args, &remaining_args)) {
+            if fn_label.is_optional() && (total_app || has_nolabel_arg(args, remaining)) {
                 consumed_optional_count += 1;
                 let option_ty = crate::types::instance(ctx, arg_ty);
                 // OCaml type_application: consumed omitted optional labels still appear
@@ -8242,7 +8249,8 @@ fn type_application(
             continue;
         }
 
-        let arg_index = remaining_args.remove(0);
+        let arg_index = remaining_args[remaining_start];
+        remaining_start += 1;
         let (label, arg_expr_idx) = &args[arg_index];
         let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
 
@@ -8250,7 +8258,7 @@ fn type_application(
         // the final argument is `()`, treat it as an empty application.
         if consumed_optional_count > 0
             && omitted.is_empty()
-            && remaining_args.is_empty()
+            && remaining_start == remaining_args.len()
             && label.is_nolabel()
             && pending_args.len() == synthesized_optional_count
         {
