@@ -6892,20 +6892,24 @@ fn scan_def(
 
 /// Overloaded version of `same_actions` for tagged lists (ConstructorTag, lambda).
 /// Checks if all actions in a case list are the same.
-fn same_actions_tagged<K>(cases: &[(K, RawLambda)]) -> Option<RawLambda> {
+fn all_actions_same_tagged<K>(cases: &[(K, RawLambda)]) -> bool {
     match cases {
-        [] => None,
-        [(_, act)] => Some(act.clone()),
+        [] => false,
+        [_] => true,
         [(_, act0), rem @ ..] => {
-            let raw_act0 = tr_raw(act0)?;
+            let Some(raw_act0) = tr_raw(act0) else {
+                return false;
+            };
             let raw_act0_str = lambda_to_string(&raw_act0);
             for (_, act) in rem {
-                let raw_act = tr_raw(act)?;
+                let Some(raw_act) = tr_raw(act) else {
+                    return false;
+                };
                 if lambda_to_string(&raw_act) != raw_act0_str {
-                    return None;
+                    return false;
                 }
             }
-            Some(act0.clone())
+            true
         }
     }
 }
@@ -7325,16 +7329,18 @@ fn combine_constructor(
         // compiler/ml/matching.ml:2152-2155 builds `fails @ tag_lambda_list`,
         // then passes the same list to both `split_cases` and `same_actions`.
         // Rust's Vec is moved into `split_cases`, so compute the pure
-        // same-action fast path first instead of cloning every action.
+        // same-action fast path first. When all actions match, move the first
+        // owned action instead of cloning it; OCaml returns the original `act0`
+        // at compiler/ml/matching.ml:2155-2156.
         let mut actions = fails;
         actions.extend(tag_lambda_list);
-        let one_action = if fail_opt.is_none() {
-            same_actions_tagged(&actions)
-        } else {
-            None
-        };
+        let actions_all_same = fail_opt.is_none() && all_actions_same_tagged(&actions);
 
-        let lambda1 = if let Some(act) = one_action {
+        let lambda1 = if actions_all_same {
+            let (_, act) = actions
+                .into_iter()
+                .next()
+                .expect("non-empty action list after same-action check");
             act // Identical actions, no failure
         } else {
             let (mut consts, mut nonconsts) = split_cases(actions);
@@ -7640,7 +7646,6 @@ fn combine_variant(
     };
 
     let sig_complete = tag_lambda_list.len() == num_constr;
-    let one_action = same_actions_tagged(&tag_lambda_list);
 
     let (fail, local_jumps) = if sig_complete || matches!(partial, Partial::Total) {
         (None, jumps_empty())
@@ -7648,10 +7653,18 @@ fn combine_variant(
         mk_failaction_neg(partial, ctx, def)
     };
 
-    let (consts, nonconsts) = split_variant_cases(tag_lambda_list);
-    let lambda1 = match (&fail, &one_action) {
-        (None, Some(act)) => act.clone(),
-        _ => match (consts.as_slice(), nonconsts.as_slice()) {
+    let actions_all_same = fail.is_none() && all_actions_same_tagged(&tag_lambda_list);
+    let lambda1 = if actions_all_same {
+        // OCaml compiler/ml/matching.ml:2155-2156 returns the original
+        // action when all switch branches share the same lambda.
+        let (_, act) = tag_lambda_list
+            .into_iter()
+            .next()
+            .expect("non-empty variant action list after same-action check");
+        act
+    } else {
+        let (consts, nonconsts) = split_variant_cases(tag_lambda_list);
+        match (consts.as_slice(), nonconsts.as_slice()) {
             ([(_, (_, act1))], [(_, (_, act2))]) if fail.is_none() => {
                 test_int_or_block(arg, act1.clone(), act2.clone())
             }
@@ -7695,7 +7708,7 @@ fn combine_variant(
                 );
                 test_int_or_block(arg, lam_const, lam_nonconst)
             }
-        },
+        }
     };
     (lambda1, jumps_union(&local_jumps, &total1))
 }
