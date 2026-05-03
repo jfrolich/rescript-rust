@@ -4604,6 +4604,83 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
+    fn path_with_rewritten_root(path: &Path, new_root: &Path) -> Option<Path> {
+        let mut segments = Vec::new();
+        let mut cursor = path;
+        loop {
+            match cursor {
+                Path::Pident(id) => {
+                    if !id.is_persistent() {
+                        return None;
+                    }
+                    let mut rewritten = new_root.clone();
+                    for (name, pos) in segments.into_iter().rev() {
+                        rewritten = Path::Pdot(Box::new(rewritten), name, pos);
+                    }
+                    return Some(rewritten);
+                }
+                Path::Pdot(parent, name, pos) => {
+                    segments.push((name.clone(), *pos));
+                    cursor = parent;
+                }
+                Path::Papply(_, _) => return None,
+            }
+        }
+    }
+
+    fn flattened_persistent_alias_type_path(
+        ctx: &TypeContext<'_>,
+        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+        path: &Path,
+        selected_module_path: Option<&Path>,
+        allow_enclosing_selected_stdlib_component: bool,
+    ) -> Option<Path> {
+        if !matches!(path, Path::Pdot(_, type_name, _) if type_name == "t") {
+            return None;
+        }
+        let flat_root = path_root_ident(path)?;
+        if !flat_root.is_persistent() {
+            return None;
+        }
+        let qualified_root = pers_env
+            .as_ref()
+            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_root.name()))
+            .or_else(|| ctx.find_flattened_alias_component_path(flat_root.name()))?;
+        let candidate = path_with_rewritten_root(path, &qualified_root)?;
+        if candidate.same(path) {
+            return None;
+        }
+
+        if let Some(selected_module_path) = selected_module_path
+            && let Some(candidate_parent) = candidate.parent()
+        {
+            // OCaml compiler/ml/env.ml:1091-1100 selects values from the
+            // visible module path's component table, and env.ml:1530-1538
+            // builds those components with compiler/ml/subst.ml:303-309
+            // `Subst.value_description`. That substitution rewrites flattened
+            // persistent alias prefixes at any depth under the selected value
+            // module, e.g. `Webapi__Fetch.RequestInit.t` becomes
+            // `Webapi.Fetch.RequestInit.t`. For selected Stdlib values, keep
+            // the existing delayed enclosing-component rule so array argument
+            // typing does not force `Stdlib.JSON.t` earlier than OCaml.
+            let candidate_parent_is_selected_or_child = candidate_parent.same(selected_module_path)
+                || path_descendant_depth(&candidate_parent, selected_module_path).is_some();
+            let selected_is_inside_candidate_parent =
+                path_descendant_depth(selected_module_path, &candidate_parent)
+                    .is_some_and(|depth| depth > 0);
+            let candidate_root_is_stdlib = path_root_ident(&candidate_parent)
+                .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+            if !candidate_parent_is_selected_or_child
+                && !(selected_is_inside_candidate_parent
+                    && (!candidate_root_is_stdlib || allow_enclosing_selected_stdlib_component))
+            {
+                return None;
+            }
+        }
+
+        Some(candidate)
+    }
+
     fn type_expr_mentions_path_root(
         ctx: &TypeContext<'_>,
         ty: TypeExprRef,
@@ -5084,6 +5161,15 @@ fn force_qualified_value_type_paths<'a>(
                     selected_module_path,
                     selected_alias_targets,
                 )
+                .or_else(|| {
+                    flattened_persistent_alias_type_path(
+                        ctx,
+                        &tctx.persistent_env,
+                        &path,
+                        selected_module_path,
+                        !allow_stdlib_flat_parent_inference,
+                    )
+                })
                 .or_else(|| {
                     persistent_nested_type_path(
                         ctx,
