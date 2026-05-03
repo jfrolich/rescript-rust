@@ -4731,6 +4731,7 @@ fn force_qualified_value_type_paths<'a>(
         value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
         infer_stdlib_root_from_flat_parent: bool,
+        allow_enclosing_selected_stdlib_component: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
             ctx: &TypeContext<'_>,
@@ -4835,7 +4836,26 @@ fn force_qualified_value_type_paths<'a>(
                     && !selected_module_root_is_stdlib
                     && path_root_ident(&candidate_parent)
                         .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
-                if !candidate_parent.same(selected_module_path) && !implicit_stdlib_component {
+                // OCaml compiler/ml/env.ml:1091-1100 selects values through the
+                // component table for the visible module path, and env.ml:1530-1538
+                // prefixes that table with the selected component path. For a value
+                // selected from `Stdlib.JSON.Encode`, a result-side enclosing
+                // type path `Stdlib.JSON.t` is therefore visible through that
+                // same selected table; for `Stdlib.String`, a sibling type like
+                // `Stdlib_RegExp.t` is not. Keep this off for the argument-side
+                // `type_argument` path from compiler/ml/typecore.ml:4171-4192:
+                // OCaml leaves `JSON.Encode.array`'s argument element type as
+                // the flattened runtime unit while rewriting its result.
+                let enclosing_selected_stdlib_component = allow_enclosing_selected_stdlib_component
+                    && selected_module_root_is_stdlib
+                    && path_root_ident(&candidate_parent)
+                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+                    && path_descendant_depth(selected_module_path, &candidate_parent)
+                        .is_some_and(|depth| depth > 0);
+                if !candidate_parent.same(selected_module_path)
+                    && !implicit_stdlib_component
+                    && !enclosing_selected_stdlib_component
+                {
                     continue;
                 }
             }
@@ -4870,6 +4890,18 @@ fn force_qualified_value_type_paths<'a>(
         None
     }
 
+    fn selected_non_stdlib_persistent_module(
+        selected_module_path: Option<&Path>,
+        value_access_root_is_local: bool,
+    ) -> bool {
+        !value_access_root_is_local
+            && selected_module_path.is_some_and(|selected| {
+                path_root_ident(selected).is_some_and(|root| {
+                    root.is_persistent() && root.name() != "Stdlib" && root.name() != "Pervasives"
+                })
+            })
+    }
+
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
@@ -4893,12 +4925,28 @@ fn force_qualified_value_type_paths<'a>(
                 let arg_ty = arg.typ;
                 let ret_ty = *ret;
                 drop(desc);
-                // OCaml compiler/ml/typecore.ml:4171-4192 types actual
-                // application arguments through `type_argument` before the
-                // result type is returned from typecore.ml:4219-4224. Restrict
-                // flattened Stdlib path inference to this argument side so Rust
-                // does not eagerly rewrite return nodes that OCaml has not
-                // observed through argument propagation.
+                // OCaml compiler/ml/env.ml:1091-1100 returns selected values as
+                // `Pdot(p, s, pos)`, and env.ml:1530-1538 builds those
+                // component values with compiler/ml/subst.ml:303-309
+                // `Subst.value_description`. For non-Stdlib persistent modules,
+                // the selected value scheme can expose implicit `Stdlib.*`
+                // component paths on either side of the arrow. Keep the
+                // argument-side allowance from typecore.ml:4171-4192 separate
+                // from the return-side implicit-Stdlib rewrite below so
+                // result-side side effects still run like OCaml. For selected
+                // `Stdlib` functions, leave the return side lazy until
+                // typecore.ml:4219-4224 returns the application result and the
+                // caller's `rue` unifies it with the expected type; this keeps
+                // `JSON.Encode.string` flat when it is typed as an array
+                // element, while direct non-function values such as
+                // `JSON.Encode.null` still use the selected component path.
+                let selected_module_root_is_stdlib =
+                    selected_module_path.is_some_and(|selected| {
+                        path_root_ident(selected)
+                            .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+                    });
+                let ret_allow_stdlib_flat_parent_inference =
+                    allow_stdlib_flat_parent_inference || selected_module_root_is_stdlib;
                 visit(
                     tctx,
                     env,
@@ -4918,7 +4966,7 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    false,
+                    ret_allow_stdlib_flat_parent_inference,
                     seen,
                 );
             }
@@ -5020,6 +5068,12 @@ fn force_qualified_value_type_paths<'a>(
                         crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
                     }
                 }
+                let allow_implicit_stdlib_flat_parent_inference =
+                    allow_stdlib_flat_parent_inference
+                        || selected_non_stdlib_persistent_module(
+                            selected_module_path,
+                            value_access_root_is_local,
+                        );
                 let rewritten_path = visible_local_alias_type_path(
                     ctx,
                     env,
@@ -5039,10 +5093,11 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         false,
+                        !allow_stdlib_flat_parent_inference,
                     )
                 })
                 .or_else(|| {
-                    allow_stdlib_flat_parent_inference
+                    allow_implicit_stdlib_flat_parent_inference
                         .then(|| {
                             persistent_nested_type_path(
                                 ctx,
@@ -5052,6 +5107,7 @@ fn force_qualified_value_type_paths<'a>(
                                 value_access_root,
                                 selected_module_path,
                                 true,
+                                false,
                             )
                         })
                         .flatten()
