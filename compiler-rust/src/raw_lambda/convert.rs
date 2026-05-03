@@ -210,141 +210,140 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
     fv
 }
 
-fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLambda {
+fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawLambda {
     if subst.is_empty() {
-        return lam.clone();
+        return lam;
     }
 
     match lam {
-        RawLambda::Lvar(id) => subst.get(id).cloned().unwrap_or_else(|| lam.clone()),
-        RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => lam.clone(),
+        RawLambda::Lvar(id) => subst
+            .get(&id)
+            .cloned()
+            .map(RawLambda::Lvar)
+            .unwrap_or(RawLambda::Lvar(id)),
+        RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => lam,
         RawLambda::Lapply(apply) => RawLambda::Lapply(crate::raw_lambda::RawApply {
-            ap_func: Box::new(raw_subst_lambda(subst, &apply.ap_func)),
+            ap_func: Box::new(raw_subst_idents_owned(subst, *apply.ap_func)),
             ap_args: apply
                 .ap_args
-                .iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+                .into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
-            ap_info: apply.ap_info.clone(),
+            ap_info: apply.ap_info,
             ap_transformed_jsx: apply.ap_transformed_jsx,
         }),
         RawLambda::Lfunction(func) => RawLambda::Lfunction(crate::raw_lambda::RawLFunction {
             arity: func.arity,
-            params: func.params.clone(),
-            body: Box::new(raw_subst_lambda(subst, &func.body)),
-            attr: func.attr.clone(),
+            params: func.params,
+            body: Box::new(raw_subst_idents_owned(subst, *func.body)),
+            attr: func.attr,
         }),
         RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
-            *kind,
-            id.clone(),
-            Box::new(raw_subst_lambda(subst, arg)),
-            Box::new(raw_subst_lambda(subst, body)),
+            kind,
+            id,
+            Box::new(raw_subst_idents_owned(subst, *arg)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lletrec(bindings, body) => RawLambda::Lletrec(
             bindings
-                .iter()
-                .map(|(id, expr)| (id.clone(), raw_subst_lambda(subst, expr)))
+                .into_iter()
+                .map(|(id, expr)| (id, raw_subst_idents_owned(subst, expr)))
                 .collect(),
-            Box::new(raw_subst_lambda(subst, body)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lprim(info) => RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
-            primitive: info.primitive.clone(),
+            primitive: info.primitive,
             args: info
                 .args
-                .iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+                .into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
-            loc: info.loc.clone(),
+            loc: info.loc,
         }),
         RawLambda::Lswitch(arg, sw, loc) => RawLambda::Lswitch(
-            Box::new(raw_subst_lambda(subst, arg)),
+            Box::new(raw_subst_idents_owned(subst, *arg)),
             crate::raw_lambda::RawLambdaSwitch {
                 sw_numconsts: sw.sw_numconsts,
                 sw_consts_full: sw.sw_consts_full,
                 sw_consts: sw
                     .sw_consts
-                    .iter()
-                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, raw_subst_idents_owned(subst, lam)))
                     .collect(),
                 sw_numblocks: sw.sw_numblocks,
                 sw_blocks_full: sw.sw_blocks_full,
                 sw_blocks: sw
                     .sw_blocks
-                    .iter()
-                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, raw_subst_idents_owned(subst, lam)))
                     .collect(),
                 sw_failaction: sw
                     .sw_failaction
-                    .as_ref()
-                    .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
-                sw_names: sw.sw_names.clone(),
+                    .map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
+                sw_names: sw.sw_names,
             },
-            loc.clone(),
+            loc,
         ),
         RawLambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
-            Box::new(raw_subst_lambda(subst, arg)),
+            Box::new(raw_subst_idents_owned(subst, *arg)),
             cases
-                .iter()
-                .map(|(name, lam)| (name.clone(), raw_subst_lambda(subst, lam)))
+                .into_iter()
+                .map(|(name, lam)| (name, raw_subst_idents_owned(subst, lam)))
                 .collect(),
-            default
-                .as_ref()
-                .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
+            default.map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
         ),
         RawLambda::LstaticRaise(i, args) => RawLambda::LstaticRaise(
-            *i,
-            args.iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+            i,
+            args.into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
         ),
         RawLambda::LstaticCatch(body, handler, on_raise) => RawLambda::LstaticCatch(
-            Box::new(raw_subst_lambda(subst, body)),
-            handler.clone(),
-            Box::new(raw_subst_lambda(subst, on_raise)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
+            handler,
+            Box::new(raw_subst_idents_owned(subst, *on_raise)),
         ),
         RawLambda::LtryWith(body, exn, handler) => RawLambda::LtryWith(
-            Box::new(raw_subst_lambda(subst, body)),
-            exn.clone(),
-            Box::new(raw_subst_lambda(subst, handler)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
+            exn,
+            Box::new(raw_subst_idents_owned(subst, *handler)),
         ),
         RawLambda::LifThenElse(cond, ifso, ifnot) => RawLambda::LifThenElse(
-            Box::new(raw_subst_lambda(subst, cond)),
-            Box::new(raw_subst_lambda(subst, ifso)),
-            Box::new(raw_subst_lambda(subst, ifnot)),
+            Box::new(raw_subst_idents_owned(subst, *cond)),
+            Box::new(raw_subst_idents_owned(subst, *ifso)),
+            Box::new(raw_subst_idents_owned(subst, *ifnot)),
         ),
         RawLambda::Lsequence(first, second) => RawLambda::Lsequence(
-            Box::new(raw_subst_lambda(subst, first)),
-            Box::new(raw_subst_lambda(subst, second)),
+            Box::new(raw_subst_idents_owned(subst, *first)),
+            Box::new(raw_subst_idents_owned(subst, *second)),
         ),
         RawLambda::Lwhile(cond, body) => RawLambda::Lwhile(
-            Box::new(raw_subst_lambda(subst, cond)),
-            Box::new(raw_subst_lambda(subst, body)),
+            Box::new(raw_subst_idents_owned(subst, *cond)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor(var, lo, hi, dir, body) => RawLambda::Lfor(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, lo)),
-            Box::new(raw_subst_lambda(subst, hi)),
-            *dir,
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *lo)),
+            Box::new(raw_subst_idents_owned(subst, *hi)),
+            dir,
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor_of(var, iterable, body) => RawLambda::Lfor_of(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, iterable)),
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *iterable)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor_await_of(var, iterable, body) => RawLambda::Lfor_await_of(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, iterable)),
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *iterable)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lassign(id, expr) => {
-            RawLambda::Lassign(id.clone(), Box::new(raw_subst_lambda(subst, expr)))
+            RawLambda::Lassign(id, Box::new(raw_subst_idents_owned(subst, *expr)))
         }
-        RawLambda::Lsend(name, obj, loc) => RawLambda::Lsend(
-            name.clone(),
-            Box::new(raw_subst_lambda(subst, obj)),
-            loc.clone(),
-        ),
+        RawLambda::Lsend(name, obj, loc) => {
+            RawLambda::Lsend(name, Box::new(raw_subst_idents_owned(subst, *obj)), loc)
+        }
         RawLambda::Lbreak => RawLambda::Lbreak,
         RawLambda::Lcontinue => RawLambda::Lcontinue,
     }
@@ -4061,14 +4060,19 @@ impl<'a> RawLambdaConverter<'a> {
                 let field = get_field(self, id.name(), *pos);
                 let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
                 lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
-                subst.insert(id.clone(), RawLambda::var(rebound));
+                subst.insert(id.clone(), rebound);
             }
         }
 
         if subst.is_empty() {
             lam
         } else {
-            raw_subst_lambda(&subst, &lam)
+            // OCaml `wrap_id_pos_list` builds a substitution containing only
+            // `id' -> Lvar id''` before calling `Lambda.subst_lambda`
+            // (compiler/ml/translmod.ml:112-127). Keep that substitution
+            // specialized in Rust and consume `lam` instead of cloning the
+            // whole module body.
+            raw_subst_idents_owned(&subst, lam)
         }
     }
 
