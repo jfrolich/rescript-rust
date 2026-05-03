@@ -4739,16 +4739,19 @@ fn force_qualified_value_type_paths<'a>(
             type_name: &str,
         ) -> bool {
             let mut no_persistent_env = None;
-            resolve_module_signature_for_path(module_path, env, &mut no_persistent_env, ctx)
-                .is_some_and(|(_, sig)| {
-                    sig.iter().any(|item| {
-                        matches!(
-                            item,
-                            crate::types::decl::SignatureItem::SigType(id, _, _)
-                                if id.name() == type_name
-                        )
-                    })
-                })
+            // OCaml env.ml:781-793 descends through `comp_components`, and
+            // env.ml:1513-1514 keeps those component tables lazy/cached. We
+            // only need the presence of a type component here, so query the
+            // cached component table directly instead of cloning the whole
+            // resolved signature and scanning it.
+            with_resolved_module_components_for_path(
+                module_path,
+                env,
+                &mut no_persistent_env,
+                ctx,
+                |components| components.lookup_type(type_name).is_some(),
+            )
+            .unwrap_or(false)
         }
 
         let Path::Pdot(parent, type_name, _) = path else {
