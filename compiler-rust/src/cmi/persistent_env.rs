@@ -790,6 +790,21 @@ impl PersistentEnv {
             return Some(ps);
         }
 
+        // OCaml compiler/core/res_compmisc.ml:48-66 filters the current unit
+        // from implicit opens, and compiler/ml/typemod.ml:1732-1788 only saves
+        // an implementation's inferred signature after type-checking it. In
+        // --in-process source fallback, do not recursively type-check the current
+        // implementation as if a persistent `.cmi` already existed; if an
+        // interface was published above, the portable-cache branch has already
+        // returned it.
+        if self
+            .compiling_module
+            .as_deref()
+            .is_some_and(|compiling| compiling == name)
+        {
+            return None;
+        }
+
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
         let load_name = self

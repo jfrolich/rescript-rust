@@ -969,10 +969,7 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     use crate::types::decl::{ModuleType, SignatureItem};
 
     if ctx.persistent_env_is_in_process() {
-        panic!(
-            "in-process compilation attempted to resolve {} through .cmi files",
-            module_path.name()
-        );
+        return resolve_module_signature_through_persistent_env(ctx, module_path, visiting);
     }
 
     let cache_key = module_path.name();
@@ -1052,15 +1049,146 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     result
 }
 
+fn resolve_module_signature_through_persistent_env<'a>(
+    ctx: &'a TypeContext<'a>,
+    module_path: &Path,
+    visiting: &mut HashSet<Path>,
+) -> Option<super::decl::Signature> {
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    let cache_key = module_path.name();
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+        if cached_path.same(module_path) {
+            return Some(cached_sig);
+        }
+    }
+
+    if !visiting.insert(module_path.clone()) {
+        return None;
+    }
+
+    let result = match module_path {
+        Path::Pident(id) => {
+            if !id.is_persistent() {
+                return None;
+            }
+
+            // OCaml compiler/ml/env.ml:865-873 resolves persistent module
+            // identifiers through find_pers_struct and then forces ps_sig.
+            // In --in-process, PersistentEnv is the equivalent source of truth:
+            // it can read already-published registry entries or source fallbacks,
+            // but it must not fall through to disk .cmi files.
+            let mut pers_env = ctx.persistent_env_clone()?;
+            let ps = pers_env.find_pers_struct(id.name(), ctx)?;
+            ctx.set_persistent_env(pers_env);
+            Some(ps.ps_sig.clone())
+        }
+        Path::Pdot(parent, module_name, _) => {
+            let parent_sig =
+                resolve_module_signature_through_persistent_env(ctx, parent, visiting)?;
+            let mut resolved = None;
+            for item in &parent_sig {
+                if let SignatureItem::SigModule(id, md, _) = item {
+                    if id.name() == module_name {
+                        resolved = match &md.md_type {
+                            ModuleType::MtySignature(sig) => Some(sig.clone()),
+                            ModuleType::MtyAlias(_, alias_path)
+                            | ModuleType::MtyIdent(alias_path) => {
+                                resolve_module_signature_through_persistent_env(
+                                    ctx, alias_path, visiting,
+                                )
+                            }
+                            _ => None,
+                        };
+                        break;
+                    }
+                }
+            }
+            resolved
+        }
+        Path::Papply(_, _) => None,
+    };
+
+    if let Some(sig) = result.as_ref() {
+        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), sig.clone());
+    }
+
+    result
+}
+
+fn normalize_module_path_through_components<'a>(
+    ctx: &'a TypeContext<'a>,
+    load_paths: &[std::path::PathBuf],
+    module_path: &Path,
+    visiting: &mut HashSet<Path>,
+) -> Option<Path> {
+    use crate::types::decl::{ModuleType, SignatureItem};
+
+    if !visiting.insert(module_path.clone()) {
+        return Some(module_path.clone());
+    }
+
+    let normalized_path = match module_path {
+        Path::Pdot(parent, name, pos) => {
+            let parent =
+                normalize_module_path_through_components(ctx, load_paths, parent, visiting)
+                    .unwrap_or_else(|| (**parent).clone());
+            Path::Pdot(Box::new(parent), name.clone(), *pos)
+        }
+        Path::Papply(functor, arg) => {
+            let functor =
+                normalize_module_path_through_components(ctx, load_paths, functor, visiting)
+                    .unwrap_or_else(|| (**functor).clone());
+            let arg = normalize_module_path_through_components(ctx, load_paths, arg, visiting)
+                .unwrap_or_else(|| (**arg).clone());
+            Path::Papply(Box::new(functor), Box::new(arg))
+        }
+        Path::Pident(_) => module_path.clone(),
+    };
+
+    let alias_target = match &normalized_path {
+        Path::Pdot(parent, module_name, _) => {
+            let mut lookup_visiting = HashSet::new();
+            let parent_sig = resolve_module_signature_through_cmi(
+                ctx,
+                load_paths,
+                parent,
+                &mut lookup_visiting,
+            )?;
+            parent_sig.iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, md, _) if id.name() == module_name => {
+                    match &md.md_type {
+                        ModuleType::MtyAlias(_, alias_path) => Some(alias_path.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+
+    if let Some(alias_path) = alias_target {
+        // OCaml `normalize_path` rewrites module aliases before component
+        // lookup (compiler/ml/env.ml:903-913). Use the normalized module path
+        // only as declaration metadata; the caller still caches the lookup
+        // under the original access path.
+        normalize_module_path_through_components(ctx, load_paths, &alias_path, visiting)
+            .or(Some(alias_path))
+    } else if let Some(flattened_path) =
+        flattened_alias_module_path_for_metadata(ctx, &normalized_path)
+    {
+        Some(flattened_path)
+    } else {
+        Some(normalized_path)
+    }
+}
+
 pub(crate) fn resolve_type_item_through_modules<'a>(
     ctx: &'a TypeContext<'a>,
     path: &Path,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
-
-    if ctx.persistent_env_is_in_process() {
-        return None;
-    }
 
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
@@ -1068,13 +1196,24 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     };
 
     let load_paths = ctx.load_paths();
-    if load_paths.is_empty() {
+    if load_paths.is_empty() && !ctx.persistent_env_is_in_process() {
         return None;
     }
 
     let mut visiting = HashSet::new();
+    // OCaml compiler/ml/env.ml:800-823 resolves dotted type paths through
+    // persistent module components; compiler/ml/ctype.ml:1395-1439 then uses
+    // those declarations for abbreviation expansion. In --in-process, the
+    // persistent registry is the component source instead of disk `.cmi` files.
     let current_sig =
         resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
+    let type_module_path = normalize_module_path_through_components(
+        ctx,
+        &load_paths,
+        module_path,
+        &mut HashSet::new(),
+    )
+    .unwrap_or_else(|| module_path.clone());
 
     // Register ALL types in the final signature by stamp for future lookups.
     // This is important because type manifests may reference sibling types
@@ -1083,27 +1222,25 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     let mut result = None;
     for item in &current_sig {
         if let SignatureItem::SigType(id, decl, _) = item {
+            let qualified_decl =
+                qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
             // Register every type by stamp
             if id.stamp() != 0 {
                 let should_register = {
                     let existing = ctx.find_type_decl_by_stamp(id.stamp());
                     existing.as_ref().is_none_or(|d| {
-                        d.type_path.is_none() && path_root_is_persistent(module_path)
+                        d.type_path.is_none() && path_root_is_persistent(&type_module_path)
                     })
                 };
                 if should_register {
-                    let mut decl_for_stamp = decl.clone();
-                    if decl_for_stamp.type_path.is_none() && path_root_is_persistent(module_path) {
-                        decl_for_stamp.type_path = Some(Path::pdot(module_path.clone(), id.name()));
-                    }
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl_for_stamp);
+                    ctx.register_type_decl_by_stamp(id.stamp(), qualified_decl.clone());
                 }
             }
             if id.name() == type_name {
                 // Cache the target type in the path store
                 let path_name = path.name();
-                ctx.register_type_decl_by_path(&path_name, decl.clone());
-                result = Some((id.clone(), decl.clone()));
+                ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
+                result = Some((id.clone(), qualified_decl));
             }
         }
     }
@@ -1368,6 +1505,63 @@ fn strengthen_type_decl_for_module_access_path<'a>(
         strengthened.type_private = PrivateFlag::Public;
     }
     strengthened
+}
+
+fn qualify_type_decl_for_module_access_path(
+    module_access_path: &Path,
+    id: &crate::ident::Ident,
+    decl: &super::decl::TypeDeclaration,
+) -> super::decl::TypeDeclaration {
+    if decl.type_path.is_some() {
+        return decl.clone();
+    }
+
+    let qualified_type_path = Path::pdot(module_access_path.clone(), id.name());
+
+    // OCaml `Env.find_type` resolves dotted paths through module components
+    // (compiler/ml/env.ml:800-823). Rust keeps the selected path as out-of-band
+    // metadata on TypeDeclaration. Preserve real paths already substituted from
+    // compiled signatures; otherwise attach the lookup path without allocating a
+    // strengthened self-manifest at this point.
+    let mut qualified = decl.clone();
+    qualified.type_path = Some(qualified_type_path);
+    qualified
+}
+
+fn flattened_alias_module_path_for_metadata(
+    ctx: &TypeContext<'_>,
+    module_path: &Path,
+) -> Option<Path> {
+    // OCaml component construction records paths after `prefix_idents`
+    // (compiler/ml/env.ml:1530-1578). For namespace aliases, Rust also records
+    // the flattened compile-unit head (`Stdlib_Date`) for the qualified
+    // component path (`Stdlib.Date`), so use that head for type metadata.
+    let mut flat_heads = ctx
+        .persistent_env_clone()
+        .map(|pers| pers.flattened_alias_heads_for_path(module_path))
+        .unwrap_or_default();
+
+    if let Ok((head, components)) = module_path.flatten()
+        && !components.is_empty()
+    {
+        let mut flat_name = head.name().to_string();
+        for component in components {
+            flat_name.push('_');
+            flat_name.push_str(component);
+        }
+        if !flat_heads.iter().any(|item| item == &flat_name)
+            && ctx
+                .find_flattened_alias_component_path(&flat_name)
+                .is_some_and(|component_path| component_path.same(module_path))
+        {
+            flat_heads.push(flat_name);
+        }
+    }
+
+    flat_heads
+        .into_iter()
+        .next()
+        .map(|flat_head| Path::pident(Ident::create_persistent(&flat_head)))
 }
 
 fn strengthen_module_type_for_module_access_path<'a>(

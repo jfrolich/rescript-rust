@@ -431,7 +431,7 @@ pub fn compile(
             let pre_compile_result: Result<()> = std::thread::scope(|scope| {
                 let handle = std::thread::Builder::new()
                     .name("rewatch-runtime-precompile".to_string())
-                    .stack_size(64 * 1024 * 1024)
+                    .stack_size(256 * 1024 * 1024)
                     .spawn_scoped(scope, || {
                         let _parent = parent_span.enter();
                         pre_compile_runtime_modules(build_state)
@@ -1586,13 +1586,24 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(build_state, &runtime_modules);
-    compile_runtime_modules_parallel(
-        build_state,
-        runtime_root,
-        &runtime_path,
-        &runtime_config,
-        &runtime_modules,
-    )?;
+    let runtime_compile_threads = rayon::current_num_threads().max(2);
+    // Runtime module compilation runs inside Rayon workers, so the outer
+    // precompile thread stack is not enough for very large runtime IR cleanup.
+    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(runtime_compile_threads)
+        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
+        .stack_size(256 * 1024 * 1024)
+        .build()
+        .context("failed to create runtime in-process compiler pool")?;
+    runtime_compile_pool.install(|| {
+        compile_runtime_modules_parallel(
+            build_state,
+            runtime_root,
+            &runtime_path,
+            &runtime_config,
+            &runtime_modules,
+        )
+    })?;
 
     debug!(
         "Compiled {} runtime modules from source into registry",

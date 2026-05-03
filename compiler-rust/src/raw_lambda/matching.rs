@@ -6609,8 +6609,12 @@ fn get_variant_constructors_from_env(
             Ok(decl) if exact_lookup(decl) => Some(decl),
             _ => None,
         };
-        let fallback_decl =
-            ctype::lookup_type_decl_for_path_pub(ctx_ref, env, path).filter(&exact_lookup);
+        // OCaml `Parmatch.get_variant_constructors` trusts `Env.find_type`
+        // for the queried path, even when an alias path returns the target
+        // declaration metadata (compiler/ml/parmatch.ml:975-984). The helper
+        // below is Rust's Env.find_type-equivalent, so do not require its
+        // returned `type_path` to be textually identical to the query.
+        let fallback_decl = ctype::lookup_type_decl_for_path_pub(ctx_ref, env, path);
 
         if let Some(decl) = env_decl {
             match &decl.type_kind {
@@ -6642,57 +6646,11 @@ fn get_variant_constructors_from_env(
             }
         }
 
-        if let crate::types::Path::Pdot(parent, type_name, _) = path {
-            fn find_type_in_module_type(
-                ctx_ref: &TypeContext<'_>,
-                env: &crate::types::env::Env,
-                mty: &crate::types::decl::ModuleType,
-                type_name: &str,
-            ) -> Option<crate::types::decl::TypeDeclaration> {
-                match mty {
-                    crate::types::decl::ModuleType::MtySignature(sig) => {
-                        sig.iter().find_map(|item| match item {
-                            crate::types::decl::SignatureItem::SigType(id, decl, _)
-                                if id.name() == type_name =>
-                            {
-                                Some(decl.clone())
-                            }
-                            _ => None,
-                        })
-                    }
-                    crate::types::decl::ModuleType::MtyAlias(_, path)
-                    | crate::types::decl::ModuleType::MtyIdent(path) => {
-                        let resolved = crate::types::ctype::resolve_module_type_through_env(
-                            ctx_ref, env, path,
-                        )?;
-                        find_type_in_module_type(ctx_ref, env, &resolved, type_name)
-                    }
-                    _ => None,
-                }
-            }
-
-            if let Some(module_type) =
-                crate::types::ctype::resolve_module_type_through_env(ctx_ref, env, parent)
-            {
-                if let Some(decl) =
-                    find_type_in_module_type(ctx_ref, env, &module_type, type_name.as_str())
-                {
-                    match &decl.type_kind {
-                        TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
-                        TypeKind::TypeAbstract => {
-                            if let Some(manifest) = decl.type_manifest {
-                                let manifest = ctx_ref.repr(manifest);
-                                if manifest != ty {
-                                    ty = manifest;
-                                    continue;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        // OCaml `Parmatch.get_variant_constructors` asks `Env.find_type` for
+        // the path and only expands the type head when that declaration has a
+        // manifest (compiler/ml/parmatch.ml:975-984). Do not walk module type
+        // aliases here: if normal Env-compatible lookup misses, the caller can
+        // synthesize missing constructor tags from the typed constructor counts.
 
         if let Some(expanded) = ctype::expand_head_once(ctx_ref, env, ty) {
             let expanded = ctx_ref.repr(expanded);

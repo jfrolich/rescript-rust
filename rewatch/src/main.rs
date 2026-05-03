@@ -154,7 +154,7 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
     }
 }
 
-const IN_PROCESS_STACK_SIZE: usize = 64 * 1024 * 1024;
+const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
 where

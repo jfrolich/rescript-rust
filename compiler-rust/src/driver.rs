@@ -3674,6 +3674,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     let is_pure = program.side_effect.is_none();
     let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
     let mut rendered_programs = if options.skip_js_render {
+        crate::js_ir::dispose_deps_program_nonrecursive(program);
         Vec::new()
     } else {
         let mut rendered_programs = vec![(
@@ -3723,12 +3724,15 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                     path,
                     code: std::mem::take(&mut primary_js),
                 });
+                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 String::new()
             } else {
+                crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 primary_js
             };
             for (path, program, module_path_resolver) in rendered_programs {
                 let Some(path) = path else {
+                    crate::js_ir::dispose_deps_program_nonrecursive(program);
                     continue;
                 };
                 let code = print_deps_program_with_directives_and_options(
@@ -3739,12 +3743,12 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                     jsx_preserve,
                     !options.no_version_header,
                 );
+                crate::js_ir::dispose_deps_program_nonrecursive(program);
                 js_outputs.push(JsOutput { path, code });
             }
             (js, js_outputs)
         }
     });
-
     Ok(InProcessCompileResult {
         js_output: js,
         js_outputs,
