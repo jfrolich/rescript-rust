@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
-fn free_vars(ctx: &TypeContext<'_>, ty: TypeExprRef) -> HashSet<TypeExprRef> {
+fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
     let mut result = HashSet::new();
     let mut visited = HashSet::new();
     free_vars_rec(ctx, ty, &mut result, &mut visited);
@@ -62,7 +62,7 @@ fn predef_exception_ident(name: &str) -> Option<Ident> {
 }
 
 fn free_vars_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     result: &mut HashSet<TypeExprRef>,
     visited: &mut HashSet<TypeExprRef>,
@@ -89,7 +89,7 @@ fn free_vars_rec(
 /// Existentials are type variables that appear in the args but not in the result type.
 /// Matches OCaml's Datarepr.constructor_existentials.
 pub fn constructor_existentials(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cstr_args: &[TypeExprRef],
     cd_res: Option<TypeExprRef>,
 ) -> Vec<TypeExprRef> {
@@ -1277,7 +1277,7 @@ impl Default for Env {
 /// - Defines abstract types (int, float, string, char, bigint, etc.)
 /// - Defines variant types with constructors (bool, unit, option, list, result)
 /// - Registers constructors in the environment so they can be looked up
-pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
+pub fn initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
     // Helper: create an abstract type declaration
@@ -1311,7 +1311,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let add_type_with_constrs = |env: &mut Env,
                                  id: Ident,
                                  decl: TypeDeclaration,
-                                 ctx: &TypeContext<'_>| {
+                                 ctx: &TypeContext| {
         let type_path = Path::pident(id.clone());
 
         // Extract constructors/labels from predef declarations so they are
@@ -2179,7 +2179,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 /// Helper to add a binary primitive operator.
 fn add_binary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     arg1_ty: TypeExprRef,
@@ -2213,7 +2213,7 @@ fn add_binary_primitive(
 /// Helper to add a unary primitive operator
 fn add_unary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     arg_ty: TypeExprRef,
@@ -2262,7 +2262,7 @@ fn add_constant_value(env: &mut Env, name: &str, ty: TypeExprRef) {
 /// occurrence is a separate physical node.
 fn add_mono_binary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ty_path: &Path,
@@ -2277,7 +2277,7 @@ fn add_mono_binary_primitive(
 /// nullary type constructor. Creates distinct type nodes for each position.
 fn add_mono_unary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ty_path: &Path,
@@ -2290,7 +2290,7 @@ fn add_mono_unary_primitive(
 /// Helper to add a polymorphic binary operator: ('a, 'a) => 'a
 /// Creates a single shared Tvar for all three positions, matching OCaml behavior
 /// where Pervasives declares e.g. `external "+": ('a, 'a) => 'a = "%add"`
-fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
+fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
     // Create a SINGLE Tvar shared across all three positions
     let alpha = ctx.new_generic_var(None);
     add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, alpha);
@@ -2300,7 +2300,7 @@ fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, p
 /// Creates a single shared Tvar for the two arg positions
 fn add_poly_cmp_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ret_ty: TypeExprRef,
@@ -2310,7 +2310,7 @@ fn add_poly_cmp_primitive(
 }
 
 /// Helper to add a polymorphic unary operator: 'a => 'a
-fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
+fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
     let alpha = ctx.new_generic_var(None);
     add_unary_primitive(env, ctx, name, prim_name, alpha, alpha);
 }

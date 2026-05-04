@@ -690,7 +690,7 @@ fn set_args_erase_mutable(q: &Pattern, r: &[Pattern]) -> Vec<Pattern> {
 }
 
 fn untagged_payload_type_cannot_be_undefined(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     env_ref: EnvRef,
     ty: TypeExprRef,
 ) -> bool {
@@ -716,7 +716,7 @@ fn untagged_payload_type_cannot_be_undefined(
 }
 
 fn can_strip_optional_construct_wrapper(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     pat_env: EnvRef,
     cstr: &ConstructorDescription,
 ) -> bool {
@@ -740,7 +740,7 @@ fn can_strip_optional_construct_wrapper(
 /// missing ones with omega. Since Rust's `lbl_all` is a placeholder, we
 /// resolve via the TypeContext when available.
 fn strip_optional_record_pattern_wrapper(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     lbl: &LabelDescription,
     pat: &Pattern,
 ) -> Pattern {
@@ -774,7 +774,7 @@ fn strip_optional_record_pattern_wrapper(
 }
 
 fn all_record_args(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     pat_type: TypeExprRef,
     pat_env: EnvRef,
     lbls: &[(
@@ -1236,7 +1236,7 @@ pub fn make_default(
 ///
 /// Equivalent to OCaml's `ctx_matcher`.
 pub fn ctx_matcher<'a>(
-    ctx_ref: Option<&'a TypeContext<'a>>,
+    ctx_ref: Option<&'a TypeContext>,
     p: &Pattern,
 ) -> Box<dyn Fn(&Pattern, &[Pattern]) -> Result<(Pattern, Vec<Pattern>), MatchError> + 'a> {
     let p = normalize_pat(p);
@@ -1367,7 +1367,7 @@ pub fn ctx_matcher<'a>(
 
 /// Filter contexts using a matcher built from pattern q.
 /// Equivalent to OCaml's `filter_ctx`.
-pub fn filter_ctx<'a>(ctx_ref: Option<&'a TypeContext<'a>>, q: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
+pub fn filter_ctx<'a>(ctx_ref: Option<&'a TypeContext>, q: &Pattern, ctx: &[Ctx]) -> Vec<Ctx> {
     let matcher = ctx_matcher(ctx_ref, q);
 
     fn filter_rec(
@@ -2678,8 +2678,8 @@ enum VarPat {
 /// - Aliases are preserved around or-patterns
 ///
 /// Equivalent to OCaml's `simplify_or`.
-fn simplify_or(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Pattern {
-    fn simpl_rec(ctx_ref: Option<&TypeContext<'_>>, p: &Pattern) -> Result<Pattern, VarPat> {
+fn simplify_or(ctx_ref: Option<&TypeContext>, p: &Pattern) -> Pattern {
+    fn simpl_rec(ctx_ref: Option<&TypeContext>, p: &Pattern) -> Result<Pattern, VarPat> {
         match &p.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) => Err(VarPat::Var(p.clone())),
             PatternDesc::Tpat_alias(q, id, s) => match simpl_rec(ctx_ref, q) {
@@ -2747,7 +2747,7 @@ fn bind(kind: LetKind, id: &Ident, arg: &RawLambda, action: RawLambda) -> RawLam
 ///
 /// Equivalent to OCaml's `simplify_cases`.
 pub fn simplify_cases(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     args: &[(RawLambda, LetKind)],
     cls: Vec<Clause>,
 ) -> Vec<Clause> {
@@ -2756,7 +2756,7 @@ pub fn simplify_cases(
     let (ref arg, _) = args[0];
 
     fn simplify(
-        ctx_ref: Option<&TypeContext<'_>>,
+        ctx_ref: Option<&TypeContext>,
         arg: &RawLambda,
         cls: Vec<Clause>,
     ) -> Vec<Clause> {
@@ -2974,7 +2974,7 @@ pub struct CannotFlatten;
 /// Raises `CannotFlatten` if an alias id has no argument.
 /// Equivalent to OCaml's `mk_alpha_env`.
 pub fn mk_alpha_env(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     arg: &Option<Ident>,
     aliases: &[Ident],
     ids: &IdentSet,
@@ -3098,7 +3098,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
 ///
 /// Equivalent to OCaml's `explode_or_pat`.
 pub fn explode_or_pat<F>(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     arg: &Option<Ident>,
     patl: &[Pattern],
     mk_action: &F,
@@ -3588,7 +3588,7 @@ fn rebuild_nexts(
 /// Split a matching, directed first by or-patterns, then by tests/variable transitions.
 /// Equivalent to OCaml's `split_or`.
 fn split_or(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     cls: Vec<Clause>,
     args: &MatchArgs,
@@ -3612,7 +3612,7 @@ fn split_or(
 
 /// Inner do_split for split_or.
 fn do_split_or(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     mut before: VecDeque<Clause>,
     mut ors: VecDeque<Clause>,
@@ -3667,7 +3667,7 @@ fn do_split_or(
 
 /// cons_next helper for split_or.
 fn cons_next_or(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     yes: Vec<Clause>,
     yesor: Vec<Clause>,
@@ -4213,7 +4213,7 @@ fn dont_precompile_var(
 /// Precompile or-patterns.
 /// Equivalent to OCaml's `precompile_or`.
 fn precompile_or(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     cls: Vec<Clause>,
     ors: Vec<Clause>,
@@ -4252,7 +4252,7 @@ fn precompile_or(
 /// Process or-pattern cases for precompile_or.
 /// Equivalent to the inner `do_cases` in OCaml's `precompile_or`.
 fn do_cases_or(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     ors: &[Clause],
     args: &MatchArgs,
@@ -4264,7 +4264,7 @@ fn do_cases_or(
 }
 
 fn do_cases_or_deque(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     ors: &[Clause],
     args: &MatchArgs,
@@ -4360,7 +4360,7 @@ fn do_cases_or_deque(
 /// Top-level split_precompile.
 /// Equivalent to OCaml's `split_precompile`.
 pub fn split_precompile(
-    ctx_ref: Option<&TypeContext<'_>>,
+    ctx_ref: Option<&TypeContext>,
     argo: &Option<Ident>,
     pm: &PatternMatching,
     next_raise: &mut i32,
@@ -4789,7 +4789,7 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 /// Make a constructor matching cell.
 /// Equivalent to OCaml's `make_constr_matching`.
 fn make_constr_matching(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     p: &Pattern,
     def: &DefaultEnv,
     ctx: &[Ctx],
@@ -4904,7 +4904,7 @@ fn make_constr_matching(
 /// Divide a pattern matching by constructor.
 /// Equivalent to OCaml's `divide_constructor`.
 fn divide_constructor(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     ctx: &[Ctx],
     pm: &PatternMatching,
 ) -> Vec<(ConstructorTag, MatchCell)> {
@@ -5034,7 +5034,7 @@ fn make_variant_matching_nonconst(
 /// Divide a pattern matching by variant tag.
 /// Equivalent to OCaml's `divide_variant`.
 fn divide_variant(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     row: &RowDesc,
     ctx: &[Ctx],
     pm: &PatternMatching,
@@ -5042,7 +5042,7 @@ fn divide_variant(
     let row = btype::row_repr(ctx_ref, row);
 
     fn divide_rec(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         row: &RowDesc,
         cases: &[Clause],
         def: &DefaultEnv,
@@ -5399,7 +5399,7 @@ fn make_record_matching(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     all_labels: &[LabelDescription],
     p: &Pattern,
@@ -5525,7 +5525,7 @@ const STRINGS_TEST_THRESHOLD: usize = 8;
 /// Bind a switch argument to a variable if it's not already a variable.
 /// Equivalent to OCaml's `bind_sw`.
 fn bind_sw(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arg: RawLambda,
     k: impl FnOnce(RawLambda) -> RawLambda,
 ) -> RawLambda {
@@ -5543,7 +5543,7 @@ fn bind_sw(
 /// Build a sequential string equality test sequence.
 /// Equivalent to OCaml's `make_string_test_sequence`.
 fn make_string_test_sequence(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -5634,7 +5634,7 @@ fn tree_way_test(
 /// Build a dichotomic string test tree.
 /// Equivalent to OCaml's `do_make_string_test_tree`.
 fn do_make_string_test_tree(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -5687,7 +5687,7 @@ fn do_make_string_test_tree(
 /// Entry point for string matching.
 /// Equivalent to OCaml's `expand_stringswitch`.
 pub fn expand_stringswitch(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     loc: Location,
     arg: RawLambda,
     sw: Vec<(String, RawLambda)>,
@@ -6646,7 +6646,7 @@ fn list_as_pat(pats: &[Pattern]) -> Pattern {
 ///
 /// This requires environment lookups to get all constructors of a type.
 /// We use a simplified approach: extract constructor info from the first pattern.
-fn complete_pats_constrs(ctx_ref: &TypeContext<'_>, pats: &[Pattern]) -> Vec<Pattern> {
+fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern> {
     match pats.first() {
         None => panic!("complete_pats_constrs: empty list"),
         Some(p) => {
@@ -6780,7 +6780,7 @@ fn pat_of_constr(ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
 /// Get variant constructors from the environment for a given result type.
 /// Equivalent to OCaml's `Parmatch.get_variant_constructors`.
 fn get_variant_constructors_from_env(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     env: &crate::types::env::Env,
     result_type: TypeExprRef,
 ) -> Vec<ConstructorDescription> {
@@ -6939,7 +6939,7 @@ fn mk_failaction_neg(
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     partial: &Partial,
     seen: &[Pattern],
     ctx: &[Ctx],
@@ -7265,7 +7265,7 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
 /// Translate an extension path to a RawLambda.
 /// Equivalent to OCaml's `transl_extension_path`.
 fn transl_extension_path(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     env: EnvRef,
     path: &crate::types::path::Path,
 ) -> RawLambda {
@@ -7286,7 +7286,7 @@ fn transl_extension_path(
 /// Normalize a value path's prefix through the type context's module sig cache.
 /// This handles persistent module aliases that Env::normalize_path can't resolve.
 fn normalize_path_via_ctx(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     path: &crate::types::path::Path,
 ) -> crate::types::path::Path {
     use crate::types::path::Path;
@@ -7307,7 +7307,7 @@ fn normalize_path_via_ctx(
 
 /// Normalize a module path through the type context's module sig cache.
 fn normalize_module_path_via_ctx(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     path: &crate::types::path::Path,
 ) -> crate::types::path::Path {
     use crate::types::decl::{ModuleType, SignatureItem};
@@ -7378,7 +7378,7 @@ fn normalize_module_path_via_ctx(
 /// Combine constructor matching results.
 /// Equivalent to OCaml's `combine_constructor`.
 fn combine_constructor(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     sw_names: Option<SwitchNames>,
     loc: Location,
     arg: RawLambda,
@@ -7688,7 +7688,7 @@ fn call_switcher_variant_constant(
 /// Call switcher for variant non-constant (block) matching.
 /// Equivalent to OCaml's `Polyvar_pattern_match.call_switcher_variant_constr`.
 fn call_switcher_variant_constr(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     loc: Location,
     fail: Option<RawLambda>,
     arg: RawLambda,
@@ -7719,7 +7719,7 @@ fn call_switcher_variant_constr(
 /// Combine variant matching results.
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     names: Option<SwitchNames>,
     loc: Location,
     row: &RowDesc,
@@ -7836,7 +7836,7 @@ fn combine_variant(
 /// Combine array matching results.
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     names: Option<SwitchNames>,
     loc: Location,
     arg: RawLambda,
@@ -8217,7 +8217,7 @@ fn c_rec(
 
 /// Find a reasonable name for the match variable from the first pattern.
 /// Equivalent to OCaml's `name_pattern`.
-fn name_pattern(ctx_ref: &TypeContext<'_>, default: &str, cases: &[Clause]) -> Ident {
+fn name_pattern(ctx_ref: &TypeContext, default: &str, cases: &[Clause]) -> Ident {
     for (pats, _) in cases {
         if let Some(pat) = pats.first() {
             if let Some(id) = id_of_pattern(ctx_ref, pat) {
@@ -8230,7 +8230,7 @@ fn name_pattern(ctx_ref: &TypeContext<'_>, default: &str, cases: &[Clause]) -> I
 
 /// Extract an identifier from a pattern (for naming purposes).
 /// Equivalent to OCaml's `Typecore.id_of_pattern`.
-fn id_of_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<Ident> {
+fn id_of_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<Ident> {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, _) => Some(id.clone()),
         PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
@@ -8246,7 +8246,7 @@ fn id_of_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<Ident> {
 
 /// Convert arg to a variable (bind if not already a variable).
 /// Equivalent to OCaml's `arg_to_var`.
-fn arg_to_var(ctx_ref: &TypeContext<'_>, arg: &RawLambda, cls: &[Clause]) -> (Ident, RawLambda) {
+fn arg_to_var(ctx_ref: &TypeContext, arg: &RawLambda, cls: &[Clause]) -> (Ident, RawLambda) {
     match arg {
         RawLambda::Lvar(v) => (v.clone(), arg.clone()),
         _ => {
@@ -8292,7 +8292,7 @@ fn patch_guarded(patch: RawLambda, lam: &RawLambda) -> RawLambda {
 ///
 /// Equivalent to OCaml's `compile_match`.
 fn compile_match(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     _repr: Option<()>,
     partial: &Partial,
@@ -8367,7 +8367,7 @@ fn compile_match(
 /// Main dispatch for compiling half-compiled pattern matchings.
 /// Equivalent to OCaml's `do_compile_matching`.
 fn do_compile_matching(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     partial: &Partial,
     ctx: &[Ctx],
@@ -8572,7 +8572,7 @@ fn do_compile_matching(
 /// Compile without test (divide_line + compile_match).
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> MatchCell,
     up_ctx: &dyn Fn(&[Ctx]) -> Vec<Ctx>,
@@ -8619,7 +8619,7 @@ unsafe impl Sync for RaiseCounter {}
 /// We inline compile_test here to avoid borrow conflicts with next_raise_count
 /// being captured by both compile_fn and combine_fn closures.
 fn compile_test_wrapper<K: Clone>(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     partial: &Partial,
     divide_fn: &dyn Fn(&[Ctx], &PatternMatching) -> Vec<(K, MatchCell)>,
@@ -8679,7 +8679,7 @@ fn get_all_labels_from_record_fields(
 /// This is the equivalent of OCaml's `lbl.lbl_all` which points to all labels of the record type.
 /// We look up the type declaration via the TypeContext to get all labels.
 fn resolve_all_record_labels(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     pat: &Pattern,
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
@@ -8710,7 +8710,7 @@ fn resolve_all_record_labels(
 
 /// Look up all LabelDescription entries for a record type.
 fn resolve_labels_from_type(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     record_ty: TypeExprRef,
     env_ref: EnvRef,
 ) -> Option<Vec<LabelDescription>> {
@@ -8903,7 +8903,7 @@ fn build_label_descriptions(
 /// Follows type links to find the Tvariant row.
 /// Extract variant row with env-based expansion (preferred).
 fn extract_row_from_type_with_env(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     ty: TypeExprRef,
     env_ref: crate::types::typedtree::EnvRef,
 ) -> RowDesc {
@@ -8923,7 +8923,7 @@ fn extract_row_from_type_with_env(
     extract_row_from_type(ctx_ref, ty)
 }
 
-fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc {
+fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
     use crate::types::btype;
     use crate::types::type_expr::TypeDesc;
 
@@ -8989,7 +8989,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext<'_>, ty: TypeExprRef) -> RowDesc 
 
 /// Placeholder for names_from_construct_pattern.
 /// Matches `compiler/core/matching_polyfill.ml`.
-fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Option<SwitchNames> {
+fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<SwitchNames> {
     fn process_tag_type(attrs: &[crate::types::decl::Attribute]) -> Option<SwitchCaseTag> {
         attrs.iter().find_map(|attr| {
             if attr.attr_name.txt != "as" {
@@ -9078,7 +9078,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn get_block_type_from_typ(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         env: &Env,
         ty: TypeExprRef,
     ) -> Option<SwitchBlockType> {
@@ -9114,7 +9114,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn extract_concrete_type_decl(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         env: &Env,
         ty: TypeExprRef,
     ) -> Option<crate::types::decl::TypeDeclaration> {
@@ -9133,7 +9133,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn get_untagged_payload_block_type(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         env: &Env,
         cstr: &crate::types::decl::ConstructorDeclaration,
     ) -> Option<SwitchBlockType> {
@@ -9159,7 +9159,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn get_block_type(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         env: &Env,
         cstr: &crate::types::decl::ConstructorDeclaration,
     ) -> Option<SwitchBlockType> {
@@ -9170,7 +9170,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn switch_names_from_variant(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         env: &Env,
         cstrs: &[crate::types::decl::ConstructorDeclaration],
     ) -> SwitchNames {
@@ -9198,7 +9198,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn resolve_type(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         ty: TypeExprRef,
         env: &Env,
         seen: &mut BTreeSet<String>,
@@ -9213,7 +9213,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext<'_>, pat: &Pattern) -> Opt
     }
 
     fn resolve_path(
-        ctx_ref: &TypeContext<'_>,
+        ctx_ref: &TypeContext,
         path: &Path,
         env: &Env,
         seen: &mut BTreeSet<String>,
@@ -9349,7 +9349,7 @@ fn check_total(
 /// Compile a matching with error handler.
 /// Equivalent to OCaml's `compile_matching`.
 pub fn compile_matching(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
@@ -9416,7 +9416,7 @@ pub fn compile_matching(
 
 /// Build a match failure exception raise.
 /// Equivalent to OCaml's `partial_function`.
-pub fn partial_function(_ctx_ref: &TypeContext<'_>, loc: Location) -> RawLambda {
+pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let line = loc.loc_start.line;
     let char_pos = loc.loc_start.column();
     // File name is stored as StrIdx; we use "" as placeholder since we can't
@@ -9454,7 +9454,7 @@ pub fn partial_function(_ctx_ref: &TypeContext<'_>, loc: Location) -> RawLambda 
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
 pub fn for_function(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
@@ -9477,7 +9477,7 @@ pub fn for_function(
 /// Compile a match for a try-with handler.
 /// Equivalent to OCaml's `for_trywith`.
 pub fn for_trywith(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     param: RawLambda,
     pat_act_list: Vec<(Pattern, RawLambda)>,
@@ -9504,7 +9504,7 @@ pub fn for_trywith(
 /// Simple let matching.
 /// Equivalent to OCaml's `simple_for_let`.
 pub fn simple_for_let(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
@@ -9527,7 +9527,7 @@ pub fn simple_for_let(
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
 pub fn for_let(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     param: RawLambda,
@@ -9559,7 +9559,7 @@ pub fn for_let(
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
 pub fn for_tupled_function(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     paraml: &[Ident],
@@ -9725,7 +9725,7 @@ fn flatten_precompiled(
 /// Hence it needs a fourth argument (arg), which it ignores.
 /// Equivalent to OCaml's `compile_flattened`.
 fn compile_flattened(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     partial: &Partial,
     ctx: &[Ctx],
@@ -9759,7 +9759,7 @@ fn compile_flattened(
 /// Compile a multiple-match expression (tuple patterns on arguments).
 /// Equivalent to OCaml's `do_for_multiple_match`.
 pub fn do_for_multiple_match(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
@@ -9899,7 +9899,7 @@ pub fn do_for_multiple_match(
 
 /// Extract a variable from a param, binding if needed.
 /// Equivalent to OCaml's `param_to_var`.
-fn param_to_var(ctx_ref: &TypeContext<'_>, param: &RawLambda) -> (Ident, Option<RawLambda>) {
+fn param_to_var(ctx_ref: &TypeContext, param: &RawLambda) -> (Ident, Option<RawLambda>) {
     match param {
         RawLambda::Lvar(v) => (v.clone(), None),
         _ => (ctx_ref.create_ident("match"), Some(param.clone())),
@@ -9918,7 +9918,7 @@ fn bind_opt(v_eo: (Ident, Option<RawLambda>), k: RawLambda) -> RawLambda {
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
 pub fn for_multiple_match(
-    ctx_ref: &TypeContext<'_>,
+    ctx_ref: &TypeContext,
     arena: &ParseArena,
     loc: Location,
     paraml: Vec<RawLambda>,
@@ -9959,7 +9959,7 @@ mod tests {
     #[test]
     fn constructor_switch_names_use_pattern_env() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let env_ref = ctx.store_typed_env(&env);
         let pat_type = ctx.new_generic_constr(

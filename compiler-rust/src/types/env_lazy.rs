@@ -35,7 +35,7 @@ fn add_type_constructors(
     access_path: &Path,
     type_name: &str,
     decl: &TypeDeclaration,
-    ctx: &super::context::TypeContext<'_>,
+    ctx: &super::context::TypeContext,
 ) {
     let super::decl::TypeKind::TypeVariant(cstrs) = &decl.type_kind else {
         return;
@@ -260,7 +260,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new(
         access_path: Path,
         signature: Signature,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
     }
@@ -269,7 +269,7 @@ impl QualifiedModuleComponents {
         access_path: Path,
         signature: Signature,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
     }
@@ -278,7 +278,7 @@ impl QualifiedModuleComponents {
         access_path: Path,
         signature: Arc<Signature>,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Self {
         let child_components = if child_components.is_empty() {
             build_child_components_from_signature(&access_path, &signature)
@@ -515,7 +515,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn lookup_qualified_module(
         &self,
         name: &str,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, ModuleDeclaration)> {
         let (idx, runtime_pos) = *self.modules.get(name)?;
         if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
@@ -563,7 +563,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn lookup_qualified_modtype(
         &self,
         name: &str,
-        _ctx: &super::context::TypeContext<'_>,
+        _ctx: &super::context::TypeContext,
     ) -> Option<(Ident, ModtypeDeclaration)> {
         if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
             return Some((id, mtd));
@@ -612,7 +612,7 @@ fn build_local_module_components<'a>(
     access_path: &Path,
     md: &ModuleDeclaration,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a super::context::TypeContext<'a>,
+    ctx: &'a super::context::TypeContext,
 ) -> Option<QualifiedModuleComponents> {
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
@@ -776,7 +776,7 @@ impl StoredModuleComponents {
     pub(crate) fn with_components<'a, R>(
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a super::context::TypeContext<'a>,
+        ctx: &'a super::context::TypeContext,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if self.cached.borrow().is_none() {

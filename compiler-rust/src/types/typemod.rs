@@ -66,7 +66,7 @@ fn open_direct_persistent_module<'a>(
     lid: &Longident,
     arena: &ParseArena,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     let Longident::Lident(module_idx) = lid else {
         return None;
@@ -143,7 +143,7 @@ fn flattened_persistent_alias_path(
 /// `Ttyp_poly` core type, so we don't double-wrap. If it wasn't poly, we wrap in
 /// `Ttyp_poly([], inner)` to match OCaml's `force_poly` behavior.
 fn force_poly_typed_core_type(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     typed_core_type: TypedCoreType,
     ty_ref: TypeExprRef,
 ) -> (TypedCoreType, TypeExprRef) {
@@ -304,7 +304,7 @@ fn decl_attrs_mark_immediate(attrs: &[crate::types::decl::Attribute]) -> bool {
 }
 
 fn type_expr_is_immediate(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> bool {
@@ -338,7 +338,7 @@ fn type_expr_is_immediate(
 }
 
 fn compute_type_immediacy(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     type_kind: &crate::types::TypeKind,
     type_manifest: Option<TypeExprRef>,
@@ -426,7 +426,7 @@ fn arity_from_arrow_core_type(arena: &ParseArena, core_type: &crate::parser::ast
 }
 
 fn get_primitive_arity_from_type(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<i32> {
@@ -434,7 +434,7 @@ fn get_primitive_arity_from_type(
 }
 
 fn get_primitive_arity_from_type_depth(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
     depth: u32,
@@ -463,14 +463,14 @@ fn get_primitive_arity_from_type_depth(
 
 /// Check if a type is a Tconstr (type alias) at the top level.
 /// Used to determine prim_from_constructor for external declarations.
-fn is_type_constructor(ctx: &crate::types::context::TypeContext<'_>, ty: TypeExprRef) -> bool {
+fn is_type_constructor(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
     let repr = ctx.repr(ty);
     matches!(&*ctx.get_desc(repr), crate::types::TypeDesc::Tconstr { .. })
 }
 
 fn primitive_description_from_value_decl(
     arena: &ParseArena,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     val_prim: &[StrIdx],
     core_type_idx: crate::parse_arena::CoreTypeIdx,
@@ -514,7 +514,7 @@ fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreT
 }
 
 fn primitive_description_from_typed_value_desc(
-    ctx: Option<&crate::types::context::TypeContext<'_>>,
+    ctx: Option<&crate::types::context::TypeContext>,
     env: Option<&Env>,
     vd: &crate::types::typedtree::TypedValueDescription,
 ) -> crate::types::PrimitiveDescription {
@@ -653,7 +653,7 @@ fn collect_functor_arg_module_aliases(
 }
 
 fn inline_record_type_params(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     parent_type_params: &[TypeExprRef],
     labels: &[crate::types::LabelDeclaration],
 ) -> Vec<TypeExprRef> {
@@ -788,7 +788,7 @@ fn included_path_is_direct_child(
 }
 
 fn rewrite_included_type_paths_to_local(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
     include_root_path: Option<&Path>,
     include_flat_name: Option<&str>,
@@ -1003,7 +1003,7 @@ fn rewrite_included_type_paths_to_local(
 }
 
 fn rewrite_included_type_decl_paths_to_local(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     id: &Ident,
     decl: &mut crate::types::decl::TypeDeclaration,
     include_root_path: Option<&Path>,
@@ -1104,7 +1104,7 @@ fn rewrite_included_type_decl_paths_to_local(
 }
 
 fn rewrite_included_module_type_paths_to_local(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     mty: &mut crate::types::decl::ModuleType,
     include_root_path: Option<&Path>,
     include_flat_name: Option<&str>,
@@ -1169,7 +1169,7 @@ fn rewrite_included_module_type_paths_to_local(
 }
 
 fn rewrite_included_signature_paths_to_local(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     sig: &mut [crate::types::decl::SignatureItem],
     include_root_path: Option<&Path>,
     include_flat_name: Option<&str>,
@@ -1358,7 +1358,7 @@ fn rewrite_module_prefix_in_type(
     ty_ref: TypeExprRef,
     old_param: &Ident,
     new_prefix: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
@@ -1446,7 +1446,7 @@ fn copy_and_rewrite_module_prefix_type(
     ty_ref: TypeExprRef,
     old_param: &Ident,
     new_prefix: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
     // Functor-result substitution is a module-type operation; copied nodes should
@@ -1464,7 +1464,7 @@ fn copy_and_rewrite_constructor_args(
     args: &crate::types::decl::ConstructorArguments,
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
@@ -1504,7 +1504,7 @@ fn copy_and_rewrite_type_kind(
     type_kind: &crate::types::decl::TypeKind,
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeKind {
     match type_kind {
@@ -1559,7 +1559,7 @@ fn copy_and_rewrite_type_inlined(
     inlined: &crate::types::decl::TypeInlinedType,
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
     match inlined {
@@ -1589,7 +1589,7 @@ fn substitute_functor_param_in_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> Vec<crate::types::decl::SignatureItem> {
     use crate::types::decl::SignatureItem;
 
@@ -1713,7 +1713,7 @@ fn substitute_functor_param_in_module_type(
     mty: &crate::types::decl::ModuleType,
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -1763,7 +1763,7 @@ fn substitute_functor_param_in_module_type(
 /// The environment should already contain the argument module bound to `mid`.
 /// Returns `None` if the dependency cannot be eliminated.
 fn nondep_supertype(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     mid: &Ident,
     mty: &crate::types::decl::ModuleType,
@@ -1772,7 +1772,7 @@ fn nondep_supertype(
 }
 
 fn nondep_mty(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     mid: &Ident,
     mty: &crate::types::decl::ModuleType,
@@ -1837,7 +1837,7 @@ fn nondep_mty(
 }
 
 fn nondep_sig(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     mid: &Ident,
     sig_items: &[crate::types::decl::SignatureItem],
@@ -1932,7 +1932,7 @@ fn rewrite_module_aliases_in_type(
     ty_ref: TypeExprRef,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
 ) {
     use crate::types::type_expr::{RowField, TypeDesc};
@@ -2031,7 +2031,7 @@ fn copy_and_rewrite_module_aliases_type(
     ty_ref: TypeExprRef,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
     let old_level = ctx.current_level();
@@ -2047,7 +2047,7 @@ fn copy_and_rewrite_constructor_args_with_aliases(
     args: &crate::types::decl::ConstructorArguments,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
@@ -2091,7 +2091,7 @@ fn copy_and_rewrite_type_kind_with_aliases(
     kind: &crate::types::TypeKind,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::TypeKind {
     match kind {
@@ -2146,7 +2146,7 @@ fn copy_and_rewrite_type_inlined_with_aliases(
     inlined: &crate::types::decl::TypeInlinedType,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
     match inlined {
@@ -2176,7 +2176,7 @@ fn substitute_functor_param_aliases_in_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> Vec<crate::types::decl::SignatureItem> {
     use crate::types::decl::SignatureItem;
 
@@ -2308,7 +2308,7 @@ fn substitute_functor_param_aliases_in_module_type(
     mty: &crate::types::decl::ModuleType,
     old_param: &Ident,
     arg_aliases: &HashMap<String, Path>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -2360,7 +2360,7 @@ fn substitute_functor_param_aliases_in_module_type(
     }
 }
 
-fn unwrap_poly_type(ctx: &crate::types::context::TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+fn unwrap_poly_type(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> TypeExprRef {
     let repr = ctx.repr(ty);
     match &*ctx.get_desc(repr) {
         crate::types::TypeDesc::Tpoly { body, .. } => ctx.repr(*body),
@@ -2370,7 +2370,7 @@ fn unwrap_poly_type(ctx: &crate::types::context::TypeContext<'_>, ty: TypeExprRe
 
 fn find_type_decl_for_path(
     env: &Env,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     path: &Path,
 ) -> Option<crate::types::TypeDeclaration> {
     // `Env.lookup_type` on qualified paths currently falls back to leaf-name
@@ -2436,13 +2436,13 @@ fn find_type_decl_for_path(
 }
 
 fn expand_record_spread_label(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     label: &crate::types::LabelDeclaration,
     visited: &mut HashSet<String>,
 ) -> Option<Vec<crate::types::LabelDeclaration>> {
     fn with_original_level(
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         original: TypeExprRef,
         rebuilt: TypeExprRef,
     ) -> TypeExprRef {
@@ -2461,7 +2461,7 @@ fn expand_record_spread_label(
     }
 
     fn substitute_type_params(
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         ty: TypeExprRef,
         params: &[TypeExprRef],
         args: &[TypeExprRef],
@@ -2850,7 +2850,7 @@ fn expand_record_spread_label(
 
 fn make_typed_spread_label(
     arena: &ParseArena,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     template: &TypedLabelDeclaration,
     field: &crate::types::LabelDeclaration,
 ) -> TypedLabelDeclaration {
@@ -3023,7 +3023,7 @@ fn type_to_instanceof_backed_obj(path: &Path) -> bool {
 }
 
 fn touch_untagged_constructor_payload_type(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) {
@@ -3050,7 +3050,7 @@ fn touch_untagged_constructor_payload_type(
 }
 
 fn touch_untagged_variant_well_formedness(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     decl: &crate::types::decl::TypeDeclaration,
 ) {
@@ -3080,7 +3080,7 @@ fn touch_untagged_variant_well_formedness(
 }
 
 fn touch_manifest_cyclic_abbrev_check(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     manifest: TypeExprRef,
 ) {
@@ -3105,7 +3105,7 @@ fn touch_manifest_cyclic_abbrev_check(
 }
 
 fn touch_type_constraint_path(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -3165,7 +3165,7 @@ fn touch_type_constraint_path(
 }
 
 fn touch_package_constraint_match_side_effects(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) {
@@ -3221,7 +3221,7 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
 }
 
 fn type_expr_mentions_path_root(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -3281,7 +3281,7 @@ fn type_expr_mentions_path_root(
 }
 
 fn type_decl_mentions_path_root(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     decl: &crate::types::decl::TypeDeclaration,
@@ -3321,7 +3321,7 @@ fn type_decl_mentions_path_root(
 }
 
 fn type_path_decl_mentions_path_root(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     path: &Path,
@@ -3356,7 +3356,7 @@ fn type_path_decl_mentions_path_root(
 }
 
 fn constraint_path_needs_primitive_js_match_force(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     path: &Path,
@@ -3393,7 +3393,7 @@ fn constraint_path_needs_primitive_js_match_force(
 }
 
 fn touch_type_declaration_constraints(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     decl: &crate::types::decl::TypeDeclaration,
@@ -3408,7 +3408,7 @@ fn touch_type_declaration_constraints(
 }
 
 fn compute_type_variance_fixpoint(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     env: &Env,
     type_ids: &[Ident],
 ) -> Vec<Vec<TypesVariance>> {
@@ -3697,7 +3697,7 @@ pub fn lookup_module_path_by_lid<'b>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<Path> {
     use crate::parser::longident::Longident;
 
@@ -3770,7 +3770,7 @@ pub fn lookup_modtype_path_by_lid<'b>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<Path> {
     use crate::parser::longident::Longident;
 
@@ -3834,7 +3834,7 @@ fn lookup_module_alias_by_lid<'b>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<(crate::types::decl::AliasPresence, Path)> {
     use crate::parser::longident::Longident;
 
@@ -3880,7 +3880,7 @@ pub fn lookup_module_type_by_lid<'b>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::parser::longident::Longident;
     use crate::types::decl::ModuleType as DeclMty;
@@ -3904,7 +3904,7 @@ pub fn lookup_module_type_by_lid<'b>(
         arena: &ParseArena,
         env: &Env,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<(crate::types::decl::AliasPresence, Path)> {
         if let Longident::Lident(mod_idx) = lid {
             let mod_name = arena.get_string(*mod_idx);
@@ -4036,7 +4036,7 @@ pub fn resolve_mod_type_to_sig<'b>(
     mty: &crate::types::decl::ModuleType,
     env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::Signature> {
     let mut visiting = HashSet::new();
     resolve_mod_type_to_sig_impl(mty, env, pers_env, ctx, &mut visiting)
@@ -4080,7 +4080,7 @@ pub(crate) fn consume_fake_package_mty_freshening<'b>(
     package_path: &Path,
     constraint_count: usize,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) {
     if constraint_count == 0 {
         return;
@@ -4105,7 +4105,7 @@ fn resolve_mod_type_to_sig_impl<'b>(
     mty: &crate::types::decl::ModuleType,
     env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
     visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
     use crate::types::decl::ModuleType as DeclMty;
@@ -4124,7 +4124,7 @@ fn resolve_modtype_path_to_sig_impl<'b>(
     path: &Path,
     env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
     visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
     if !visiting.insert(path.clone()) {
@@ -4161,7 +4161,7 @@ fn resolve_path_to_sig_impl<'b>(
     path: &Path,
     env: Option<&Env>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
     visiting: &mut HashSet<Path>,
 ) -> Option<crate::types::decl::Signature> {
     use crate::types::decl::SignatureItem as SigItem;
@@ -4301,7 +4301,7 @@ struct WithTypeConstraint {
 fn flatten_package_constraint_path(
     lid: &Longident,
     arena: &ParseArena,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> Vec<String> {
     lid.flatten_idx()
         .into_iter()
@@ -4367,7 +4367,7 @@ fn rewrite_package_freshened_type_path(path: &Path, fresh_type_ids: &HashMap<i32
 }
 
 fn rewrite_package_freshened_type_expr(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
     fresh_type_ids: &HashMap<i32, Ident>,
     visited: &mut HashSet<TypeExprRef>,
@@ -4449,7 +4449,7 @@ fn rewrite_package_freshened_type_expr(
 
 fn rewrite_package_freshened_constructor_args(
     args: &mut crate::types::decl::ConstructorArguments,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     fresh_type_ids: &HashMap<i32, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
@@ -4469,7 +4469,7 @@ fn rewrite_package_freshened_constructor_args(
 
 fn rewrite_package_freshened_type_kind(
     kind: &mut crate::types::TypeKind,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     fresh_type_ids: &HashMap<i32, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
@@ -4498,7 +4498,7 @@ fn rewrite_package_freshened_type_kind(
 
 fn rewrite_package_freshened_type_inlined(
     inlined: &mut crate::types::decl::TypeInlinedType,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     fresh_type_ids: &HashMap<i32, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
@@ -4513,7 +4513,7 @@ fn rewrite_package_freshened_type_inlined(
 
 fn collect_package_fresh_type_ids_in_module_type(
     mty: &crate::types::decl::ModuleType,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     fresh_type_ids: &mut HashMap<i32, Ident>,
 ) {
     use crate::types::decl::ModuleType as DeclMty;
@@ -4563,7 +4563,7 @@ fn collect_package_fresh_type_ids_in_module_type(
 
 fn freshen_package_type_ids_in_module_type(
     mty: &mut crate::types::decl::ModuleType,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     fresh_type_ids: &HashMap<i32, Ident>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
@@ -4675,7 +4675,7 @@ fn freshen_package_type_ids_in_module_type(
 
 fn copy_signature_for_package_constraints(
     sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> crate::types::decl::Signature {
     let dummy_param = Ident::create_local("__pkg_copy_param__");
     let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
@@ -4697,7 +4697,7 @@ fn apply_package_constraints_to_module_type<'b>(
     constraints: &[PackageConstraint],
     _package_parent_path: Option<&Path>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::SignatureItem;
 
@@ -4755,7 +4755,7 @@ fn apply_package_constraints_to_module_type<'b>(
         mut rewritten_sig: crate::types::decl::Signature,
         nested_modules: Vec<(usize, Vec<PackageConstraint>)>,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<crate::types::decl::ModuleType> {
         for (idx, nested) in nested_modules {
             let Some(SignatureItem::SigModule(_, md, _)) = rewritten_sig.get_mut(idx) else {
@@ -4779,7 +4779,7 @@ fn apply_package_constraints_to_module_type<'b>(
         path: &Path,
         constraints: &[PackageConstraint],
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
         visiting: &mut HashSet<Path>,
     ) -> Option<crate::types::decl::ModuleType> {
         if !visiting.insert(path.clone()) {
@@ -4892,7 +4892,7 @@ fn apply_package_constraints_to_module_type<'b>(
         mty: &crate::types::decl::ModuleType,
         constraints: &[PackageConstraint],
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
         visiting: &mut HashSet<Path>,
     ) -> Option<crate::types::decl::ModuleType> {
         use crate::types::decl::ModuleType as DeclMty;
@@ -4922,13 +4922,13 @@ fn apply_with_type_constraints_to_module_type<'b>(
     mty: &crate::types::decl::ModuleType,
     constraints: &[WithTypeConstraint],
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
     use crate::types::type_expr::TypeDesc;
 
     fn rewrite_type_with_substs(
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         ty: TypeExprRef,
         substs: &HashMap<String, TypeExprRef>,
         cache: &mut HashMap<String, TypeExprRef>,
@@ -5031,7 +5031,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
     }
 
     fn rewrite_module_type_with_substs(
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         mty: &mut DeclMty,
         substs: &HashMap<String, TypeExprRef>,
         cache: &mut HashMap<String, TypeExprRef>,
@@ -5148,7 +5148,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
         sig: &[SignatureItem],
         constraints: &[WithTypeConstraint],
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<crate::types::decl::Signature> {
         // OCaml builds a new constrained signature, then returns
         // `Mtype.freshen (Mty_signature final_sg)` without mutating the source
@@ -5214,7 +5214,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
         mty: &DeclMty,
         constraints: &[WithTypeConstraint],
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
         visiting: &mut HashSet<Path>,
     ) -> Option<DeclMty> {
         match mty {
@@ -5252,7 +5252,7 @@ pub fn modtype_of_package<'b>(
     package_args: &[TypeExprRef],
     arena: &ParseArena,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -5423,7 +5423,7 @@ fn resolve_with_constraint_target_in_sig(
     prefix: Option<&Path>,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> Option<ResolvedWithConstraintTarget> {
     use crate::types::decl::SignatureItem;
 
@@ -5671,7 +5671,7 @@ fn rewrite_functor_param_type_paths_in_type(
     ty: TypeExprRef,
     param_name: &str,
     manifests: &HashMap<String, TypeExprRef>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     visited: &mut HashSet<TypeExprRef>,
     manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
 ) {
@@ -5893,7 +5893,7 @@ fn copy_and_specialize_functor_arg_type(
     ty: TypeExprRef,
     param_name: &str,
     manifests: &HashMap<String, TypeExprRef>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
     manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
 ) -> TypeExprRef {
@@ -5919,13 +5919,13 @@ fn specialize_functor_result_value_types(
     mty: &crate::types::decl::ModuleType,
     param_name: &str,
     manifests: &HashMap<String, TypeExprRef>,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> crate::types::decl::ModuleType {
     fn specialize_label_decl(
         label: &crate::types::decl::LabelDeclaration,
         param_name: &str,
         manifests: &HashMap<String, TypeExprRef>,
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
         manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::LabelDeclaration {
@@ -5945,7 +5945,7 @@ fn specialize_functor_result_value_types(
         args: &crate::types::decl::ConstructorArguments,
         param_name: &str,
         manifests: &HashMap<String, TypeExprRef>,
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
         manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::ConstructorArguments {
@@ -5991,7 +5991,7 @@ fn specialize_functor_result_value_types(
         kind: &crate::types::decl::TypeKind,
         param_name: &str,
         manifests: &HashMap<String, TypeExprRef>,
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
         manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::TypeKind {
@@ -6054,7 +6054,7 @@ fn specialize_functor_result_value_types(
         inlined: &crate::types::decl::TypeInlinedType,
         param_name: &str,
         manifests: &HashMap<String, TypeExprRef>,
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
         manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::TypeInlinedType {
@@ -6084,7 +6084,7 @@ fn specialize_functor_result_value_types(
         mty: &crate::types::decl::ModuleType,
         param_name: &str,
         manifests: &HashMap<String, TypeExprRef>,
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
         copy_cache: &mut HashMap<TypeExprRef, TypeExprRef>,
         manifest_subst_cache: &mut HashMap<String, TypeExprRef>,
     ) -> crate::types::decl::ModuleType {
@@ -6289,7 +6289,7 @@ fn scrape_alias_module_type<'b>(
     mty: &crate::types::decl::ModuleType,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -6297,7 +6297,7 @@ fn scrape_alias_module_type<'b>(
         path: &Path,
         env: &Env,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
         visiting: &mut HashSet<Path>,
         force_component_subst: bool,
     ) -> Option<DeclMty> {
@@ -6724,7 +6724,7 @@ fn remove_module_type_aliases_for_typeof<'b>(
     mty: &crate::types::decl::ModuleType,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
     use crate::types::decl::SignatureItem as SigItem;
@@ -6861,7 +6861,7 @@ fn strengthen_semantic_ident_module_type<'a>(
     path: &Path,
     semantic_mty: crate::types::decl::ModuleType,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -6899,7 +6899,7 @@ fn strengthen_semantic_ident_module_type<'a>(
 fn force_persistent_sigs_for_normalize_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     path: &Path,
 ) {
     match path {
@@ -7676,7 +7676,7 @@ fn add_decl_signature_item_to_env(item: &crate::types::decl::SignatureItem, env:
 }
 
 fn approx_abstract_type_decl(
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
     arity: usize,
 ) -> crate::types::decl::TypeDeclaration {
     ctx.begin_def();
@@ -8220,7 +8220,7 @@ fn extract_module_type_from_mod_expr(
 pub(crate) fn extract_module_type_from_mod_expr_with_ctx<'a>(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
-    type_ctx: &'a crate::types::context::TypeContext<'a>,
+    type_ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
     let mut no_ident_resolver = |_lid: &Located<LidentIdx>,
                                  _env: Option<&Env>|
@@ -8236,7 +8236,7 @@ pub(crate) fn extract_module_type_from_mod_expr_with_ctx<'a>(
 fn strip_self_module_prefix_in_sig(
     sig: &[crate::types::decl::SignatureItem],
     module_id: &Ident,
-    type_ctx: &crate::types::context::TypeContext<'_>,
+    type_ctx: &crate::types::context::TypeContext,
 ) {
     use crate::types::decl::SignatureItem;
     use crate::types::type_expr::{RowField, TypeDesc};
@@ -8277,7 +8277,7 @@ fn strip_self_module_prefix_in_sig(
         ty_ref: crate::types::TypeExprRef,
         module_id: &Ident,
         direct_items: &HashMap<String, Ident>,
-        type_ctx: &crate::types::context::TypeContext<'_>,
+        type_ctx: &crate::types::context::TypeContext,
         visited: &mut HashSet<crate::types::TypeExprRef>,
     ) {
         let ty_ref = type_ctx.repr(ty_ref);
@@ -8367,7 +8367,7 @@ fn strip_self_module_prefix_in_sig(
         sig: &[crate::types::decl::SignatureItem],
         module_id: &Ident,
         direct_items: &HashMap<String, Ident>,
-        type_ctx: &crate::types::context::TypeContext<'_>,
+        type_ctx: &crate::types::context::TypeContext,
     ) {
         let mut visited = HashSet::new();
         for item in sig {
@@ -8416,7 +8416,7 @@ fn localize_exported_structure_module_type(
     mty: crate::types::decl::ModuleType,
     local_id: &Ident,
     env: Option<&Env>,
-    type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+    type_ctx: Option<&crate::types::context::TypeContext>,
 ) -> crate::types::decl::ModuleType {
     use crate::types::decl::ModuleType as DeclMty;
 
@@ -8466,7 +8466,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
     sig: &mut [crate::types::decl::SignatureItem],
     structure: &Structure,
     module_path: &Path,
-    type_ctx: &crate::types::context::TypeContext<'_>,
+    type_ctx: &crate::types::context::TypeContext,
 ) {
     use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
@@ -8474,7 +8474,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
         sub_sig: &mut [crate::types::decl::SignatureItem],
         child_path: &Path,
         mod_expr: &ModuleExpr,
-        type_ctx: &crate::types::context::TypeContext<'_>,
+        type_ctx: &crate::types::context::TypeContext,
     ) {
         if matches!(
             mod_expr.mod_desc,
@@ -8611,7 +8611,7 @@ fn module_expr_contains_unpack_for_sig_localization(mod_expr: &ModuleExpr) -> bo
 fn localize_raw_unpack_module_type_family(
     sig: &[crate::types::decl::SignatureItem],
     local_id: &Ident,
-    type_ctx: &crate::types::context::TypeContext<'_>,
+    type_ctx: &crate::types::context::TypeContext,
 ) {
     use crate::types::decl::SignatureItem;
     use crate::types::type_expr::TypeDesc;
@@ -8659,7 +8659,7 @@ fn localize_raw_unpack_module_type_family(
 fn localize_raw_unpack_modules_in_structure_sig(
     sig: &[crate::types::decl::SignatureItem],
     structure: &Structure,
-    type_ctx: &crate::types::context::TypeContext<'_>,
+    type_ctx: &crate::types::context::TypeContext,
 ) {
     use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
@@ -8731,7 +8731,7 @@ fn localize_raw_unpack_modules_in_structure_sig(
 fn extract_module_type_from_mod_expr_with_resolver<F>(
     mod_expr: &ModuleExpr,
     env: Option<&Env>,
-    type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+    type_ctx: Option<&crate::types::context::TypeContext>,
     resolve_ident_sig: &mut F,
 ) -> Option<crate::types::decl::ModuleType>
 where
@@ -8757,7 +8757,7 @@ where
     fn resolve_modtype_to_sig_in_env(
         mty: &crate::types::decl::ModuleType,
         env: &Env,
-        type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+        type_ctx: Option<&crate::types::context::TypeContext>,
     ) -> Option<crate::types::decl::Signature> {
         use crate::types::decl::ModuleType as DeclMty;
         fn anchored(
@@ -8774,7 +8774,7 @@ where
             parent_path: &Path,
             owner_path: &Path,
             mty: &crate::types::decl::ModuleType,
-            ctx: &crate::types::context::TypeContext<'_>,
+            ctx: &crate::types::context::TypeContext,
         ) -> crate::types::decl::ModuleType {
             let mut mty = mty.clone();
             crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
@@ -8790,7 +8790,7 @@ where
         fn resolve_path(
             path: &Path,
             env: &Env,
-            type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+            type_ctx: Option<&crate::types::context::TypeContext>,
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             use crate::types::decl::SignatureItem as SigItem;
@@ -8893,7 +8893,7 @@ where
         fn resolve_mty(
             mty: &crate::types::decl::ModuleType,
             env: &Env,
-            type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+            type_ctx: Option<&crate::types::context::TypeContext>,
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             match mty {
@@ -8912,7 +8912,7 @@ where
     fn resolve_module_type_path_in_env(
         path: &Path,
         env: &Env,
-        type_ctx: Option<&crate::types::context::TypeContext<'_>>,
+        type_ctx: Option<&crate::types::context::TypeContext>,
     ) -> Option<crate::types::decl::ModuleType> {
         use crate::types::decl::ModuleType as DeclMty;
         use crate::types::decl::SignatureItem as SigItem;
@@ -8931,7 +8931,7 @@ where
             parent_path: &Path,
             owner_path: &Path,
             mty: &crate::types::decl::ModuleType,
-            ctx: &crate::types::context::TypeContext<'_>,
+            ctx: &crate::types::context::TypeContext,
         ) -> crate::types::decl::ModuleType {
             let mut mty = mty.clone();
             crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
@@ -14881,7 +14881,7 @@ mod tests {
         crate::ident::Ident::set_current_time(999);
         let id_gen = IdGenerator::with_start_stamp(999);
         let _ = id_gen.next_stamp();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut parser = Parser::new("test.res", source);
         let structure = module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "parse failed");

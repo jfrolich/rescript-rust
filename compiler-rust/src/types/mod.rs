@@ -23,7 +23,7 @@
 //! use rescript_compiler::context::IdGenerator;
 //!
 //! let id_gen = IdGenerator::new();
-//! let ctx = TypeContext::new(&id_gen);
+//! let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 //!
 //! // Create types
 //! let t1 = ctx.new_var(Some("a".to_string()));
@@ -122,7 +122,7 @@ mod tests {
     fn test_integration() {
         // Create a type context
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         // Create a simple function type: 'a -> 'b
         let a = ctx.new_var(Some("a".to_string()));
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_level_scoping() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         // Begin a definition scope
         ctx.begin_def();

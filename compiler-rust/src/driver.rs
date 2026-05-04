@@ -1355,7 +1355,7 @@ pub fn compile_source_to_js_with_options(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -1765,7 +1765,7 @@ fn build_inferred_signature_coercion(
 
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
@@ -1856,7 +1856,7 @@ pub fn typecheck_interface_source(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -2033,7 +2033,7 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 pub fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     open_modules: &[String],
     nopervasives: bool,
     compiling_module: Option<&str>,
@@ -2122,7 +2122,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -2175,7 +2175,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -2219,7 +2219,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 /// links these shared Tvars to interface types, ALL references update.
 fn apply_moregen_constraints(
     tctx: &mut TypeCheckContext<'_>,
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
     known_has_interface: Option<bool>,
@@ -2407,7 +2407,7 @@ fn apply_moregen_constraints(
 }
 
 fn moregen_link_structure(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
@@ -2476,7 +2476,7 @@ fn moregen_link_structure(
 }
 
 fn moregen_link_mod_expr(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mod_expr: &crate::types::typedtree::ModuleExpr,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
@@ -2493,7 +2493,7 @@ fn moregen_link_mod_expr(
 }
 
 fn dump_all_tvars(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: crate::types::type_expr::TypeExprRef,
     debug: &mut Vec<String>,
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
@@ -2581,7 +2581,7 @@ fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) ->
 /// Walk two types structurally and link non-generic Tvars in the impl
 /// to the corresponding interface types. Matches OCaml's moregen.
 fn moregen_link(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2594,7 +2594,7 @@ fn moregen_link(
 }
 
 fn moregen_link_exported_alias(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2610,7 +2610,7 @@ fn moregen_link_exported_alias(
 }
 
 fn moregen_link_impl(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2941,7 +2941,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -2986,7 +2986,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3026,7 +3026,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// val_type = Tpat_any's pat_type, NOT the outer pattern's pat_type. We look up
 /// val_type from the env to match this behavior exactly.
 pub(crate) fn normalize_signature_types(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     final_env: &crate::types::env::Env,
 ) {
@@ -3076,7 +3076,7 @@ pub(crate) fn normalize_signature_types(
     }
 
     fn norm_structure(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &crate::types::env::Env,
         s: &crate::types::typedtree::Structure,
         allow_local_sig_values: bool,
@@ -3131,7 +3131,7 @@ pub(crate) fn normalize_signature_types(
     }
 
     fn norm_modexpr(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &crate::types::env::Env,
         me: &crate::types::typedtree::ModuleExpr,
     ) {
@@ -3157,7 +3157,7 @@ pub(crate) fn normalize_signature_types(
 }
 
 fn rename_ident_for_save_signature(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     id: &crate::ident::Ident,
 ) -> crate::ident::Ident {
     let fresh = type_ctx.create_ident(id.name());
@@ -3169,7 +3169,7 @@ fn rename_ident_for_save_signature(
 }
 
 fn consume_module_type_save_signature_renames(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) {
     use crate::types::decl::ModuleType;
@@ -3192,7 +3192,7 @@ fn consume_module_type_save_signature_renames(
 }
 
 fn consume_signature_save_renames(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     sig: &[crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
@@ -3230,7 +3230,7 @@ fn consume_signature_save_renames(
 }
 
 fn prepare_inferred_signature_for_saving(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     source_filename: Option<&str>,
     has_resi: bool,
@@ -3507,7 +3507,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3962,7 +3962,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -4064,7 +4064,7 @@ pub fn typecheck_implementation_in_process(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);

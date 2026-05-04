@@ -288,7 +288,7 @@ pub struct ConstructorInfo {
 /// Convert a TypeInfo back to a TypeExprRef.
 /// Looks up user-defined types by name in the environment.
 pub fn type_info_to_type_expr<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ti: &TypeInfo,
 ) -> Option<TypeExprRef> {
@@ -329,7 +329,7 @@ pub fn type_info_to_type_expr<'a>(
 /// Resolves aliases, identifies primitives, and inspects user-defined types
 /// (records, variants) through their declarations in the type context.
 pub fn build_type_info<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
     visited: &mut Vec<TypeExprRef>,
@@ -411,7 +411,7 @@ pub fn build_type_info<'a>(
 
 /// Build TypeInfo from a Tconstr (type constructor application).
 fn build_type_info_from_constr<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     path: &Path,
     args: &[TypeExprRef],
@@ -540,7 +540,7 @@ fn build_type_info_from_constr<'a>(
 /// the appropriate Texp_construct nodes.
 pub fn type_info_to_typed_expr<'a>(
     info: &TypeInfo,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> Option<typedtree::Expression> {
@@ -658,7 +658,7 @@ pub fn type_info_to_typed_expr<'a>(
 /// Build a typed expression for a fieldInfo record value.
 fn build_field_info_expr<'a>(
     field: &FieldInfo,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -687,7 +687,7 @@ fn build_field_info_expr<'a>(
 /// Make a typed string constant expression.
 pub fn make_string_expr<'a>(
     s: &str,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -703,7 +703,7 @@ pub fn make_string_expr<'a>(
 /// Make a typed boolean expression.
 pub fn make_bool_expr<'a>(
     b: bool,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -906,7 +906,7 @@ impl SpecEnv {
 pub fn specialize_expression(
     expr: &typedtree::Expression,
     env: &mut SpecEnv,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     type_env: &Env,
 ) -> Result<typedtree::Expression, String> {
     env.step()?;

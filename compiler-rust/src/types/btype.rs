@@ -25,12 +25,12 @@ use std::borrow::Cow;
 // ============================================================================
 
 /// Check if a type is at the generic level.
-pub fn is_generic(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn is_generic(ctx: &TypeContext, t: TypeExprRef) -> bool {
     ctx.get_level(t) == GENERIC_LEVEL
 }
 
 /// Check if a type's level is >= lowest_level (not marked).
-pub fn is_unmarked(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn is_unmarked(ctx: &TypeContext, t: TypeExprRef) -> bool {
     ctx.get_level(t) >= LOWEST_LEVEL
 }
 
@@ -39,19 +39,19 @@ pub fn is_unmarked(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 // ============================================================================
 
 /// Check if a type is a type variable (Tvar).
-pub fn is_tvar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn is_tvar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
     matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(_))
 }
 
 /// Check if a type is a universal type variable (Tunivar).
-pub fn is_tunivar(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn is_tunivar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
     matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(_))
 }
 
 /// Check if a type is a type constructor (Tconstr).
-pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn is_tconstr(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
     matches!(*ctx.borrow_desc(t), TypeDesc::Tconstr { .. })
 }
@@ -63,11 +63,11 @@ pub fn is_tconstr(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
 /// Get the representative of a row field.
 ///
 /// This follows the `link` chain in `Reither` fields.
-pub fn row_field_repr(ctx: &TypeContext<'_>, field: &RowField) -> RowField {
+pub fn row_field_repr(ctx: &TypeContext, field: &RowField) -> RowField {
     row_field_repr_aux(ctx, &[], field)
 }
 
-pub fn row_field_is_absent(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+pub fn row_field_is_absent(ctx: &TypeContext, field: &RowField) -> bool {
     match field {
         RowField::Reither { link, .. } => ctx
             .get_row_field(*link)
@@ -77,7 +77,7 @@ pub fn row_field_is_absent(ctx: &TypeContext<'_>, field: &RowField) -> bool {
     }
 }
 
-pub fn row_field_is_reither(ctx: &TypeContext<'_>, field: &RowField) -> bool {
+pub fn row_field_is_reither(ctx: &TypeContext, field: &RowField) -> bool {
     match field {
         RowField::Reither { link, .. } => ctx
             .get_row_field(*link)
@@ -87,7 +87,7 @@ pub fn row_field_is_reither(ctx: &TypeContext<'_>, field: &RowField) -> bool {
 }
 
 pub fn row_field_unmatched_reither_link(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     field: &RowField,
 ) -> Option<RowFieldRef> {
     match field {
@@ -100,7 +100,7 @@ pub fn row_field_unmatched_reither_link(
     }
 }
 
-fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowField) -> RowField {
+fn row_field_repr_aux(ctx: &TypeContext, tl: &[TypeExprRef], field: &RowField) -> RowField {
     match field {
         RowField::Reither {
             constant,
@@ -131,7 +131,7 @@ fn row_field_repr_aux(ctx: &TypeContext<'_>, tl: &[TypeExprRef], field: &RowFiel
 /// Get the "more" type variable from a row.
 ///
 /// This follows variant type chains to find the underlying type variable.
-pub fn row_more(ctx: &TypeContext<'_>, row: &RowDesc) -> TypeExprRef {
+pub fn row_more(ctx: &TypeContext, row: &RowDesc) -> TypeExprRef {
     let more = ctx.repr(row.row_more);
     match &*ctx.borrow_desc(more) {
         TypeDesc::Tvariant(inner_row) => row_more(ctx, inner_row),
@@ -142,11 +142,11 @@ pub fn row_more(ctx: &TypeContext<'_>, row: &RowDesc) -> TypeExprRef {
 /// Get the row representative.
 ///
 /// Flattens nested variant rows by combining their fields.
-pub fn row_repr(ctx: &TypeContext<'_>, row: &RowDesc) -> RowDesc {
+pub fn row_repr(ctx: &TypeContext, row: &RowDesc) -> RowDesc {
     row_repr_aux(ctx, &[], row)
 }
 
-pub fn row_repr_ref<'row>(ctx: &TypeContext<'_>, row: &'row RowDesc) -> Cow<'row, RowDesc> {
+pub fn row_repr_ref<'row>(ctx: &TypeContext, row: &'row RowDesc) -> Cow<'row, RowDesc> {
     let more = ctx.repr(row.row_more);
     let desc = ctx.borrow_desc(more);
     if matches!(&*desc, TypeDesc::Tvariant(_)) {
@@ -158,7 +158,7 @@ pub fn row_repr_ref<'row>(ctx: &TypeContext<'_>, row: &'row RowDesc) -> Cow<'row
 }
 
 fn row_repr_aux(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ll: &[Vec<(crate::types::asttypes::Label, RowField)>],
     row: &RowDesc,
 ) -> RowDesc {
@@ -199,7 +199,7 @@ fn row_repr_aux(
 }
 
 /// Get a specific field from a row by its tag.
-pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
+pub fn row_field(ctx: &TypeContext, tag: &str, row: &RowDesc) -> RowField {
     // First check the current row's fields
     for (field_tag, field) in &row.row_fields {
         if field_tag == tag {
@@ -216,7 +216,7 @@ pub fn row_field(ctx: &TypeContext<'_>, tag: &str, row: &RowDesc) -> RowField {
 }
 
 /// Check if a row is fixed.
-pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
+pub fn row_fixed(ctx: &TypeContext, row: &RowDesc) -> bool {
     if row.row_fixed {
         return true;
     }
@@ -231,7 +231,7 @@ pub fn row_fixed(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
 }
 
 /// Check if a row is static (closed with no Reither fields).
-pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
+pub fn static_row(ctx: &TypeContext, row: &RowDesc) -> bool {
     let row = row_repr_ref(ctx, row);
     row.row_closed
         && row
@@ -245,7 +245,7 @@ pub fn static_row(ctx: &TypeContext<'_>, row: &RowDesc) -> bool {
 // ============================================================================
 
 /// Iterate over all type expressions in a row.
-pub fn iter_row<F>(ctx: &TypeContext<'_>, row: &RowDesc, mut f: F)
+pub fn iter_row<F>(ctx: &TypeContext, row: &RowDesc, mut f: F)
 where
     F: FnMut(TypeExprRef),
 {
@@ -295,7 +295,7 @@ where
 }
 
 /// Iterate over all immediate child type expressions.
-pub fn iter_type_expr<F>(ctx: &TypeContext<'_>, ty: TypeExprRef, mut f: F)
+pub fn iter_type_expr<F>(ctx: &TypeContext, ty: TypeExprRef, mut f: F)
 where
     F: FnMut(TypeExprRef),
 {
@@ -371,7 +371,7 @@ where
 }
 
 /// Iterate over abbreviation memo.
-pub fn iter_abbrev<F>(ctx: &TypeContext<'_>, memo: AbbrevMemoRef, f: F)
+pub fn iter_abbrev<F>(ctx: &TypeContext, memo: AbbrevMemoRef, f: F)
 where
     F: FnMut(TypeExprRef),
 {
@@ -449,7 +449,7 @@ where
 // ============================================================================
 
 /// Mark a type by negating its level around pivot_level.
-pub fn mark_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn mark_type(ctx: &TypeContext, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
     if level >= LOWEST_LEVEL {
@@ -459,7 +459,7 @@ pub fn mark_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
 }
 
 /// Mark just the type node (not its children).
-pub fn mark_type_node(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn mark_type_node(ctx: &TypeContext, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
     if level >= LOWEST_LEVEL {
@@ -468,12 +468,12 @@ pub fn mark_type_node(ctx: &TypeContext<'_>, ty: TypeExprRef) {
 }
 
 /// Mark type parameters (children only).
-pub fn mark_type_params(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn mark_type_params(ctx: &TypeContext, ty: TypeExprRef) {
     iter_type_expr(ctx, ty, |t| mark_type(ctx, t));
 }
 
 /// Unmark a type by reversing the mark operation.
-pub fn unmark_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn unmark_type(ctx: &TypeContext, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
     if level < LOWEST_LEVEL {
@@ -487,7 +487,7 @@ pub fn unmark_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
 // ============================================================================
 
 /// Get the proxy for a type (used for object types).
-pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+pub fn proxy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     let ty0 = ctx.repr(ty);
 
     // Extract what we need in a separate scope
@@ -522,7 +522,7 @@ pub fn proxy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
     }
 }
 
-fn proxy_obj(ctx: &TypeContext<'_>, ty: TypeExprRef, original: TypeExprRef) -> TypeExprRef {
+fn proxy_obj(ctx: &TypeContext, ty: TypeExprRef, original: TypeExprRef) -> TypeExprRef {
     let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tfield { rest, .. } => {
@@ -542,7 +542,7 @@ fn proxy_obj(ctx: &TypeContext<'_>, ty: TypeExprRef, original: TypeExprRef) -> T
 }
 
 /// Get the row type from a type.
-pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
+pub fn row_of_type(ctx: &TypeContext, t: TypeExprRef) -> TypeExprRef {
     let t = ctx.repr(t);
 
     // Extract what we need in a separate scope
@@ -568,7 +568,7 @@ pub fn row_of_type(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
     }
 }
 
-fn get_row(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
+fn get_row(ctx: &TypeContext, t: TypeExprRef) -> TypeExprRef {
     let t = ctx.repr(t);
     let desc = ctx.borrow_desc(t);
     match &*desc {
@@ -582,7 +582,7 @@ fn get_row(ctx: &TypeContext<'_>, t: TypeExprRef) -> TypeExprRef {
 }
 
 /// Check if a type has a constructor row.
-pub fn has_constr_row(ctx: &TypeContext<'_>, t: TypeExprRef) -> bool {
+pub fn has_constr_row(ctx: &TypeContext, t: TypeExprRef) -> bool {
     !is_tconstr(ctx, t) && is_tconstr(ctx, row_of_type(ctx, t))
 }
 
@@ -592,7 +592,7 @@ pub fn is_row_name(s: &str) -> bool {
 }
 
 /// Check if a type is a constructor row type.
-pub fn is_constr_row(ctx: &TypeContext<'_>, t: TypeExprRef, allow_ident: bool) -> bool {
+pub fn is_constr_row(ctx: &TypeContext, t: TypeExprRef, allow_ident: bool) -> bool {
     let desc = ctx.borrow_desc(t);
     match &*desc {
         TypeDesc::Tconstr { path, .. } => match path {
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn test_is_tvar() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let tvar = ctx.new_var(Some("a".to_string()));
         assert!(is_tvar(&ctx, tvar));
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn test_mark_unmark() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let tvar = ctx.new_var(None);
         let original_level = ctx.get_level(tvar);
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_iter_type_expr_tuple() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn test_iter_type_expr_arrow() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);

@@ -647,7 +647,7 @@ impl PersistentEnv {
         &self,
         module_name: &str,
         _original_alias_count: usize,
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (Option<PortablePersStruct>, HashMap<String, Path>) {
         let portable = self
@@ -663,7 +663,7 @@ impl PersistentEnv {
     /// stdlib instead of re-loading every dependency from source.
     pub fn extract_all_cached_modules(
         &self,
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
     ) -> (HashMap<String, PortablePersStruct>, HashMap<String, Path>) {
         let portables: HashMap<String, PortablePersStruct> = self
@@ -746,7 +746,7 @@ impl PersistentEnv {
     pub fn find_pers_struct<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<Arc<PersStruct>> {
         // Check cache first (already internalized)
         if let Some(cached) = self.cache_lookup(name) {
@@ -826,7 +826,7 @@ impl PersistentEnv {
         ps_name: String,
         mut signature: Signature,
         ps_filename: String,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> PersStruct {
         let module_path = Path::Pident(Ident::create_persistent(name));
 
@@ -1011,7 +1011,7 @@ impl PersistentEnv {
     fn typecheck_source_signature<'a>(
         &self,
         source_path: &FsPath,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<(Signature, PersistentEnv)> {
         if self.source_fallback_depth >= Self::MAX_SOURCE_FALLBACK_DEPTH {
             return None;
@@ -1143,7 +1143,7 @@ impl PersistentEnv {
     fn load_module_from_source_fallback<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<PersStruct> {
         let ast_filename = format!("{}.ast", name);
         let ast_path = self.find_in_path_uncap(&ast_filename)?;
@@ -1200,7 +1200,7 @@ impl PersistentEnv {
 
     /// Load a module from a .cmi file, or fall back to the source path embedded
     /// in a sibling `.ast` when the module is implementation-only.
-    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<PersStruct> {
+    fn load_module<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<PersStruct> {
         // In in-process mode, never fall through to .cmi loading. The registry
         // is authoritative for normal project modules. Runtime/bootstrap code
         // may register source fallback paths, which are also source-only.
@@ -1247,7 +1247,7 @@ impl PersistentEnv {
     fn load_module_from_source_path_fallback<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<PersStruct> {
         let source_path = self.source_fallback_path_entry(name)?.1;
 
@@ -1287,7 +1287,7 @@ impl PersistentEnv {
     /// Pident paths that match the implementation's local paths.
     /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
     /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext<'a>) -> Option<Signature> {
+    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
         if self.in_process_mode {
             if let Some(cached) = self.cache_lookup(name) {
                 return cached.map(|loaded| loaded.ps_sig.clone());
@@ -1339,7 +1339,7 @@ impl PersistentEnv {
     pub fn get_renamed_sig<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<Signature> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
         if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
@@ -1364,7 +1364,7 @@ impl PersistentEnv {
     pub(crate) fn force_lazy_signature_rename<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<()> {
         if ctx.renamed_module_sigs.borrow().contains_key(name)
             || self.renamed_sig_cache.contains_key(name)
@@ -1386,7 +1386,7 @@ impl PersistentEnv {
         Some(())
     }
 
-    pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext<'a>) -> bool {
+    pub fn open_module<'a>(&mut self, name: &str, env: &mut Env, ctx: &'a TypeContext) -> bool {
         // Don't rename at open time — OCaml's ps_sig is only forced later
         // when find_module is called from normalize_path during type expansion.
         let ps = match self.find_pers_struct(name, ctx) {
@@ -1403,7 +1403,7 @@ impl PersistentEnv {
     pub fn get_module_declaration<'a>(
         &mut self,
         name: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<ModuleDeclaration> {
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ModuleDeclaration {
@@ -1435,7 +1435,7 @@ impl PersistentEnv {
         name: &str,
         signature: Signature,
         source_filename: &str,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) {
         let ps = self.finalize_loaded_signature(
             name,
@@ -1549,7 +1549,7 @@ impl PersistentEnv {
 fn register_sig_types_recursive<'a>(
     sig: &Signature,
     module_path: &Path,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     _load_path: &[PathBuf],
 ) {
     for item in sig {
@@ -1587,7 +1587,7 @@ fn register_sig_types_recursive<'a>(
 /// This is a lightweight version that doesn't use the persistent env cache.
 fn load_module_sig_for_alias<'a>(
     name: &str,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     load_path: &[PathBuf],
 ) -> Option<Signature> {
     let cmi_filename = format!("{}.cmi", name);
@@ -1642,7 +1642,7 @@ mod tests {
         std::fs::write(&source_path, "let answer = 1\n").expect("failed to write source");
 
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let mut env = PersistentEnv::new();
         env.set_in_process_mode(true);
@@ -2219,13 +2219,13 @@ fn decode_cmj_list<T>(
 /// Recursively register all types from a module type (and sub-modules) by stamp.
 /// This ensures that types referenced in function signatures can be expanded
 /// during type unification, even when the type comes from a deeply nested module.
-pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext<'_>) {
+pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext) {
     if let ModuleType::MtySignature(sig) = md_type {
         register_types_by_stamp_in_signature_recursive(sig, ctx);
     }
 }
 
-fn register_types_by_stamp_in_signature_recursive(sig: &Signature, ctx: &TypeContext<'_>) {
+fn register_types_by_stamp_in_signature_recursive(sig: &Signature, ctx: &TypeContext) {
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
@@ -2388,7 +2388,7 @@ fn merge_subst_maps(parent: &SubstMaps, child: &SubstMaps) -> SubstMaps {
 fn freshen_module_type_bound_idents_with_maps(
     module_type: &mut ModuleType,
     maps: &SubstMaps,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     match module_type {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
@@ -2432,7 +2432,7 @@ fn freshen_module_type_bound_idents_with_maps(
 fn freshen_signature_bound_idents_with_maps(
     sig_items: &mut [SignatureItem],
     maps: &SubstMaps,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     if !maps.is_empty() {
         substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
@@ -2486,7 +2486,7 @@ fn freshen_signature_bound_idents_with_maps(
 
 pub(crate) fn freshen_signature_bound_idents(
     sig_items: &mut [SignatureItem],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
     // then subst.ml:378-400 renames signature binders and applies that
@@ -2499,7 +2499,7 @@ pub(crate) fn freshen_signature_bound_idents(
 
 pub(crate) fn freshened_signature_bound_idents_from(
     sig_items: &[SignatureItem],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> Signature {
     // Mirrors OCaml `Subst.signature` (compiler/ml/subst.ml:358-364):
     // copy each component through the substitution, then rename bound
@@ -2511,14 +2511,14 @@ pub(crate) fn freshened_signature_bound_idents_from(
 
 pub(crate) fn freshen_copied_signature_bound_idents(
     sig_items: &mut [SignatureItem],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 
 pub(crate) fn freshen_module_type_bound_idents(
     module_type: &mut ModuleType,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     // OCaml compiler/ml/subst.ml:365-376 implements `Subst.modtype` by
     // returning a fresh module type; for signatures it reaches subst.ml:378-400,
@@ -2531,7 +2531,7 @@ pub(crate) fn substitute_functor_result_module_path(
     module_type: &ModuleType,
     old_param: &Ident,
     arg_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> ModuleType {
     // OCaml compiler/ml/typemod.ml:1321-1325 applies
     // `Subst.modtype (Subst.add_module param path ...) mty_res`.
@@ -2555,7 +2555,7 @@ pub(crate) fn freshen_component_modtype_declaration_bound_idents(
     mtd: &mut ModtypeDeclaration,
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     if let Some(module_type) = mtd.mtd_type.as_mut() {
         // OCaml compiler/ml/env.ml:1530 builds the component substitution with
@@ -2574,7 +2574,7 @@ pub(crate) fn freshen_component_module_declaration_bound_idents(
     md: &mut ModuleDeclaration,
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     // OCaml compiler/ml/env.ml:1568 stores child module declarations as
     // EnvLazy thunks. Forcing them through env.ml:475 runs
@@ -2702,7 +2702,7 @@ pub fn substitute_sig_decl_paths_in_place(sig_items: &mut [SignatureItem], modul
 fn substitute_type_paths_in_sig_with_maps(
     sig_items: &[SignatureItem],
     maps: &SubstMaps,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     if maps.is_empty() {
         return;
@@ -2890,7 +2890,7 @@ pub fn substitute_type_paths_in_child_sig(
     child_sig: &[SignatureItem],
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
@@ -2901,7 +2901,7 @@ fn restore_child_self_manifests_from_parent_scope(
     child_sig: &[SignatureItem],
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     for child_item in child_sig {
         let SignatureItem::SigType(child_id, child_decl, _) = child_item else {
@@ -2964,7 +2964,7 @@ pub fn substitute_type_paths_in_child_module_type(
     child_mty: &mut ModuleType,
     parent_sig: &[SignatureItem],
     parent_module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     // Deep-copy the module type first to avoid modifying shared type expressions
     // in-place. OCaml's lazy `components_of_module_maker` + `Subst.type_declaration`
@@ -2994,7 +2994,7 @@ pub fn substitute_type_paths_in_child_module_type(
 pub fn substitute_type_paths_in_sig(
     sig_items: &[SignatureItem],
     module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let maps = build_subst_maps_for_module(sig_items, module_path);
     let type_stamp_map = &maps.type_stamp_map;
@@ -3222,7 +3222,7 @@ pub fn substitute_type_paths_in_sig(
 pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
     sig_items: &[SignatureItem],
     stamp_map: &HashMap<i32, Path>,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     if stamp_map.is_empty() {
         return;
@@ -3284,7 +3284,7 @@ pub(crate) fn substitute_type_expr_path_pub(
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
     protected_module_head: Option<&(i32, String)>,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
     substitute_type_expr_path(
@@ -3306,7 +3306,7 @@ fn substitute_type_expr_path(
     module_stamp_map: &ModuleStampSubstMap,
     module_name_map: &HashMap<String, Path>,
     protected_module_head: Option<&(i32, String)>,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
     // Use an explicit work stack instead of recursion to avoid stack overflow
@@ -3413,7 +3413,7 @@ fn substitute_type_expr_path(
 }
 
 fn direct_manifest_substitution_would_self_alias(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     id: &Ident,
     manifest: TypeExprRef,
     module_path: &Path,
@@ -3566,7 +3566,7 @@ fn rewrite_type_expr_prefix(
     ty_ref: TypeExprRef,
     old_name: &str,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
     if !visited.insert(ty_ref.0) {
@@ -3749,7 +3749,7 @@ pub fn rewrite_module_prefix_in_sig(
     sig_items: &[SignatureItem],
     old_name: &str,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
 
@@ -3953,7 +3953,7 @@ fn rewrite_type_expr_by_path_prefix(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
     if !visited.insert(ty_ref.0) {
@@ -4040,7 +4040,7 @@ pub fn rewrite_type_expr_by_path_prefix_pub(
     ty_ref: TypeExprRef,
     old_prefix: &Path,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
     rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
@@ -4053,7 +4053,7 @@ pub fn rewrite_sig_by_path_prefix(
     sig_items: &[SignatureItem],
     old_prefix: &Path,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
 
@@ -4153,7 +4153,7 @@ pub fn rewrite_sig_by_path_prefix(
 pub fn substitute_submodule_paths_pub(
     sig_items: &[SignatureItem],
     module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     substitute_submodule_paths(sig_items, module_path, ctx);
 }
@@ -4165,7 +4165,7 @@ pub fn substitute_submodule_paths_pub(
 fn substitute_submodule_paths(
     sig_items: &[SignatureItem],
     module_path: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     // Match OCaml `prefix_idents`/`Subst` behavior: when descending into a
     // submodule, keep parent substitutions visible so child signatures can
@@ -4241,7 +4241,7 @@ fn rewrite_deep_prefix_in_sig(
     sig_items: &[SignatureItem],
     old_name: &str,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) {
     let mut visited = HashSet::new();
 
@@ -4352,7 +4352,7 @@ fn rewrite_deep_prefix_expr(
     ty_ref: TypeExprRef,
     old_name: &str,
     new_prefix: &Path,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
     if !visited.insert(ty_ref.0) {
@@ -4482,7 +4482,7 @@ pub fn add_signature_to_env(
     sig_items: &[SignatureItem],
     module_path: &Path,
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     as_opened: bool,
 ) {
     add_signature_to_env_with_options(sig_items, module_path, env, ctx, as_opened, true, true);
@@ -4492,7 +4492,7 @@ fn add_signature_to_env_with_options(
     sig_items: &[SignatureItem],
     module_path: &Path,
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     as_opened: bool,
     apply_path_subst: bool,
     register_loaded_types: bool,
@@ -4505,7 +4505,7 @@ fn add_signature_to_env_with_options(
     }
 
     fn collect_target_constr_nodes(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         initial_ty: TypeExprRef,
         out: &mut Vec<(TypeExprRef, String)>,
         seen: &mut HashSet<TypeExprRef>,
@@ -4591,7 +4591,7 @@ fn add_signature_to_env_with_options(
     }
 
     fn inline_record_type_params(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         parent_type_params: &[TypeExprRef],
         labels: &[crate::types::LabelDeclaration],
     ) -> Vec<TypeExprRef> {

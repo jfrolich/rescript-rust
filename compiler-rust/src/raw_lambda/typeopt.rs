@@ -33,7 +33,7 @@ pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> b
 }
 
 pub(crate) fn type_cannot_contain_undefined(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> bool {
@@ -42,7 +42,7 @@ pub(crate) fn type_cannot_contain_undefined(
 }
 
 fn type_cannot_contain_undefined_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     seen: &mut HashSet<TypeExprRef>,
@@ -132,8 +132,8 @@ fn type_cannot_contain_undefined_rec(
 /// Checks type descriptor directly for types that are always safe
 /// (Ttuple, Tarrow, Tvariant, Tpackage, Tconstr for builtin types).
 /// Also tries to expand Tconstr types via type declarations.
-pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
-    fn rec(ctx: &TypeContext<'_>, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> bool {
+pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    fn rec(ctx: &TypeContext, ty: TypeExprRef, seen: &mut HashSet<TypeExprRef>) -> bool {
         let ty = ctx.repr(ty);
         if !seen.insert(ty) {
             return false;
@@ -178,7 +178,7 @@ pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext<'_>, ty: Ty
 /// returns the arg type (recursively expanded). Returns None for recursive types.
 /// Simplified version of OCaml's Typedecl.get_unboxed_type_representation.
 fn get_unboxed_type_representation(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -187,7 +187,7 @@ fn get_unboxed_type_representation(
 }
 
 fn get_unboxed_repr_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     visited: &mut HashSet<TypeExprRef>,
@@ -224,7 +224,7 @@ fn get_unboxed_repr_rec(
     }
 }
 
-fn scrape_ty(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     // OCaml's scrape_ty uses expand_head_opt (less aggressive) and then handles
     // unboxed types by getting their representation. We approximate this by
     // expanding and then checking for the unboxed case.
@@ -283,14 +283,14 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
 }
 
 pub(crate) fn find_type_decl_pub(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Option<TypeDeclaration> {
     find_type_decl(ctx, env, path)
 }
 
-fn find_type_decl(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> Option<TypeDeclaration> {
+fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
             .find_type_decl_by_stamp(id.stamp())
@@ -335,7 +335,7 @@ fn has_undefined_literal(attrs: &[Attribute]) -> bool {
     })
 }
 
-pub(crate) fn type_is_builtin_object(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) -> bool {
+pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     let ty = scrape_ty(ctx, env, ty);
     match &*ctx.get_desc(ty) {
         TypeDesc::Tobject { .. } => true,
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn builtin_object_recognizes_object_types() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let fields = ctx.new_type(TypeDesc::Tnil);
         let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
 

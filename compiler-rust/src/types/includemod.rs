@@ -124,7 +124,7 @@ fn with_local_pident_module_type<R>(
 }
 
 pub fn modtypes<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
@@ -134,7 +134,7 @@ pub fn modtypes<'a>(
 
 /// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
 fn modtypes_inner<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
@@ -161,7 +161,7 @@ fn modtypes_inner<'a>(
     }
 
     fn expand_module_type_in_env(
-        type_ctx: &TypeContext<'_>,
+        type_ctx: &TypeContext,
         env: &Env,
         path: &Path,
     ) -> Option<ModuleType> {
@@ -697,7 +697,7 @@ fn pair_signature_items<'a>(
 }
 
 fn check_paired_signature_items<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     paired: &[PairedSignatureItem<'_>],
     type_subst: &HashMap<String, Path>,
@@ -832,7 +832,7 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
 }
 
 pub fn compunit<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     _impl_name: &str,
     impl_sig: &Signature,
@@ -844,7 +844,7 @@ pub fn compunit<'a>(
 
 /// Check if signature `sig_impl` is a subtype of `sig_sig`.
 pub fn signatures<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     sig_impl: &Signature,
     sig_sig: &Signature,
@@ -925,7 +925,7 @@ pub fn signatures<'a>(
 
 /// Check if value description `impl_desc` is a subtype of `sig_desc`.
 fn value_descriptions<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     id: Ident,
     impl_desc: &ValueDescription,
@@ -935,7 +935,7 @@ fn value_descriptions<'a>(
     modtype_subst: &HashMap<String, Path>,
 ) -> IncludeModResult<ModuleCoercion> {
     fn has_non_row_type_variables(
-        type_ctx: &TypeContext<'_>,
+        type_ctx: &TypeContext,
         ty: TypeExprRef,
         seen: &mut HashSet<TypeExprRef>,
     ) -> bool {
@@ -1061,7 +1061,7 @@ fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
 }
 
 fn substitute_value_description_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     desc: &ValueDescription,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1081,7 +1081,7 @@ fn substitute_value_description_paths<'a>(
 }
 
 fn substitute_label_declaration_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     label: &LabelDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1099,7 +1099,7 @@ fn substitute_label_declaration_paths<'a>(
 }
 
 fn substitute_constructor_arguments_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     args: &ConstructorArguments,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1138,7 +1138,7 @@ fn substitute_constructor_arguments_paths<'a>(
 }
 
 fn substitute_constructor_declaration_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     constructor: &ConstructorDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1159,7 +1159,7 @@ fn substitute_constructor_declaration_paths<'a>(
 }
 
 fn substitute_type_kind_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     kind: &TypeKind,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1201,7 +1201,7 @@ fn substitute_type_kind_paths<'a>(
 }
 
 fn substitute_type_inlined_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     inlined: &TypeInlinedType,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1227,7 +1227,7 @@ fn substitute_type_inlined_paths<'a>(
 }
 
 fn substitute_type_declaration_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     decl: &TypeDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1271,7 +1271,7 @@ fn substitute_type_declaration_paths<'a>(
 }
 
 fn substitute_extension_constructor_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     ext: &ExtensionConstructor,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1397,7 +1397,7 @@ fn substitute_modtype_path(
 }
 
 fn substitute_module_type_paths(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mty: &ModuleType,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1419,7 +1419,7 @@ fn substitute_module_type_paths(
 }
 
 fn substitute_module_type_paths_no_freshen(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mty: &ModuleType,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1522,7 +1522,7 @@ fn substitute_module_type_paths_no_freshen(
 }
 
 fn substitute_module_declaration_paths(
-    _type_ctx: &TypeContext<'_>,
+    _type_ctx: &TypeContext,
     md: &ModuleDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1542,7 +1542,7 @@ fn substitute_module_declaration_paths(
 }
 
 fn substitute_module_declaration_paths_no_freshen(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     md: &ModuleDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1564,7 +1564,7 @@ fn substitute_module_declaration_paths_no_freshen(
 }
 
 fn substitute_modtype_declaration_paths(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mtd: &ModtypeDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1584,7 +1584,7 @@ fn substitute_modtype_declaration_paths(
 }
 
 fn substitute_modtype_declaration_paths_no_freshen(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mtd: &ModtypeDeclaration,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1604,7 +1604,7 @@ fn substitute_modtype_declaration_paths_no_freshen(
 }
 
 fn substitute_value_type_paths<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     ty: TypeExprRef,
     type_subst: &HashMap<String, Path>,
     module_subst: &HashMap<String, Path>,
@@ -1617,7 +1617,7 @@ fn substitute_value_type_paths<'a>(
     }
 
     fn rewrite<'a>(
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         ty: TypeExprRef,
         type_subst: &HashMap<String, Path>,
         module_subst: &HashMap<String, Path>,
@@ -1822,7 +1822,7 @@ fn substitute_value_type_paths<'a>(
 }
 
 fn close_matching_variant_rows_from_expected<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     impl_ty: TypeExprRef,
     expected_ty: TypeExprRef,
@@ -1853,7 +1853,7 @@ fn close_matching_variant_rows_from_expected<'a>(
     type ExpansionPairKey = (ExpansionPathKey, usize, ExpansionPathKey, usize);
 
     fn align_rows<'a>(
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &Env,
         impl_ty: TypeExprRef,
         expected_ty: TypeExprRef,
@@ -2195,7 +2195,7 @@ fn close_matching_variant_rows_from_expected<'a>(
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.
 fn type_declarations<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &TypeDeclaration,
@@ -2291,7 +2291,7 @@ fn type_declarations<'a>(
 }
 
 fn force_package_manifest_inclusion_side_effects<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     impl_decl: &TypeDeclaration,
     sig_decl: &TypeDeclaration,
@@ -2351,7 +2351,7 @@ fn force_package_manifest_inclusion_side_effects<'a>(
 
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
 fn extension_constructors<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     id: Ident,
     impl_ext: &ExtensionConstructor,
@@ -2372,7 +2372,7 @@ fn extension_constructors<'a>(
 
 /// Check if module type declaration `impl_decl` is compatible with `sig_decl`.
 fn modtype_declarations<'a>(
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &Env,
     id: Ident,
     impl_decl: &ModtypeDeclaration,
@@ -2502,7 +2502,7 @@ mod tests {
     #[test]
     fn test_empty_signatures_match() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let sig_impl: Signature = vec![];
@@ -2515,7 +2515,7 @@ mod tests {
     #[test]
     fn test_missing_value_error() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let sig_impl: Signature = vec![];
@@ -2538,7 +2538,7 @@ mod tests {
     #[test]
     fn test_value_match() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let val_ty = type_ctx.new_var(None);
@@ -2570,7 +2570,7 @@ mod tests {
     #[test]
     fn test_signature_pairing_uses_final_type_substitution() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let impl_type_id = Ident::create_local("t");
@@ -2625,7 +2625,7 @@ mod tests {
     #[test]
     fn test_signature_pairing_uses_last_matching_component() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let val_ty = type_ctx.new_var(None);
@@ -2654,7 +2654,7 @@ mod tests {
     #[test]
     fn test_local_modtype_ident_matches_signature() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&type_ctx);
 
         let val_ty = type_ctx.new_var(None);
@@ -2684,7 +2684,7 @@ mod tests {
     #[test]
     fn test_functor_match() {
         let id_gen = IdGenerator::new();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
         let param_sig = ModuleType::MtySignature(vec![]);

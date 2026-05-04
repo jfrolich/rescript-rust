@@ -171,7 +171,7 @@ fn sexp_path(p: &Path) -> Sexp {
 // Longident Printer
 // ============================================================================
 
-fn sexp_longident(arena: &ParseArena, ctx: &TypeContext<'_>, li: &Longident) -> Sexp {
+fn sexp_longident(arena: &ParseArena, ctx: &TypeContext, li: &Longident) -> Sexp {
     match li {
         Longident::Lident(s_idx) => {
             let s = ctx.resolve_longident_component(arena, *s_idx);
@@ -195,7 +195,7 @@ fn sexp_longident(arena: &ParseArena, ctx: &TypeContext<'_>, li: &Longident) -> 
 
 fn sexp_longident_idx(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     idx: crate::parse_arena::LidentIdx,
 ) -> Sexp {
     sexp_longident(arena, ctx, arena.get_longident(idx))
@@ -471,7 +471,7 @@ impl TypeSexpState {
 
 fn sexp_type_expr_inline(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     te: TypeExprRef,
 ) -> Sexp {
@@ -511,7 +511,7 @@ fn sexp_type_expr_inline(
 
 fn sexp_type_expr_body_inline(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     te: TypeExprRef,
 ) -> Sexp {
@@ -615,7 +615,7 @@ fn sexp_type_expr_body_inline(
 
 fn sexp_type_expr(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     _dedup: &mut TypeDedupTable,
     te: TypeExprRef,
 ) -> Sexp {
@@ -625,7 +625,7 @@ fn sexp_type_expr(
 
 fn sexp_row_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     row: &RowDesc,
 ) -> Sexp {
@@ -641,7 +641,7 @@ fn sexp_row_desc(
         })
     }
 
-    fn raw_row_blocks(ctx: &TypeContext<'_>, row: &RowDesc) -> Vec<Vec<String>> {
+    fn raw_row_blocks(ctx: &TypeContext, row: &RowDesc) -> Vec<Vec<String>> {
         let mut blocks = vec![
             row.row_fields
                 .iter()
@@ -688,7 +688,7 @@ fn sexp_row_desc(
 
 fn sexp_row_field(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     rf: &RowField,
 ) -> Sexp {
@@ -722,7 +722,7 @@ fn sexp_row_field(
 
 fn sexp_pattern(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     p: &Pattern,
@@ -767,7 +767,7 @@ fn sexp_pattern(
 
 fn sexp_pat_extra(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     extra: &crate::types::typedtree::PatExtra,
@@ -816,7 +816,7 @@ fn sexp_pat_extra(
 
 fn sexp_pattern_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &PatternDesc,
@@ -896,7 +896,7 @@ fn sexp_pattern_desc(
 
 fn sexp_expression(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     e: &Expression,
@@ -963,7 +963,7 @@ fn sexp_expression(
 
 fn sexp_exp_extra(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     extra: &crate::types::typedtree::ExpExtra,
@@ -1017,7 +1017,7 @@ fn sexp_exp_extra(
 
 fn sexp_expression_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &ExpressionDesc,
@@ -1320,7 +1320,7 @@ fn sexp_expression_desc(
 
 fn sexp_case(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     c: &Case,
@@ -1340,7 +1340,7 @@ fn sexp_case(
 
 fn sexp_value_binding(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     vb: &ValueBinding,
@@ -1364,7 +1364,7 @@ fn sexp_value_binding(
 
 fn sexp_core_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ct: &TypedCoreType,
@@ -1388,7 +1388,7 @@ fn sexp_core_type(
 
 fn sexp_core_type_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &TypedCoreTypeDesc,
@@ -1479,7 +1479,7 @@ fn sexp_core_type_desc(
 
 fn sexp_object_field(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     field: &crate::types::typedtree::ObjectField,
@@ -1501,7 +1501,7 @@ fn sexp_object_field(
 
 fn sexp_row_field_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     field: &crate::types::typedtree::RowFieldType,
@@ -1563,7 +1563,7 @@ fn sexp_attributes(arena: &ParseArena, with_locs: bool, attrs: &[Attribute]) -> 
 
 fn sexp_module_expr(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     me: &ModuleExpr,
@@ -1585,7 +1585,7 @@ fn sexp_module_expr(
 
 fn sexp_module_expr_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &ModuleExprDesc,
@@ -1648,7 +1648,7 @@ fn sexp_module_expr_desc(
 
 fn sexp_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     td: &TypeDeclaration,
@@ -1693,7 +1693,7 @@ fn sexp_type_declaration(
 
 fn sexp_type_kind(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     kind: &TypeKind,
@@ -1720,7 +1720,7 @@ fn sexp_type_kind(
 
 fn sexp_constructor_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     cd: &ConstructorDeclaration,
@@ -1757,7 +1757,7 @@ fn sexp_constructor_decl(
 
 fn sexp_constructor_args(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     args: &ConstructorArguments,
@@ -1782,7 +1782,7 @@ fn sexp_constructor_args(
 
 fn sexp_label_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &LabelDeclaration,
@@ -1815,7 +1815,7 @@ fn sexp_label_decl(
 
 fn sexp_typed_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     td: &TypedTypeDeclaration,
@@ -1875,7 +1875,7 @@ fn sexp_typed_type_declaration(
 
 fn sexp_typed_type_kind(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     kind: &TypedTypeKind,
@@ -1904,7 +1904,7 @@ fn sexp_typed_type_kind(
 
 fn sexp_typed_constructor_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     cd: &TypedConstructorDeclaration,
@@ -1941,7 +1941,7 @@ fn sexp_typed_constructor_decl(
 
 fn sexp_typed_constructor_args(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     args: &TypedConstructorArguments,
@@ -1966,7 +1966,7 @@ fn sexp_typed_constructor_args(
 
 fn sexp_typed_label_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &TypedLabelDeclaration,
@@ -1995,7 +1995,7 @@ fn sexp_typed_label_decl(
 
 fn sexp_type_extension(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     te: &TypeExtension,
@@ -2041,7 +2041,7 @@ fn sexp_type_extension(
 
 fn sexp_extension_constructor(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ec: &ExtensionConstructor,
@@ -2081,7 +2081,7 @@ fn sexp_extension_constructor(
 
 fn sexp_constructor_argument(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     arg: &crate::types::typedtree::ConstructorArgument,
@@ -2107,7 +2107,7 @@ fn sexp_constructor_argument(
 
 fn sexp_label_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &crate::types::typedtree::LabelDeclaration,
@@ -2140,7 +2140,7 @@ fn sexp_label_declaration(
 
 fn sexp_structure(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     str: &Structure,
@@ -2154,7 +2154,7 @@ fn sexp_structure(
 
 fn sexp_structure_item(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     si: &StructureItem,
@@ -2173,7 +2173,7 @@ fn sexp_structure_item(
 
 fn sexp_structure_item_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &StructureItemDesc,
@@ -2252,7 +2252,7 @@ fn sexp_structure_item_desc(
 
 fn sexp_module_binding(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mb: &ModuleBinding,
@@ -2275,7 +2275,7 @@ fn sexp_module_binding(
 
 fn sexp_open_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
@@ -2302,7 +2302,7 @@ fn sexp_open_declaration(
 
 fn sexp_module_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mt: &crate::types::typedtree::ModuleType,
@@ -2323,7 +2323,7 @@ fn sexp_module_type(
 
 fn sexp_module_type_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &crate::types::typedtree::ModuleTypeDesc,
@@ -2382,7 +2382,7 @@ fn sexp_module_type_desc(
 
 fn sexp_with_constraint(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     wc: &crate::types::typedtree::WithConstraint,
@@ -2412,7 +2412,7 @@ fn sexp_with_constraint(
 
 fn sexp_typed_signature(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     sig: &crate::types::typedtree::TypedSignature,
@@ -2426,7 +2426,7 @@ fn sexp_typed_signature(
 
 fn sexp_typed_signature_item(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     si: &crate::types::typedtree::TypedSignatureItem,
@@ -2445,7 +2445,7 @@ fn sexp_typed_signature_item(
 
 fn sexp_typed_signature_item_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &crate::types::typedtree::TypedSignatureItemDesc,
@@ -2511,7 +2511,7 @@ fn sexp_typed_signature_item_desc(
 
 fn sexp_typed_module_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     md: &crate::types::typedtree::TypedModuleDeclaration,
@@ -2534,7 +2534,7 @@ fn sexp_typed_module_declaration(
 
 fn sexp_include_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     incl: &crate::types::typedtree::IncludeDescription,
@@ -2559,7 +2559,7 @@ fn sexp_include_description(
 
 fn sexp_module_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mtd: &crate::types::typedtree::ModuleTypeDeclaration,
@@ -2589,7 +2589,7 @@ fn sexp_module_type_declaration(
 
 fn sexp_value_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     vd: &crate::types::typedtree::TypedValueDescription,
@@ -2617,7 +2617,7 @@ fn sexp_value_description(
 
 fn sexp_include_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     incl: &crate::types::typedtree::IncludeDeclaration,
@@ -2642,7 +2642,7 @@ fn sexp_include_declaration(
 
 fn sexp_open_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
@@ -2670,7 +2670,7 @@ fn sexp_open_description(
 /// Print a typed structure as sexp (without locations)
 pub fn print_typed_structure<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     str: &Structure,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2682,7 +2682,7 @@ pub fn print_typed_structure<W: Write>(
 /// Print a typed structure as sexp (with locations)
 pub fn print_typed_structure_with_locs<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     str: &Structure,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2694,7 +2694,7 @@ pub fn print_typed_structure_with_locs<W: Write>(
 /// Print a typed signature as sexp (without locations)
 pub fn print_typed_signature<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     sig: &crate::types::typedtree::TypedSignature,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2706,7 +2706,7 @@ pub fn print_typed_signature<W: Write>(
 /// Print a typed signature as sexp (with locations)
 pub fn print_typed_signature_with_locs<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     sig: &crate::types::typedtree::TypedSignature,
     out: &mut W,
 ) -> std::io::Result<()> {

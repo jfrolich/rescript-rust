@@ -37,7 +37,7 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::sync::Arc;
 
 fn in_process_module_resolution_env(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> Option<crate::cmi::persistent_env::PersistentEnv> {
     // OCaml compiler/ml/env.ml:1000-1007 resolves persistent units through
     // the current persistent environment before any CMI lookup. In Rust's
@@ -275,7 +275,7 @@ fn is_instantiable(env: &Env, path: &Path) -> bool {
 }
 
 fn lookup_type_decl_for_path(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
@@ -335,14 +335,14 @@ fn type_decl_would_get_strengthened_manifest(decl: &super::decl::TypeDeclaration
 }
 
 pub(crate) fn lookup_type_decl_for_path_pub(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
     lookup_type_decl_for_path(ctx, env, path)
 }
 
-fn is_newtype_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> bool {
+fn is_newtype_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
     lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
         decl.type_newtype_level.is_some()
             && matches!(decl.type_kind, super::TypeKind::TypeAbstract)
@@ -350,7 +350,7 @@ fn is_newtype_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> bool {
     })
 }
 
-fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> (i32, i32) {
+fn find_newtype_level_for_path(ctx: &TypeContext, env: &Env, path: &Path) -> (i32, i32) {
     lookup_type_decl_for_path(ctx, env, path)
         .and_then(|decl| decl.type_newtype_level)
         .unwrap_or_else(|| {
@@ -359,13 +359,13 @@ fn find_newtype_level_for_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) ->
         })
 }
 
-fn get_level(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> i32 {
+fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
     let mut pending_type_lookup_paths = None;
     get_level_with_lookup_capture(ctx, env, path, &mut pending_type_lookup_paths)
 }
 
 fn get_level_with_lookup_capture(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path: &Path,
     pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
@@ -417,7 +417,7 @@ fn path_root_ident(path: &Path) -> Option<&Ident> {
 }
 
 fn decl_manifest_aliases_path(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     decl: &super::decl::TypeDeclaration,
     target: &Path,
     arity: usize,
@@ -435,7 +435,7 @@ fn decl_manifest_aliases_path(
 }
 
 pub(crate) fn flattened_alias_paths_equivalent(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path1: &Path,
     path2: &Path,
@@ -536,7 +536,7 @@ pub(crate) fn flattened_alias_paths_equivalent(
 }
 
 pub(crate) fn nullary_constr_paths_equivalent(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path1: &Path,
     path2: &Path,
@@ -575,7 +575,7 @@ pub(crate) fn nullary_constr_paths_equivalent(
 /// Creates a local constraint with a manifest type declaration.
 /// Matches OCaml's `add_gadt_equation` in ctype.ml.
 fn add_gadt_equation(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &mut Env,
     source_path: &Path,
     destination: TypeExprRef,
@@ -631,9 +631,9 @@ fn add_gadt_equation(
 ///
 /// This is the occurs check that prevents infinite types.
 /// Returns `true` if `needle` occurs in `haystack`.
-pub fn occurs(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
+pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
     fn occurs_rec(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         needle: TypeExprRef,
         haystack: TypeExprRef,
         visited: &mut HashSet<TypeExprRef>,
@@ -671,9 +671,9 @@ pub fn occurs(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef)
 }
 
 /// Deep occur check - follows type constructors.
-pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
+pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
     fn deep_occur_rec(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         needle: TypeExprRef,
         haystack: TypeExprRef,
         visited: &mut HashSet<TypeExprRef>,
@@ -712,7 +712,7 @@ pub fn deep_occur(ctx: &TypeContext<'_>, needle: TypeExprRef, haystack: TypeExpr
 /// Check if a type contains any Tvariant node (shallow check of Tconstr args).
 /// Used to prevent identity sharing of types whose variant args would be
 /// contaminated across branches (e.g. result<string, [#InvalidString]>).
-pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
+pub fn type_contains_variant(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -733,7 +733,7 @@ pub fn type_contains_variant(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
 ///
 /// This makes `t1` point to `t2`, effectively making them the same type.
 /// The level of `t2` is updated to be the minimum of both levels.
-pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
+pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
     let source_name = {
@@ -779,7 +779,7 @@ pub fn link_type(ctx: &TypeContext<'_>, t1: TypeExprRef, t2: TypeExprRef) {
 }
 
 /// Update the level of a type and its children.
-pub fn update_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) {
+pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let current = ctx.get_level(ty);
 
@@ -798,13 +798,13 @@ pub fn update_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) {
 /// is above the target, expand the abbreviation and link the original type
 /// to its expansion. This normalizes module-alias paths (e.g.,
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
-pub fn update_level_expand<'a>(ctx: &'a TypeContext<'a>, env: &Env, level: i32, ty: TypeExprRef) {
+pub fn update_level_expand<'a>(ctx: &'a TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
     let mut pending_type_lookup_paths = None;
     update_level_expand_with_lookup_capture(ctx, env, level, ty, &mut pending_type_lookup_paths);
 }
 
 fn update_level_expand_with_lookup_capture<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     level: i32,
     ty: TypeExprRef,
@@ -970,7 +970,7 @@ fn is_predef_type_name(name: &str) -> bool {
 }
 
 fn should_preserve_local_t_alias_during_level_update(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     original_path: &Path,
     expanded: TypeExprRef,
@@ -1057,7 +1057,7 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
 }
 
 pub(crate) fn resolve_module_signature_through_cmi<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -1147,7 +1147,7 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
 }
 
 fn resolve_module_signature_through_persistent_env<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     module_path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<super::decl::Signature> {
@@ -1214,7 +1214,7 @@ fn resolve_module_signature_through_persistent_env<'a>(
 }
 
 fn normalize_module_path_through_components<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
@@ -1278,7 +1278,7 @@ fn normalize_module_path_through_components<'a>(
 }
 
 pub(crate) fn resolve_type_item_through_modules<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     path: &Path,
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use crate::types::decl::SignatureItem;
@@ -1342,7 +1342,7 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
 }
 
 pub fn resolve_type_through_modules<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
     resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
@@ -1352,7 +1352,7 @@ pub fn resolve_type_through_modules<'a>(
 ///
 /// If the type is `Tconstr(path, args)` and the type declaration for `path`
 fn resolve_module_type_through_env_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     path: &Path,
     visiting: &mut HashSet<Path>,
@@ -1522,7 +1522,7 @@ fn resolve_module_type_through_env_path<'a>(
 }
 
 pub fn resolve_module_type_through_env<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     path: &Path,
 ) -> Option<super::decl::ModuleType> {
@@ -1531,7 +1531,7 @@ pub fn resolve_module_type_through_env<'a>(
 }
 
 fn resolve_signature_through_env_module_type<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     mty: &super::decl::ModuleType,
     visiting: &mut HashSet<Path>,
@@ -1561,7 +1561,7 @@ fn resolve_signature_through_env_module_type<'a>(
 }
 
 fn strengthen_type_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     module_access_path: &Path,
     id: &crate::ident::Ident,
     decl: &super::decl::TypeDeclaration,
@@ -1617,7 +1617,7 @@ fn qualify_type_decl_for_module_access_path(
 }
 
 fn strengthen_module_type_for_module_access_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -1690,7 +1690,7 @@ fn strengthen_module_type_for_module_access_path<'a>(
 }
 
 pub fn strengthen_module_type_for_inclusion_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     module_access_path: &Path,
     mty: &super::decl::ModuleType,
@@ -1699,7 +1699,7 @@ pub fn strengthen_module_type_for_inclusion_path<'a>(
 }
 
 fn strengthen_module_decl_for_module_access_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -1725,7 +1725,7 @@ fn strengthen_module_decl_for_module_access_path<'a>(
 }
 
 fn strengthen_signature_for_module_access_path<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     aliasable: bool,
     module_access_path: &Path,
@@ -1794,7 +1794,7 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
 fn lookup_raw_module_sig_type<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
@@ -1835,7 +1835,7 @@ fn lookup_raw_module_sig_type<'a>(
 }
 
 fn resolve_type_item_through_env<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     path: &Path,
     strengthen_alias_types: bool,
@@ -1940,7 +1940,7 @@ fn resolve_type_item_through_env<'a>(
 }
 
 fn resolve_type_through_env<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &super::env::Env,
     path: &Path,
     strengthen_alias_types: bool,
@@ -1949,7 +1949,7 @@ fn resolve_type_through_env<'a>(
 }
 
 pub(crate) fn resolved_type_items_share_identity(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     path1: &Path,
     path2: &Path,
@@ -2037,7 +2037,7 @@ pub(crate) fn resolved_type_items_share_identity(
 /// 1. Recursively normalizes the prefix `p`
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
-pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
+pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
     let env_id = env.id();
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
@@ -2047,7 +2047,7 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext<'a>, env: &Env, path:
     normalized
 }
 
-fn normalize_path_forward_only<'a>(ctx: &'a TypeContext<'a>, env: &Env, path: &Path) -> Path {
+fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
     normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, None)
 }
 
@@ -2087,7 +2087,7 @@ fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> 
 }
 
 fn normalize_path_full_inner<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     path: &Path,
     depth: usize,
@@ -2328,7 +2328,7 @@ fn normalize_path_full_inner<'a>(
     path
 }
 
-fn resolved_module_signature_has_submodules(ctx: &TypeContext<'_>, path: &Path) -> bool {
+fn resolved_module_signature_has_submodules(ctx: &TypeContext, path: &Path) -> bool {
     ctx.find_resolved_module_sig(&path.name())
         .is_some_and(|(_, sig)| {
             sig.iter()
@@ -2341,7 +2341,7 @@ fn resolved_module_signature_has_submodules(ctx: &TypeContext<'_>, path: &Path) 
 ///
 /// Returns `Some(expanded)` if expansion was possible, `None` otherwise.
 fn proper_abbrevs(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     path: &Path,
     args: &[TypeExprRef],
     abbrev: AbbrevMemoRef,
@@ -2360,7 +2360,7 @@ enum ExpandHeadMode {
 }
 
 fn try_expand_head_with_mode<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -2775,7 +2775,7 @@ fn try_expand_head_with_mode<'a>(
 }
 
 fn try_expand_head<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -2783,7 +2783,7 @@ fn try_expand_head<'a>(
 }
 
 fn try_expand_head_unif<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -2793,7 +2793,7 @@ fn try_expand_head_unif<'a>(
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head_once<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -2803,12 +2803,12 @@ pub fn expand_head_once<'a>(
 
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
-pub fn expand_head<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+pub fn expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
 pub(crate) fn expand_head_unif<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> TypeExprRef {
@@ -2816,7 +2816,7 @@ pub(crate) fn expand_head_unif<'a>(
 }
 
 pub(crate) fn touch_constraint_match_head_expansion(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) {
@@ -2851,7 +2851,7 @@ pub(crate) fn touch_constraint_match_head_expansion(
 }
 
 fn expand_head_with_mode<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
     mode: ExpandHeadMode,
@@ -2905,7 +2905,7 @@ fn expand_head_with_mode<'a>(
 // ============================================================================
 
 fn filter_method_field<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     method_name: &str,
     ty: TypeExprRef,
@@ -2985,7 +2985,7 @@ fn filter_method_field<'a>(
 ///
 /// This mirrors OCaml `Ctype.filter_method` for the public method-send path.
 pub fn filter_method<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     method_name: &str,
     ty: TypeExprRef,
@@ -3033,7 +3033,7 @@ pub fn filter_method<'a>(
 /// Given a mapping from parameter type refs to argument type refs,
 /// create a copy of `ty` with all occurrences of parameters replaced by arguments.
 fn subst_type(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     params: &[TypeExprRef],
     args: &[TypeExprRef],
     ty: TypeExprRef,
@@ -3146,7 +3146,7 @@ fn subst_type(
 /// 6. Unify stub with fresh body
 /// 7. Substitute fresh params with actual args
 fn subst_with_memo(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     _env: &Env,
     ty: TypeExprRef,              // original Tconstr being expanded
     lookup_abbrev: AbbrevMemoRef, // proper_abbrevs target memo
@@ -3232,7 +3232,7 @@ fn subst_with_memo(
 // ============================================================================
 
 pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: Option<&Env>,
     mty: super::decl::ModuleType,
     required_lids: &[crate::parser::longident::Longident],
@@ -3266,14 +3266,14 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
 }
 
 fn package_longident_same_label(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     left: &crate::parser::longident::Longident,
     right: &crate::parser::longident::Longident,
 ) -> bool {
     use crate::parser::longident::Longident;
 
     fn component_same(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         left: crate::intern::StrIdx,
         right: crate::intern::StrIdx,
     ) -> bool {
@@ -3313,7 +3313,7 @@ fn package_longident_same_label(
 ///
 /// Returns `TypeError::Unify` if the types cannot be unified.
 pub fn unify<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -3371,7 +3371,7 @@ pub fn unify<'a>(
 /// after the occurs check and level update, falling back to full `unify` for
 /// constructor self-occurrences and non-variable left sides.
 pub fn unify_var<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -3429,7 +3429,7 @@ pub fn unify_var<'a>(
 // We mirror that branch choice so alias identity is preserved for both
 // one-sided and two-sided expansion cases.
 fn unify_after_expansion<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t1_expanded: TypeExprRef,
@@ -3579,7 +3579,7 @@ fn unify_after_expansion<'a>(
 }
 
 fn should_keep_expanded_manifest_alias_repr(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     lhs: TypeExprRef,
     rhs: TypeExprRef,
@@ -3646,7 +3646,7 @@ fn should_keep_expanded_manifest_alias_repr(
         && !same_family(&relink_path, &lhs_path)
 }
 
-fn has_cached_expansion(ctx: &TypeContext<'_>, path: &Path, mut memo: AbbrevMemoRef) -> bool {
+fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef) -> bool {
     for _ in 0..128 {
         match ctx.get_abbrev_memo(memo) {
             AbbrevMemo::Mnil => return false,
@@ -3670,7 +3670,7 @@ fn has_cached_expansion(ctx: &TypeContext<'_>, path: &Path, mut memo: AbbrevMemo
 
 /// Internal unification logic.
 fn unify_types<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -4821,7 +4821,7 @@ fn merge_row_fields<'a, 'b>(
 /// and partition fields, then unifies pairs. The result has fields in alphabetical
 /// order, matching OCaml's `row_repr` which flattens the sorted chain.
 fn unify_rows<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     row1: &RowDesc,
     row2: &RowDesc,
@@ -4915,7 +4915,7 @@ fn unify_rows<'a>(
         row_name: name,
     };
 
-    let set_more = |ctx: &'a TypeContext<'a>,
+    let set_more = |ctx: &'a TypeContext,
                     state: &mut UnifyState,
                     row: &RowDesc,
                     rest: &[RowFieldEntryRef<'_>]|
@@ -4990,7 +4990,7 @@ fn unify_rows<'a>(
 /// Unify two row fields.
 /// Matches OCaml's `unify_row_field` behavior, including Reither link updates.
 fn unify_row_field<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     fixed1: bool,
     fixed2: bool,
@@ -5201,7 +5201,7 @@ fn unify_row_field<'a>(
 /// Flatten an object field chain into a sorted list of (name, kind, type) + rest.
 /// Matches OCaml `flatten_fields` in ctype.ml.
 fn flatten_fields(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
 ) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
     let mut fields = Vec::new();
@@ -5281,7 +5281,7 @@ fn associate_fields(
 /// Build a Tfield chain from a list of fields with a given rest.
 /// Matches OCaml `build_fields` in ctype.ml.
 fn build_fields(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     level: i32,
     fields: &[(String, FieldKind, TypeExprRef)],
     rest: TypeExprRef,
@@ -5304,7 +5304,7 @@ fn build_fields(
 /// Unify two object field chains using OCaml's field-order-independent algorithm.
 /// Matches OCaml `unify_fields` in ctype.ml.
 fn unify_object_fields<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     state: &mut UnifyState,
     fields1: TypeExprRef,
     fields2: TypeExprRef,
@@ -5356,7 +5356,7 @@ fn unify_object_fields<'a>(
 ///
 /// This marks all type variables at or above the current level as generic,
 /// making the type polymorphic.
-fn generalize_rec(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+fn generalize_rec(ctx: &TypeContext, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
     let current = ctx.current_level();
@@ -5375,14 +5375,14 @@ fn generalize_rec(ctx: &TypeContext<'_>, ty: TypeExprRef) {
     }
 }
 
-pub fn generalize(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn generalize(ctx: &TypeContext, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_rec(ctx, ty);
 }
 
 fn lower_nongen_type_expr_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     nglev: i32,
     ty: TypeExprRef,
     seen: &mut HashSet<TypeExprRef>,
@@ -5409,7 +5409,7 @@ fn lower_nongen_type_expr_rec(
 }
 
 fn lower_nongen_type_decl_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     nglev: i32,
     decl: &crate::types::decl::TypeDeclaration,
     seen: &mut HashSet<TypeExprRef>,
@@ -5463,7 +5463,7 @@ fn lower_nongen_type_decl_rec(
 }
 
 fn lower_nongen_extension_constructor_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     nglev: i32,
     ext: &crate::types::decl::ExtensionConstructor,
     seen: &mut HashSet<TypeExprRef>,
@@ -5491,7 +5491,7 @@ fn lower_nongen_extension_constructor_rec(
 }
 
 fn lower_nongen_module_type_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     nglev: i32,
     mty: &crate::types::decl::ModuleType,
     seen: &mut HashSet<TypeExprRef>,
@@ -5537,7 +5537,7 @@ fn lower_nongen_module_type_rec(
 }
 
 pub fn lower_nongen_module_type(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     nglev: i32,
     mty: &crate::types::decl::ModuleType,
 ) {
@@ -5546,7 +5546,7 @@ pub fn lower_nongen_module_type(
 }
 
 fn force_generalize_sig_type_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     seen: &mut HashSet<TypeExprRef>,
 ) {
@@ -5566,14 +5566,14 @@ fn force_generalize_sig_type_rec(
     }
 }
 
-pub fn force_generalize_sig_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn force_generalize_sig_type(ctx: &TypeContext, ty: TypeExprRef) {
     ctx.clear_simple_abbrevs();
     let mut seen = HashSet::new();
     force_generalize_sig_type_rec(ctx, ty, &mut seen);
 }
 
 fn force_generalize_module_type_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
     seen: &mut HashSet<TypeExprRef>,
 ) {
@@ -5612,7 +5612,7 @@ fn force_generalize_module_type_rec(
 }
 
 pub fn force_generalize_module_sig_values(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) {
     let mut seen = HashSet::new();
@@ -5620,7 +5620,7 @@ pub fn force_generalize_module_sig_values(
 }
 
 pub fn force_generalize_signature_values(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     sig_items: &[crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
@@ -5645,7 +5645,7 @@ pub fn force_generalize_signature_values(
 }
 
 /// Generalize the structure of a type at a given level.
-fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprRef) {
+fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let level = ctx.get_level(ty);
 
@@ -5717,14 +5717,14 @@ fn generalize_structure_rec(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprR
     }
 }
 
-pub fn generalize_structure(ctx: &TypeContext<'_>, var_level: i32, ty: TypeExprRef) {
+pub fn generalize_structure(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_structure_rec(ctx, var_level, ty);
 }
 
 fn generalize_expansive_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     var_level: i32,
     visited: &mut HashSet<TypeExprRef>,
@@ -5800,7 +5800,7 @@ fn generalize_expansive_rec(
     }
 }
 
-pub fn generalize_expansive(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) {
+pub fn generalize_expansive(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     let mut visited = HashSet::new();
@@ -5814,7 +5814,7 @@ pub fn generalize_expansive(ctx: &TypeContext<'_>, env: &Env, ty: TypeExprRef) {
 /// causing generalize_expansive to prevent generalization of covariant params.
 /// OCaml infers actual variance from the type body.
 pub fn compute_variance_decl(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     decl: &super::decl::TypeDeclaration,
 ) -> Vec<Variance> {
@@ -5922,7 +5922,7 @@ pub fn compute_variance_decl(
 }
 
 fn compute_variance_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     visited: &mut HashMap<TypeExprRef, Variance>,
     vari: Variance,
@@ -6082,7 +6082,7 @@ fn compute_variance_rec(
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
-pub fn lower_args<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) {
+pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) {
     let mut seen = Vec::new();
     let mut current = ty;
     loop {
@@ -6124,7 +6124,7 @@ pub fn lower_args<'a>(ctx: &'a TypeContext<'a>, env: &Env, ty: TypeExprRef) {
 ///
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
-pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     let mut cache = CopyCache::new();
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -6134,7 +6134,7 @@ pub fn instance(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// With `keep = false`, non-generic subtrees without free universal variables
 /// are forgotten as fresh variables at the current level instead of being
 /// copied structurally. This is used by polymorphic variant pattern typing.
-pub fn instance_partial(ctx: &TypeContext<'_>, ty: TypeExprRef, keep: bool) -> TypeExprRef {
+pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeExprRef {
     let mut cache = CopyCache::new_partial(ctx, ty, keep);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -6145,7 +6145,7 @@ pub fn instance_partial(ctx: &TypeContext<'_>, ty: TypeExprRef, keep: bool) -> T
 /// can link the original manifest node, creating self-referential expansion
 /// loops. This creates a shallow copy of the top-level node when identity
 /// is returned, protecting the original declaration's manifest.
-fn instance_for_expansion(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+fn instance_for_expansion(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     let result = instance(ctx, ty);
     let result_repr = ctx.repr(result);
     let ty_repr = ctx.repr(ty);
@@ -6161,7 +6161,7 @@ fn instance_for_expansion(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef
 /// Like instance_for_expansion, but also caches the result in simple_expansion_cache
 /// Instantiate a list of types, sharing variable substitutions across all of them.
 /// Matches OCaml's Ctype.instance_list.
-pub fn instance_list(ctx: &TypeContext<'_>, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+pub fn instance_list(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
     let mut cache = CopyCache::new();
     types
         .iter()
@@ -6177,7 +6177,7 @@ pub fn instance_list(ctx: &TypeContext<'_>, types: &[TypeExprRef]) -> Vec<TypeEx
 ///
 /// Returns (fresh_params, fresh_body).
 pub fn instance_parameterized_type(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     params: &[TypeExprRef],
     body: TypeExprRef,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
@@ -6210,7 +6210,7 @@ fn diff_bound_list(bound: &[TypeExprRef], bound_t: &[TypeExprRef]) -> Vec<TypeEx
 }
 
 fn bound_conflicts(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     free_univars: &HashSet<TypeExprRef>,
     bound: &[TypeExprRef],
 ) -> bool {
@@ -6218,7 +6218,7 @@ fn bound_conflicts(
 }
 
 fn build_inverse_type_graph(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     parent: Option<TypeExprRef>,
     ty: TypeExprRef,
     inverted: &mut HashMap<TypeExprRef, Vec<TypeExprRef>>,
@@ -6246,7 +6246,7 @@ fn build_inverse_type_graph(
 }
 
 fn add_univar_to_parents(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     univar: TypeExprRef,
     node: TypeExprRef,
     inverted: &HashMap<TypeExprRef, Vec<TypeExprRef>>,
@@ -6279,7 +6279,7 @@ fn add_univar_to_parents(
 }
 
 fn compute_univars_per_node(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
 ) -> HashMap<TypeExprRef, HashSet<TypeExprRef>> {
     let mut inverted: HashMap<TypeExprRef, Vec<TypeExprRef>> = HashMap::new();
@@ -6307,7 +6307,7 @@ struct CopySepVisitedEntry {
 }
 
 fn copy_sep_row(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     row: &RowDesc,
     fixed: bool,
     keep: bool,
@@ -6384,7 +6384,7 @@ fn copy_sep_row(
 }
 
 fn copy_sep_inner(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     fixed: bool,
     free_univars: &HashMap<TypeExprRef, HashSet<TypeExprRef>>,
@@ -6676,7 +6676,7 @@ fn copy_sep_inner(
 /// Instantiate a polymorphic type with free universal variables.
 /// Matches OCaml's `instance_poly` / `copy_sep` behavior.
 pub fn instance_poly(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     keep_names: bool,
     fixed: bool,
     univars: &[TypeExprRef],
@@ -6741,7 +6741,7 @@ pub fn instance_poly(
 /// result type and argument types while sharing the same variable substitutions.
 /// Matches OCaml's Ctype.instance_constructor.
 pub fn instance_constructor(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cstr: &super::ConstructorDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
     let mut cache = CopyCache::new();
@@ -6759,7 +6759,7 @@ pub fn instance_constructor(
 /// `$ConstructorName_'varname` and links the copied existential to it.
 /// Matches OCaml's Ctype.instance_constructor ~in_pattern:(env, newtype_lev).
 pub fn instance_constructor_in_pattern(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &mut super::env::Env,
     newtype_lev: i32,
     cstr: &super::ConstructorDescription,
@@ -6827,7 +6827,7 @@ pub fn instance_constructor_in_pattern(
 /// type parameter nodes. This keeps `lbl_arg` and `lbl_res` sharing the same
 /// type parameter identities when labels are rebuilt from declarations.
 pub fn remap_label_type_to_params(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     label_ty: TypeExprRef,
     type_params: &[TypeExprRef],
 ) -> TypeExprRef {
@@ -6897,7 +6897,7 @@ pub fn remap_label_type_to_params(
 }
 
 pub(crate) fn subst_type_params(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     params: &[TypeExprRef],
     args: &[TypeExprRef],
     ty: TypeExprRef,
@@ -6910,7 +6910,7 @@ pub(crate) fn subst_type_params(
 /// the same variable substitutions between them.
 /// Handles Tpoly unwrapping like OCaml's instance_label in ctype.ml.
 pub fn instance_label(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
@@ -7006,7 +7006,7 @@ pub fn instance_label(
 /// OCaml's check_univars: after typing a polymorphic field value,
 /// convert any still-unresolved fresh Tvars back to Tunivar.
 /// This preserves the universal quantification in the typed tree.
-pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
+pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
     for &v in vars {
         let v = ctx.repr(v);
         let desc = ctx.get_desc(v);
@@ -7028,7 +7028,7 @@ pub fn check_univars(ctx: &TypeContext<'_>, vars: &[TypeExprRef]) {
 /// non-generic types directly. Adding that check here regresses parity
 /// because other parts of the system are calibrated for copy-everything.
 pub fn copy_type_deep(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
@@ -7238,7 +7238,7 @@ impl CopyCache {
         }
     }
 
-    fn new_partial(ctx: &TypeContext<'_>, ty: TypeExprRef, keep: bool) -> Self {
+    fn new_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> Self {
         CopyCache {
             nodes: HashMap::new(),
             row_more_markers: HashMap::new(),
@@ -7257,7 +7257,7 @@ struct CopyRowMoreMarker {
 }
 
 fn type_expr_contains_ident_stamp(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     target_stamp: i32,
     seen: &mut HashSet<TypeExprRef>,
@@ -7331,7 +7331,7 @@ fn type_expr_contains_ident_stamp(
     }
 }
 
-pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext<'_>, path: &Path) -> bool {
+pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
     let Path::Pident(id) = path else {
         return false;
     };
@@ -7369,7 +7369,7 @@ pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext<'_>, path: 
     }
 }
 
-fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext<'_>, path: &Path) -> bool {
+fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext, path: &Path) -> bool {
     let Path::Pident(_) = path else {
         return false;
     };
@@ -7381,7 +7381,7 @@ fn is_recursive_local_nullary_type_for_identity(ctx: &TypeContext<'_>, path: &Pa
 /// identity for in copy because they have no structural content (no variant
 /// constructors, no record fields). Includes both opaque types (`type t`) and
 /// type aliases (`type t = int`).
-fn is_local_abstract_type(ctx: &TypeContext<'_>, path: &Path) -> bool {
+fn is_local_abstract_type(ctx: &TypeContext, path: &Path) -> bool {
     let Path::Pident(id) = path else {
         return false;
     };
@@ -7395,7 +7395,7 @@ fn is_local_abstract_type(ctx: &TypeContext<'_>, path: &Path) -> bool {
 }
 
 /// Copy a type, creating fresh type variables for generic ones.
-pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+pub fn copy_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     let mut cache = CopyCache::new();
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -7405,12 +7405,12 @@ pub fn copy_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
 /// nodes for everything except Tvars/Tunivar.
 /// Used in type_newtype to ensure replace_newtype_path doesn't corrupt
 /// shared pattern types.
-pub fn subst_identity_copy(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     subst_identity_copy_with_partial(ctx, ty, false)
 }
 
 pub fn subst_identity_copy_with_partial(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
 ) -> TypeExprRef {
@@ -7435,7 +7435,7 @@ struct SubstRowMoreMarker {
 }
 
 fn subst_identity_copy_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     reopen_closed_variant_rows: bool,
     seen: &mut HashMap<TypeExprRef, TypeExprRef>,
@@ -7859,7 +7859,7 @@ fn subst_identity_copy_rec(
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
 /// non-generic nodes unchanged (`partial = None` case used by `instance`).
 /// For duplicated generic nodes, sharing is preserved across the copied graph.
-fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCache) -> TypeExprRef {
+fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
     // OCaml Ctype.copy marker precedence:
@@ -8326,7 +8326,7 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
 
 /// Copy a row descriptor.
 fn copy_row_cached(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     row: &RowDesc,
     fixed: bool,
     keep: bool,
@@ -8386,13 +8386,13 @@ fn copy_row_cached(
 // ============================================================================
 
 /// Check if a type is a function type.
-pub fn is_function(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
+pub fn is_function(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
     matches!(*ctx.borrow_desc(ty), TypeDesc::Tarrow { .. })
 }
 
 /// Get the arity of a function type (number of arguments).
-pub fn function_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> usize {
+pub fn function_arity(ctx: &TypeContext, ty: TypeExprRef) -> usize {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -8406,7 +8406,7 @@ pub fn function_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> usize {
 }
 
 /// Extract the argument and return types from an arrow type.
-pub fn split_arrow(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
+pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -8417,7 +8417,7 @@ pub fn split_arrow(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(TypeExprRe
 
 /// Extract the argument type, label, and return type from an arrow type.
 pub fn split_arrow_with_label(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
 ) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
@@ -8430,7 +8430,7 @@ pub fn split_arrow_with_label(
 
 /// Extract the inner type from option<T>, returning T.
 /// Returns None if the type is not option<T>.
-pub fn extract_option_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<TypeExprRef> {
+pub fn extract_option_type(ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -8446,7 +8446,7 @@ pub fn extract_option_type(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Typ
 }
 
 /// Get the element types of a tuple.
-pub fn tuple_elements(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Vec<TypeExprRef>> {
+pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExprRef>> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
@@ -8464,7 +8464,7 @@ pub fn tuple_elements(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<Vec<Type
 /// For Tvariant: flattens row, filters Rabsent fields, sorts alphabetically, mutates desc.
 /// For Tobject: flattens fields (sorts alphabetically), rebuilds chain, mutates desc.
 /// Recursively visits all sub-types.
-pub fn normalize_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
+pub fn normalize_type(ctx: &TypeContext, ty: TypeExprRef) {
     let mut visited = HashSet::new();
     normalize_type_rec(ctx, &mut visited, ty);
 }
@@ -8472,7 +8472,7 @@ pub fn normalize_type(ctx: &TypeContext<'_>, ty: TypeExprRef) {
 /// Sort ALL Tobject field chains alphabetically in the entire type context.
 /// OCaml sorts object fields during type checking (flatten_fields/unify_fields),
 /// so all Tobject types should have sorted fields. This function ensures that.
-pub fn sort_all_object_fields(ctx: &TypeContext<'_>) {
+pub fn sort_all_object_fields(ctx: &TypeContext) {
     let count = ctx.type_expr_count();
     for i in 0..count {
         let ty = TypeExprRef(i);
@@ -8497,7 +8497,7 @@ pub fn sort_all_object_fields(ctx: &TypeContext<'_>) {
 }
 
 /// Normalize ALL type nodes in the context (sort variant/object fields).
-pub fn normalize_all_types(ctx: &TypeContext<'_>) {
+pub fn normalize_all_types(ctx: &TypeContext) {
     let count = ctx.type_expr_count();
     for i in 0..count {
         let ty = TypeExprRef(i);
@@ -8548,7 +8548,7 @@ pub fn normalize_all_types(ctx: &TypeContext<'_>) {
     }
 }
 
-fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>, ty: TypeExprRef) {
+fn normalize_type_rec(ctx: &TypeContext, visited: &mut HashSet<TypeExprRef>, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     if visited.contains(&ty) {
         return;
@@ -8636,7 +8636,7 @@ fn normalize_type_rec(ctx: &TypeContext<'_>, visited: &mut HashSet<TypeExprRef>,
 /// Any `Tconstr(p, tl, _)` where `p.is_free(mid)` is expanded via `env`.
 /// Returns `None` if the dependency cannot be removed.
 pub fn nondep_type<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -8646,7 +8646,7 @@ pub fn nondep_type<'a>(
 }
 
 fn nondep_type_rec<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     mid: &Ident,
     ty: TypeExprRef,
@@ -8917,7 +8917,7 @@ fn nondep_type_rec<'a>(
 /// Eliminate dependencies on functor parameter `mid` from a type declaration.
 /// OCaml: Ctype.nondep_type_decl
 fn unroll_abbrev<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     id: &Ident,
     params: &[TypeExprRef],
     ty: TypeExprRef,
@@ -8949,7 +8949,7 @@ fn unroll_abbrev<'a>(
 }
 
 pub fn nondep_type_decl<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     mid: &Ident,
     _id: &Ident,
@@ -8996,7 +8996,7 @@ pub fn nondep_type_decl<'a>(
 }
 
 fn nondep_type_kind<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     mid: &Ident,
     kind: &super::decl::TypeKind,
@@ -9072,7 +9072,7 @@ mod tests {
     #[test]
     fn test_unify_same_type() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut state = UnifyState::new();
 
         let t = ctx.new_var(None);
@@ -9082,7 +9082,7 @@ mod tests {
     #[test]
     fn test_unify_var_with_type() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut state = UnifyState::new();
 
         let var = ctx.new_var(None);
@@ -9099,7 +9099,7 @@ mod tests {
     #[test]
     fn test_unify_tuples() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut state = UnifyState::new();
 
         let a = ctx.new_var(None);
@@ -9113,7 +9113,7 @@ mod tests {
     #[test]
     fn test_unify_tuple_length_mismatch() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut state = UnifyState::new();
 
         let a = ctx.new_var(None);
@@ -9126,7 +9126,7 @@ mod tests {
     #[test]
     fn test_occurs_check() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let a = ctx.new_var(None);
         let b = ctx.new_var(None);
@@ -9140,7 +9140,7 @@ mod tests {
     #[test]
     fn test_generalize_and_instance() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         // Create a type at the current level
         ctx.begin_def();
@@ -9159,7 +9159,7 @@ mod tests {
     #[test]
     fn test_is_function() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let a = ctx.new_var(None);
         let b = ctx.new_var(None);
@@ -9172,7 +9172,7 @@ mod tests {
     #[test]
     fn test_function_arity() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let a = ctx.new_var(None);
         let b = ctx.new_var(None);
@@ -9190,7 +9190,7 @@ mod tests {
     #[test]
     fn resolve_type_item_through_env_keeps_original_module_signature_unmodified() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = crate::types::Env::empty();
 
         let module_id = Ident::create_local("M");

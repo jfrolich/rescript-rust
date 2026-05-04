@@ -805,7 +805,7 @@ struct ComparisonSpecialization {
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     possible_required_modules: AHashSet<ModuleId>,
@@ -821,7 +821,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter.
     pub fn new(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
     ) -> Self {
         Self {
@@ -842,7 +842,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter with stamps continuing from an existing phase.
     pub fn with_start_stamp(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
         start_stamp: i32,
     ) -> Self {
@@ -864,7 +864,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter with the current compilation unit name.
     pub fn with_start_stamp_and_unit_name(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
         start_stamp: i32,
         unit_name: String,
@@ -11047,7 +11047,7 @@ mod tests {
     fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
 
@@ -11087,7 +11087,7 @@ mod tests {
     fn empty_inlined_record_constructor_keeps_inlined_record_metadata() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
 
@@ -11258,7 +11258,7 @@ mod tests {
     fn function_expression_preserves_directive_attribute() {
         let mut arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
 
         let directive_expr = crate::parser::ast::Expression {
@@ -11326,7 +11326,7 @@ mod tests {
     fn simple_trywith_extension_handler_assigns_exit_ids_in_source_order() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         converter.next_static_raise = 1;
@@ -11375,7 +11375,7 @@ mod tests {
     fn sync_matching_stamps_advances_raw_converter_after_matching_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
 
@@ -11402,7 +11402,7 @@ mod tests {
     fn fresh_ident_advances_past_lowered_converter_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
 
@@ -11433,7 +11433,7 @@ mod tests {
         );
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_expr_raw(&sequence);
@@ -11468,7 +11468,7 @@ mod tests {
         };
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_structure(&structure);
@@ -11501,7 +11501,7 @@ mod tests {
         ];
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_let_with_body_raw(
@@ -11527,7 +11527,7 @@ mod tests {
     fn ffi_spec_reads_null_to_opt_return_wrapper() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11553,7 +11553,7 @@ mod tests {
     fn ffi_spec_preserves_marshaled_js_var_shape() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11587,7 +11587,7 @@ mod tests {
     fn ffi_spec_preserves_marshaled_import_attributes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11655,7 +11655,7 @@ external myJson: Js.Json.t = "default"
         let encoded = parser.arena().get_string(encoded.pval_prim[1]).to_string();
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(parser.arena(), &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11691,7 +11691,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_preserves_marshaled_js_new_shape() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11727,7 +11727,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_object_create_kind() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11746,7 +11746,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_inline_string_constant() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11774,7 +11774,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_inline_int_constant() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11830,7 +11830,7 @@ external myJson: Js.Json.t = "default"
     fn primitive_value_compare_specializes_through_alias_env() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
         let int_ty = ctx.predef_int();
         let compare_ty = ctx.new_arrow_simple(int_ty, ctx.new_arrow_simple(int_ty, int_ty));
@@ -11861,7 +11861,7 @@ external myJson: Js.Json.t = "default"
     fn coercion_alias_keeps_original_path_instead_of_normalizing_through_module_alias() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let original_module = Ident::create_local("M'");
@@ -11926,7 +11926,7 @@ external myJson: Js.Json.t = "default"
     fn primitive_value_equality_specializes_through_alias_env() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
         let string_ty = ctx.predef_string();
         let bool_ty = ctx.predef_bool();
@@ -11961,7 +11961,7 @@ external myJson: Js.Json.t = "default"
     fn translate_module_path_raw_follows_mty_ident_flattened_submodule_aliases() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let pkg = Ident::create_persistent("Pkg");
@@ -12014,7 +12014,7 @@ external myJson: Js.Json.t = "default"
     fn translate_module_path_raw_leaves_possible_required_modules_to_later_passes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
 
@@ -12036,7 +12036,7 @@ external myJson: Js.Json.t = "default"
     fn empty_include_records_possible_required_modules() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12069,7 +12069,7 @@ external myJson: Js.Json.t = "default"
     fn plain_module_aliases_do_not_record_possible_required_modules() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12098,7 +12098,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_marks_global_modules_as_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
 
@@ -12127,7 +12127,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_alias_lets_mark_global_modules_as_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let module_id = Ident::create_persistent("ModuleWithAlias");
 
@@ -12161,7 +12161,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_pack_idents_record_only_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12204,7 +12204,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_keeps_local_unpack_prefixes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let modtype_x = Ident::create_local("X");
@@ -12245,7 +12245,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_follows_persistent_mty_ident_flattened_submodule_aliases() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let pkg = Ident::create_persistent("Pkg");
@@ -12320,7 +12320,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_keeps_constrained_persistent_submodule_prefixes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let inner_define = Ident::create_persistent("Inner_define");
@@ -12432,7 +12432,7 @@ external myJson: Js.Json.t = "default"
     fn recmodule_function_init_shape_keeps_function_constructor_metadata() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
 

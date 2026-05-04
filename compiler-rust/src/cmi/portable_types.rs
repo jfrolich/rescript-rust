@@ -551,7 +551,7 @@ fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &[Porta
 /// indices into the returned PortableTypeGraph.
 pub fn serialize_pers_struct(
     ps: &PersStruct,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
     let mut ser = TypeGraphSerializer {
@@ -574,14 +574,14 @@ pub fn serialize_pers_struct(
     }
 }
 
-struct TypeGraphSerializer<'a, 'b> {
-    ctx: &'a TypeContext<'b>,
+struct TypeGraphSerializer<'a> {
+    ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
     cache: HashMap<TypeExprRef, usize>,
 }
 
-impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
+impl<'a> TypeGraphSerializer<'a> {
     /// Serialize a TypeExprRef, returning the portable index.
     fn serialize_type(&mut self, r: TypeExprRef) -> usize {
         if let Some(&idx) = self.cache.get(&r) {
@@ -860,7 +860,7 @@ impl<'a, 'b> TypeGraphSerializer<'a, 'b> {
 
 /// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
 /// with valid TypeExprRefs.
-pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext<'_>) -> PersStruct {
+pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> PersStruct {
     ctx.import_cmi_longident_names(&pps.cmi_longident_names);
 
     let graph = &pps.type_graph;
@@ -899,7 +899,7 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext<'_>) 
 fn internalize_desc(
     desc: &PortableTypeDesc,
     remap: &[TypeExprRef],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
@@ -959,7 +959,7 @@ fn internalize_desc(
     }
 }
 
-fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext<'_>) -> Longident {
+fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext) -> Longident {
     match lid {
         PortableLongident::Lident(name) => Longident::Lident(ctx.intern_cmi_longident_name(name)),
         PortableLongident::Ldot(prefix, name) => Longident::Ldot(
@@ -976,7 +976,7 @@ fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext<'_>) -> Long
 fn internalize_row_desc(
     prd: &PortableRowDesc,
     remap: &[TypeExprRef],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> RowDesc {
     RowDesc {
         row_fields: prd
@@ -1002,7 +1002,7 @@ fn internalize_row_desc(
 fn internalize_row_field(
     prf: &PortableRowField,
     remap: &[TypeExprRef],
-    _ctx: &TypeContext<'_>,
+    _ctx: &TypeContext,
 ) -> RowField {
     match prf {
         PortableRowField::Rpresent(opt) => RowField::Rpresent(opt.map(|i| remap[i])),

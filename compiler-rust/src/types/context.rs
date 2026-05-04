@@ -132,7 +132,7 @@ fn normalize_component_cache_path(path: Path) -> Path {
 /// use rescript_compiler::context::IdGenerator;
 ///
 /// let id_gen = IdGenerator::new();
-/// let mut ctx = TypeContext::new(&id_gen);
+/// let mut ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 ///
 /// // Create a type variable
 /// let tvar = ctx.new_var(None);
@@ -141,9 +141,11 @@ fn normalize_component_cache_path(path: Path) -> Path {
 /// let int_type = ctx.new_constr(path_int, vec![]);
 /// let func_type = ctx.new_arrow(tvar, int_type);
 /// ```
-pub struct TypeContext<'a> {
-    /// ID generator for type IDs
-    id_gen: &'a IdGenerator,
+pub struct TypeContext {
+    /// ID generator for type IDs.
+    /// Owned by `Arc` so the context can outlive its caller and live in
+    /// thread-local worker storage (where a borrow can't be expressed).
+    id_gen: Arc<IdGenerator>,
 
     /// Current generalization level
     current_level: Cell<i32>,
@@ -357,9 +359,9 @@ pub struct TypeContext<'a> {
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
-impl<'a> TypeContext<'a> {
+impl TypeContext {
     /// Create a new type context.
-    pub fn new(id_gen: &'a IdGenerator) -> Self {
+    pub fn new(id_gen: Arc<IdGenerator>) -> Self {
         TypeContext {
             id_gen,
             current_level: Cell::new(0),
@@ -1726,7 +1728,7 @@ impl<'a> TypeContext<'a> {
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
-        id.rename(self.id_gen)
+        id.rename(&self.id_gen)
     }
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
@@ -1888,7 +1890,7 @@ mod tests {
     #[test]
     fn test_new_var() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let v1 = ctx.new_var(Some("a".to_string()));
         let v2 = ctx.new_var(None);
@@ -1899,7 +1901,7 @@ mod tests {
     #[test]
     fn test_new_arrow() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);
@@ -1912,7 +1914,7 @@ mod tests {
     #[test]
     fn test_level_management() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         assert_eq!(ctx.current_level(), 0);
 
@@ -1932,7 +1934,7 @@ mod tests {
     #[test]
     fn test_repr() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_link(t1);
@@ -1947,7 +1949,7 @@ mod tests {
     #[test]
     fn test_repr_path_compression() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_link(t1);
@@ -1967,7 +1969,7 @@ mod tests {
     #[test]
     fn test_tuple() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);

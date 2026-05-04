@@ -314,7 +314,7 @@ fn compare_longident(arena: &ParseArena, left: &Longident, right: &Longident) ->
 }
 
 pub(crate) fn inline_record_type_params(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     parent_type_params: &[TypeExprRef],
     labels: &[crate::types::LabelDeclaration],
 ) -> Vec<TypeExprRef> {
@@ -623,7 +623,7 @@ impl PatternState {
     /// Takes parsed Located<StrIdx> (with LocIdx) and arena to convert to Location.
     pub fn enter_variable(
         &mut self,
-        type_ctx: &crate::types::TypeContext<'_>,
+        type_ctx: &crate::types::TypeContext,
         loc: LocIdx,
         name: &Located<StrIdx>,
         ty: TypeExprRef,
@@ -695,7 +695,7 @@ impl Default for PatternState {
 /// Context for type checking.
 pub struct TypeCheckContext<'a> {
     /// Type context for allocation.
-    pub type_ctx: &'a TypeContext<'a>,
+    pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
     pub arena: &'a ParseArena,
     /// Unification state.
@@ -759,7 +759,7 @@ pub struct TypeCoreDiagnostic {
 
 impl<'a> TypeCheckContext<'a> {
     /// Create a new type check context.
-    pub fn new(type_ctx: &'a TypeContext<'a>, arena: &'a ParseArena) -> Self {
+    pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
         TypeCheckContext {
             type_ctx,
             arena,
@@ -861,7 +861,7 @@ impl<'a> TypeCheckContext<'a> {
 // ============================================================================
 
 /// Type check a constant and return its type.
-pub fn type_constant(ctx: &TypeContext<'_>, env: &Env, cst: &Constant) -> TypeExprRef {
+pub fn type_constant(ctx: &TypeContext, env: &Env, cst: &Constant) -> TypeExprRef {
     let ty = match cst {
         // Match OCaml typecore.ml type_constant: instance_def Predef.type_*
         // so each constant occurrence gets its own instantiated node.
@@ -2832,7 +2832,7 @@ fn type_pattern_inner(
 
 fn preferred_alias_equiv_representative<'a>(
     env: &Env,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     lhs: TypeExprRef,
     rhs: TypeExprRef,
 ) -> Option<TypeExprRef> {
@@ -2929,7 +2929,7 @@ fn preserve_apply_argument_alias_representative(
             })
     }
 
-    fn constr_path_and_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(Path, usize)> {
+    fn constr_path_and_arity(ctx: &TypeContext, ty: TypeExprRef) -> Option<(Path, usize)> {
         let ty = ctx.repr(ty);
         let desc = ctx.get_desc(ty);
         match &*desc {
@@ -2939,7 +2939,7 @@ fn preserve_apply_argument_alias_representative(
     }
 
     fn raw_signature_manifest_path(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &Env,
         module_id: &Ident,
         type_name: &str,
@@ -3239,7 +3239,7 @@ fn unify_pattern_types_gadt(
 }
 
 fn row_field_contains_tunivar(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     field: &crate::types::type_expr::RowField,
     seen: &mut HashSet<TypeExprRef>,
@@ -3257,7 +3257,7 @@ fn row_field_contains_tunivar(
 }
 
 fn type_contains_tunivar(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     env: &Env,
     ty: TypeExprRef,
     seen: &mut HashSet<TypeExprRef>,
@@ -3326,7 +3326,7 @@ fn type_contains_tunivar(
     }
 }
 
-fn is_local_abstract_type_path(ctx: &TypeContext<'_>, env: &Env, path: &Path) -> bool {
+fn is_local_abstract_type_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
     let is_local_abstract = |decl: &crate::types::TypeDeclaration| {
         decl.type_newtype_level.is_some()
             && decl.type_manifest.is_none()
@@ -4489,7 +4489,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn visible_local_alias_type_path(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &Env,
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
@@ -4531,7 +4531,7 @@ fn force_qualified_value_type_paths<'a>(
         }
 
         fn add_alias_targets(
-            ctx: &TypeContext<'_>,
+            ctx: &TypeContext,
             env: &Env,
             pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
             target: &Path,
@@ -4670,7 +4670,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn flattened_persistent_alias_type_path(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
         selected_module_path: Option<&Path>,
@@ -4723,7 +4723,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn type_expr_mentions_path_root(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         ty: TypeExprRef,
         root_name: &str,
         seen: &mut Vec<TypeExprRef>,
@@ -4799,7 +4799,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn type_decl_manifest_mentions_path_root(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         decl: &crate::types::decl::TypeDeclaration,
         root_name: &str,
     ) -> bool {
@@ -4812,7 +4812,7 @@ fn force_qualified_value_type_paths<'a>(
         path: &Path,
         env: &Env,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
     ) -> Option<Path> {
         match path {
             Path::Pident(_) => alias_target_for_module_path(path, env, pers_env, ctx),
@@ -4843,7 +4843,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn persistent_nested_type_path(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &Env,
         path: &Path,
         arity: usize,
@@ -4853,7 +4853,7 @@ fn force_qualified_value_type_paths<'a>(
         allow_enclosing_selected_stdlib_component: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
-            ctx: &TypeContext<'_>,
+            ctx: &TypeContext,
             env: &Env,
             module_path: &Path,
             type_name: &str,
@@ -5611,7 +5611,7 @@ fn force_qualified_value_type_paths<'a>(
 }
 
 fn constructor_alias_rewrite_value_path(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     result_ty: TypeExprRef,
     constructor_name: &str,
 ) -> Option<Path> {
@@ -7819,7 +7819,7 @@ fn unify_expression_types(
 
 /// Instance a type if it's at GENERIC_LEVEL, otherwise return it unchanged.
 /// Used to protect generic expected types from corruption by non-rue handlers.
-fn instance_if_generic(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+fn instance_if_generic(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     if ctx.get_level(ctx.repr(ty)) == crate::types::type_expr::GENERIC_LEVEL {
         crate::types::instance(ctx, ty)
     } else {
@@ -7905,7 +7905,7 @@ fn get_unified_op_entry(path_name: &str) -> Option<UnifiedOpEntry> {
 }
 
 /// Check if a resolved type is a Tconstr matching a specific type name.
-fn is_type_named(ctx: &TypeContext<'_>, ty: TypeExprRef, name: &str) -> bool {
+fn is_type_named(ctx: &TypeContext, ty: TypeExprRef, name: &str) -> bool {
     let ty = ctx.repr(ty);
     let desc = ctx.get_desc(ty);
     match &*desc {
@@ -7918,7 +7918,7 @@ fn is_type_named(ctx: &TypeContext<'_>, ty: TypeExprRef, name: &str) -> bool {
 }
 
 fn unified_specialized_type_name(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     specialization: UnifiedOpSpecialization,
 ) -> Option<&'static str> {
@@ -7937,7 +7937,7 @@ fn unified_specialized_type_name(
     }
 }
 
-fn unified_expected_type(env: &Env, ctx: &TypeContext<'_>, type_name: &str) -> TypeExprRef {
+fn unified_expected_type(env: &Env, ctx: &TypeContext, type_name: &str) -> TypeExprRef {
     match type_name {
         "int" => env.type_int(ctx),
         "bool" => env.type_bool(ctx),
@@ -8220,7 +8220,7 @@ fn type_application(
     }
 
     fn new_arrow_with_level(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         label: crate::types::ArgLabel,
         arg_ty: TypeExprRef,
         ret_ty: TypeExprRef,
@@ -8849,7 +8849,7 @@ fn type_application(
 /// This is a simplified version of OCaml's `Parmatch.check_partial` that handles
 /// the most common cases.
 fn check_partial_simple<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     cases: &[crate::types::typedtree::Case],
 ) -> crate::types::typedtree::Partial {
@@ -11140,7 +11140,7 @@ fn type_case(
 }
 
 fn shallow_copy_pattern_binding_type(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     copy_nullary: bool,
 ) -> TypeExprRef {
@@ -11208,7 +11208,7 @@ fn parsed_pattern_contains_polymorphic_variant(arena: &ParseArena, pat: &ParsedP
     }
 }
 
-fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool {
+fn type_contains_variant_either(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let mut worklist = vec![ctx.repr(ty)];
     let mut visited = HashSet::new();
     while let Some(current) = worklist.pop() {
@@ -11247,7 +11247,7 @@ fn type_contains_variant_either(ctx: &TypeContext<'_>, ty: TypeExprRef) -> bool 
 /// polymorphic variant pattern instantiation (`erase_either`): when a copied
 /// variant row is closed, non-fixed, and still has `Reither` fields, reopen
 /// the row and drop those `Reither` fields.
-fn instance_for_erase_either_patterns(ctx: &TypeContext<'_>, ty: TypeExprRef) -> TypeExprRef {
+fn instance_for_erase_either_patterns(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     crate::types::ctype::instance_partial(ctx, ty, false)
 }
 
@@ -11709,7 +11709,7 @@ fn type_function(
             ..typed_body
         };
 
-        fn id_of_pattern(ctx: &TypeContext<'_>, pat: &Pattern) -> Option<Ident> {
+        fn id_of_pattern(ctx: &TypeContext, pat: &Pattern) -> Option<Ident> {
             match &pat.pat_desc {
                 PatternDesc::Tpat_var(id, _) => Some(id.clone()),
                 PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
@@ -11725,7 +11725,7 @@ fn type_function(
             }
         }
 
-        fn name_pattern(ctx: &TypeContext<'_>, default: &str, cases: &[Case]) -> Ident {
+        fn name_pattern(ctx: &TypeContext, default: &str, cases: &[Case]) -> Ident {
             for case in cases {
                 if let Some(id) = id_of_pattern(ctx, &case.c_lhs) {
                     return id;
@@ -12423,7 +12423,7 @@ fn find_record_label_description_by_name(
 }
 
 fn select_record_type_for_fields<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     field_names: &[String],
@@ -12462,7 +12462,7 @@ fn select_record_type_for_fields<'a>(
 }
 
 fn select_record_type_from_qualified_fields<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -13501,7 +13501,7 @@ fn type_record(
 }
 
 /// Create a ConstructorDescription for the `Some` constructor.
-fn make_some_constructor(ctx: &TypeContext<'_>) -> crate::types::ConstructorDescription {
+fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (inner_ty, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "Some".to_string(),
@@ -13521,7 +13521,7 @@ fn make_some_constructor(ctx: &TypeContext<'_>) -> crate::types::ConstructorDesc
 }
 
 /// Create a ConstructorDescription for the `None` constructor.
-fn make_none_constructor(ctx: &TypeContext<'_>) -> crate::types::ConstructorDescription {
+fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (_, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "None".to_string(),
@@ -13542,7 +13542,7 @@ fn make_none_constructor(ctx: &TypeContext<'_>) -> crate::types::ConstructorDesc
 
 /// Get all label declarations for a record type from the environment.
 fn get_record_labels<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -13632,7 +13632,7 @@ fn constructor_matches_inline_record_path<'a>(
     cstr: &crate::types::decl::ConstructorDescription,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     if cstr.cstr_inlined.is_none() {
         return false;
@@ -13660,7 +13660,7 @@ fn constructor_matches_inline_record_path<'a>(
 }
 
 fn inline_record_decl_from_variant_type<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     type_decl: &crate::types::TypeDeclaration,
     cstr_name: &str,
 ) -> Option<crate::types::TypeDeclaration> {
@@ -13734,7 +13734,7 @@ fn lookup_inline_record_decl_for_path<'a>(
     actual_args: &[TypeExprRef],
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
     if let Path::Pdot(parent_path, cstr_name, _) = path {
         if let Some(parent_decl) = lookup_type_decl_for_path(parent_path, env, pers_env, ctx) {
@@ -14303,7 +14303,7 @@ fn type_newtype(
         let rewritten_ty = crate::types::ctype::subst_identity_copy(ctx, typed_body.exp_type);
 
         fn replace_newtype_path(
-            ctx: &TypeContext<'_>,
+            ctx: &TypeContext,
             ty: TypeExprRef,
             target_id: &Ident,
             replacement_ty: TypeExprRef,
@@ -14389,7 +14389,7 @@ fn type_await(
 
 /// Type check method send.
 fn collect_public_methods_from_object_type<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<Vec<String>> {
@@ -14452,7 +14452,7 @@ fn method_name_is_plain_ident(name: &str) -> bool {
 }
 
 fn instantiate_poly_body_for_send(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     body: TypeExprRef,
     vars: &[TypeExprRef],
 ) -> TypeExprRef {
@@ -14933,7 +14933,7 @@ fn resolve_letmodule_alias_root(env: &Env, module_id: &Ident) -> Option<Path> {
 }
 
 pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     module_id: &Ident,
@@ -14954,7 +14954,7 @@ pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
 }
 
 fn replace_letmodule_local_paths<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -15055,7 +15055,7 @@ fn replace_letmodule_local_paths<'a>(
 }
 
 fn apply_letmodule_local_path_cleanup<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     body_env: &Env,
@@ -15186,7 +15186,7 @@ fn type_letmodule(
     }
 
     fn register_module_type_type_decls_by_stamp(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         mty: &crate::types::decl::ModuleType,
     ) {
         use crate::types::decl::ModuleType as DeclMty;
@@ -15226,7 +15226,7 @@ fn type_letmodule(
     }
 
     fn replace_letmodule_local_paths<'a>(
-        ctx: &'a TypeContext<'a>,
+        ctx: &'a TypeContext,
         env: &Env,
         ty: TypeExprRef,
         module_id: &Ident,
@@ -15731,7 +15731,7 @@ fn type_pack(
         base: &Path,
         lid: &Longident,
         arena: &ParseArena,
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
     ) -> Option<Path> {
         match lid {
             Longident::Lident(name) => Some(Path::pdot(
@@ -16779,7 +16779,7 @@ pub fn type_binding<'a>(
 }
 
 fn copy_lookup_type_expr(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> TypeExprRef {
@@ -17089,7 +17089,7 @@ fn copy_lookup_type_expr(
 
 fn copy_lookup_constructor_args(
     args: &crate::types::decl::ConstructorArguments,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
@@ -17121,7 +17121,7 @@ fn copy_lookup_constructor_args(
 
 fn copy_lookup_type_kind(
     kind: &crate::types::decl::TypeKind,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeKind {
     match kind {
@@ -17164,7 +17164,7 @@ fn copy_lookup_type_kind(
 
 fn copy_lookup_type_inlined(
     inlined: &crate::types::decl::TypeInlinedType,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
     match inlined {
@@ -17189,7 +17189,7 @@ fn copy_lookup_type_inlined(
 
 fn copy_lookup_type_decl(
     decl: &crate::types::decl::TypeDeclaration,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::TypeDeclaration {
     crate::types::decl::TypeDeclaration {
@@ -17221,7 +17221,7 @@ fn copy_lookup_type_decl(
 
 pub(crate) fn copy_lookup_type_decl_for_subst(
     decl: &crate::types::decl::TypeDeclaration,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
     let mut cache = HashMap::new();
     copy_lookup_type_decl(decl, ctx, &mut cache)
@@ -17229,7 +17229,7 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
 
 fn copy_lookup_extension_constructor(
     ext: &crate::types::decl::ExtensionConstructor,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ExtensionConstructor {
     crate::types::decl::ExtensionConstructor {
@@ -17252,7 +17252,7 @@ fn copy_lookup_extension_constructor(
 
 fn copy_lookup_module_type(
     module_type: &crate::types::decl::ModuleType,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::ModuleType {
     match module_type {
@@ -17283,7 +17283,7 @@ fn copy_lookup_module_type(
 
 fn copy_lookup_signature(
     sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cache: &mut HashMap<TypeExprRef, TypeExprRef>,
 ) -> crate::types::decl::Signature {
     sig_items
@@ -17363,7 +17363,7 @@ fn rewrite_flattened_alias_child_prefixes<'a>(
     sig: &[crate::types::decl::SignatureItem],
     qualified_alias_path: &Path,
     flattened_access_path: &Path,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     rewrite_child_module_prefixes_from_sig(
         sig,
@@ -17380,7 +17380,7 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
     qualified_alias_path: &Path,
     access_path: &Path,
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     let mut flat_heads = pers_env
         .map(|pers| pers.flattened_alias_heads_for_path(qualified_alias_path))
@@ -17424,7 +17424,7 @@ fn rewrite_child_module_prefixes_from_sig<'a>(
     old_parent_path: &Path,
     new_parent_path: &Path,
     skip_child_name: Option<&str>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     for item in source_sig {
         if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
@@ -17445,7 +17445,7 @@ fn rewrite_child_module_prefixes_from_sig<'a>(
 
 pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> crate::types::decl::Signature {
     let mut cache = HashMap::new();
     copy_lookup_signature(sig_items, ctx, &mut cache)
@@ -17457,7 +17457,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
 /// behavior in `components_of_module_maker` + `Subst.type_declaration`).
 pub(crate) fn copy_lookup_module_type_for_subst(
     module_type: &crate::types::decl::ModuleType,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
     let mut cache = HashMap::new();
     copy_lookup_module_type(module_type, ctx, &mut cache)
@@ -17471,57 +17471,57 @@ impl Env {
     /// Get a fresh int type instance.
     /// Uses cached generic singleton + instance(), matching OCaml's
     /// `instance_def Predef.type_int` pattern.
-    pub fn type_int(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_int(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_int())
     }
 
     /// Get a fresh char type instance.
-    pub fn type_char(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_char(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_char())
     }
 
     /// Get a fresh string type instance.
-    pub fn type_string(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_string(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_string())
     }
 
     /// Get a fresh float type instance.
-    pub fn type_float(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_float(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_float())
     }
 
     /// Get a fresh bigint type instance.
-    pub fn type_bigint(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_bigint(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_bigint())
     }
 
     /// Get a fresh unit type instance.
-    pub fn type_unit(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_unit(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_unit())
     }
 
     /// Get a fresh bool type instance.
-    pub fn type_bool(&self, ctx: &TypeContext<'_>) -> TypeExprRef {
+    pub fn type_bool(&self, ctx: &TypeContext) -> TypeExprRef {
         crate::types::ctype::instance(ctx, ctx.predef_bool())
     }
 
     /// Get the array type.
-    pub fn type_array(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+    pub fn type_array(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(crate::types::predef::path_array(), vec![elem_ty])
     }
 
     /// Get the iterable type (upstream #7887).
-    pub fn type_iterable(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+    pub fn type_iterable(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(crate::types::predef::path_iterable(), vec![elem_ty])
     }
 
     /// Get the asyncIterable type (upstream #7887).
-    pub fn type_async_iterable(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+    pub fn type_async_iterable(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(crate::types::predef::path_async_iterable(), vec![elem_ty])
     }
 
     /// Get the option type.
-    pub fn type_option(&self, ctx: &TypeContext<'_>, elem_ty: TypeExprRef) -> TypeExprRef {
+    pub fn type_option(&self, ctx: &TypeContext, elem_ty: TypeExprRef) -> TypeExprRef {
         ctx.new_constr(crate::types::predef::path_option(), vec![elem_ty])
     }
 
@@ -17531,7 +17531,7 @@ impl Env {
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> TypeCoreResult<(Path, ValueDescription)> {
         match lid {
             Longident::Lident(idx) => {
@@ -17741,7 +17741,7 @@ impl Env {
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, true)
     }
@@ -17751,7 +17751,7 @@ impl Env {
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<Path> {
         match lid {
             Longident::Lident(mod_idx) => {
@@ -17836,14 +17836,14 @@ impl Env {
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
     }
 
     fn signature_has_package_self_manifests(
         sig: &[crate::types::decl::SignatureItem],
-        ctx: &crate::types::context::TypeContext<'_>,
+        ctx: &crate::types::context::TypeContext,
     ) -> bool {
         use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
@@ -17877,7 +17877,7 @@ impl Env {
         lid: &Longident,
         arena: &crate::parse_arena::ParseArena,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
         apply_subst: bool,
     ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
         match lid {
@@ -18347,7 +18347,7 @@ impl Env {
         &self,
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext<'b>,
+        ctx: &'b crate::types::context::TypeContext,
     ) -> Option<(crate::types::decl::Signature, Option<String>)> {
         use HashSet;
 
@@ -18355,7 +18355,7 @@ impl Env {
             env: &Env,
             mty: &crate::types::decl::ModuleType,
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-            ctx: &'b crate::types::context::TypeContext<'b>,
+            ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             match mty {
@@ -18377,7 +18377,7 @@ impl Env {
             env: &Env,
             path: &Path,
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-            ctx: &'b crate::types::context::TypeContext<'b>,
+            ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
@@ -18443,7 +18443,7 @@ impl Env {
             env: &Env,
             path: &Path,
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-            ctx: &'b crate::types::context::TypeContext<'b>,
+            ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
@@ -18632,7 +18632,7 @@ fn force_find_module_path_for_lookup<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     if !module_path.head().is_persistent() && module_path.head().stamp() != 0 {
         return;
@@ -18698,7 +18698,7 @@ pub(crate) fn lookup_constructor_in_module<'b>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
     expected_ty: Option<TypeExprRef>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     use crate::parser::longident::Longident;
@@ -18778,7 +18778,7 @@ fn lookup_predef_option_constructor<'b>(
     lid: &Longident,
     arena: &ParseArena,
     _env: &Env,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     let (prefix, cstr_idx) = match lid {
         Longident::Ldot(prefix, cstr_idx) => (prefix, cstr_idx),
@@ -18833,7 +18833,7 @@ fn lookup_predef_option_constructor<'b>(
 fn extract_type_path_from_expected<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     let mut no_persistent_env = None;
     extract_type_path_from_expected_with_persistent_env(
@@ -18848,7 +18848,7 @@ fn extract_type_path_from_expected_with_persistent_env<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     let mut visited_types = HashSet::new();
     let mut visited_paths = HashSet::new();
@@ -18866,7 +18866,7 @@ fn extract_type_path_from_expected_inner<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     visited_types: &mut HashSet<usize>,
     visited_paths: &mut HashSet<Path>,
 ) -> Option<Path> {
@@ -18921,13 +18921,13 @@ fn extract_variant_type_path_from_expected_with_persistent_env<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     fn resolve_variant_type_path<'a>(
         path: &Path,
         env: &Env,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a crate::types::context::TypeContext<'a>,
+        ctx: &'a crate::types::context::TypeContext,
     ) -> Option<Path> {
         let mut current = path.clone();
         let mut visited = HashSet::new();
@@ -18997,7 +18997,7 @@ fn expand_type_path_for_compare<'a>(
     path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     depth: usize,
     visiting: &mut HashSet<String>,
     force_env_normalize: bool,
@@ -19107,7 +19107,7 @@ fn resolve_type_item_identity<'a>(
     path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(i32, usize)> {
     match path {
         Path::Pident(id) => {
@@ -19141,7 +19141,7 @@ fn resolved_type_items_share_identity<'a>(
     right: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     let Some((left_stamp, left_arity)) = resolve_type_item_identity(left, env, pers_env, ctx)
     else {
@@ -19160,7 +19160,7 @@ fn compare_type_paths_for_disambiguation<'a>(
     right: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, false)
 }
@@ -19170,7 +19170,7 @@ fn compare_type_paths_for_label_disambiguation<'a>(
     right: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, true)
 }
@@ -19180,7 +19180,7 @@ fn compare_type_paths_for_constructor_disambiguation<'a>(
     right: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     compare_type_paths_for_disambiguation_impl(left, right, env, pers_env, ctx, true)
 }
@@ -19190,7 +19190,7 @@ fn compare_type_paths_for_disambiguation_impl<'a>(
     right: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     force_env_normalize: bool,
 ) -> bool {
     if !force_env_normalize && left.same(right) {
@@ -19220,7 +19220,7 @@ fn compare_type_paths_for_disambiguation_impl<'a>(
 }
 
 fn label_result_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     label: &crate::types::LabelDescription,
 ) -> Option<Path> {
     let res = ctx.repr(label.lbl_res);
@@ -19236,7 +19236,7 @@ fn should_prefer_expected_record_label<'a>(
     env_label: &crate::types::LabelDescription,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     let Some(expected_path) = label_result_path(ctx, expected_label) else {
         return false;
@@ -19262,7 +19262,7 @@ fn should_force_expected_closed_record_label<'a>(
     env_label: &crate::types::LabelDescription,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     let Some(_expected_record_info) =
         extract_concrete_record_type_info(expected_ty, env, pers_env, ctx)
@@ -19328,7 +19328,7 @@ fn is_implicit_stdlib_component_path(path: &Path) -> bool {
 }
 
 fn type_contains_unresolved_local_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -19423,10 +19423,10 @@ fn qualify_label_description_paths<'a>(
     label: &mut crate::types::LabelDescription,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     fn rewrite_direct_root_type_family_in_place<'a>(
-        ctx: &'a crate::types::context::TypeContext<'a>,
+        ctx: &'a crate::types::context::TypeContext,
         ty: TypeExprRef,
         old_root_path: &Path,
         new_root_path: &Path,
@@ -19712,7 +19712,7 @@ fn disambiguate_constructor<'a>(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     // Step 1: Try to extract the variant type path from the expected type
     let opath = extract_variant_type_path_from_expected_with_persistent_env(
@@ -19784,7 +19784,7 @@ fn lookup_label_by_lid<'a>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     expected_record_ty: Option<TypeExprRef>,
 ) -> Option<crate::types::LabelDescription> {
     use crate::types::decl::SignatureItem;
@@ -19870,7 +19870,7 @@ fn extract_concrete_record_type_info<'a>(
     record_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
     let mut current = ctx.repr(record_ty);
     let mut visited_types = HashSet::new();
@@ -19938,7 +19938,7 @@ fn build_record_label_descriptions<'a>(
     record_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
     // OCaml reuses the installed `lbl_all` array during record typing
     // (compiler/ml/typecore.ml:2802,2840-2842). Rust reconstructs that array
@@ -19993,7 +19993,7 @@ fn build_record_label_descriptions<'a>(
 
 fn cached_record_label_descriptions_for_constr(
     record_ty: TypeExprRef,
-    ctx: &crate::types::context::TypeContext<'_>,
+    ctx: &crate::types::context::TypeContext,
 ) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
     let mut current = ctx.repr(record_ty);
     for _ in 0..32 {
@@ -20017,7 +20017,7 @@ fn specialize_label_for_record_ty<'a>(
     record_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> crate::types::LabelDescription {
     let Some((record_path, actual_args, decl)) =
         extract_concrete_record_type_info(record_ty, env, pers_env, ctx)
@@ -20053,7 +20053,7 @@ fn lookup_label_by_expected_type<'a>(
     record_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
@@ -20130,7 +20130,7 @@ fn lookup_label_by_expected_type<'a>(
 }
 
 fn force_type_paths_for_lookup_from_type<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -20207,7 +20207,7 @@ fn force_type_paths_for_lookup_from_type<'a>(
 }
 
 fn force_type_path_for_lookup_from_type<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     path: &Path,
@@ -20233,7 +20233,7 @@ fn force_type_path_for_lookup_from_type<'a>(
 }
 
 fn materialize_dict_pattern_label(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     base_label: &crate::types::LabelDescription,
     field_name: &str,
 ) -> crate::types::LabelDescription {
@@ -20275,7 +20275,7 @@ fn disambiguate_label<'a>(
     record_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -20401,11 +20401,11 @@ type FindModuleAliasTarget<'a> = fn(
     &Path,
     &Env,
     &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    &'a crate::types::context::TypeContext<'a>,
+    &'a crate::types::context::TypeContext,
 ) -> Option<Path>;
 
 fn qualify_module_local_type_paths_in_place<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -20424,7 +20424,7 @@ fn qualify_module_local_type_paths_in_place<'a>(
 }
 
 fn qualify_module_local_type_paths_from_module_descr_in_place<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -20443,7 +20443,7 @@ fn qualify_module_local_type_paths_from_module_descr_in_place<'a>(
 }
 
 fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
@@ -20860,7 +20860,7 @@ fn lookup_constructor_from_type_descrs<'b>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     let Path::Pdot(parent, type_name, _) = type_path else {
         return None;
@@ -20900,7 +20900,7 @@ fn lookup_constructor_by_expected_type<'b>(
     expected_ty: TypeExprRef,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'b crate::types::context::TypeContext<'b>,
+    ctx: &'b crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
     // Match OCaml's disambiguation behavior: first expand expected type aliases
     // (extract_concrete_variant), then inspect constructors on the concrete path.
@@ -21174,7 +21174,7 @@ fn lookup_constructor_by_expected_type<'b>(
 }
 
 fn strengthen_type_decl_for_module_access_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     module_access_path: &Path,
     id: &Ident,
     decl: &crate::types::decl::TypeDeclaration,
@@ -21207,7 +21207,7 @@ fn strengthen_type_decl_for_module_access_path<'a>(
 }
 
 fn strengthen_sig_for_module_access_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     module_access_path: &Path,
     sig_items: &[crate::types::decl::SignatureItem],
 ) -> crate::types::decl::Signature {
@@ -21356,7 +21356,7 @@ fn direct_sig_type_family_rebind_options(
 }
 
 fn collect_matching_type_paths<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     ty: TypeExprRef,
     type_name: &str,
     arity: usize,
@@ -21427,7 +21427,7 @@ fn collect_matching_type_paths<'a>(
 }
 
 fn infer_direct_sig_type_family_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     sig_items: &[crate::types::decl::SignatureItem],
     type_name: &str,
     arity: usize,
@@ -21586,7 +21586,7 @@ fn infer_direct_sig_type_family_path<'a>(
 }
 
 pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     access_path: &Path,
     sig_items: &[crate::types::decl::SignatureItem],
     allow_inferred_paths: bool,
@@ -21700,7 +21700,7 @@ fn with_resolved_child_module_components<'a, R>(
     child_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
@@ -21849,7 +21849,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     f: &mut dyn FnMut(&crate::types::env_lazy::QualifiedModuleComponents) -> Option<R>,
 ) -> Option<R> {
     match lid {
@@ -21900,7 +21900,7 @@ pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
@@ -21916,7 +21916,7 @@ fn build_module_components_from_parent_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
     let Path::Pdot(parent, module_name, _) = module_path else {
         return None;
@@ -21991,7 +21991,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let local_module_path = match module_path {
@@ -22082,7 +22082,7 @@ pub(crate) fn lookup_module_in_resolved_path<'a>(
     module_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Path, crate::types::decl::ModuleDeclaration)> {
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components
@@ -22105,7 +22105,7 @@ pub(crate) fn copy_resolved_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
         (
@@ -22120,7 +22120,7 @@ pub(crate) fn copy_module_signature_in_resolved_path<'a>(
     module_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let (_, access_path, _) =
         lookup_module_in_resolved_path(parent_module_path, module_name, env, pers_env, ctx)?;
@@ -22132,7 +22132,7 @@ pub(crate) fn lookup_modtype_in_resolved_path<'a>(
     modtype_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ModtypeDeclaration)> {
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components
@@ -22147,7 +22147,7 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     type_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
@@ -22178,7 +22178,7 @@ fn rewrite_alias_pident_child_prefixes<'a>(
     sig: &mut [crate::types::decl::SignatureItem],
     target: &Path,
     access_path: &Path,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) {
     let child_names = sig
         .iter()
@@ -22201,7 +22201,7 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
     resolved_sig: &crate::types::decl::Signature,
     resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
     force_generalize_values: bool,
 ) -> crate::types::decl::Signature {
     let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
@@ -22379,7 +22379,7 @@ pub(crate) fn qualify_resolved_signature_for_access_path<'a>(
     resolved_sig: &crate::types::decl::Signature,
     resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> crate::types::decl::Signature {
     qualify_resolved_signature_for_access_path_inner(
         access_path,
@@ -22398,7 +22398,7 @@ pub(crate) fn qualify_resolved_signature_for_local_components<'a>(
     resolved_sig: &crate::types::decl::Signature,
     resolved_name: Option<&str>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> crate::types::decl::Signature {
     qualify_resolved_signature_for_access_path_inner(
         access_path,
@@ -22416,7 +22416,7 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
     access_path: &Path,
     mty: &crate::types::decl::ModuleType,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::Signature> {
     let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx)?;
     Some(qualify_resolved_signature_for_access_path(
@@ -22452,7 +22452,7 @@ fn build_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
@@ -22817,7 +22817,7 @@ pub(crate) fn resolve_module_signature_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
         (
@@ -22831,7 +22831,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
@@ -22861,7 +22861,7 @@ pub(crate) fn module_alias_target_for_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
@@ -22898,7 +22898,7 @@ fn raw_alias_target_for_module_path<'a>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Path> {
     match module_path {
         Path::Pident(_) => alias_target_for_module_path(module_path, env, pers_env, ctx),
@@ -22931,13 +22931,13 @@ fn lookup_type_decl_for_path<'a>(
     type_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
+    ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::TypeDeclaration> {
     fn lookup_raw_type_decl_from_module_path<'a>(
         module_path: &Path,
         type_name: &str,
         env: &Env,
-        ctx: &'a crate::types::context::TypeContext<'a>,
+        ctx: &'a crate::types::context::TypeContext,
     ) -> Option<crate::types::decl::TypeDeclaration> {
         let mut no_persistent_env = None;
         with_resolved_module_components_for_path(
@@ -23451,7 +23451,7 @@ fn try_comptime_match(
 /// Used to substitute comptime-known variables during type checking.
 fn comptime_value_to_typed_expr<'a>(
     value: &crate::types::comptime::ComptimeValue,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: LocIdx,
 ) -> Option<Expression> {
@@ -25163,7 +25163,7 @@ mod tests {
     #[test]
     fn test_type_constant() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = crate::types::initial_env(&ctx);
 
         let cst = Constant::Int(42);
@@ -25176,7 +25176,7 @@ mod tests {
     #[test]
     fn test_pattern_state_enter_variable() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let _env = crate::types::initial_env(&ctx);
         let mut state = PatternState::new();
 
@@ -25197,7 +25197,7 @@ mod tests {
     #[test]
     fn test_type_pattern_or_reuses_left_branch_ident() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = crate::types::initial_env(&ctx);
         let mut arena = ParseArena::new();
 
@@ -25253,7 +25253,7 @@ mod tests {
     #[test]
     fn test_type_check_context_creation() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let arena = ParseArena::new();
         let tctx = TypeCheckContext::new(&ctx, &arena);
 
@@ -25264,7 +25264,7 @@ mod tests {
     #[test]
     fn test_env_type_constructors() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = crate::types::initial_env(&ctx);
 
         let int_ty = env.type_int(&ctx);
