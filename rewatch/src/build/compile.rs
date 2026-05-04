@@ -1759,9 +1759,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(runtime_compile_threads)
         .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
-        // See rewatch/src/main.rs:157-161; runtime precompilation also runs
-        // the Rust compiler pipeline inside Rayon workers.
-        .stack_size(384 * 1024 * 1024)
+        .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
     runtime_compile_pool.install(|| {
