@@ -16606,6 +16606,23 @@ fn copy_lookup_type_expr(
         return copied;
     }
 
+    // OCaml compiler/ml/subst.ml:130-141 `Subst.typexp` short-circuits Tvar
+    // and Tunivar by returning the original type when `s.for_saving` is false
+    // and `ty.id >= 0`. The `for_saving` flag is only set during CMI write,
+    // so during normal substitution and `Subst.identity` freshening (which is
+    // what these copy helpers mirror) every Tvar/Tunivar is shared with the
+    // source. Allocating fresh nodes here advances the typedtree stamp stream
+    // ahead of OCaml's, producing the strict-parity drift documented in
+    // memory/tella_strict_parity_findings_20260504.md.
+    {
+        let desc = ctx.get_desc(ty);
+        if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {
+            drop(desc);
+            cache.insert(ty, ty);
+            return ty;
+        }
+    }
+
     let level = ctx.get_level(ty);
     let placeholder = ctx.new_var(None);
     ctx.set_level(placeholder, level);
@@ -16615,6 +16632,7 @@ fn copy_lookup_type_expr(
         let desc = ctx.get_desc(ty).clone();
         match desc {
             TypeDesc::Tvar(name) => {
+                // Unreachable: handled above to match `Subst.typexp`.
                 let t = ctx.new_var(name);
                 ctx.set_level(t, level);
                 t
