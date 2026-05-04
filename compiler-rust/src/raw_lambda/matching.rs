@@ -5887,6 +5887,31 @@ fn do_tests_fail(
     )
 }
 
+fn do_tests_fail_owned(
+    loc: Location,
+    fail: RawLambda,
+    tst: Primitive,
+    arg: RawLambda,
+    cases: Vec<(Constant, RawLambda)>,
+) -> RawLambda {
+    // OCaml compiler/ml/matching.ml:1761-1833 receives immutable action
+    // pointers from `share_actions_tree`. `materialize_resolved_action` above
+    // has already converted single-use Rust actions back to owned lambdas, so
+    // build the same right-associated test chain while moving those actions
+    // into place instead of recursively cloning them.
+    cases.into_iter().rev().fold(fail, |acc, (c, act)| {
+        RawLambda::LifThenElse(
+            Box::new(RawLambda::Lprim(RawPrimInfo {
+                primitive: tst.clone(),
+                args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
+                loc: loc.clone(),
+            })),
+            Box::new(acc),
+            Box::new(act),
+        )
+    })
+}
+
 /// Sequential equality tests without a fail action.
 /// Equivalent to OCaml's `do_tests_nofail`.
 fn do_tests_nofail(
@@ -5910,6 +5935,31 @@ fn do_tests_nofail(
         Box::new(do_tests_nofail(loc, tst, arg, rest)),
         Box::new(act.clone()),
     )
+}
+
+fn do_tests_nofail_owned(
+    loc: Location,
+    tst: Primitive,
+    arg: RawLambda,
+    mut cases: Vec<(Constant, RawLambda)>,
+) -> RawLambda {
+    assert!(!cases.is_empty(), "Matching.do_tests_nofail");
+    let (_, last_action) = cases
+        .pop()
+        .expect("checked non-empty constant test sequence");
+    // Same branch shape as `do_tests_nofail`: for [c1->a1; c2->a2],
+    // emit `if c1 then a2 else a1`. See compiler/ml/matching.ml:1761-1833.
+    cases.into_iter().rev().fold(last_action, |acc, (c, act)| {
+        RawLambda::LifThenElse(
+            Box::new(RawLambda::Lprim(RawPrimInfo {
+                primitive: tst.clone(),
+                args: vec![arg.clone(), typed_const_to_lambda_const(&c)],
+                loc: loc.clone(),
+            })),
+            Box::new(acc),
+            Box::new(act),
+        )
+    })
 }
 
 /// Convert a typedtree constant to a lambda constant wrapped in Lconst.
@@ -5971,6 +6021,60 @@ fn make_test_sequence(
         }
     }
 
+    fn make_test_seq_inner_owned(
+        loc: &Location,
+        fail: Option<RawLambda>,
+        tst: &Primitive,
+        lt_tst: &Primitive,
+        arg: &RawLambda,
+        mut const_lambda_list: Vec<(Constant, RawLambda)>,
+    ) -> RawLambda {
+        if const_lambda_list.len() >= 4 && !matches!(lt_tst, Primitive::Pignore) {
+            let mid = const_lambda_list.len() / 2;
+            let list2 = const_lambda_list.split_off(mid);
+            let pivot_const = &list2[0].0;
+            RawLambda::LifThenElse(
+                Box::new(RawLambda::Lprim(RawPrimInfo {
+                    primitive: lt_tst.clone(),
+                    args: vec![arg.clone(), typed_const_to_lambda_const(pivot_const)],
+                    loc: loc.clone(),
+                })),
+                Box::new(make_test_seq_inner_owned(
+                    loc,
+                    fail.clone(),
+                    tst,
+                    lt_tst,
+                    arg,
+                    const_lambda_list,
+                )),
+                Box::new(make_test_seq_inner_owned(
+                    loc,
+                    fail,
+                    tst,
+                    lt_tst,
+                    arg,
+                    list2,
+                )),
+            )
+        } else {
+            match fail {
+                None => do_tests_nofail_owned(
+                    loc.clone(),
+                    tst.clone(),
+                    arg.clone(),
+                    const_lambda_list,
+                ),
+                Some(fail) => do_tests_fail_owned(
+                    loc.clone(),
+                    fail,
+                    tst.clone(),
+                    arg.clone(),
+                    const_lambda_list,
+                ),
+            }
+        }
+    }
+
     fn split_sequence(
         loc: &Location,
         fail: &Option<RawLambda>,
@@ -5993,7 +6097,7 @@ fn make_test_sequence(
         )
     }
 
-    let result = make_test_seq_inner(&loc, &fail, &tst, &lt_tst, &arg, &const_lambda_list);
+    let result = make_test_seq_inner_owned(&loc, fail, &tst, &lt_tst, &arg, const_lambda_list);
     apply_handlers(result, handlers)
 }
 
