@@ -154,7 +154,11 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
     }
 }
 
-const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
+// compiler-rust/src/bin/bsc.rs:119 uses a 512 MB subprocess stack for one
+// compiler invocation. In-process builds run the same pipeline in several
+// workers, so keep more headroom than the old 256 MB worker stack without
+// multiplying subprocess-sized stacks across the whole build.
+const IN_PROCESS_STACK_SIZE: usize = 384 * 1024 * 1024;
 
 fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
 where

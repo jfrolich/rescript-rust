@@ -838,12 +838,12 @@ impl PersistentEnv {
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
 
-        // Keep the existing deep-prefix rewrite for flattened alias heads.
-        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name) {
-            if !name.contains('-') {
-                rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
-            }
-        }
+        // OCaml compiler/ml/env.ml:711-746 stores each persistent unit under
+        // its own compile-unit name, and env.ml:719-721 defines `ps_sig` as
+        // `Subst.signature Subst.identity sign`. Parent aliases such as
+        // `Stdlib.JSON = Stdlib_JSON` are applied when env.ml:1496-1538 builds
+        // the selected component table, not by rewriting the target unit's
+        // cached signature when `Stdlib_JSON.cmi` is loaded.
 
         let effective_module_path = self
             .alias_prefix_rewrites
