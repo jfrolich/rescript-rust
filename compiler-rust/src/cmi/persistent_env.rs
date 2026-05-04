@@ -3820,6 +3820,170 @@ pub fn rewrite_module_prefix_in_sig(
                     rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, &mut visited);
                 }
             }
+            SignatureItem::SigModule(_id, md, _) => {
+                // OCaml compiler/ml/env.ml:1530-1538 `prefix_idents` substitution
+                // walks the entire signature; nested module type expressions are
+                // reachable only through `Mty_signature` items, so descend into
+                // nested sigs to rewrite type expressions inside them. Without
+                // this descent, a `Pdot(Pident("Js_typed_array2"), "Uint8Array")`
+                // path on a nested `elt` type stays unrewritten when the outer
+                // traversal flattens `Js_typed_array2` to `Js.TypedArray2`.
+                rewrite_module_type_prefix_in_module_type(
+                    &md.md_type,
+                    old_name,
+                    new_prefix,
+                    ctx,
+                    &mut visited,
+                );
+            }
+            SignatureItem::SigModtype(_id, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_ref() {
+                    rewrite_module_type_prefix_in_module_type(
+                        module_type,
+                        old_name,
+                        new_prefix,
+                        ctx,
+                        &mut visited,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_module_type_prefix_in_module_type(
+    module_type: &ModuleType,
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    match module_type {
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig) => {
+            rewrite_module_prefix_in_sig_with_visited(sig, old_name, new_prefix, ctx, visited);
+        }
+        ModuleType::MtyFunctor {
+            param_type, result, ..
+        } => {
+            if let Some(param_type) = param_type.as_ref() {
+                rewrite_module_type_prefix_in_module_type(
+                    param_type, old_name, new_prefix, ctx, visited,
+                );
+            }
+            rewrite_module_type_prefix_in_module_type(result, old_name, new_prefix, ctx, visited);
+        }
+    }
+}
+
+fn rewrite_module_prefix_in_sig_with_visited(
+    sig_items: &[SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext<'_>,
+    visited: &mut HashSet<usize>,
+) {
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_type_expr_prefix(desc.val_type, old_name, new_prefix, ctx, visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, visited);
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, visited);
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_type_expr_prefix(
+                                            arg, old_name, new_prefix, ctx, visited,
+                                        );
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_type_expr_prefix(
+                                            lbl.ld_type,
+                                            old_name,
+                                            new_prefix,
+                                            ctx,
+                                            visited,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_type_expr_prefix(res, old_name, new_prefix, ctx, visited);
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigTypext(_id, ext, _) => {
+                for &param in &ext.ext_type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, visited);
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, visited);
+                }
+            }
+            SignatureItem::SigModule(_id, md, _) => {
+                rewrite_module_type_prefix_in_module_type(
+                    &md.md_type,
+                    old_name,
+                    new_prefix,
+                    ctx,
+                    visited,
+                );
+            }
+            SignatureItem::SigModtype(_id, mtd) => {
+                if let Some(module_type) = mtd.mtd_type.as_ref() {
+                    rewrite_module_type_prefix_in_module_type(
+                        module_type,
+                        old_name,
+                        new_prefix,
+                        ctx,
+                        visited,
+                    );
+                }
+            }
             _ => {}
         }
     }
