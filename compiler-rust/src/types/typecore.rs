@@ -5115,16 +5115,22 @@ fn force_qualified_value_type_paths<'a>(
                 // OCaml compiler/ml/env.ml:1091-1100 returns selected values as
                 // `Pdot(p, s, pos)`, and env.ml:1530-1538 builds those
                 // component values with compiler/ml/subst.ml:303-309
-                // `Subst.value_description`. That substitution is scoped to the
-                // selected component path; a value selected from `AWS.*` keeps
-                // unrelated backing-unit types such as `Stdlib_JSON.t`
-                // flattened. Only values selected from the implicit Stdlib
-                // component path get the `Stdlib.JSON.t` view here.
+                // `Subst.value_description`. For non-Stdlib persistent modules,
+                // the selected value scheme can expose implicit `Stdlib.*`
+                // component paths on either side of the arrow. Keep the
+                // argument-side allowance from typecore.ml:4171-4192 separate
+                // from the return-side implicit-Stdlib rewrite below so
+                // result-side side effects still run like OCaml. For selected
+                // `Stdlib` functions, leave the return side lazy until
+                // typecore.ml:4219-4224 returns the application result and the
+                // caller's `rue` unifies it with the expected type; this keeps
+                // `JSON.Encode.string` flat when it is typed as an array
+                // element, while direct non-function values such as
+                // `JSON.Encode.null` still use the selected component path.
                 let selected_module_root_is_stdlib = selected_module_path.is_some_and(|selected| {
                     path_root_ident(selected)
                         .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
                 });
-                let arg_allow_stdlib_flat_parent_inference = selected_module_root_is_stdlib;
                 let ret_allow_stdlib_flat_parent_inference =
                     allow_stdlib_flat_parent_inference || selected_module_root_is_stdlib;
                 visit(
@@ -5135,7 +5141,7 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    arg_allow_stdlib_flat_parent_inference,
+                    true,
                     seen,
                 );
                 visit(
