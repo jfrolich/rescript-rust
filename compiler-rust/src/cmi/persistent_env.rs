@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, jsx_version_for_structure, load_pervasives, normalize_signature_types,
+    CompilerOptions, experimental_let_unwrap_for_structure, jsx_version_for_structure,
+    load_pervasives, normalize_signature_types,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
@@ -790,6 +791,21 @@ impl PersistentEnv {
             return Some(ps);
         }
 
+        // OCaml compiler/core/res_compmisc.ml:48-66 filters the current unit
+        // from implicit opens, and compiler/ml/typemod.ml:1732-1788 only saves
+        // an implementation's inferred signature after type-checking it. In
+        // --in-process source fallback, do not recursively type-check the current
+        // implementation as if a persistent `.cmi` already existed; if an
+        // interface was published above, the portable-cache branch has already
+        // returned it.
+        if self
+            .compiling_module
+            .as_deref()
+            .is_some_and(|compiling| compiling == name)
+        {
+            return None;
+        }
+
         // Insert a placeholder before loading so recursive lookups of the same
         // module fail cleanly instead of recursing indefinitely.
         let load_name = self
@@ -822,12 +838,12 @@ impl PersistentEnv {
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
 
-        // Keep the existing deep-prefix rewrite for flattened alias heads.
-        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name) {
-            if !name.contains('-') {
-                rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
-            }
-        }
+        // OCaml compiler/ml/env.ml:711-746 stores each persistent unit under
+        // its own compile-unit name, and env.ml:719-721 defines `ps_sig` as
+        // `Subst.signature Subst.identity sign`. Parent aliases such as
+        // `Stdlib.JSON = Stdlib_JSON` are applied when env.ml:1496-1538 builds
+        // the selected component table, not by rewriting the target unit's
+        // cached signature when `Stdlib_JSON.cmi` is loaded.
 
         let effective_module_path = self
             .alias_prefix_rewrites
@@ -1093,6 +1109,8 @@ impl PersistentEnv {
             jsx_version: self.jsx_version,
             ..CompilerOptions::default()
         };
+        let experimental_let_unwrap =
+            experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
             jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
@@ -1103,6 +1121,7 @@ impl PersistentEnv {
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
 
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
+        tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);
         let (typed_structure, final_env) =
             type_structure(&mut tctx, &env, parser.arena(), &structure).ok()?;

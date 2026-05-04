@@ -4,7 +4,7 @@ use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use serde::Serialize;
 use serde_json::json;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +72,7 @@ fn deps_to_pkgs<'a>(
 }
 
 fn write_sourcedirs_files(path: &Path, source_dirs: &SourceDirs) -> Result<usize, std::io::Error> {
+    fs::create_dir_all(path)?;
     let mut source_dirs_json = File::create(path.join(".sourcedirs.json"))?;
     source_dirs_json.write(json!(source_dirs).to_string().as_bytes())
 }

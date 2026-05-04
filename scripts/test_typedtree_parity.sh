@@ -133,6 +133,7 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
+RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
 STDLIB_PROJECT="$PROJECT_ROOT/packages/@rescript/runtime"
@@ -201,6 +202,13 @@ if [[ ! -x "$RESCRIPT_CLI" ]]; then
     exit 1
 fi
 
+if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
+    echo -e "${RED}Error: ReScript runtime package not found at $RESCRIPT_RUNTIME${RESET}"
+    echo "Set RESCRIPT_RUNTIME to the runtime package matching the compiler under test."
+    exit 1
+fi
+export RESCRIPT_RUNTIME
+
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
@@ -266,6 +274,7 @@ if [[ "$RUST_AVAILABLE" == "true" ]]; then
 else
     echo "Rust bsc:  (not available)"
 fi
+echo "Runtime:   $RESCRIPT_RUNTIME"
 if [[ "$TELLA_MODE" == "true" ]]; then
     echo "Tella dir: $TELLA_DIR"
     if [[ "$TELLA_JSX_MODE" == "true" ]]; then
@@ -486,6 +495,22 @@ test_single_file() {
         args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
+            # Tella keeps some checked-in JS outputs that a normal build can
+            # consider up to date without regenerating lib/bs/*.ast. Generate
+            # the parser artifact on demand so this harness measures typedtree
+            # parity, not whether rewatch happened to rebuild the source file.
+            local ast_arg parser_args
+            ast_arg=$(echo "$compiler_args_json" | python3 -c "import sys, json; args=json.load(sys.stdin).get('compiler_args', []); print(args[-1] if args else '')" 2>/dev/null) || ast_arg=""
+            if [[ -n "$ast_arg" && ! -f "$TEST_PROJECT/lib/bs/$ast_arg" ]]; then
+                parser_args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('parser_args', [])))" 2>/dev/null) || parser_args=""
+                if [[ -n "$parser_args" ]]; then
+                    (
+                        cd "$TEST_PROJECT/lib/bs"
+                        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $parser_args 2> "$file_temp/parser.err" 1>/dev/null
+                    ) || true
+                fi
+            fi
+
             # Run OCaml compiler with the args + -dtyped-sexp
             cd "$TEST_PROJECT/lib/bs"
             if timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -dtyped-sexp $args 2> "$file_temp/ocaml.sexp" 1>/dev/null; then

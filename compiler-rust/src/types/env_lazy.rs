@@ -586,12 +586,18 @@ fn qualified_submodule_access_path(
     parent_access_path: &Path,
     module_name: &str,
     runtime_pos: usize,
-    md: &ModuleDeclaration,
+    _md: &ModuleDeclaration,
 ) -> Path {
     if path_non_apply_root_is_persistent_or_global(parent_access_path) {
-        md.md_path
-            .clone()
-            .unwrap_or_else(|| Path::pdot(parent_access_path.clone(), module_name.to_string()))
+        // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents` creates
+        // component paths as `Pdot(root, name, pos)`, and env.ml:1573-1578
+        // stores child component thunks under that prefixed path. Do not let an
+        // alias module's own `md_path` replace the selected component path.
+        Path::pdot_pos(
+            parent_access_path.clone(),
+            module_name.to_string(),
+            runtime_pos as i32,
+        )
     } else {
         Path::pdot_pos(
             parent_access_path.clone(),

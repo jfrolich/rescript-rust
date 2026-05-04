@@ -533,44 +533,46 @@ pub fn compile(
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
 
-        // Pre-compile all @rescript/runtime modules into the registry.
-        // In in-process mode, the registry is the sole source of truth —
-        // no CMI fallback. Every dependency must be in the registry before
-        // project modules start compiling, even when @rescript/runtime is
-        // also present in the package graph.
-        let parent_span = compile_parent_span.clone();
-        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
-                .name("rewatch-runtime-precompile".to_string())
-                .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let _parent = parent_span.enter();
-                    pre_compile_runtime_modules(build_state)
-                })
-                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+        if build_includes_runtime_package(build_state) {
+            debug!("Skipping runtime pre-compilation because @rescript/runtime is in the build graph");
+        } else {
+            // Pre-compile all @rescript/runtime modules into the registry.
+            // In in-process mode, the registry is the sole source of truth —
+            // no CMI fallback. Every dependency must be in the registry.
+            let parent_span = compile_parent_span.clone();
+            let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+                let handle = std::thread::Builder::new()
+                    .name("rewatch-runtime-precompile".to_string())
+                    .stack_size(256 * 1024 * 1024)
+                    .spawn_scoped(scope, || {
+                        let _parent = parent_span.enter();
+                        pre_compile_runtime_modules(build_state)
+                    })
+                    .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
-            match handle.join() {
-                Ok(result) => result,
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
+                        Err(anyhow!("runtime pre-compilation panicked: {msg}"))
+                    }
                 }
-            }
-        });
-        pre_compile_result?;
+            });
+            pre_compile_result?;
 
-        // Clear source-fallback paths after pre-compilation.
-        build_state
-            .module_registry
-            .lock()
-            .unwrap()
-            .set_source_fallback_paths(AHashMap::new());
+            // Clear source-fallback paths after pre-compilation.
+            build_state
+                .module_registry
+                .lock()
+                .unwrap()
+                .set_source_fallback_paths(AHashMap::new());
+        }
     }
 
     // Expand the compile universe: every dirty module plus everything that
@@ -996,6 +998,13 @@ pub fn compile(
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
 
+fn build_includes_runtime_package(build_state: &BuildCommandState) -> bool {
+    build_state
+        .packages
+        .values()
+        .any(|package| package.name == "@rescript/runtime")
+}
+
 static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn get_runtime_path(package_config: &Config, project_context: &ProjectContext) -> Result<PathBuf> {
@@ -1275,6 +1284,7 @@ struct InProcessCompilerFlags {
     debug: bool,
     jsx_preserve: bool,
     jsx_version: Option<i32>,
+    experimental_let_unwrap: bool,
     open_modules: Vec<String>,
 }
 
@@ -1290,6 +1300,7 @@ impl Default for InProcessCompilerFlags {
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
+            experimental_let_unwrap: false,
             open_modules: Vec::new(),
         }
     }
@@ -1311,6 +1322,13 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             "-bs-jsx" => {
                 if let Some(version) = iter.next().and_then(|v| v.parse::<i32>().ok()) {
                     parsed.jsx_version = Some(version);
+                }
+            }
+            "-enable-experimental" => {
+                if let Some(feature) = iter.next() {
+                    if feature == "LetUnwrap" {
+                        parsed.experimental_let_unwrap = true;
+                    }
                 }
             }
             "-open" => {
@@ -1369,6 +1387,11 @@ fn build_compiler_options(
             .and_then(|jsx| jsx.version)
             .filter(|&v| v == 4)
     });
+    let experimental_let_unwrap = parsed_flags.experimental_let_unwrap
+        || package
+            .config
+            .has_experimental_feature(config::ExperimentalFeature::LetUnwrap)
+        || root_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap);
 
     // Build open_modules: namespace opens first, then explicit -open flags from compiler-flags.
     // In the file-based mode, `-bs-ns Namespace` is passed to all namespaced modules.
@@ -1404,6 +1427,7 @@ fn build_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version,
+        experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         check_div_by_zero: parsed_flags.check_div_by_zero,
@@ -1737,13 +1761,26 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(build_state, &runtime_modules);
-    compile_runtime_modules_parallel(
-        build_state,
-        runtime_root,
-        &runtime_path,
-        &runtime_config,
-        &runtime_modules,
-    )?;
+    let runtime_compile_threads = rayon::current_num_threads().max(2);
+    // Runtime module compilation runs inside Rayon workers, so the outer
+    // precompile thread stack is not enough for very large runtime IR cleanup.
+    let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(runtime_compile_threads)
+        .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
+        // See rewatch/src/main.rs:157-161; runtime precompilation also runs
+        // the Rust compiler pipeline inside Rayon workers.
+        .stack_size(384 * 1024 * 1024)
+        .build()
+        .context("failed to create runtime in-process compiler pool")?;
+    runtime_compile_pool.install(|| {
+        compile_runtime_modules_parallel(
+            build_state,
+            runtime_root,
+            &runtime_path,
+            &runtime_config,
+            &runtime_modules,
+        )
+    })?;
 
     if let (Some(start), Some(before)) = (runtime_timing_start, runtime_timing_before) {
         let after = rescript_compiler::timing::snapshot();
@@ -2008,6 +2045,10 @@ fn compile_runtime_module_from_source(
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
+        // OCaml compiler/ml/typemod.ml:1742-1758 checks the implementation
+        // against the already-saved interface `.cmi`; typemod.ml:1779-1787
+        // only saves an inferred `.cmi` in the no-interface branch. Keep
+        // implementation-local module aliases out of the published registry.
         if let Some(pers_struct) = interface_pers_struct {
             shared_registry.register_module_arc(
                 &module.module_name,
@@ -2019,7 +2060,6 @@ fn compile_runtime_module_from_source(
             shared_registry.insert_module_info(module.module_name.clone(), module_info);
             shared_registry.extend_alias_rewrites(interface_alias_rewrites);
         }
-        shared_registry.extend_alias_rewrites(compile_result.new_alias_rewrites);
     } else if let Some(pers_struct) = compile_result.pers_struct {
         shared_registry.register_module(
             &module.module_name,
@@ -2323,6 +2363,8 @@ fn runtime_compiler_options(
         output_module_format,
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
+        experimental_let_unwrap: parsed_flags.experimental_let_unwrap
+            || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         no_version_header: parsed_flags.no_version_header,
@@ -2691,16 +2733,20 @@ fn compile_module_in_process(
         is_runtime,
     };
     if has_interface {
+        // OCaml compiler/ml/typemod.ml:1742-1758 reads the interface `.cmi`
+        // for the inclusion check and does not replace it with the
+        // implementation signature. Alias rewrites from the `.res` body are
+        // therefore private, unlike inferred-signature aliases from the
+        // no-interface branch at typemod.ml:1779-1787.
         if let Some(mut update) = interface_registry_update {
             update.module_info = module_info;
-            update.alias_rewrites.extend(compile_result.new_alias_rewrites);
             registry_updates.push(update);
         } else {
             registry_updates.push(PendingRegistryUpdate {
                 module_name: module_name.to_string(),
                 pers_struct: None,
                 module_info,
-                alias_rewrites: compile_result.new_alias_rewrites,
+                alias_rewrites: AHashMap::new(),
             });
         }
     } else if let Some(ps) = compile_result.pers_struct {

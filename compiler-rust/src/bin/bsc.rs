@@ -91,6 +91,7 @@ struct Options {
     package_name: Option<String>,
     open_modules: Vec<String>,
     jsx_version: Option<i32>,
+    experimental_let_unwrap: bool,
     jsx_preserve: bool,
     nopervasives: bool,
     no_version_header: bool,
@@ -203,6 +204,13 @@ fn run() -> Result<()> {
                         opts.jsx_version = val.parse::<i32>().ok();
                     }
                 }
+                "-enable-experimental" => {
+                    if let Some(val) = args.next() {
+                        if val == "LetUnwrap" {
+                            opts.experimental_let_unwrap = true;
+                        }
+                    }
+                }
                 "-bs-jsx-preserve" => opts.jsx_preserve = true,
                 "-bs-no-version-header" => opts.no_version_header = true,
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
@@ -277,6 +285,7 @@ fn run() -> Result<()> {
             .map(|(module_format, _, _)| *module_format),
         js_output_targets: Vec::new(),
         jsx_version: opts.jsx_version,
+        experimental_let_unwrap: opts.experimental_let_unwrap,
         jsx_preserve: opts.jsx_preserve,
         debug: opts.debug,
         no_version_header: opts.no_version_header,
