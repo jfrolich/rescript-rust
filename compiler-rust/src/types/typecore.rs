@@ -3464,7 +3464,6 @@ fn build_as_type(
                             env,
                             &mut tctx.persistent_env,
                             ctx,
-                            false,
                         )
                         .unwrap_or(resolved_label);
                         let field_pat = present_fields_by_pos
@@ -3987,16 +3986,7 @@ fn type_pattern_record(
             ctx,
             Some(record_ty),
         )
-        .or_else(|| {
-            disambiguate_label(
-                &field_name,
-                record_ty,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-                false,
-            )
-        });
+        .or_else(|| disambiguate_label(&field_name, record_ty, env, &mut tctx.persistent_env, ctx));
 
         let label = disambiguated.map(|env_label| {
             if has_dict_pattern_attr {
@@ -12086,29 +12076,9 @@ fn type_construct(
     let lid_name = tctx.longident_last_name(&longident);
     let is_qualified = matches!(longident, Longident::Ldot(..));
     let (_cstr_path, cstr_desc) = if is_qualified {
-        // OCaml compiler/ml/typecore.ml:4242-4253 computes `opath` before
-        // `Typetexp.find_all_constructors`, then still runs qualified
-        // constructors through `Constructor.disambiguate`. Its
-        // `disambiguate_by_type` path at typecore.ml:983-988 compares the
-        // expected type path first, preserving `Env.normalize_path` side
-        // effects from typecore.ml:776-787 even when the constructor lookup
-        // itself is already unambiguous.
-        let opath = extract_variant_type_path_from_expected_with_persistent_env(
-            expected_ty,
-            env,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        );
         if let Some((path, desc)) =
             lookup_predef_option_constructor(&longident, tctx.arena, env, tctx.type_ctx)
         {
-            force_constructor_disambiguate_by_type_compare(
-                opath.as_ref(),
-                &desc,
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            );
             (path, desc)
         } else {
             // Module-qualified: use direct lookup
@@ -12120,16 +12090,7 @@ fn type_construct(
                 tctx.type_ctx,
                 Some(expected_ty),
             ) {
-                Some((path, desc)) => {
-                    force_constructor_disambiguate_by_type_compare(
-                        opath.as_ref(),
-                        &desc,
-                        env,
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    );
-                    (path, desc)
-                }
+                Some((path, desc)) => (path, desc),
                 None => match env.find_constructor(&lid_name) {
                     Ok(desc) => (
                         Path::pident(Ident::create_persistent(lid_name.clone())),
@@ -12778,7 +12739,6 @@ fn type_record(
                 env,
                 &mut tctx.persistent_env,
                 ctx,
-                false,
             )
         });
         explicit_fields.push(ExplicitField {
@@ -13479,14 +13439,7 @@ fn type_record(
         } else {
             // Fallback: find any label for single-instance unification
             let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
-                disambiguate_label(
-                    &lbl.lbl_name,
-                    record_ty,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                    false,
-                )
+                disambiguate_label(&lbl.lbl_name, record_ty, env, &mut tctx.persistent_env, ctx)
             });
             if let Some(env_label) = label_for_unify {
                 let (_poly_vars, _ty_arg, ty_res) =
@@ -13836,7 +13789,6 @@ fn type_field(
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
-            true,
         )
     });
     let mut env_label = env_label;
@@ -13958,16 +13910,7 @@ fn type_setfield(
         ctx,
         Some(ty_exp),
     )
-    .or_else(|| {
-        disambiguate_label(
-            &field_name,
-            ty_exp,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-            true,
-        )
-    });
+    .or_else(|| disambiguate_label(&field_name, ty_exp, env, &mut tctx.persistent_env, ctx));
     let mut env_label = env_label;
     if let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
@@ -19288,64 +19231,6 @@ fn label_result_path<'a>(
     }
 }
 
-fn implicit_open_duplicate_type_path(left: &Path, right: &Path) -> bool {
-    fn matches_pair(short: &Path, qualified: &Path) -> bool {
-        let Path::Pident(short_id) = short else {
-            return false;
-        };
-        let Path::Pdot(parent, leaf, _) = qualified else {
-            return false;
-        };
-        let Path::Pident(root_id) = &**parent else {
-            return false;
-        };
-        root_id.is_persistent()
-            && matches!(root_id.name(), "Pervasives" | "Stdlib")
-            && short_id.name() == leaf
-    }
-
-    // OCaml compiler/core/res_compmisc.ml:61-62 implicitly opens Stdlib and
-    // Pervasives into the initial environment. During `lookup_all_labels` and
-    // `lookup_all_constructors`, env.ml:1103-1113 can therefore expose both a
-    // short component path and its implicit-root-qualified path. Treat that as
-    // the same candidate before running the side-effectful `compare_type_path`
-    // from typecore.ml:975-987; otherwise Rust forces the persistent root's
-    // `ps_sig` earlier than OCaml for duplicate implicit-open entries.
-    matches_pair(left, right) || matches_pair(right, left)
-}
-
-fn force_ambiguous_label_access_type_path_compare<'a>(
-    labels: &[&crate::types::LabelDescription],
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) {
-    // OCaml compiler/ml/typecore.ml:3648-3670 routes field access through
-    // `type_label_access` and `Label.disambiguate`. With no concrete record
-    // path, typecore.ml:975-981 still calls `ambiguous_types`; its `unique`
-    // loop at typecore.ml:969-973 invokes `compare_type_path`, whose
-    // `expand_path` reaches side-effectful `Env.normalize_path` at
-    // typecore.ml:776-787.
-    let mut unique_paths: Vec<Path> = Vec::new();
-    // OCaml compiler/ml/env.ml:1103-1113 returns lookup candidates in
-    // precedence order, and compiler/ml/typecore.ml:997-1004 feeds that first
-    // candidate directly to `ambiguous_types`. Rust's BindingTable stores the
-    // same candidates oldest-to-newest and selects with `.last()`, so replay
-    // the ambiguous compare pass in reverse to keep the same force order.
-    for label in labels.iter().rev() {
-        let Some(path) = label_result_path(ctx, label) else {
-            continue;
-        };
-        let already_seen = unique_paths.iter().any(|existing| {
-            implicit_open_duplicate_type_path(&path, existing)
-                || compare_type_paths_for_label_disambiguation(&path, existing, env, pers_env, ctx)
-        });
-        if !already_seen {
-            unique_paths.push(path);
-        }
-    }
-}
-
 fn should_prefer_expected_record_label<'a>(
     expected_label: &crate::types::LabelDescription,
     env_label: &crate::types::LabelDescription,
@@ -19845,10 +19730,6 @@ fn disambiguate_constructor<'a>(
         return lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx);
     }
 
-    if opath.is_none() {
-        force_ambiguous_constructor_type_path_compare(&all_constrs, env, pers_env, ctx);
-    }
-
     // Step 3: If we have a target type path, try to disambiguate
     if let Some(ref target_path) = opath {
         // Match OCaml NameChoice.disambiguate_by_type: choose the first
@@ -19867,8 +19748,8 @@ fn disambiguate_constructor<'a>(
                 // `expand_path` (typecore.ml:776-784) uses side-effectful
                 // `Env.normalize_path` even for already-equal paths.
                 if compare_type_paths_for_constructor_disambiguation(
-                    target_path,
                     cstr_path,
+                    target_path,
                     env,
                     pers_env,
                     ctx,
@@ -19891,74 +19772,6 @@ fn disambiguate_constructor<'a>(
     let cstr = all_constrs.last().unwrap();
     let path = Path::pident(Ident::create_persistent(cstr_name));
     Some((path, (*cstr).clone()))
-}
-
-fn force_constructor_disambiguate_by_type_compare<'a>(
-    opath: Option<&Path>,
-    cstr: &crate::types::decl::ConstructorDescription,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) {
-    let Some(target_path) = opath else {
-        return;
-    };
-    let Some(cstr_path) = constructor_result_path(ctx, cstr) else {
-        return;
-    };
-    let _ = compare_type_paths_for_constructor_disambiguation(
-        target_path,
-        &cstr_path,
-        env,
-        pers_env,
-        ctx,
-    );
-}
-
-fn constructor_result_path<'a>(
-    ctx: &'a crate::types::context::TypeContext<'a>,
-    cstr: &crate::types::decl::ConstructorDescription,
-) -> Option<Path> {
-    let res = ctx.repr(cstr.cstr_res);
-    let desc = ctx.get_desc(res);
-    match &*desc {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
-        _ => None,
-    }
-}
-
-fn force_ambiguous_constructor_type_path_compare<'a>(
-    constructors: &[&crate::types::decl::ConstructorDescription],
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) {
-    // OCaml compiler/ml/typecore.ml:4238-4253 routes constructors through
-    // `Constructor.disambiguate`, instantiated from `NameChoice` at
-    // typecore.ml:1238-1247. With no concrete expected variant path, that
-    // uses the same ambiguous-type path as labels: typecore.ml:975-981 calls
-    // `unique` at typecore.ml:969-973, and `compare_type_path` reaches
-    // side-effectful `Env.normalize_path` at typecore.ml:776-787.
-    let mut unique_paths: Vec<Path> = Vec::new();
-    // OCaml compiler/ml/env.ml:1103-1113 returns lookup candidates in
-    // precedence order, and compiler/ml/typecore.ml:997-1004 feeds that first
-    // candidate directly to `ambiguous_types`. Rust's BindingTable stores the
-    // same candidates oldest-to-newest and selects with `.last()`, so replay
-    // the ambiguous compare pass in reverse to keep the same force order.
-    for cstr in constructors.iter().rev() {
-        let Some(path) = constructor_result_path(ctx, cstr) else {
-            continue;
-        };
-        let already_seen = unique_paths.iter().any(|existing| {
-            implicit_open_duplicate_type_path(&path, existing)
-                || compare_type_paths_for_constructor_disambiguation(
-                    &path, existing, env, pers_env, ctx,
-                )
-        });
-        if !already_seen {
-            unique_paths.push(path);
-        }
-    }
 }
 
 /// Type-directed label disambiguation when the label is not in scope.
@@ -20463,7 +20276,6 @@ fn disambiguate_label<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
-    force_ambiguous_types: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -20495,10 +20307,6 @@ fn disambiguate_label<'a>(
     }
 
     let mut selected = None;
-
-    if force_ambiguous_types && opath.is_none() {
-        force_ambiguous_label_access_type_path_compare(&all_labels, env, pers_env, ctx);
-    }
 
     // If we have a target type path, try to disambiguate by exact path identity.
     // Prefer the most recently added matching label (reverse iteration).
