@@ -544,18 +544,27 @@ impl PersistentEnv {
         }
     }
 
-    /// Create a PersistentEnv seeded from a ModuleRegistry.
-    ///
-    /// Each worker in a parallel wave gets its own PersistentEnv via this
-    /// constructor. The registry's cached modules and metadata are cloned
-    /// into the env so that `find_pers_struct` can resolve dependencies
-    /// without disk I/O. The env is automatically in in-process mode.
+    /// Create a PersistentEnv seeded from a ModuleRegistry with a fresh
+    /// internalization cache.
     pub fn from_registry(registry: &ModuleRegistry) -> Self {
-        // Store portable modules for lazy internalization. They will be
-        // deserialized into the current TypeContext on first access via
-        // find_pers_struct, which has a TypeContext parameter.
+        Self::from_registry_with_cache(registry, Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    /// Create a PersistentEnv seeded from a ModuleRegistry, reusing an
+    /// existing internalization cache.
+    ///
+    /// In rewatch's in-process build, every rayon worker calls this with the
+    /// same `Arc`-shared cache across the modules it compiles. The cache
+    /// stores `Arc<PersStruct>` values whose `TypeExprRef`s point into the
+    /// worker's thread-local `TypeContext` arena, so reusing the cache is
+    /// safe iff the caller also reuses that `TypeContext`. See
+    /// `WorkerSession` in `driver.rs`.
+    pub fn from_registry_with_cache(
+        registry: &ModuleRegistry,
+        cache: Arc<Mutex<HashMap<String, Option<Arc<PersStruct>>>>>,
+    ) -> Self {
         PersistentEnv {
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache,
             load_path: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                 registry.alias_rewrites.clone(),

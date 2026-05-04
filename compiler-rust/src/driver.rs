@@ -37,6 +37,31 @@ use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature,
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
+// Per-worker `TypeContext` reuse and shared `PersStruct` cache across the
+// modules a rayon worker compiles is the natural next lever for in-process
+// build time. The plumbing for it (`TypeContext::begin_compile`,
+// `Arc<IdGenerator>` ownership, `PersistentEnv::from_registry_with_cache`)
+// is in place but the wire-up was reverted on this branch after two real
+// blockers showed up against tella-fusion:
+//
+//  1. `find_pers_struct`'s cache hit path skips `collect_alias_rewrites`
+//     and a few other side effects that the miss path applies to
+//     `PersistentEnv::alias_prefix_rewrites.local`. With the cache shared
+//     across compiles, those rewrites disappear after the first compile,
+//     producing `TypeExprRef(0)` lookup failures on later modules.
+//
+//  2. The `TypeArena` is append-only; without dropping types unreachable
+//     from preserved declaration stores between compiles, a single worker's
+//     arena grew to multi-GB during one tella build (peak footprint 7.8GB
+//     vs. baseline 0.05GB), and the per-allocation cost regressed wall
+//     time.
+//
+// Both fixes are scoped: promote `alias_prefix_rewrites.local` into the
+// shared cache (or run the per-compile side effects on every cache hit
+// regardless), and add a between-compile sweep that prunes types not
+// reachable from the worker-scoped declaration stores. That work is
+// pending; see `projects/shared-interfaces/PROGRESS.md`.
+
 /// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
 /// (Instant::now panics on WASM since time isn't implemented there).
 #[inline]

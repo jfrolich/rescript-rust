@@ -422,6 +422,98 @@ impl TypeContext {
         }
     }
 
+    /// Reset compile-scoped state in preparation for a new module compile while
+    /// preserving worker-scoped state (the type arena, materialized declaration
+    /// stores, lookup caches that don't depend on env identity, the persistent
+    /// env's internalized signatures, predef type singletons).
+    ///
+    /// This makes a single TypeContext reusable across the modules a rayon
+    /// worker compiles, amortizing the cost of materializing dependency module
+    /// signatures (`internalize_pers_struct`, `register_sig_types_recursive`,
+    /// `freshened_signature_bound_idents_from`) over many compiles.
+    ///
+    /// What is NOT reset (worker-scoped, persists across compiles):
+    /// - `types` (the type arena): types in published interfaces stay valid;
+    ///   transient types from prior compiles become unreachable garbage but
+    ///   bounded by typical sig sizes.
+    /// - `abbrevs`, `row_fields`, `commutables`, `field_kinds`: side tables for
+    ///   indirect refs inside types; index stability matters.
+    /// - `type_decl_store`, `type_decl_by_stamp`, `type_decl_by_path`,
+    ///   `resolved_pdot_type_cache`, `resolved_module_sig_cache`: declaration
+    ///   stores populated by `register_sig_types_recursive`. These are the win.
+    /// - `persistent_env` cache, `renamed_module_sigs`, `raw_module_sigs`:
+    ///   the materialized PersStruct cache. Reusing this across compiles is
+    ///   the whole point.
+    /// - Predef type singletons: stable across compiles.
+    /// - `flattened_alias_component_paths`, `record_labels_cache`,
+    ///   `record_label_descriptions_cache`: indexed by stable path strings.
+    /// - `cmi_longident_names`, `next_cmi_longident_idx`: synthetic CMI
+    ///   longident state; numbered identifiers must not collide so we keep
+    ///   appending.
+    ///
+    /// What IS reset (compile-scoped):
+    /// - Generalization levels (`current_level`, `nongen_level`,
+    ///   `global_level`, `saved_levels`).
+    /// - Abbreviation memo state (`simple_abbrevs`, `current_abbreviations`,
+    ///   `memoized_abbrev_refs`).
+    /// - GADT trace flag, previous env id (used by check_abbrev_env).
+    /// - Per-compile env-keyed caches (`qualified_module_components_cache`,
+    ///   `resolved_module_value_cache`, `resolved_module_type_cache`,
+    ///   `resolved_child_module_path_cache`, `qualified_module_decl_cache`,
+    ///   `normalized_path_full_cache`): these contain entries that name the
+    ///   previous compile's env-id; they're not directly unsafe to keep
+    ///   (the env-ids of new envs won't collide), but they grow unboundedly
+    ///   without reset, and not amortized across compiles anyway since each
+    ///   compile has its own env.
+    /// - Per-compile typedtree state (`typed_envs`, `typed_envs_by_id`,
+    ///   `arity_aliases`).
+    /// - Per-compile parse-arena-tied caches (`synthesized_record_lidents`,
+    ///   `dict_pattern_labels_cache`, `generic_dotted_constr_copies`).
+    pub fn begin_compile(&self) {
+        // Generalization levels.
+        self.current_level.set(0);
+        self.nongen_level.set(0);
+        self.global_level.set(1);
+        self.saved_levels.borrow_mut().clear();
+
+        // Abbreviation memo state. The simple_abbrevs slot points back to
+        // index 1 of `abbrevs`, which we keep but reset to Mnil.
+        self.trace_gadt_instances.set(false);
+        self.simple_abbrevs.set(AbbrevMemoRef(1));
+        self.current_abbreviations.set(AbbrevMemoRef::nil());
+        self.previous_env_id.set(0);
+        // Truncate abbrevs back to the two reserved Mnil slots so subsequent
+        // alloc_abbrev_memo calls are deterministic.
+        {
+            let mut abbrevs = self.abbrevs.borrow_mut();
+            abbrevs.truncate(2);
+            // Reset the dedicated simple_abbrevs cell to Mnil (it shares index 1).
+            *abbrevs[0].borrow_mut() = AbbrevMemo::Mnil;
+            *abbrevs[1].borrow_mut() = AbbrevMemo::Mnil;
+        }
+        self.memoized_abbrev_refs.borrow_mut().clear();
+
+        // Per-compile env-keyed caches. Cheaper to drop than to grow.
+        self.qualified_module_components_cache.borrow_mut().clear();
+        self.resolved_module_value_cache.borrow_mut().clear();
+        self.resolved_module_type_cache.borrow_mut().clear();
+        self.resolved_child_module_path_cache.borrow_mut().clear();
+        self.qualified_module_decl_cache.borrow_mut().clear();
+        self.normalized_path_full_cache.borrow_mut().clear();
+
+        // Per-compile typedtree state. Snapshots from the previous compile's
+        // env are no longer reachable from the new env's typed tree.
+        self.typed_envs.borrow_mut().clear();
+        self.typed_envs_by_id.borrow_mut().clear();
+        self.arity_aliases.borrow_mut().clear();
+
+        // Per-compile parse-arena-tied caches. The previous compile's
+        // ParseArena is gone, so its `LidentIdx` values no longer resolve.
+        self.synthesized_record_lidents.borrow_mut().clear();
+        self.dict_pattern_labels_cache.borrow_mut().clear();
+        self.generic_dotted_constr_copies.borrow_mut().clear();
+    }
+
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
@@ -817,6 +909,15 @@ impl TypeContext {
 
     pub(crate) fn persistent_env_clone(&self) -> Option<crate::cmi::persistent_env::PersistentEnv> {
         self.persistent_env.borrow().clone()
+    }
+
+    /// Drop the per-compile `PersistentEnv` reference held inside this
+    /// `TypeContext` before the context is parked in worker thread-local
+    /// storage. The shared `PersStruct` cache lives behind an `Arc` and
+    /// outlives this drop; only the compile-scoped wrapper struct is
+    /// released so the next compile can install its own.
+    pub(crate) fn clear_persistent_env_for_park(&self) {
+        *self.persistent_env.borrow_mut() = None;
     }
 
     pub(crate) fn persistent_env_is_in_process(&self) -> bool {
