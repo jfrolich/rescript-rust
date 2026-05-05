@@ -908,12 +908,10 @@ impl PersistentEnv {
         // Also recursively substitute paths in sub-module signatures.
         substitute_submodule_paths(&signature, &module_path, ctx);
 
-        // Keep the existing deep-prefix rewrite for flattened alias heads.
-        if let Some(qualified_path) = self.alias_prefix_rewrites.get(name) {
-            if !name.contains('-') {
-                rewrite_deep_prefix_in_sig(&signature, name, &qualified_path, ctx);
-            }
-        }
+        // OCaml compiler/ml/env.ml:677 and env.ml:1970 store `ps_sig` as
+        // `Subst.signature Subst.identity sign`. Alias path rewriting is applied
+        // lazily when env.ml:1513-1530 builds module components, not by rewriting
+        // the cached persistent unit signature during load.
 
         let effective_module_path = self
             .alias_prefix_rewrites
