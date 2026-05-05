@@ -134,6 +134,8 @@ fn get_dep_modules_from_memory(
 
 pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
+    let in_process_mode = build_state.build_mode().is_in_process();
+    let in_memory_deps = in_process_mode.then(|| build_state.snapshot_in_memory_deps());
     build_state
         .modules
         .par_iter()
@@ -146,12 +148,13 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                 let ast_path = helpers::get_ast_path(&source_file.implementation.path);
                 if module.deps_dirty || !build_state.deps_initialized {
                     let impl_key = format!("{module_name}:impl");
-                    let mut deps = if build_state.build_mode().is_in_process() {
-                        build_state
-                            .get_in_memory_deps(&impl_key)
-                            .map(|in_memory_deps| {
+                    let mut deps = if in_process_mode {
+                        in_memory_deps
+                            .as_ref()
+                            .and_then(|deps| deps.get(&impl_key))
+                            .map(|in_memory_dep| {
                                 get_dep_modules_from_memory(
-                                    &in_memory_deps,
+                                    in_memory_dep,
                                     package.namespace.to_suffix(),
                                     package.modules.as_ref().unwrap(),
                                     all_mod,
@@ -180,12 +183,13 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                         let iast_path = helpers::get_ast_path(&interface.path);
 
                         let intf_key = format!("{module_name}:intf");
-                        let intf_deps = if build_state.build_mode().is_in_process() {
-                            build_state
-                                .get_in_memory_deps(&intf_key)
-                                .map(|in_memory_deps| {
+                        let intf_deps = if in_process_mode {
+                            in_memory_deps
+                                .as_ref()
+                                .and_then(|deps| deps.get(&intf_key))
+                                .map(|in_memory_dep| {
                                     get_dep_modules_from_memory(
-                                        &in_memory_deps,
+                                        in_memory_dep,
                                         package.namespace.to_suffix(),
                                         package.modules.as_ref().unwrap(),
                                         all_mod,
