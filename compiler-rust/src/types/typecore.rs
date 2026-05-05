@@ -19919,15 +19919,20 @@ fn lookup_label_by_lid<'a>(
                 let cand_ty = ctx.repr(candidate.lbl_res);
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
-                    if path.same(&target_path)
-                        || compare_type_paths_for_disambiguation(
-                            path,
-                            &target_path,
-                            env,
-                            pers_env,
-                            ctx,
-                        )
-                    {
+                    // OCaml compiler/ml/typecore.ml:983-988
+                    // `disambiguate_by_type` calls `compare_type_path` directly
+                    // for label selection. That reaches typecore.ml:776-787
+                    // `expand_path`, whose Env.normalize_path fallback forces
+                    // persistent ps_sig lazies through compiler/ml/env.ml:903-926
+                    // and env.ml:865-875. Do not short-circuit exact paths here:
+                    // the force timing affects later typedtree identifier stamps.
+                    if compare_type_paths_for_label_disambiguation(
+                        &target_path,
+                        path,
+                        env,
+                        pers_env,
+                        ctx,
+                    ) {
                         let mut selected = candidate.clone();
                         qualify_label_description_paths(&mut selected, env, pers_env, ctx);
                         return Some(selected);
