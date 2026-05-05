@@ -5216,13 +5216,14 @@ fn force_qualified_value_type_paths<'a>(
         selected_alias_targets: &[Path],
         allow_stdlib_flat_parent_inference: bool,
         allow_non_stdlib_implicit_stdlib_inference: bool,
-        seen: &mut HashSet<TypeExprRef>,
+        seen: &mut Vec<TypeExprRef>,
     ) {
         let ctx = tctx.type_ctx;
         let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
+        if seen.iter().any(|seen_ty| *seen_ty == ty) {
             return;
         }
+        seen.push(ty);
 
         let desc = ctx.get_desc(ty);
         match &*desc {
@@ -5754,7 +5755,7 @@ fn force_qualified_value_type_paths<'a>(
     } else {
         Vec::new()
     };
-    let mut seen = HashSet::new();
+    let mut seen = Vec::new();
     visit(
         tctx,
         env,
@@ -19586,14 +19587,15 @@ fn type_contains_unresolved_local_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
-    visited: &mut HashSet<TypeExprRef>,
+    visited: &mut Vec<TypeExprRef>,
 ) -> bool {
     use crate::types::type_expr::RowField;
 
     let repr = ctx.repr(ty);
-    if !visited.insert(repr) {
+    if visited.iter().any(|seen| *seen == repr) {
         return false;
     }
+    visited.push(repr);
 
     let desc = ctx.get_desc(repr);
     match &*desc {
@@ -19684,14 +19686,15 @@ fn qualify_label_description_paths<'a>(
         ty: TypeExprRef,
         old_root_path: &Path,
         new_root_path: &Path,
-        visited: &mut HashSet<TypeExprRef>,
+        visited: &mut Vec<TypeExprRef>,
     ) {
         use crate::types::type_expr::RowField;
 
         let repr = ctx.repr(ty);
-        if !visited.insert(repr) {
+        if visited.iter().any(|seen| *seen == repr) {
             return;
         }
+        visited.push(repr);
 
         let desc = ctx.get_desc(repr).clone();
         match desc {
@@ -19884,7 +19887,7 @@ fn qualify_label_description_paths<'a>(
 
     match res_path {
         Path::Pdot(_, _, _) => {
-            let mut probe_visited = HashSet::new();
+            let mut probe_visited = Vec::new();
             has_unresolved_local_path = type_contains_unresolved_local_path(
                 ctx,
                 env,
@@ -19946,7 +19949,7 @@ fn qualify_label_description_paths<'a>(
             if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
             {
                 if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
-                    let mut visited = HashSet::new();
+                    let mut visited = Vec::new();
                     rewrite_direct_root_type_family_in_place(
                         ctx,
                         label.lbl_arg,
