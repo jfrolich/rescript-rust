@@ -32,21 +32,24 @@ use crate::intern::StrIdx;
 use crate::parse_arena::LidentIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
-/// Append-only type arena using UnsafeCell for zero-copy access.
+/// Append-only type arena using chunked allocation for zero-copy access.
 ///
 /// Safe because:
-/// - `Box<TypeExpr>` gives stable heap addresses
-/// - The Vec only grows (push), never shrinks or reorders
+/// - `typed_arena::Arena<TypeExpr>` gives stable addresses for allocated nodes
+/// - The pointer Vec only grows (push), never shrinks or reorders
 /// - Individual TypeExpr.desc RefCells are independent
 struct TypeArena {
-    types: std::cell::UnsafeCell<Vec<Box<TypeExpr>>>,
+    arena: typed_arena::Arena<TypeExpr>,
+    types: std::cell::UnsafeCell<Vec<NonNull<TypeExpr>>>,
 }
 
 impl TypeArena {
     fn new() -> Self {
         TypeArena {
+            arena: typed_arena::Arena::new(),
             types: std::cell::UnsafeCell::new(Vec::new()),
         }
     }
@@ -60,10 +63,11 @@ impl TypeArena {
     }
 
     fn push(&self, ty: TypeExpr) -> TypeExprRef {
+        let ptr = NonNull::from(self.arena.alloc(ty));
         unsafe {
             let types = &mut *self.types.get();
             let idx = types.len();
-            types.push(Box::new(ty));
+            types.push(ptr);
             TypeExprRef(idx)
         }
     }
