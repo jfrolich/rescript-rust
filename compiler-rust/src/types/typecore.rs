@@ -22378,15 +22378,23 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             access_path,
         );
     }
+    let alias_access_is_persistent_child = matches!((mty, access_path), (
+        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id)),
+        Path::Pdot(parent, _, _),
+    ) if alias_id.is_persistent() && parent.head().is_persistent());
     if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty
         && !target.same(access_path)
-        && !access_path_has_persistent_root
+        && (!access_path_has_persistent_root || alias_access_is_persistent_child)
     {
         // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
         // compiler/ml/env.ml:1530-1538 prefixes component declarations with the
         // selected access path. Rust persistent signatures are already finalized
         // under their saved unit path, so rewrite that target prefix to the
-        // selected local alias path before applying the component substitution.
+        // selected alias path before applying the component substitution.
+        // This also covers persistent child aliases such as `Web.MediaStream =
+        // Web__MediaStream`: env.ml:1008-1013 selects the child component path,
+        // then env.ml:1542-1556 exposes value/type descriptions through that
+        // selected path rather than the flattened backing unit.
         match target {
             Path::Pident(alias_id) => {
                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
