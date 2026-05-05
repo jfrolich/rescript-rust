@@ -102,6 +102,23 @@ impl QualifiedModuleComponentsCacheKey {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct QualifiedRecordLabelCacheKey {
+    path: Path,
+    env_id: u64,
+    lbl_pos: i32,
+}
+
+impl QualifiedRecordLabelCacheKey {
+    fn new(path: Path, env_id: u64, lbl_pos: i32) -> Self {
+        Self {
+            path: normalize_component_cache_path(path),
+            env_id,
+            lbl_pos,
+        }
+    }
+}
+
 fn normalize_component_cache_path(path: Path) -> Path {
     match path {
         Path::Pident(_) => path,
@@ -337,6 +354,14 @@ pub struct TypeContext {
     record_label_descriptions_cache:
         RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
 
+    /// Qualified persistent record labels keyed by environment and label slot.
+    /// OCaml caches module components with already-substituted `lbl_all`
+    /// descriptors (compiler/ml/env.ml:1513-1514,1542-1548); this avoids
+    /// repeatedly copying the same persistent JSX prop label skeleton before
+    /// each `instance_label` call.
+    qualified_record_label_cache:
+        RefCell<ahash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
+
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
     /// pattern field is resolved; we model that with an append-only side table.
@@ -418,6 +443,7 @@ impl TypeContext {
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
@@ -1147,6 +1173,35 @@ impl TypeContext {
             .borrow()
             .get(type_path)
             .cloned()
+    }
+
+    pub(crate) fn get_qualified_record_label(
+        &self,
+        env_id: u64,
+        type_path: &Path,
+        lbl_pos: i32,
+    ) -> Option<super::decl::LabelDescription> {
+        self.qualified_record_label_cache
+            .borrow()
+            .get(&QualifiedRecordLabelCacheKey::new(
+                type_path.clone(),
+                env_id,
+                lbl_pos,
+            ))
+            .cloned()
+    }
+
+    pub(crate) fn cache_qualified_record_label(
+        &self,
+        env_id: u64,
+        type_path: &Path,
+        lbl_pos: i32,
+        label: super::decl::LabelDescription,
+    ) {
+        self.qualified_record_label_cache.borrow_mut().insert(
+            QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
+            label,
+        );
     }
 
     /// Return a cached synthesized record-field lident by label name.

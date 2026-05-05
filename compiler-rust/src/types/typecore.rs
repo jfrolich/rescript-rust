@@ -19784,6 +19784,27 @@ fn qualify_label_description_paths<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) {
+    fn qualified_record_label_cache_key(
+        label: &crate::types::LabelDescription,
+        env: &Env,
+        ctx: &crate::types::context::TypeContext,
+    ) -> Option<(u64, Path, i32)> {
+        if label.lbl_pos < 0
+            || !matches!(
+                label.lbl_repres,
+                crate::types::RecordRepresentation::RecordRegular
+            )
+        {
+            return None;
+        }
+
+        let desc = ctx.get_desc(ctx.repr(label.lbl_res));
+        let TypeDesc::Tconstr { path, .. } = &*desc else {
+            return None;
+        };
+        path_non_apply_root_is_persistent(path).then(|| (env.id(), path.clone(), label.lbl_pos))
+    }
+
     fn rewrite_direct_root_type_family_in_place<'a>(
         ctx: &'a crate::types::context::TypeContext,
         ty: TypeExprRef,
@@ -19976,6 +19997,14 @@ fn qualify_label_description_paths<'a>(
         }
     }
 
+    let cache_key = qualified_record_label_cache_key(label, env, ctx);
+    if let Some((env_id, path, lbl_pos)) = cache_key.as_ref()
+        && let Some(cached) = ctx.get_qualified_record_label(*env_id, path, *lbl_pos)
+    {
+        *label = cached;
+        return;
+    }
+
     let mut copy_cache = HashMap::new();
     label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
     label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
@@ -20076,6 +20105,10 @@ fn qualify_label_description_paths<'a>(
             &module_access_path,
             &mut visited,
         );
+    }
+
+    if let Some((env_id, path, lbl_pos)) = cache_key {
+        ctx.cache_qualified_record_label(env_id, &path, lbl_pos, label.clone());
     }
 }
 
