@@ -24,6 +24,13 @@ struct NameScope {
     next_suffix: HashMap<String, usize>,
 }
 
+enum JsxChildren<'a> {
+    None,
+    EmptyFragment,
+    Slice(&'a [Expression]),
+    Single(&'a Expression),
+}
+
 /// JavaScript printer state
 pub struct JsPrinter {
     /// Output buffer
@@ -1095,25 +1102,25 @@ impl JsPrinter {
         )
     }
 
-    fn collect_jsx_fields_from_object(
+    fn collect_jsx_fields_from_object<'a>(
         &self,
-        props: &[(PropertyName, Expression)],
-    ) -> Option<Vec<(String, Expression)>> {
+        props: &'a [(PropertyName, Expression)],
+    ) -> Option<Vec<(&'a str, &'a Expression)>> {
         let mut fields = Vec::with_capacity(props.len());
         for (name, value) in props {
             let PropertyName::Lit(name) = name else {
                 return None;
             };
-            fields.push((name.clone(), value.clone()));
+            fields.push((name.as_str(), value));
         }
         Some(fields)
     }
 
-    fn collect_jsx_fields_from_record_block(
+    fn collect_jsx_fields_from_record_block<'a>(
         &self,
-        elements: &[Expression],
-        fields: &[(String, bool)],
-    ) -> Option<Vec<(String, Expression)>> {
+        elements: &'a [Expression],
+        fields: &'a [(String, bool)],
+    ) -> Option<Vec<(&'a str, &'a Expression)>> {
         if elements.len() != fields.len() {
             return None;
         }
@@ -1123,28 +1130,31 @@ impl JsPrinter {
             if *optional && is_undefined_literal(value) {
                 continue;
             }
-            collected.push((name.clone(), value.clone()));
+            collected.push((name.as_str(), value));
         }
         Some(collected)
     }
 
-    fn collect_jsx_spread_assignments(
+    fn collect_jsx_spread_assignments<'a>(
         &self,
-        props: &Expression,
-    ) -> Option<(Vec<(String, Expression)>, Expression)> {
-        fn visit(expr: &Expression, acc: &mut Vec<(String, Expression)>) -> Option<Expression> {
+        props: &'a Expression,
+    ) -> Option<(Vec<(&'a str, &'a Expression)>, &'a Expression)> {
+        fn visit<'a>(
+            expr: &'a Expression,
+            acc: &mut Vec<(&'a str, &'a Expression)>,
+        ) -> Option<&'a Expression> {
             match &expr.desc {
                 ExpressionDesc::Seq(first, rest) => match &first.desc {
                     ExpressionDesc::Bin(BinOp::Eq, target, value) => match &target.as_ref().desc {
                         ExpressionDesc::StaticIndex(_, name, _) => {
-                            acc.push((name.clone(), value.as_ref().clone()));
+                            acc.push((name.as_str(), value.as_ref()));
                             visit(rest, acc)
                         }
                         _ => None,
                     },
                     _ => None,
                 },
-                _ => Some(expr.clone()),
+                _ => Some(expr),
             }
         }
 
@@ -1153,14 +1163,14 @@ impl JsPrinter {
         Some((fields, spread))
     }
 
-    fn collect_transformed_jsx_props(
+    fn collect_transformed_jsx_props<'a>(
         &self,
-        props: &Expression,
-    ) -> Option<(Vec<(String, Expression)>, Option<Expression>)> {
+        props: &'a Expression,
+    ) -> Option<(Vec<(&'a str, &'a Expression)>, Option<&'a Expression>)> {
         match &props.desc {
             ExpressionDesc::Object(dup, props) => Some((
                 self.collect_jsx_fields_from_object(props)?,
-                dup.as_ref().map(|dup| dup.as_ref().clone()),
+                dup.as_ref().map(|dup| dup.as_ref()),
             )),
             ExpressionDesc::CamlBlock(
                 elements,
@@ -1175,39 +1185,40 @@ impl JsPrinter {
                 let (fields, spread_props) = self.collect_jsx_spread_assignments(props)?;
                 Some((fields, Some(spread_props)))
             }
-            ExpressionDesc::Var(_) => Some((Vec::new(), Some(props.clone()))),
+            ExpressionDesc::Var(_) => Some((Vec::new(), Some(props))),
             _ => None,
         }
     }
 
-    fn jsx_children(
+    fn jsx_children<'a>(
         &self,
         fn_name: &str,
-        fields: &[(String, Expression)],
+        fields: &[(&'a str, &'a Expression)],
         is_fragment: bool,
-    ) -> Option<Vec<Expression>> {
-        let children = fields.iter().find_map(|(name, expr)| {
-            if name != "children" {
-                return None;
+    ) -> JsxChildren<'a> {
+        for (name, expr) in fields {
+            if *name != "children" {
+                continue;
             }
 
-            if fn_name == "jsxs" {
+            return if fn_name == "jsxs" {
                 match &expr.desc {
-                    ExpressionDesc::Array(children, _) => Some(children.clone()),
+                    ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
                     ExpressionDesc::OptionalBlock(inner, _) => match &inner.as_ref().desc {
-                        ExpressionDesc::Array(children, _) => Some(children.clone()),
-                        _ => Some(vec![expr.clone()]),
+                        ExpressionDesc::Array(children, _) => JsxChildren::Slice(children),
+                        _ => JsxChildren::Single(expr),
                     },
-                    _ => Some(vec![expr.clone()]),
+                    _ => JsxChildren::Single(expr),
                 }
             } else {
-                Some(vec![expr.clone()])
-            }
-        });
+                JsxChildren::Single(expr)
+            };
+        }
 
-        match children {
-            None if is_fragment => Some(Vec::new()),
-            other => other,
+        if is_fragment {
+            JsxChildren::EmptyFragment
+        } else {
+            JsxChildren::None
         }
     }
 
@@ -1264,19 +1275,19 @@ impl JsPrinter {
         level: u8,
         fn_name: &str,
         tag: &Expression,
-        fields: &[(String, Expression)],
+        fields: &[(&str, &Expression)],
         spread_props: Option<&Expression>,
         key: Option<&Expression>,
     ) {
         let is_fragment = self.is_jsx_fragment_tag(tag);
         let children = self.jsx_children(fn_name, fields, is_fragment);
-        let props: Vec<_> = fields
+        let named_prop_count = fields
             .iter()
-            .filter(|(name, _)| name != "children")
-            .collect();
-        let has_named_props = !props.is_empty();
+            .filter(|(name, _)| *name != "children")
+            .count();
+        let has_named_props = named_prop_count != 0;
         let printable_prop_count =
-            usize::from(key.is_some()) + usize::from(spread_props.is_some()) + props.len();
+            usize::from(key.is_some()) + usize::from(spread_props.is_some()) + named_prop_count;
 
         if level > 15 {
             self.write_char('(');
@@ -1286,7 +1297,7 @@ impl JsPrinter {
         self.print_transformed_jsx_tag(tag, level, is_fragment);
 
         if printable_prop_count == 0 {
-            if children.is_none() {
+            if matches!(children, JsxChildren::None) {
                 self.write(" ");
             }
         } else {
@@ -1308,9 +1319,11 @@ impl JsPrinter {
                     self.newline();
                 }
             }
-            for (index, (name, value)) in props.iter().enumerate() {
+            let mut printed_named_props = 0;
+            for (name, value) in fields.iter().filter(|(name, _)| *name != "children") {
                 self.print_transformed_jsx_named_prop(name, value);
-                if index + 1 < props.len() {
+                printed_named_props += 1;
+                if printed_named_props < named_prop_count {
                     self.newline();
                 }
             }
@@ -1319,25 +1332,42 @@ impl JsPrinter {
         }
 
         match children {
-            None => {
+            JsxChildren::None => {
                 if has_named_props {
                     self.newline();
                 }
                 self.write("/>");
             }
-            Some(children) if children.is_empty() && is_fragment => {
+            JsxChildren::EmptyFragment => {
                 self.write("></>");
             }
-            Some(children) => {
+            JsxChildren::Slice(children) if children.is_empty() && is_fragment => {
+                self.write("></>");
+            }
+            JsxChildren::Slice(children) => {
                 if has_named_props {
                     self.newline();
                 }
                 self.write(">");
                 self.indent();
-                for child in &children {
+                for child in children {
                     self.newline();
                     self.print_transformed_jsx_child(child);
                 }
+                self.dedent();
+                self.newline();
+                self.write("</");
+                self.print_transformed_jsx_tag(tag, level, is_fragment);
+                self.write(">");
+            }
+            JsxChildren::Single(child) => {
+                if has_named_props {
+                    self.newline();
+                }
+                self.write(">");
+                self.indent();
+                self.newline();
+                self.print_transformed_jsx_child(child);
                 self.dedent();
                 self.newline();
                 self.write("</");
@@ -1375,7 +1405,7 @@ impl JsPrinter {
             return false;
         };
 
-        self.print_transformed_jsx(level, fn_name, tag, &fields, spread_props.as_ref(), key);
+        self.print_transformed_jsx(level, fn_name, tag, &fields, spread_props, key);
         true
     }
 
