@@ -41,26 +41,25 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 // modules a rayon worker compiles is the natural next lever for in-process
 // build time. The plumbing for it (`TypeContext::begin_compile`,
 // `Arc<IdGenerator>` ownership, `PersistentEnv::from_registry_with_cache`)
-// is in place but the wire-up was reverted on this branch after two real
-// blockers showed up against tella-fusion:
+// is in place but the wire-up was reverted on this branch after one
+// blocker showed up against tella-fusion:
 //
-//  1. `find_pers_struct`'s cache hit path skips `collect_alias_rewrites`
-//     and a few other side effects that the miss path applies to
-//     `PersistentEnv::alias_prefix_rewrites.local`. With the cache shared
-//     across compiles, those rewrites disappear after the first compile,
-//     producing `TypeExprRef(0)` lookup failures on later modules.
+//   `find_pers_struct`'s cache hit path skips `collect_alias_rewrites`
+//   and a few other side effects that the miss path applies to
+//   `PersistentEnv::alias_prefix_rewrites.local`. With the cache shared
+//   across compiles, those rewrites disappear after the first compile,
+//   producing `TypeExprRef(0)` lookup failures on later modules.
 //
-//  2. The `TypeArena` is append-only; without dropping types unreachable
-//     from preserved declaration stores between compiles, a single worker's
-//     arena grew to multi-GB during one tella build (peak footprint 7.8GB
-//     vs. baseline 0.05GB), and the per-allocation cost regressed wall
-//     time.
+// Fix path: promote `alias_prefix_rewrites.local` into the shared cache
+// (or run the per-compile side effects on every cache hit regardless).
+// Pending; see `projects/shared-interfaces/PROGRESS.md`.
 //
-// Both fixes are scoped: promote `alias_prefix_rewrites.local` into the
-// shared cache (or run the per-compile side effects on every cache hit
-// regardless), and add a between-compile sweep that prunes types not
-// reachable from the worker-scoped declaration stores. That work is
-// pending; see `projects/shared-interfaces/PROGRESS.md`.
+// A 7.8GB peak-memory spike observed during the wire-up attempt was an
+// artifact of running with cache sharing *disabled* and `TypeContext`
+// shared — every compile re-materialized its full dep closure into the
+// same arena, accumulating ~213 duplicate copies per worker. With cache
+// sharing working, materialization is amortized and per-worker memory
+// stays bounded similarly to the per-compile-fresh-`TypeContext` baseline.
 
 /// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
 /// (Instant::now panics on WASM since time isn't implemented there).

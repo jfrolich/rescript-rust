@@ -83,42 +83,43 @@ on a shared `TypeContext`, so those don't need re-running, but a careful
 audit of the miss path is required to identify all state-mutating side
 effects that the cache hit path bypasses.
 
-#### Blocker 2: unbounded `TypeArena` growth
+#### Blocker 2 (re-diagnosed): the 7.8GB was from disabled cache sharing, not arena reuse per se
 
-The `TypeArena` is append-only. Per-compile state (transient type
-variables, fresh instantiations, intermediate Tlinks, etc.) accumulates
-in the arena across all the modules a worker compiles. With ~213 modules
-per worker on a 10-core run of tella-fusion, peak memory footprint went
-from ~50MB to ~7.8GB and wall time was variable (5.0s → 10.2s on
-back-to-back runs depending on allocator behavior). The per-allocation
-cost rises with arena size and the system starts page-faulting under
-the larger working set.
+I initially wrote this up as an unbounded-`TypeArena`-growth blocker
+needing a between-compile sweep or generational arena. That diagnosis
+was wrong. Re-thinking:
 
-Fix sketch: between compiles, drop any types not reachable from the
-worker-scoped state we actually want to preserve (the declaration stores,
-the `PersStruct` cache, the predef singletons, the renamed-sig cache).
-Implementation options:
+- The old model materialized a compile's full dep closure (~500K types)
+  into a per-compile arena and dropped the arena at compile end. Peak
+  memory at any instant was bounded by the in-flight compiles ×
+  per-compile materialization, ~500MB on a 10-core run.
+- The new model with cache sharing *working* would materialize each dep
+  once per worker. The worker's arena holds one copy of each touched
+  dep's types plus small per-compile transients. Bounded similarly to
+  the old model.
+- The 7.8GB run was the *worst of both worlds*: cache sharing disabled
+  (after blocker 1 broke things) while `TypeContext` was still shared.
+  Every compile re-materialized its dep closure into the same arena, so
+  after 213 compiles each worker held ~213 copies of the same dep
+  types. That's an artifact of my broken intermediate state, not of
+  per-worker reuse.
 
-- **Mark-and-sweep**: walk the preserved roots, mark every reachable
-  `TypeExprRef`, compact the arena keeping only marked entries. Requires
-  remapping every `TypeExprRef` in every preserved data structure to the
-  compacted indices — a large but mechanical pass.
+The remaining concern in this category is small: per-compile transient
+types (fresh tvars, intermediate Tlinks during unification) do
+accumulate in an append-only arena. Order-of-magnitude estimate: a few
+tens of MB per compile × 213 compiles = a few GB per worker over a long
+build. That may or may not warrant a sweep, but it's an optimization
+question rather than a feasibility blocker. Concrete approaches if it
+matters:
 
-- **Generational arena**: split the arena into "permanent" (worker-scoped)
-  and "scratch" (compile-scoped) regions. New allocations go into scratch
-  during a compile; promotion to permanent happens at compile end for
-  types reachable from preserved state. The scratch region resets to
-  empty on `begin_compile`. This is closer in spirit to the published-
-  interface catalog from `PLAN.md` Step B, where shared types live in a
-  separate read-only catalog.
+- **Mark-and-sweep**: walk preserved roots, mark reachable
+  `TypeExprRef`s, compact the arena, remap stored refs. Big mechanical
+  pass.
+- **Generational arena**: split into "permanent" (worker-scoped) and
+  "scratch" (compile-scoped); promote on compile end. Composes naturally
+  with the cross-worker shared-catalog Step B.
 
-- **Per-worker session lifetime**: skip the in-arena reuse entirely and
-  instead pay the full re-internalization cost; this is what the rejected
-  worker session did. Doesn't move the needle.
-
-The generational-arena approach is the right answer because it composes
-with the eventual cross-worker shared catalog: the published-interface
-catalog is just the global "permanent" arena.
+Neither is required to land per-worker reuse usefully.
 
 ### Tella build timing baseline
 
@@ -138,27 +139,27 @@ it's insensitive to driver.rs / rewatch changes.
 
 ### Next session
 
-The next session should land both fixes together because they're
-interdependent: cache sharing without arena pruning produces unbounded
-memory growth, and arena pruning without cache sharing doesn't amortize
-the materialization work. Concretely:
+The next session needs *one* focused fix, not two. With the memory
+re-diagnosis above, the only true blocker is cache-hit-path side
+effects:
 
 1. Walk every code path in `find_pers_struct`'s miss branch and either
    (a) move the per-compile side effects into a separate
-   `prepare_per_compile_persistent_env_state(name)` method called on every
-   `find_pers_struct` regardless of cache hit/miss, or (b) move the
-   mutated state (`alias_prefix_rewrites.local`) onto the shared cache.
+   `prepare_per_compile_persistent_env_state(name)` method called on
+   every `find_pers_struct` regardless of cache hit/miss, or (b) move
+   the mutated state (`alias_prefix_rewrites.local`) onto the shared
+   cache. The known-affected state is
+   `PersistentEnv::alias_prefix_rewrites.local`; an audit may find more.
 
-2. Implement either generational-arena allocation or a between-compile
-   `TypeContext::sweep_unreachable_types` pass that compacts the arena
-   keeping only types referenced from `type_decl_store`, `type_decl_by_stamp`,
-   `type_decl_by_path`, `resolved_pdot_type_cache`, `resolved_module_sig_cache`,
-   `record_label_descriptions_cache`, the persistent-env cache values, and
-   the predef singletons.
+2. Re-enable the worker-session wire-up (`WorkerSession::acquire`,
+   `from_registry_with_cache`, `begin_compile`). Validate parity still
+   passes, measure tella build time, document delta.
 
-3. Re-enable the worker-session wire-up. Validate parity still passes,
-   measure tella build time, document delta.
+3. Optional follow-up if transient-type accumulation in the arena
+   becomes measurable: add a between-compile sweep or split the arena
+   into permanent + scratch regions. Not on the critical path for the
+   first measurable speedup.
 
-Until those are in, the infrastructure committed in this session is dead
-code (deliberately so) and the in-process build behaves identically to
-the pre-session state.
+Until step 1 and 2 land, the infrastructure committed in this session
+is dead code (deliberately so) and the in-process build behaves
+identically to the pre-session state.
