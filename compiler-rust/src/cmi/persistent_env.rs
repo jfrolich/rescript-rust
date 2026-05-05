@@ -561,12 +561,12 @@ impl PersistentEnv {
     /// Create a PersistentEnv seeded from a ModuleRegistry, reusing an
     /// existing internalization cache.
     ///
-    /// In rewatch's in-process build, every rayon worker calls this with the
-    /// same `Arc`-shared cache across the modules it compiles. The cache
-    /// stores `Arc<PersStruct>` values whose `TypeExprRef`s point into the
-    /// worker's thread-local `TypeContext` arena, so reusing the cache is
-    /// safe iff the caller also reuses that `TypeContext`. See
-    /// `WorkerSession` in `driver.rs`.
+    /// A future rewatch worker-session wire-up can call this with one cache per
+    /// rayon worker across the modules it compiles. The cache stores
+    /// `Arc<PersStruct>` values whose `TypeExprRef`s point into that worker's
+    /// reused `TypeContext` arena, so reusing the cache is safe iff the caller
+    /// also reuses the matching `TypeContext`. The current in-process build
+    /// path still uses `from_registry`, which creates a fresh cache per compile.
     pub fn from_registry_with_cache(
         registry: &ModuleRegistry,
         cache: Arc<Mutex<HashMap<String, Option<Arc<PersStruct>>>>>,

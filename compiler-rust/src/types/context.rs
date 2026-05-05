@@ -423,9 +423,8 @@ impl TypeContext {
     }
 
     /// Reset compile-scoped state in preparation for a new module compile while
-    /// preserving worker-scoped state (the type arena, materialized declaration
-    /// stores, lookup caches that don't depend on env identity, the persistent
-    /// env's internalized signatures, predef type singletons).
+    /// preserving selected worker-scoped state (the type arena, stable path-keyed
+    /// declaration stores, and predef type singletons).
     ///
     /// This makes a single TypeContext reusable across the modules a rayon
     /// worker compiles, amortizing the cost of materializing dependency module
@@ -440,9 +439,7 @@ impl TypeContext {
     ///   indirect refs inside types; index stability matters.
     /// - `type_decl_by_path`, `resolved_pdot_type_cache`,
     ///   `resolved_module_sig_cache`: declaration stores keyed by stable full
-    ///   paths populated by `register_sig_types_recursive`. These are the win.
-    /// - `persistent_env` cache: the materialized PersStruct cache. Reusing this
-    ///   across compiles is the whole point.
+    ///   paths populated by `register_sig_types_recursive`.
     /// - Predef type singletons: stable across compiles.
     /// - `flattened_alias_component_paths`: indexed by stable path strings.
     /// - `cmi_longident_names`, `next_cmi_longident_idx`: synthetic CMI
@@ -463,6 +460,9 @@ impl TypeContext {
     ///   (the env-ids of new envs won't collide), but they grow unboundedly
     ///   without reset, and not amortized across compiles anyway since each
     ///   compile has its own env.
+    /// - Per-compile persistent-env wrapper and raw/renamed signature tables.
+    ///   The shared `PersStruct` cache would live outside the wrapper in the
+    ///   future worker-session wire-up; the wrapper itself is unit-scoped.
     /// - Per-compile typedtree state (`typed_envs`, `typed_envs_by_id`,
     ///   `arity_aliases`).
     /// - Per-compile parse-arena-tied caches (`synthesized_record_lidents`,
