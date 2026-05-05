@@ -148,7 +148,7 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
     if build_mode.is_in_process() {
         let mut builder = rayon::ThreadPoolBuilder::new();
         if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-            builder = builder.num_threads(num_cpus::get().max(1));
+            builder = builder.num_threads(default_in_process_threads());
         }
         builder
             .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
@@ -156,6 +156,18 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
             .build_global()
             .expect("failed to configure in-process Rayon worker pool");
     }
+}
+
+fn default_in_process_threads() -> usize {
+    let logical = num_cpus::get().max(1);
+    let target = logical.saturating_mul(8);
+    // In-process compilation publishes signatures before JS is emitted so
+    // dependents can type-check early. Those workers can later block before JS
+    // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
+    // runnable modules stranded behind parked workers. Keep this bounded on
+    // ordinary machines because compiler workers use large stacks, but never
+    // choose fewer workers than Rayon would have used by default.
+    target.min(64).max(logical)
 }
 
 const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
