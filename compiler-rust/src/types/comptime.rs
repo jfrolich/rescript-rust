@@ -1092,6 +1092,43 @@ pub fn specialize_expression(
                 extended_expression: spec_ext.map(Box::new),
             }
         }
+        typedtree::ExpressionDesc::Texp_record_sparse {
+            all_labels,
+            fields,
+            omitted_optionals,
+            extended_expression,
+        } => {
+            let spec_fields: Vec<_> = fields
+                .iter()
+                .map(|(lid, desc, def, opt)| {
+                    let spec_def = match def {
+                        typedtree::RecordLabelDefinition::Kept(_)
+                        | typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                            def.clone()
+                        }
+                        typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
+                            match specialize_expression(field_expr, env, ctx, type_env) {
+                                Ok(spec) => {
+                                    typedtree::RecordLabelDefinition::Overridden(lid2.clone(), spec)
+                                }
+                                Err(_) => def.clone(),
+                            }
+                        }
+                    };
+                    (lid.clone(), desc.clone(), spec_def, *opt)
+                })
+                .collect();
+            let spec_ext = extended_expression
+                .as_ref()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .transpose()?;
+            typedtree::ExpressionDesc::Texp_record_sparse {
+                all_labels: all_labels.clone(),
+                fields: spec_fields,
+                omitted_optionals: omitted_optionals.clone(),
+                extended_expression: spec_ext.map(Box::new),
+            }
+        }
 
         // Field access — pass through (with specialized base)
         typedtree::ExpressionDesc::Texp_field(base, lid, desc) => {

@@ -13344,8 +13344,29 @@ fn type_record(
         }
     }
 
+    // OCaml compiler/ml/typecore.ml:2833-2842 stores every omitted optional
+    // field as an `option_none` entry. Keep that typedtree contract at
+    // serialization time, but store large closed regular records sparsely
+    // inside Rust so JSX prop bags don't copy hundreds of label descriptions.
+    let sparse_all_label_descriptions = if typed_base.is_none() && !fields.is_empty() {
+        all_label_descriptions.as_ref().and_then(|labels| {
+            (labels.len() >= 20
+                && labels.iter().all(|label| {
+                    matches!(
+                        label.lbl_repres,
+                        crate::types::RecordRepresentation::RecordRegular
+                    )
+                }))
+            .then(|| labels.clone())
+        })
+    } else {
+        None
+    };
+    let use_sparse_large_record = sparse_all_label_descriptions.is_some();
+    let mut omitted_optional_fields = Vec::new();
+
     if let Some(all_label_descriptions) = all_label_descriptions.clone() {
-        if all_label_descriptions.len() > typed_fields.capacity() {
+        if !use_sparse_large_record && all_label_descriptions.len() > typed_fields.capacity() {
             typed_fields.reserve(
                 all_label_descriptions
                     .len()
@@ -13400,10 +13421,6 @@ fn type_record(
 
             if raw_label_desc.lbl_optional {
                 let option_ty = raw_label_desc.lbl_arg;
-                let label_desc = crate::types::LabelDescription {
-                    lbl_res: record_ty,
-                    ..raw_label_desc.clone()
-                };
                 let label_lid_idx = ctx
                     .get_synthesized_record_lident(&label_name)
                     .unwrap_or_else(|| {
@@ -13420,12 +13437,24 @@ fn type_record(
                     txt: label_lid_idx,
                     loc,
                 };
-                typed_fields.push((
-                    label_lid.clone(),
-                    label_desc,
-                    RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
-                    false,
-                ));
+                if use_sparse_large_record {
+                    omitted_optional_fields.push((
+                        raw_label_desc.lbl_pos as usize,
+                        label_lid,
+                        option_ty,
+                    ));
+                } else {
+                    let label_desc = crate::types::LabelDescription {
+                        lbl_res: record_ty,
+                        ..raw_label_desc.clone()
+                    };
+                    typed_fields.push((
+                        label_lid.clone(),
+                        label_desc,
+                        RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
+                        false,
+                    ));
+                }
             } else {
                 labels_missing.push(label_name);
             }
@@ -13731,11 +13760,29 @@ fn type_record(
     // the same typedtree sharing and force order.
     let record_exp_ty = crate::types::instance(ctx, expected_ty);
 
-    Ok(Expression::new(
+    let exp_desc = if let Some(all_labels) = sparse_all_label_descriptions {
+        if omitted_optional_fields.is_empty() {
+            ExpressionDesc::Texp_record {
+                fields: typed_fields,
+                extended_expression: typed_base.map(Box::new),
+            }
+        } else {
+            ExpressionDesc::Texp_record_sparse {
+                all_labels,
+                fields: typed_fields,
+                omitted_optionals: omitted_optional_fields,
+                extended_expression: typed_base.map(Box::new),
+            }
+        }
+    } else {
         ExpressionDesc::Texp_record {
             fields: typed_fields,
             extended_expression: typed_base.map(Box::new),
-        },
+        }
+    };
+
+    Ok(Expression::new(
+        exp_desc,
         loc.clone(),
         record_exp_ty,
         EnvRef(0),
@@ -16442,6 +16489,27 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+        } => {
+            fields
+                .iter()
+                .all(|(_, label, definition, _)| match definition {
+                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
+                        label.lbl_mut == crate::types::MutableFlag::Immutable
+                            && is_nonexpansive_expression(tctx, expr)
+                    }
+                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
+                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                        true
+                    }
+                })
+                && extended_expression
+                    .as_deref()
+                    .map_or(true, |expr| is_nonexpansive_expression(tctx, expr))
+        }
+        ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
         } => {
             fields
                 .iter()
@@ -25244,6 +25312,25 @@ fn contains_ident_reference(expr: &Expression, name: &str) -> bool {
         ExpressionDesc::Texp_sequence(a, b) => {
             contains_ident_reference(a, name) || contains_ident_reference(b, name)
         }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            fields.iter().any(|(_, _, def, _)| {
+                if let super::typedtree::RecordLabelDefinition::Overridden(_, expr) = def {
+                    contains_ident_reference(expr, name)
+                } else {
+                    false
+                }
+            }) || extended_expression
+                .as_deref()
+                .map_or(false, |expr| contains_ident_reference(expr, name))
+        }
         _ => false, // Conservative: may miss some cases but safe
     }
 }
@@ -25304,6 +25391,20 @@ fn substitute_ident(expr: &mut Expression, name: &str, replacement: &Expression)
         ExpressionDesc::Texp_record {
             fields,
             extended_expression,
+        } => {
+            for (_, _, def, _) in fields {
+                if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {
+                    substitute_ident(e, name, replacement);
+                }
+            }
+            if let Some(e) = extended_expression {
+                substitute_ident(e, name, replacement);
+            }
+        }
+        ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
         } => {
             for (_, _, def, _) in fields {
                 if let super::typedtree::RecordLabelDefinition::Overridden(_, e) = def {

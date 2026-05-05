@@ -21,10 +21,10 @@ use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRe
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
     FunctionParam, FunctionParamPattern, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
-    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordLabelDefinition,
-    Structure, StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
-    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
-    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
+    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordField,
+    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TypeExtension,
+    TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
+    TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -1043,6 +1043,47 @@ fn sexp_exp_extra(
     }
 }
 
+fn sexp_record_definition(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    def: &RecordLabelDefinition,
+) -> Sexp {
+    match def {
+        RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
+            Sexp::atom("Kept"),
+            sexp_type_expr(arena, ctx, dedup, *ty),
+        ]),
+        RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
+            Sexp::atom("Overridden"),
+            sexp_longident_idx(arena, ctx, li.txt),
+            sexp_expression(arena, ctx, with_locs, dedup, e),
+        ]),
+        RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
+            Sexp::atom("Overridden"),
+            sexp_longident_idx(arena, ctx, li.txt),
+            sexp_omitted_optional_none_expression(arena, ctx, with_locs, dedup, li, *option_ty),
+        ]),
+    }
+}
+
+fn sexp_record_field(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    field_name: &str,
+    def: &RecordLabelDefinition,
+    opt_flag: bool,
+) -> Sexp {
+    Sexp::list(vec![
+        string(field_name),
+        sexp_record_definition(arena, ctx, with_locs, dedup, def),
+        Sexp::atom(if opt_flag { "optional" } else { "required" }),
+    ])
+}
+
 fn sexp_expression_desc(
     arena: &ParseArena,
     ctx: &TypeContext,
@@ -1215,29 +1256,77 @@ fn sexp_expression_desc(
         } => {
             let mut field_items = Vec::new();
             for (_li, ld, def, opt_flag) in fields.iter() {
-                let def_sexp = match def {
-                    RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
-                        Sexp::atom("Kept"),
-                        sexp_type_expr(arena, ctx, dedup, *ty),
-                    ]),
-                    RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
-                        Sexp::atom("Overridden"),
-                        sexp_longident_idx(arena, ctx, li.txt),
-                        sexp_expression(arena, ctx, with_locs, dedup, e),
-                    ]),
-                    RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
-                        Sexp::atom("Overridden"),
-                        sexp_longident_idx(arena, ctx, li.txt),
-                        sexp_omitted_optional_none_expression(
-                            arena, ctx, with_locs, dedup, li, *option_ty,
-                        ),
-                    ]),
+                field_items.push(sexp_record_field(
+                    arena,
+                    ctx,
+                    with_locs,
+                    dedup,
+                    &ld.lbl_name,
+                    def,
+                    *opt_flag,
+                ));
+            }
+            let ext_sexp = match extended_expression {
+                None => Sexp::atom("None"),
+                Some(e) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_expression(arena, ctx, with_locs, dedup, e),
+                ]),
+            };
+            Sexp::list(vec![
+                Sexp::atom("Texp_record"),
+                Sexp::list(field_items),
+                ext_sexp,
+            ])
+        }
+        ExpressionDesc::Texp_record_sparse {
+            all_labels,
+            fields,
+            omitted_optionals,
+            extended_expression,
+        } => {
+            let mut explicit_by_pos: HashMap<usize, &RecordField> =
+                HashMap::with_capacity(fields.len());
+            for field in fields.iter() {
+                let pos = field.1.lbl_pos;
+                if pos >= 0 {
+                    explicit_by_pos.insert(pos as usize, field);
+                }
+            }
+            let mut omitted_by_pos = HashMap::with_capacity(omitted_optionals.len());
+            for (pos, li, option_ty) in omitted_optionals.iter() {
+                omitted_by_pos.insert(*pos, (li, *option_ty));
+            }
+
+            let mut field_items = Vec::with_capacity(all_labels.len());
+            for (idx, label) in all_labels.iter().enumerate() {
+                let pos = if label.lbl_pos >= 0 {
+                    label.lbl_pos as usize
+                } else {
+                    idx
                 };
-                field_items.push(Sexp::list(vec![
-                    string(&ld.lbl_name),
-                    def_sexp,
-                    Sexp::atom(if *opt_flag { "optional" } else { "required" }),
-                ]));
+                if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
+                    field_items.push(sexp_record_field(
+                        arena,
+                        ctx,
+                        with_locs,
+                        dedup,
+                        &ld.lbl_name,
+                        def,
+                        *opt_flag,
+                    ));
+                } else if let Some((li, option_ty)) = omitted_by_pos.get(&pos) {
+                    let def = RecordLabelDefinition::OmittedOptionalNone((*li).clone(), *option_ty);
+                    field_items.push(sexp_record_field(
+                        arena,
+                        ctx,
+                        with_locs,
+                        dedup,
+                        &label.lbl_name,
+                        &def,
+                        false,
+                    ));
+                }
             }
             let ext_sexp = match extended_expression {
                 None => Sexp::atom("None"),

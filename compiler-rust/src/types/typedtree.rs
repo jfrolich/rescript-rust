@@ -28,6 +28,7 @@ use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
+use std::sync::Arc;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
@@ -225,12 +226,20 @@ pub enum ExpressionDesc {
     /// Record: `{l1: E1, ..., ln: En}` or `{...E0, l1: E1, ...}`.
     /// Fields are (lid, label_desc, definition, optional).
     Texp_record {
-        fields: Vec<(
-            Loc<LidentIdx>,
-            LabelDescription,
-            RecordLabelDefinition,
-            bool,
-        )>,
+        fields: Vec<RecordField>,
+        extended_expression: Option<Box<Expression>>,
+    },
+
+    /// Large regular record with many omitted optional fields.
+    ///
+    /// OCaml compiler/ml/typecore.ml:2833-2842 stores one entry per label from
+    /// the shared `lbl_all` array. Keep the same external typedtree shape by
+    /// expanding in serializers, but avoid copying hundreds of label
+    /// descriptions into every sparse JSX record internally.
+    Texp_record_sparse {
+        all_labels: Arc<Vec<LabelDescription>>,
+        fields: Vec<RecordField>,
+        omitted_optionals: Vec<OmittedOptionalRecordField>,
         extended_expression: Option<Box<Expression>>,
     },
 
@@ -337,6 +346,15 @@ pub enum RecordLabelDefinition {
     /// `Texp_construct None` expression for every sparse JSX record field.
     OmittedOptionalNone(Loc<LidentIdx>, TypeExprRef),
 }
+
+pub type RecordField = (
+    Loc<LidentIdx>,
+    LabelDescription,
+    RecordLabelDefinition,
+    bool,
+);
+
+pub type OmittedOptionalRecordField = (usize, Loc<LidentIdx>, TypeExprRef);
 
 /// An argument in a function application.
 #[derive(Debug, Clone)]

@@ -218,6 +218,9 @@ impl<'a> LambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
             ),
+            ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                self.convert_record(self.loc(expr.exp_loc), fields, None)
+            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
                 let primitive = Primitive::Pfield(

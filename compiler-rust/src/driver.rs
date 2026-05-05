@@ -321,6 +321,22 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                     visit_expression(max_stamp, base);
                 }
             }
+            ExpressionDesc::Texp_record_sparse {
+                fields,
+                extended_expression,
+                ..
+            } => {
+                for (_, _, field, _) in fields {
+                    if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
+                        field
+                    {
+                        visit_expression(max_stamp, expr);
+                    }
+                }
+                if let Some(base) = extended_expression {
+                    visit_expression(max_stamp, base);
+                }
+            }
             ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
                 visit_expression(max_stamp, expr);
             }

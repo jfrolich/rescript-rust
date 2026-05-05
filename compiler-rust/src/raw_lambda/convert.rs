@@ -3202,6 +3202,12 @@ impl<'a> RawLambdaConverter<'a> {
                         extended_expression.as_deref(),
                         inlined_record_representation(cstr),
                     ),
+                    ExpressionDesc::Texp_record_sparse { fields, .. } => self.convert_record_raw(
+                        self.loc(arg.exp_loc),
+                        fields,
+                        None,
+                        inlined_record_representation(cstr),
+                    ),
                     _ => self.convert_expr_raw(arg),
                 },
                 [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
@@ -5548,6 +5554,9 @@ impl<'a> RawLambdaConverter<'a> {
                 extended_expression.as_deref(),
                 None,
             ),
+            ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                self.convert_record_raw(self.loc(expr.exp_loc), fields, None, None)
+            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                     self.convert_expr_raw(record)
@@ -5744,6 +5753,9 @@ impl<'a> RawLambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
             ),
+            ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                self.convert_record(self.loc(expr.exp_loc), fields, None)
+            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
                 let primitive = Primitive::Pfield(
@@ -5840,6 +5852,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_construct(_, _, _) => "Texp_construct",
             ExpressionDesc::Texp_variant(_, _) => "Texp_variant",
             ExpressionDesc::Texp_record { .. } => "Texp_record",
+            ExpressionDesc::Texp_record_sparse { .. } => "Texp_record_sparse",
             ExpressionDesc::Texp_field(_, _, _) => "Texp_field",
             ExpressionDesc::Texp_setfield(_, _, _, _) => "Texp_setfield",
             ExpressionDesc::Texp_array(_) => "Texp_array",
