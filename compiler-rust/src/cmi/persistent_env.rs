@@ -1474,7 +1474,36 @@ impl PersistentEnv {
             None => return false,
         };
         let module_path = Path::Pident(Ident::create_persistent(name));
-        add_signature_to_env_with_options(&ps.ps_sig, &module_path, env, ctx, true, false, true);
+        let components_key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
+            module_path.clone(),
+            None,
+        );
+        // OCaml compiler/ml/env.ml:669-678 stores persistent module components
+        // in one `ps_comps` lazy table, and env.ml:1874-1877 forces that same
+        // table when opening the module. Reuse an already forced component view
+        // here so `prefix_idents` and `Subst.modtype_declaration` side effects
+        // are not repeated.
+        let components = ctx
+            .with_qualified_module_components(&components_key, |components| components.clone())
+            .unwrap_or_else(|| {
+                let components = crate::types::env_lazy::QualifiedModuleComponents::new(
+                    module_path.clone(),
+                    ps.ps_sig.clone(),
+                    ctx,
+                );
+                ctx.register_qualified_module_components(components_key, components.clone());
+                components
+            });
+        add_signature_to_env_with_options(
+            &ps.ps_sig,
+            &module_path,
+            env,
+            ctx,
+            true,
+            false,
+            true,
+            Some(&components),
+        );
         true
     }
 
@@ -4614,7 +4643,16 @@ pub fn add_signature_to_env(
     ctx: &TypeContext,
     as_opened: bool,
 ) {
-    add_signature_to_env_with_options(sig_items, module_path, env, ctx, as_opened, true, true);
+    add_signature_to_env_with_options(
+        sig_items,
+        module_path,
+        env,
+        ctx,
+        as_opened,
+        true,
+        true,
+        None,
+    );
 }
 
 fn add_signature_to_env_with_options(
@@ -4625,6 +4663,7 @@ fn add_signature_to_env_with_options(
     as_opened: bool,
     apply_path_subst: bool,
     register_loaded_types: bool,
+    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
 ) {
     // Apply path substitution: rewrite Tconstr paths from internal
     // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
@@ -5064,10 +5103,20 @@ fn add_signature_to_env_with_options(
                 }
             }
             SignatureItem::SigModtype(id, mtd) => {
+                let mtd = precomputed_components
+                    .and_then(|components| {
+                        // OCaml compiler/ml/env.ml:1853-1855 opens
+                        // `comp_modtypes`, whose entries were built at
+                        // env.ml:1581-1584 via `Subst.modtype_declaration`.
+                        components
+                            .lookup_modtype(id.name())
+                            .map(|(_, component_mtd)| component_mtd.clone())
+                    })
+                    .unwrap_or_else(|| mtd.clone());
                 if as_opened {
-                    env.add_opened_modtype(id.clone(), mtd.clone());
+                    env.add_opened_modtype(id.clone(), mtd);
                 } else {
-                    env.add_modtype(id.clone(), mtd.clone());
+                    env.add_modtype(id.clone(), mtd);
                 }
             }
             SignatureItem::SigTypext(id, ext, _status) => {

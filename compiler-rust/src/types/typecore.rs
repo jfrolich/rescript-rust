@@ -12771,6 +12771,17 @@ fn type_record(
                     .map(Vec::as_slice),
                 &field_name,
             )
+            .map(|mut label| {
+                // OCaml compiler/ml/typecore.ml:1163-1198 sends record
+                // fields through `Label.disambiguate`; its
+                // compiler/ml/typecore.ml:942-967 `lookup_from_type` observes
+                // labels after env.ml:1542-1548 `Subst.type_declaration`.
+                // Labels rebuilt directly from Rust's selected record type need
+                // the same path qualification before `type_label_exp`
+                // instantiates them.
+                qualify_label_description_paths(&mut label, env, &mut tctx.persistent_env, ctx);
+                label
+            })
         })
         .or_else(|| {
             disambiguate_label(
@@ -12826,7 +12837,21 @@ fn type_record(
                     let expected_label = find_record_label_description_by_name(
                         expected_label_descriptions.as_deref().map(Vec::as_slice),
                         &field_name,
-                    );
+                    )
+                    .map(|mut label| {
+                        // OCaml compiler/ml/typecore.ml:3677-3717 receives the
+                        // already-substituted label chosen by
+                        // typecore.ml:942-967 `lookup_from_type`; qualify the
+                        // expected-type label before `instance_label` so field
+                        // argument paths mirror the reference component table.
+                        qualify_label_description_paths(
+                            &mut label,
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                        );
+                        label
+                    });
                     let env_label = expected_label
                         .or_else(|| {
                             lookup_label_by_expected_type(
@@ -19716,6 +19741,23 @@ fn qualify_label_description_paths<'a>(
                 if has_unresolved_local_path || parent_has_alias_target {
                     module_access_paths.push(parent.clone());
                 }
+                // OCaml compiler/ml/env.ml:1542-1548 builds labels from
+                // `decl' = Subst.type_declaration sub decl`; compiler/ml/subst.ml:87-95
+                // rewrites every dotted module prefix through `module_path`.
+                // If the record result path is `Layout.Types.Component.t`, a
+                // field type copied from the scraped alias may still mention
+                // `Layout__Types.Component.kind`. Include alias-bearing
+                // ancestors such as `Layout.Types` so the same prefix
+                // substitution is visible in the selected label descriptor.
+                let mut ancestor = parent.parent();
+                while let Some(path) = ancestor {
+                    let has_alias_target =
+                        raw_alias_target_for_module_path(&path, env, pers_env, ctx).is_some();
+                    if has_alias_target && !module_access_paths.iter().any(|p| p.same(&path)) {
+                        module_access_paths.push(path.clone());
+                    }
+                    ancestor = path.parent();
+                }
             }
             let root = path_root_module(res_path);
             let root_has_alias_target =
@@ -22221,13 +22263,14 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
 
     // OCaml compiler/ml/env.ml:800-813 implements qualified type lookup by
     // first reading the parent with `find_module_descr`; for persistent modules
-    // env.ml:1000-1007 returns `ps_comps`, not `Lazy.force ps.ps_sig`. Let the
-    // component path below use the raw component table so `Obj.t`/`Js.t` lookups
-    // do not consume `Subst.signature` stamps before OCaml would.
+    // env.ml:1000-1007 returns `ps_comps`, not `Lazy.force ps.ps_sig`. Read the
+    // resolved component table for the declaration, but return the selected
+    // lookup prefix: env.ml:1091-1099 builds `Pdot(p, s, pos)` from the module
+    // path `p`, even when the component table was produced by scraping an alias.
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components.lookup_type(type_name).map(|(id, decl)| {
             let result = (
-                components.access_path().clone(),
+                parent_module_path.clone(),
                 id.clone(),
                 Arc::new(decl.clone()),
             );
