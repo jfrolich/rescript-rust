@@ -13944,28 +13944,21 @@ fn type_structure_item<'a>(
             // same alias-rewritten module resolution path as value lookup.
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
-            let direct_persistent_open = match open_lid {
-                Longident::Lident(mod_idx) => {
-                    let mod_name = arena.get_string(*mod_idx);
-                    if env.find_module_with_origin(mod_name).is_err() {
-                        tctx.persistent_env.as_mut().and_then(|pers| {
-                            pers.find_pers_struct(mod_name, tctx.type_ctx).map(|ps| {
-                                (
-                                    Path::pident(Ident::create_persistent(mod_name)),
-                                    std::sync::Arc::new(ps.ps_sig.clone()),
-                                )
-                            })
-                        })
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            let path = if let Some((resolved_path, sig_items)) =
-                direct_persistent_open.or_else(|| {
-                    env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
-                }) {
+            let path = if let Some(path) = open_direct_persistent_module(
+                &mut new_env,
+                open_lid,
+                arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
+                // OCaml compiler/ml/typemod.ml:88-90 handles structure opens
+                // through `Env.open_signature`; for persistent roots that reaches
+                // compiler/ml/env.ml:1874-1877 and forces the cached `ps_comps`
+                // table from env.ml:669-678.
+                path
+            } else if let Some((resolved_path, sig_items)) =
+                env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+            {
                 crate::cmi::persistent_env::add_signature_to_env(
                     sig_items.as_ref(),
                     &resolved_path,
