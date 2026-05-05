@@ -2914,6 +2914,7 @@ fn preserve_alias_unify_representative(
     parameter_ty: TypeExprRef,
     argument_ty: TypeExprRef,
     allow_local_aliases: bool,
+    allow_persistent_manifest_aliases: bool,
 ) {
     #[derive(Clone, Copy)]
     enum AliasLinkDirection {
@@ -2927,6 +2928,14 @@ fn preserve_alias_unify_representative(
             && env.find_module(head.name()).ok().is_some_and(|md| {
                 matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(..))
             })
+    }
+
+    fn path_root_is_persistent(path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => id.is_persistent(),
+            Path::Pdot(parent, _, _) => path_root_is_persistent(parent),
+            Path::Papply(_, _) => false,
+        }
     }
 
     fn constr_path_and_arity(ctx: &TypeContext<'_>, ty: TypeExprRef) -> Option<(Path, usize)> {
@@ -2977,6 +2986,7 @@ fn preserve_alias_unify_representative(
         parameter_args: &[TypeExprRef],
         argument_args: &[TypeExprRef],
         allow_local_aliases: bool,
+        allow_persistent_manifest_aliases: bool,
     ) {
         let ctx = tctx.type_ctx;
         let argument_is_local_alias = path_head_is_local_module_alias(env, &argument_path);
@@ -2992,6 +3002,34 @@ fn preserve_alias_unify_representative(
             &argument_path,
             arity,
         );
+        let persistent_manifest_pair = allow_persistent_manifest_aliases
+            && arity == 0
+            && path_root_is_persistent(&parameter_path)
+            && path_root_is_persistent(&argument_path);
+        let parameter_manifest_aliases_argument = persistent_manifest_pair
+            && crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, &parameter_path)
+                .as_ref()
+                .is_some_and(|decl| {
+                    crate::types::ctype::decl_manifest_aliases_path(
+                        ctx,
+                        decl,
+                        &argument_path,
+                        arity,
+                    )
+                });
+        let argument_manifest_aliases_parameter = persistent_manifest_pair
+            && crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, &argument_path)
+                .as_ref()
+                .is_some_and(|decl| {
+                    crate::types::ctype::decl_manifest_aliases_path(
+                        ctx,
+                        decl,
+                        &parameter_path,
+                        arity,
+                    )
+                });
+        let manifest_alias_equiv =
+            parameter_manifest_aliases_argument || argument_manifest_aliases_parameter;
         let direction = if argument_is_local_alias && !parameter_is_local_alias {
             Some(AliasLinkDirection::ParameterToArgument)
         } else if parameter_is_local_alias && !argument_is_local_alias {
@@ -3003,6 +3041,19 @@ fn preserve_alias_unify_representative(
             // representative over the unpack payload's underlying `Belt.Id.cmp`
             // path.
             Some(AliasLinkDirection::ArgumentToParameter)
+        } else if parameter_manifest_aliases_argument && !argument_manifest_aliases_parameter {
+            // OCaml compiler/ml/typecore.ml:3771-3773 types an application
+            // argument against the selected parameter type. Then
+            // compiler/ml/ctype.ml:2338-2364 expands manifest heads, and
+            // ctype.ml:2393-2397 links the expanded actual head to the
+            // original selected persistent alias in expression mode. Preserve
+            // that for cases like `Webapi.Dom.Location.t = Dom.location`,
+            // without applying the rule to local module aliases handled above.
+            Some(AliasLinkDirection::ArgumentToParameter)
+        } else if argument_manifest_aliases_parameter && !parameter_manifest_aliases_argument {
+            // Same OCaml ctype.ml:2338-2364 / 2393-2397 path, with the alias
+            // spelling on the argument side.
+            Some(AliasLinkDirection::ParameterToArgument)
         } else if flattened_alias_equiv {
             match preferred_alias_equiv_representative(env, ctx, parameter_repr, argument_repr) {
                 Some(preferred) if preferred == parameter_repr => {
@@ -3096,6 +3147,7 @@ fn preserve_alias_unify_representative(
         let shares_identity = shares_direct_identity
             || shares_ctype_identity
             || selected_local_parameter_alias
+            || manifest_alias_equiv
             || flattened_alias_equiv;
         if !shares_identity {
             return;
@@ -3157,6 +3209,7 @@ fn preserve_alias_unify_representative(
         parameter_ty: TypeExprRef,
         argument_ty: TypeExprRef,
         allow_local_aliases: bool,
+        allow_persistent_manifest_aliases: bool,
         seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
     ) {
         let ctx = tctx.type_ctx;
@@ -3250,6 +3303,7 @@ fn preserve_alias_unify_representative(
                         parameter_args.as_slice(),
                         argument_args.as_slice(),
                         allow_local_aliases,
+                        allow_persistent_manifest_aliases,
                     );
                 }
                 for (parameter_arg, argument_arg) in parameter_args.iter().zip(argument_args.iter())
@@ -3260,6 +3314,7 @@ fn preserve_alias_unify_representative(
                         *parameter_arg,
                         *argument_arg,
                         allow_local_aliases,
+                        allow_persistent_manifest_aliases,
                         seen,
                     );
                 }
@@ -3272,6 +3327,7 @@ fn preserve_alias_unify_representative(
                         parameter_child,
                         argument_child,
                         allow_local_aliases,
+                        allow_persistent_manifest_aliases,
                         seen,
                     );
                 }
@@ -3287,6 +3343,7 @@ fn preserve_alias_unify_representative(
         parameter_ty,
         argument_ty,
         allow_local_aliases,
+        allow_persistent_manifest_aliases,
         &mut seen,
     );
 }
@@ -3658,7 +3715,7 @@ fn merge_or_pattern_variables(
                     // same selected representative before Rust's unification so
                     // nested flattened aliases from the second branch do not win
                     // over the first branch's selected component path.
-                    preserve_alias_unify_representative(tctx, env, v1.ty, v2.ty, true);
+                    preserve_alias_unify_representative(tctx, env, v1.ty, v2.ty, true, false);
                     unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
                     // Match OCaml alpha_pat: rename branch-2 ids onto branch-1 ids.
                     result.push((v2.id.clone(), v1.id.clone()));
@@ -5859,7 +5916,7 @@ pub fn type_expect<'a>(
             // unification so an expected application type does not relink a
             // selected component path such as `Web.MediaStream.t` back to its
             // flattened backing unit.
-            preserve_alias_unify_representative(tctx, env, ty, expected_ty, false);
+            preserve_alias_unify_representative(tctx, env, ty, expected_ty, false, false);
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
@@ -8763,6 +8820,7 @@ fn type_application(
                     arg_expected_ty,
                     typed_arg.exp_type,
                     true,
+                    true,
                 );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
@@ -8786,6 +8844,7 @@ fn type_application(
                         typed_arg.exp_type,
                         unify_ty,
                         false,
+                        true,
                     );
                     unify_expression_types(
                         tctx,
@@ -8799,6 +8858,7 @@ fn type_application(
                         env,
                         unify_ty,
                         typed_arg.exp_type,
+                        true,
                         true,
                     );
                 }
@@ -10200,6 +10260,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                     pending.typed_pat.pat_type,
                     ty_arg_prime,
                     true,
+                    false,
                 );
                 unify_pattern_types(
                     tctx,
@@ -10245,6 +10306,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                         pending.typed_pat.pat_type,
                         propagated_ty,
                         true,
+                        false,
                     );
                     unify_pattern_types(
                         tctx,

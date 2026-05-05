@@ -404,7 +404,7 @@ fn path_root_ident(path: &Path) -> Option<&Ident> {
     }
 }
 
-fn decl_manifest_aliases_path(
+pub(crate) fn decl_manifest_aliases_path(
     ctx: &TypeContext<'_>,
     decl: &super::decl::TypeDeclaration,
     target: &Path,
