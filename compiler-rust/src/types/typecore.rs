@@ -17523,14 +17523,10 @@ impl Env {
                                 // `md_path` only when its root agrees with the
                                 // resolved access parent, matching OCaml's
                                 // env.ml:1573-1578 child component path.
-                                let access_pdot = Path::pdot(
-                                    parent_path.clone(),
-                                    submod_name.to_string(),
-                                );
+                                let access_pdot =
+                                    Path::pdot(parent_path.clone(), submod_name.to_string());
                                 match md.md_path.as_ref() {
-                                    Some(md_path)
-                                        if md_path.head().same(parent_path.head()) =>
-                                    {
+                                    Some(md_path) if md_path.head().same(parent_path.head()) => {
                                         md_path.clone()
                                     }
                                     _ => access_pdot,
