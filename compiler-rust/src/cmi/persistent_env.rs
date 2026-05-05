@@ -883,6 +883,17 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.alias_prefix_rewrites,
             );
+            // Reusing a worker `TypeContext` clears short-name and stamp-keyed
+            // declaration tables at unit boundaries because OCaml resets local
+            // stamps per unit (`compiler/ml/predef.ml:447`). A cache hit still
+            // has to re-install this module's declarations for the current unit;
+            // OCaml exposes the same ps_sig through the persistent table
+            // (`compiler/ml/env.ml:711-746`) without re-reading the CMI.
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            if !effective_module_path.same(&module_path) {
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+            }
+            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
         }
 
         if should_register_lazy_raw_sig(cache_key) && !ctx.has_raw_module_sig(cache_key) {

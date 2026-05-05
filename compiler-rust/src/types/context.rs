@@ -438,15 +438,13 @@ impl TypeContext {
     ///   bounded by typical sig sizes.
     /// - `abbrevs`, `row_fields`, `commutables`, `field_kinds`: side tables for
     ///   indirect refs inside types; index stability matters.
-    /// - `type_decl_store`, `type_decl_by_stamp`, `type_decl_by_path`,
-    ///   `resolved_pdot_type_cache`, `resolved_module_sig_cache`: declaration
-    ///   stores populated by `register_sig_types_recursive`. These are the win.
-    /// - `persistent_env` cache, `renamed_module_sigs`, `raw_module_sigs`:
-    ///   the materialized PersStruct cache. Reusing this across compiles is
-    ///   the whole point.
+    /// - `type_decl_by_path`, `resolved_pdot_type_cache`,
+    ///   `resolved_module_sig_cache`: declaration stores keyed by stable full
+    ///   paths populated by `register_sig_types_recursive`. These are the win.
+    /// - `persistent_env` cache: the materialized PersStruct cache. Reusing this
+    ///   across compiles is the whole point.
     /// - Predef type singletons: stable across compiles.
-    /// - `flattened_alias_component_paths`, `record_labels_cache`,
-    ///   `record_label_descriptions_cache`: indexed by stable path strings.
+    /// - `flattened_alias_component_paths`: indexed by stable path strings.
     /// - `cmi_longident_names`, `next_cmi_longident_idx`: synthetic CMI
     ///   longident state; numbered identifiers must not collide so we keep
     ///   appending.
@@ -488,6 +486,19 @@ impl TypeContext {
         if let Some(simple) = self.abbrevs.borrow().get(1) {
             *simple.borrow_mut() = AbbrevMemo::Mnil;
         }
+
+        // Per-compile lookup state. `type_decl_store` is keyed only by short
+        // type name and `type_decl_by_stamp` uses local stamps; OCaml resets
+        // those stamps for every unit (`compiler/ml/predef.ml:447`), so keeping
+        // either table across units lets unrelated local `t` declarations alias.
+        // Record caches may also be keyed by local record paths with reused
+        // stamps, so they must be rebuilt per compile.
+        self.type_decl_store.borrow_mut().clear();
+        self.type_decl_by_stamp.borrow_mut().clear();
+        self.record_labels_cache.borrow_mut().clear();
+        self.record_label_descriptions_cache.borrow_mut().clear();
+        self.raw_module_sigs.borrow_mut().clear();
+        self.renamed_module_sigs.borrow_mut().clear();
 
         // Per-compile env-keyed caches. Cheaper to drop than to grow.
         self.qualified_module_components_cache.borrow_mut().clear();
