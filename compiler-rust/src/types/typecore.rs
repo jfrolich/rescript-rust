@@ -17549,27 +17549,20 @@ impl Env {
                     pers_env,
                     ctx,
                     |components| {
-                        components.lookup_module(submod_name).map(|(pos, _, md)| {
+                        components.lookup_module(submod_name).map(|(pos, _, _md)| {
                             if path_non_apply_root_is_persistent_or_global(&parent_path) {
-                                // OCaml compiler/ml/env.ml:781-793 returns the
-                                // qualified component path `Pdot(parent, name)`
-                                // from `find_module_descr`. When the child is an
-                                // alias whose `md_path` points at a different
-                                // persistent unit (e.g. `MediaDevices` aliased
-                                // to `Web__MediaDevices`), preferring `md_path`
-                                // here would replace the user-visible access path
-                                // (`Web.MediaDevices`) with the alias target. Use
-                                // `md_path` only when its root agrees with the
-                                // resolved access parent, matching OCaml's
-                                // env.ml:1573-1578 child component path.
-                                let access_pdot =
-                                    Path::pdot(parent_path.clone(), submod_name.to_string());
-                                match md.md_path.as_ref() {
-                                    Some(md_path) if md_path.head().same(parent_path.head()) => {
-                                        md_path.clone()
-                                    }
-                                    _ => access_pdot,
-                                }
+                                // OCaml compiler/ml/env.ml:1008-1013
+                                // `lookup_module_descr_aux` and env.ml:1064-1073
+                                // `lookup_module` construct the selected child
+                                // access path as `Pdot(parent, name, pos)`.
+                                // The module declaration's `md_path` is the
+                                // alias target; using it here leaks the backing
+                                // unit into typedtree paths.
+                                Path::pdot_pos(
+                                    parent_path.clone(),
+                                    submod_name.to_string(),
+                                    pos as i32,
+                                )
                             } else {
                                 Path::Pdot(
                                     Box::new(parent_path.clone()),
