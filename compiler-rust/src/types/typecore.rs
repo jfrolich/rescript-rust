@@ -14065,11 +14065,9 @@ fn type_open(
                     // followed by `Env.open_signature`. For persistent roots,
                     // compiler/ml/env.ml:658-672 precomputes `ps_comps`, and
                     // env.ml:1874-1877 opens those components. The component
-                    // builder at env.ml:1516-1538 applies prefix substitution to
-                    // value descriptions but does not force `ps_sig` or freshen
-                    // exported value identifiers. Reuse the raw persistent open
-                    // path here so local opens do not eagerly consume hidden
-                    // signature binder stamps before the body is finished.
+                    // builder at env.ml:1516-1588 applies prefix substitution
+                    // and `Subst.modtype_declaration` through the cached
+                    // component table instead of forcing `ps_sig`.
                     if pers.open_module(mod_name, &mut open_env, tctx.type_ctx) {
                         Some(Path::pident(Ident::create_persistent(mod_name)))
                     } else {
