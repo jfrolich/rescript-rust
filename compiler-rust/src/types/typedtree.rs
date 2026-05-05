@@ -28,7 +28,6 @@ use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
-use std::sync::Arc;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
@@ -237,9 +236,8 @@ pub enum ExpressionDesc {
     /// expanding in serializers, but avoid copying hundreds of label
     /// descriptions into every sparse JSX record internally.
     Texp_record_sparse {
-        all_labels: Arc<Vec<LabelDescription>>,
         fields: Vec<RecordField>,
-        omitted_optionals: Vec<OmittedOptionalRecordField>,
+        omitted_loc: LocIdx,
         extended_expression: Option<Box<Expression>>,
     },
 
@@ -353,8 +351,6 @@ pub type RecordField = (
     RecordLabelDefinition,
     bool,
 );
-
-pub type OmittedOptionalRecordField = (usize, Loc<LidentIdx>, TypeExprRef);
 
 /// An argument in a function application.
 #[derive(Debug, Clone)]

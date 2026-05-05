@@ -1093,9 +1093,8 @@ pub fn specialize_expression(
             }
         }
         typedtree::ExpressionDesc::Texp_record_sparse {
-            all_labels,
             fields,
-            omitted_optionals,
+            omitted_loc,
             extended_expression,
         } => {
             let spec_fields: Vec<_> = fields
@@ -1123,9 +1122,8 @@ pub fn specialize_expression(
                 .map(|e| specialize_expression(e, env, ctx, type_env))
                 .transpose()?;
             typedtree::ExpressionDesc::Texp_record_sparse {
-                all_labels: all_labels.clone(),
                 fields: spec_fields,
-                omitted_optionals: omitted_optionals.clone(),
+                omitted_loc: *omitted_loc,
                 extended_expression: spec_ext.map(Box::new),
             }
         }
