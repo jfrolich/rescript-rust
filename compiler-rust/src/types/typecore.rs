@@ -12585,7 +12585,7 @@ fn select_record_type_for_fields<'a>(
     }
 }
 
-fn select_record_type_from_qualified_fields<'a>(
+fn select_record_type_from_qualified_label_scope<'a>(
     ctx: &'a TypeContext<'a>,
     arena: &ParseArena,
     env: &Env,
@@ -12594,43 +12594,52 @@ fn select_record_type_from_qualified_fields<'a>(
     field_names: &[String],
     closed_record: bool,
 ) -> Option<TypeExprRef> {
-    use crate::types::decl::SignatureItem;
+    if field_names.len() <= 1 {
+        return None;
+    }
 
     let first_field = fields.first()?;
     let first_lid = arena.get_longident(first_field.lid.txt);
-    let Longident::Ldot(module_lid, _) = first_lid else {
+    let Longident::Ldot(module_lid, label_idx) = first_lid else {
         return None;
     };
+    let label_name = arena.get_string(*label_idx);
 
-    let (module_path, signature) =
-        env.resolve_module_lid(module_lid.as_ref(), arena, pers_env, ctx)?;
-    let mut matches: Vec<TypeExprRef> = Vec::new();
+    // OCaml compiler/ml/typecore.ml:1098-1125 first calls
+    // `Typetexp.find_all_labels`, then typecore.ml:1071-1095
+    // `disambiguate_label_by_ids` reduces that label scope by the full record
+    // field set. `find_all_labels` reaches compiler/ml/env.ml:1114-1120 and
+    // env.ml:1138-1142, reading the module component `comp_labels` table
+    // without forcing env.ml:865-875's persistent `ps_sig` lazy.
+    let candidates = with_resolved_module_components_for_lid(
+        module_lid.as_ref(),
+        arena,
+        env,
+        pers_env,
+        ctx,
+        |components| {
+            components
+                .lookup_labels(label_name)
+                .map(|labels| labels.to_vec())
+        },
+    )
+    .flatten()?;
 
-    for sig_item in &signature {
-        let SignatureItem::SigType(type_id, type_decl, _) = sig_item else {
-            continue;
-        };
-        let labels = match &type_decl.type_kind {
-            crate::types::TypeKind::TypeRecord(labels, _) => labels,
-            _ => continue,
-        };
-        if !record_labels_match_ids(labels, field_names, closed_record) {
-            continue;
+    let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
+    for label in candidates {
+        if let Some(labels) = get_record_labels(ctx, env, pers_env, label.lbl_res) {
+            if record_labels_match_ids(&labels, field_names, closed_record) {
+                let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
+                if matching.iter().any(|(existing, _)| *existing == key) {
+                    continue;
+                }
+                matching.push((key, label.lbl_res));
+            }
         }
-
-        let type_path = Path::pdot(module_path.clone(), type_id.name().to_string());
-        let candidate = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
-        if matches
-            .iter()
-            .any(|existing| ctx.repr(*existing) == ctx.repr(candidate))
-        {
-            continue;
-        }
-        matches.push(candidate);
     }
 
-    if matches.len() == 1 {
-        matches.into_iter().next()
+    if matching.len() == 1 {
+        Some(matching[0].1)
     } else {
         None
     }
@@ -12784,7 +12793,7 @@ fn type_record(
         closed_record,
     )
     .or_else(|| {
-        select_record_type_from_qualified_fields(
+        select_record_type_from_qualified_label_scope(
             ctx,
             tctx.arena,
             env,
