@@ -243,14 +243,25 @@ pub enum TypeDesc {
 /// A reference to a type expression.
 ///
 /// In the arena-based design, this is an index or pointer.
-/// For now, we use a simple newtype wrapper.
+/// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
+/// reduces typedtree and type descriptor memory traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeExprRef(pub usize);
+pub struct TypeExprRef(pub u32);
 
 impl TypeExprRef {
     /// Create a null reference (for placeholder purposes).
     pub fn null() -> Self {
         TypeExprRef(0)
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("type arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -261,7 +272,7 @@ impl TypeExprRef {
 /// storage avoids hashing for short-lived copy/substitution caches.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefMap<T> {
-    offset: usize,
+    offset: u32,
     values: Vec<Option<T>>,
 }
 
@@ -275,7 +286,7 @@ impl<T> TypeExprRefMap<T> {
 
     #[inline]
     pub(crate) fn get(&self, key: TypeExprRef) -> Option<&T> {
-        let idx = key.0.checked_sub(self.offset)?;
+        let idx = key.0.checked_sub(self.offset)? as usize;
         self.values.get(idx)?.as_ref()
     }
 
@@ -288,7 +299,7 @@ impl<T> TypeExprRefMap<T> {
         }
 
         if key.0 < self.offset {
-            let prepend = self.offset - key.0;
+            let prepend = (self.offset - key.0) as usize;
             let mut values = Vec::with_capacity(self.values.len() + prepend);
             values.resize_with(prepend, || None);
             values.append(&mut self.values);
@@ -296,7 +307,7 @@ impl<T> TypeExprRefMap<T> {
             self.offset = key.0;
         }
 
-        let idx = key.0 - self.offset;
+        let idx = (key.0 - self.offset) as usize;
         if idx >= self.values.len() {
             self.values.resize_with(idx + 1, || None);
         }

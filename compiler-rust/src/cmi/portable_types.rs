@@ -375,7 +375,7 @@ fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &[Port
 }
 
 fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &[PortableTypeEntry]) {
-    hash_type_ref(hasher, vd.val_type.0, entries, &mut Vec::new());
+    hash_type_ref(hasher, vd.val_type.index(), entries, &mut Vec::new());
     match &vd.val_kind {
         ValueKind::ValReg => {
             0u8.hash(hasher);
@@ -403,7 +403,7 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[Por
     td.type_private.hash(hasher);
     if let Some(manifest) = td.type_manifest {
         true.hash(hasher);
-        hash_type_ref(hasher, manifest.0, entries, &mut Vec::new());
+        hash_type_ref(hasher, manifest.index(), entries, &mut Vec::new());
     } else {
         false.hash(hasher);
     }
@@ -437,7 +437,7 @@ fn hash_type_expr_refs(
 ) {
     refs.len().hash(hasher);
     for r in refs {
-        hash_type_ref(hasher, r.0, entries, &mut Vec::new());
+        hash_type_ref(hasher, r.index(), entries, &mut Vec::new());
     }
 }
 
@@ -456,7 +456,7 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[Portable
                 hash_constructor_args(hasher, &ctor.cd_args, entries);
                 if let Some(res) = ctor.cd_res {
                     true.hash(hasher);
-                    hash_type_ref(hasher, res.0, entries, &mut Vec::new());
+                    hash_type_ref(hasher, res.index(), entries, &mut Vec::new());
                 } else {
                     false.hash(hasher);
                 }
@@ -475,7 +475,7 @@ fn hash_label_decls(
         label.ld_id.name().hash(hasher);
         label.ld_mutable.hash(hasher);
         label.ld_optional.hash(hasher);
-        hash_type_ref(hasher, label.ld_type.0, entries, &mut Vec::new());
+        hash_type_ref(hasher, label.ld_type.index(), entries, &mut Vec::new());
     }
 }
 
@@ -501,7 +501,7 @@ fn hash_extension_constructor(
     hash_constructor_args(hasher, &ext.ext_args, entries);
     if let Some(ret) = ext.ext_ret_type {
         true.hash(hasher);
-        hash_type_ref(hasher, ret.0, entries, &mut Vec::new());
+        hash_type_ref(hasher, ret.index(), entries, &mut Vec::new());
     } else {
         false.hash(hasher);
     }
@@ -751,15 +751,15 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_value_desc(&mut self, vd: &mut ValueDescription) {
-        vd.val_type = TypeExprRef(self.serialize_type(vd.val_type));
+        vd.val_type = TypeExprRef::from_usize(self.serialize_type(vd.val_type));
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
         for p in td.type_params.iter_mut() {
-            *p = TypeExprRef(self.serialize_type(*p));
+            *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
         if let Some(ref mut m) = td.type_manifest {
-            *m = TypeExprRef(self.serialize_type(*m));
+            *m = TypeExprRef::from_usize(self.serialize_type(*m));
         }
         match &mut td.type_kind {
             TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
@@ -786,14 +786,14 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_label_decl(&mut self, ld: &mut LabelDeclaration) {
-        ld.ld_type = TypeExprRef(self.serialize_type(ld.ld_type));
+        ld.ld_type = TypeExprRef::from_usize(self.serialize_type(ld.ld_type));
     }
 
     fn remap_ctor_decl(&mut self, cd: &mut ConstructorDeclaration) {
         match &mut cd.cd_args {
             ConstructorArguments::CstrTuple(types) => {
                 for t in types.iter_mut() {
-                    *t = TypeExprRef(self.serialize_type(*t));
+                    *t = TypeExprRef::from_usize(self.serialize_type(*t));
                 }
             }
             ConstructorArguments::CstrRecord(labels) => {
@@ -803,18 +803,18 @@ impl<'a> TypeGraphSerializer<'a> {
             }
         }
         if let Some(ref mut res) = cd.cd_res {
-            *res = TypeExprRef(self.serialize_type(*res));
+            *res = TypeExprRef::from_usize(self.serialize_type(*res));
         }
     }
 
     fn remap_ext_ctor(&mut self, ec: &mut ExtensionConstructor) {
         for p in ec.ext_type_params.iter_mut() {
-            *p = TypeExprRef(self.serialize_type(*p));
+            *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
         match &mut ec.ext_args {
             ConstructorArguments::CstrTuple(types) => {
                 for t in types.iter_mut() {
-                    *t = TypeExprRef(self.serialize_type(*t));
+                    *t = TypeExprRef::from_usize(self.serialize_type(*t));
                 }
             }
             ConstructorArguments::CstrRecord(labels) => {
@@ -824,7 +824,7 @@ impl<'a> TypeGraphSerializer<'a> {
             }
         }
         if let Some(ref mut ret) = ec.ext_ret_type {
-            *ret = TypeExprRef(self.serialize_type(*ret));
+            *ret = TypeExprRef::from_usize(self.serialize_type(*ret));
         }
     }
 
@@ -1042,15 +1042,15 @@ fn remap_sig_item_refs(item: &mut SignatureItem, remap: &[TypeExprRef]) {
 }
 
 fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
-    vd.val_type = remap[vd.val_type.0];
+    vd.val_type = remap[vd.val_type.index()];
 }
 
 fn remap_type_decl_refs(td: &mut TypeDeclaration, remap: &[TypeExprRef]) {
     for p in td.type_params.iter_mut() {
-        *p = remap[p.0];
+        *p = remap[p.index()];
     }
     if let Some(ref mut m) = td.type_manifest {
-        *m = remap[m.0];
+        *m = remap[m.index()];
     }
     match &mut td.type_kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
@@ -1077,14 +1077,14 @@ fn remap_type_decl_refs(td: &mut TypeDeclaration, remap: &[TypeExprRef]) {
 }
 
 fn remap_label_decl_refs(ld: &mut LabelDeclaration, remap: &[TypeExprRef]) {
-    ld.ld_type = remap[ld.ld_type.0];
+    ld.ld_type = remap[ld.ld_type.index()];
 }
 
 fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) {
     match &mut cd.cd_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.0];
+                *t = remap[t.index()];
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
@@ -1094,18 +1094,18 @@ fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) 
         }
     }
     if let Some(ref mut res) = cd.cd_res {
-        *res = remap[res.0];
+        *res = remap[res.index()];
     }
 }
 
 fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
     for p in ec.ext_type_params.iter_mut() {
-        *p = remap[p.0];
+        *p = remap[p.index()];
     }
     match &mut ec.ext_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.0];
+                *t = remap[t.index()];
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
@@ -1115,7 +1115,7 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
         }
     }
     if let Some(ref mut ret) = ec.ext_ret_type {
-        *ret = remap[ret.0];
+        *ret = remap[ret.index()];
     }
 }
 

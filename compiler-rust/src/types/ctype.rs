@@ -122,7 +122,7 @@ pub enum UnifyMode {
 /// - Backtracking information
 pub struct UnifyState {
     /// Set of already unified type pairs.
-    unified_pairs: HashSet<(usize, usize)>,
+    unified_pairs: HashSet<(u32, u32)>,
 
     /// Current unification mode.
     pub mode: UnifyMode,
@@ -8473,7 +8473,7 @@ pub fn normalize_type(ctx: &TypeContext, ty: TypeExprRef) {
 pub fn sort_all_object_fields(ctx: &TypeContext) {
     let count = ctx.type_expr_count();
     for i in 0..count {
-        let ty = TypeExprRef(i);
+        let ty = TypeExprRef::from_usize(i);
         let desc = ctx.get_desc(ty);
         if let TypeDesc::Tobject { fields: fi, .. } = &*desc {
             let fi = *fi;
@@ -8498,7 +8498,7 @@ pub fn sort_all_object_fields(ctx: &TypeContext) {
 pub fn normalize_all_types(ctx: &TypeContext) {
     let count = ctx.type_expr_count();
     for i in 0..count {
-        let ty = TypeExprRef(i);
+        let ty = TypeExprRef::from_usize(i);
         let desc = ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tvariant(row) => {

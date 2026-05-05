@@ -10743,7 +10743,7 @@ fn variant_row_key_for_pat_type(
     let desc = ctx.get_desc(repr);
     let is_variant = matches!(&*desc, TypeDesc::Tvariant(_));
     drop(desc);
-    if is_variant { Some(repr.0) } else { None }
+    if is_variant { Some(repr.index()) } else { None }
 }
 
 fn variant_row_desc_for_pat_type(
@@ -19220,7 +19220,7 @@ fn extract_type_path_from_expected_inner<'a>(
     visited_paths: &mut HashSet<Path>,
 ) -> Option<Path> {
     let ty = ctx.repr(expected_ty);
-    if !visited_types.insert(ty.0) {
+    if !visited_types.insert(ty.index()) {
         return None; // Already visited this type expression — break the cycle
     }
     let desc = ctx.get_desc(ty);
@@ -20261,7 +20261,7 @@ fn extract_concrete_record_type_info<'a>(
 
     loop {
         current = ctx.repr(current);
-        if !visited_types.insert(current.0) {
+        if !visited_types.insert(current.index()) {
             return None;
         }
 
@@ -21754,7 +21754,7 @@ fn collect_matching_type_paths<'a>(
     visited: &mut HashSet<usize>,
 ) {
     let ty = ctx.repr(ty);
-    if !visited.insert(ty.0) {
+    if !visited.insert(ty.index()) {
         return;
     }
     match &*ctx.get_desc(ty) {

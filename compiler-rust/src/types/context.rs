@@ -58,7 +58,7 @@ impl TypeArena {
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
         unsafe {
             let types = &*self.types.get();
-            types[r.0].as_ref()
+            types[r.index()].as_ref()
         }
     }
 
@@ -68,7 +68,7 @@ impl TypeArena {
             let types = &mut *self.types.get();
             let idx = types.len();
             types.push(ptr);
-            TypeExprRef(idx)
+            TypeExprRef::from_usize(idx)
         }
     }
 

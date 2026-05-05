@@ -3398,7 +3398,7 @@ fn substitute_type_expr_path(
     let mut work_stack = vec![initial_ty_ref];
 
     while let Some(ty_ref) = work_stack.pop() {
-        if !visited.insert(ty_ref.0) {
+        if !visited.insert(ty_ref.index()) {
             continue; // Already visited (cycle detection)
         }
 
@@ -3652,7 +3652,7 @@ fn rewrite_type_expr_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.0) {
+    if !visited.insert(ty_ref.index()) {
         return; // Already visited (cycle detection)
     }
 
@@ -4097,7 +4097,7 @@ fn rewrite_type_expr_by_path_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.0) {
+    if !visited.insert(ty_ref.index()) {
         return;
     }
 
@@ -4492,7 +4492,7 @@ fn rewrite_deep_prefix_expr(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.0) {
+    if !visited.insert(ty_ref.index()) {
         return;
     }
 
