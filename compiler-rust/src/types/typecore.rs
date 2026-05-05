@@ -19882,49 +19882,30 @@ fn lookup_label_by_lid<'a>(
     ctx: &'a crate::types::context::TypeContext<'a>,
     expected_record_ty: Option<TypeExprRef>,
 ) -> Option<crate::types::LabelDescription> {
-    use crate::types::decl::SignatureItem;
-
     let Longident::Ldot(module_lid, label_idx) = lid else {
         return None;
     };
 
     let label_name = arena.get_string(*label_idx);
-    let (module_path, signature) = env.resolve_module_lid(module_lid, arena, pers_env, ctx)?;
-    let mut candidates = Vec::new();
-
-    for sig_item in &signature {
-        if let SignatureItem::SigType(type_id, type_decl, _) = sig_item {
-            let (labels, repr) = match &type_decl.type_kind {
-                crate::types::TypeKind::TypeRecord(labels, repr) => (labels, repr),
-                _ => continue,
-            };
-
-            let type_path = Path::pdot(module_path.clone(), type_id.name().to_string());
-            let res_ty = ctx.new_generic_constr(type_path, type_decl.type_params.clone());
-
-            for (pos, ld) in labels.iter().enumerate() {
-                if ld.ld_id.name() == label_name {
-                    candidates.push(crate::types::LabelDescription {
-                        lbl_name: ld.ld_id.name().to_string(),
-                        lbl_res: res_ty,
-                        lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                            ctx,
-                            ld.ld_type,
-                            &type_decl.type_params,
-                        ),
-                        lbl_mut: ld.ld_mutable,
-                        lbl_optional: ld.ld_optional,
-                        lbl_pos: pos as i32,
-                        lbl_all: crate::types::LabelArrayRef(0),
-                        lbl_repres: repr.clone(),
-                        lbl_private: type_decl.type_private,
-                        lbl_loc: ld.ld_loc.clone(),
-                        lbl_attributes: ld.ld_attributes.clone(),
-                    });
-                }
-            }
-        }
-    }
+    // OCaml compiler/ml/typecore.ml:1107-1126 calls
+    // `Typetexp.find_all_labels` before `Label.disambiguate`; for qualified
+    // labels that reaches compiler/ml/env.ml:1114-1120/1138-1142 and reads the
+    // module component `comp_labels` table. Do the same instead of resolving and
+    // copying the full module signature, which would force unrelated
+    // compiler/ml/subst.ml:378-400 binder freshening before OCaml does.
+    let candidates = with_resolved_module_components_for_lid(
+        module_lid,
+        arena,
+        env,
+        pers_env,
+        ctx,
+        |components| {
+            components
+                .lookup_labels(label_name)
+                .map(|labels| labels.to_vec())
+        },
+    )
+    .flatten()?;
 
     if candidates.is_empty() {
         return None;
@@ -19934,7 +19915,7 @@ fn lookup_label_by_lid<'a>(
         if let Some(target_path) =
             extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)
         {
-            for candidate in candidates.iter().rev() {
+            for candidate in &candidates {
                 let cand_ty = ctx.repr(candidate.lbl_res);
                 let cand_desc = ctx.get_desc(cand_ty);
                 if let TypeDesc::Tconstr { path, .. } = &*cand_desc {
@@ -19956,7 +19937,7 @@ fn lookup_label_by_lid<'a>(
         }
     }
 
-    let mut selected = candidates.pop()?;
+    let mut selected = candidates.into_iter().next()?;
     qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
 }
