@@ -2908,11 +2908,12 @@ fn preferred_alias_equiv_representative<'a>(
     result
 }
 
-fn preserve_apply_argument_alias_representative(
+fn preserve_alias_unify_representative(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     parameter_ty: TypeExprRef,
     argument_ty: TypeExprRef,
+    allow_local_aliases: bool,
 ) {
     #[derive(Clone, Copy)]
     enum AliasLinkDirection {
@@ -2966,224 +2967,328 @@ fn preserve_apply_argument_alias_representative(
         })
     }
 
-    let ctx = tctx.type_ctx;
-    let parameter_repr = ctx.repr(parameter_ty);
-    let argument_repr = ctx.repr(argument_ty);
-    if parameter_repr == argument_repr {
-        return;
-    }
+    fn link_constr_pair(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        parameter_repr: TypeExprRef,
+        argument_repr: TypeExprRef,
+        parameter_path: Path,
+        argument_path: Path,
+        parameter_args: &[TypeExprRef],
+        argument_args: &[TypeExprRef],
+        allow_local_aliases: bool,
+    ) {
+        let ctx = tctx.type_ctx;
+        let argument_is_local_alias = path_head_is_local_module_alias(env, &argument_path);
+        let parameter_is_local_alias = path_head_is_local_module_alias(env, &parameter_path);
+        if !allow_local_aliases && (argument_is_local_alias || parameter_is_local_alias) {
+            return;
+        }
+        let arity = parameter_args.len();
+        let flattened_alias_equiv = crate::types::ctype::flattened_alias_paths_equivalent(
+            ctx,
+            env,
+            &parameter_path,
+            &argument_path,
+            arity,
+        );
+        let direction = if argument_is_local_alias && !parameter_is_local_alias {
+            Some(AliasLinkDirection::ParameterToArgument)
+        } else if parameter_is_local_alias && !argument_is_local_alias {
+            // OCaml compiler/ml/typecore.ml:2124-2133 lowers module-pattern
+            // unpacks to `let module`, then typecore.ml:3404-3407 enters that
+            // module before typing the body. With ctype.ml:2367-2379 linking
+            // expression unification representatives, an expected parameter
+            // selected through a local alias such as `Md0.cmp` must remain the
+            // representative over the unpack payload's underlying `Belt.Id.cmp`
+            // path.
+            Some(AliasLinkDirection::ArgumentToParameter)
+        } else if flattened_alias_equiv {
+            match preferred_alias_equiv_representative(env, ctx, parameter_repr, argument_repr) {
+                Some(preferred) if preferred == parameter_repr => {
+                    Some(AliasLinkDirection::ArgumentToParameter)
+                }
+                _ => Some(AliasLinkDirection::ParameterToArgument),
+            }
+        } else {
+            None
+        };
+        let Some(direction) = direction else {
+            return;
+        };
 
-    let candidate = {
-        let parameter_desc = ctx.get_desc(parameter_repr);
-        let argument_desc = ctx.get_desc(argument_repr);
-        let candidate = match (&*parameter_desc, &*argument_desc) {
-            (
-                TypeDesc::Tconstr {
-                    path: parameter_path,
-                    args: parameter_args,
-                    ..
-                },
-                TypeDesc::Tconstr {
-                    path: argument_path,
-                    args: argument_args,
-                    ..
-                },
-            ) if parameter_args.len() == argument_args.len()
-                && !parameter_path.same(argument_path) =>
-            {
-                let argument_is_local_alias = path_head_is_local_module_alias(env, argument_path);
-                let parameter_is_local_alias = path_head_is_local_module_alias(env, parameter_path);
-                let flattened_alias_equiv = crate::types::ctype::flattened_alias_paths_equivalent(
+        let local_manifest_arg_pairs: Vec<_> = parameter_args
+            .iter()
+            .zip(argument_args.iter())
+            .filter_map(|(parameter_arg, argument_arg)| {
+                let (parameter_arg_path, parameter_arg_arity) =
+                    constr_path_and_arity(ctx, *parameter_arg)?;
+                let (argument_arg_path, argument_arg_arity) =
+                    constr_path_and_arity(ctx, *argument_arg)?;
+                if parameter_arg_arity != argument_arg_arity {
+                    return None;
+                }
+                let Path::Pdot(argument_parent, argument_type_name, _) = &argument_arg_path else {
+                    return None;
+                };
+                if argument_type_name == "t" {
+                    // OCaml compiler/ml/ctype.ml:2340-2344 expands both heads
+                    // before unify3, so package value-carrier `t` manifests
+                    // (for example `M.t = Icmp2.t`) become equal without an
+                    // explicit ref mutation. Keep this compensation for the
+                    // non-`t` package fields where OCaml's local unpack refs
+                    // still win later.
+                    return None;
+                }
+                let Path::Pident(argument_module_id) = argument_parent.as_ref() else {
+                    return None;
+                };
+                let (manifest_path, manifest_arity) = raw_signature_manifest_path(
                     ctx,
                     env,
-                    parameter_path,
-                    argument_path,
-                    parameter_args.len(),
-                );
-                let direction = if argument_is_local_alias && !parameter_is_local_alias {
-                    Some(AliasLinkDirection::ParameterToArgument)
-                } else if parameter_is_local_alias && !argument_is_local_alias {
-                    // OCaml compiler/ml/typecore.ml:2124-2133 lowers
-                    // module-pattern unpacks to `let module`, then
-                    // typecore.ml:3404-3407 enters that module before typing
-                    // the body. With ctype.ml:2367-2379 linking expression
-                    // unification representatives, an expected parameter
-                    // selected through a local alias such as `Md0.cmp` must
-                    // remain the representative over the unpack payload's
-                    // underlying `Belt.Id.cmp` path.
-                    Some(AliasLinkDirection::ArgumentToParameter)
-                } else if flattened_alias_equiv {
-                    match preferred_alias_equiv_representative(
-                        env,
+                    argument_module_id,
+                    argument_type_name.as_str(),
+                )?;
+                if manifest_arity != parameter_arg_arity {
+                    return None;
+                }
+                if parameter_arg_path.same(&manifest_path)
+                    || crate::types::ctype::flattened_alias_paths_equivalent(
                         ctx,
-                        parameter_repr,
-                        argument_repr,
-                    ) {
-                        Some(preferred) if preferred == parameter_repr => {
-                            Some(AliasLinkDirection::ArgumentToParameter)
-                        }
-                        _ => Some(AliasLinkDirection::ParameterToArgument),
-                    }
-                } else {
-                    None
-                };
-                if let Some(direction) = direction {
-                    Some((
-                        parameter_path.clone(),
-                        argument_path.clone(),
-                        parameter_args.clone(),
-                        argument_args.clone(),
-                        parameter_args.len(),
-                        direction,
-                    ))
+                        env,
+                        &parameter_arg_path,
+                        &manifest_path,
+                        parameter_arg_arity,
+                    )
+                {
+                    Some((*parameter_arg, *argument_arg))
                 } else {
                     None
                 }
+            })
+            .collect();
+
+        let shares_direct_identity = resolved_type_items_share_identity(
+            &parameter_path,
+            &argument_path,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+        );
+        let shares_ctype_identity = crate::types::ctype::resolved_type_items_share_identity(
+            ctx,
+            env,
+            &parameter_path,
+            &argument_path,
+            arity,
+        );
+        let selected_local_parameter_alias = parameter_is_local_alias
+            && !argument_is_local_alias
+            && !local_manifest_arg_pairs.is_empty();
+        if parameter_is_local_alias && !argument_is_local_alias && !selected_local_parameter_alias {
+            // OCaml compiler/ml/typecore.ml:4171-4176 types each argument
+            // against the selected parameter instance, but compiler/ml/ctype.ml:2361-2379
+            // does not force the local alias representative to win for ordinary
+            // value arguments. Keep the explicit Rust compensation limited to the
+            // unpack/package manifest case identified below.
+            return;
+        }
+        let shares_identity = shares_direct_identity
+            || shares_ctype_identity
+            || selected_local_parameter_alias
+            || flattened_alias_equiv;
+        if !shares_identity {
+            return;
+        }
+
+        // OCaml compiler/ml/typecore.ml:4171-4176 types an application argument
+        // against the original parameter type, then typecore.ml:3771-3773
+        // unifies the result with that parameter instance. Through
+        // compiler/ml/ctype.ml:2361-2364 and ctype.ml:2393-2397, nested
+        // constructor refs can become the representative too; mirror that for
+        // selected flattened aliases inside arrows and containers.
+        match direction {
+            AliasLinkDirection::ParameterToArgument => {
+                if !crate::types::ctype::deep_occur(ctx, parameter_repr, argument_repr) {
+                    crate::types::ctype::link_type(ctx, parameter_repr, argument_repr);
+                }
             }
-            _ => None,
+            AliasLinkDirection::ArgumentToParameter => {
+                if !crate::types::ctype::deep_occur(ctx, argument_repr, parameter_repr) {
+                    crate::types::ctype::link_type(ctx, argument_repr, parameter_repr);
+                }
+            }
+        }
+        if selected_local_parameter_alias {
+            // OCaml compiler/ml/typecore.ml:2124-2133 wraps unpacked module
+            // patterns as local `let module`s, and typecore.ml:3404-3407 enters
+            // those modules before typing the body. The package signature can
+            // expose a manifest like `type identity = Icmp2.identity`, while the
+            // value selected from the local module carries `Mm.identity`. OCaml's
+            // ctype.ml:2367-2379 expression unification mutates the shared refs so
+            // the local unpack path wins for that manifest argument; mirror that
+            // explicit alias argument sharing after the top-level constructor link.
+            for (parameter_arg, argument_arg) in local_manifest_arg_pairs {
+                let parameter_arg = ctx.repr(parameter_arg);
+                let argument_arg = ctx.repr(argument_arg);
+                if parameter_arg != argument_arg
+                    && !crate::types::ctype::deep_occur(ctx, parameter_arg, argument_arg)
+                {
+                    crate::types::ctype::link_type(ctx, parameter_arg, argument_arg);
+                }
+            }
+        }
+    }
+
+    enum PairAction {
+        Constr {
+            parameter_path: Path,
+            argument_path: Path,
+            parameter_args: Vec<TypeExprRef>,
+            argument_args: Vec<TypeExprRef>,
+        },
+        Children(Vec<(TypeExprRef, TypeExprRef)>),
+        None,
+    }
+
+    fn visit_pair(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        parameter_ty: TypeExprRef,
+        argument_ty: TypeExprRef,
+        allow_local_aliases: bool,
+        seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    ) {
+        let ctx = tctx.type_ctx;
+        let parameter_repr = ctx.repr(parameter_ty);
+        let argument_repr = ctx.repr(argument_ty);
+        if parameter_repr == argument_repr || !seen.insert((parameter_repr, argument_repr)) {
+            return;
+        }
+
+        let action = {
+            let parameter_desc = ctx.get_desc(parameter_repr);
+            let argument_desc = ctx.get_desc(argument_repr);
+            let action = match (&*parameter_desc, &*argument_desc) {
+                (
+                    TypeDesc::Tconstr {
+                        path: parameter_path,
+                        args: parameter_args,
+                        ..
+                    },
+                    TypeDesc::Tconstr {
+                        path: argument_path,
+                        args: argument_args,
+                        ..
+                    },
+                ) if parameter_args.len() == argument_args.len() => PairAction::Constr {
+                    parameter_path: parameter_path.clone(),
+                    argument_path: argument_path.clone(),
+                    parameter_args: parameter_args.clone(),
+                    argument_args: argument_args.clone(),
+                },
+                (
+                    TypeDesc::Tarrow {
+                        arg: parameter_arg,
+                        ret: parameter_ret,
+                        ..
+                    },
+                    TypeDesc::Tarrow {
+                        arg: argument_arg,
+                        ret: argument_ret,
+                        ..
+                    },
+                ) => PairAction::Children(vec![
+                    (parameter_arg.typ, argument_arg.typ),
+                    (*parameter_ret, *argument_ret),
+                ]),
+                (TypeDesc::Ttuple(parameter_items), TypeDesc::Ttuple(argument_items))
+                    if parameter_items.len() == argument_items.len() =>
+                {
+                    PairAction::Children(
+                        parameter_items
+                            .iter()
+                            .zip(argument_items.iter())
+                            .map(|(parameter_item, argument_item)| {
+                                (*parameter_item, *argument_item)
+                            })
+                            .collect(),
+                    )
+                }
+                (
+                    TypeDesc::Tpoly {
+                        body: parameter_body,
+                        ..
+                    },
+                    TypeDesc::Tpoly {
+                        body: argument_body,
+                        ..
+                    },
+                ) => PairAction::Children(vec![(*parameter_body, *argument_body)]),
+                _ => PairAction::None,
+            };
+            drop(parameter_desc);
+            drop(argument_desc);
+            action
         };
-        drop(parameter_desc);
-        drop(argument_desc);
-        candidate
-    };
 
-    let Some((parameter_path, argument_path, parameter_args, argument_args, arity, direction)) =
-        candidate
-    else {
-        return;
-    };
-
-    let local_manifest_arg_pairs: Vec<_> = parameter_args
-        .iter()
-        .zip(argument_args.iter())
-        .filter_map(|(parameter_arg, argument_arg)| {
-            let (parameter_arg_path, parameter_arg_arity) =
-                constr_path_and_arity(ctx, *parameter_arg)?;
-            let (argument_arg_path, argument_arg_arity) =
-                constr_path_and_arity(ctx, *argument_arg)?;
-            if parameter_arg_arity != argument_arg_arity {
-                return None;
+        match action {
+            PairAction::Constr {
+                parameter_path,
+                argument_path,
+                parameter_args,
+                argument_args,
+            } => {
+                if !parameter_path.same(&argument_path) {
+                    link_constr_pair(
+                        tctx,
+                        env,
+                        parameter_repr,
+                        argument_repr,
+                        parameter_path,
+                        argument_path,
+                        parameter_args.as_slice(),
+                        argument_args.as_slice(),
+                        allow_local_aliases,
+                    );
+                }
+                for (parameter_arg, argument_arg) in parameter_args.iter().zip(argument_args.iter())
+                {
+                    visit_pair(
+                        tctx,
+                        env,
+                        *parameter_arg,
+                        *argument_arg,
+                        allow_local_aliases,
+                        seen,
+                    );
+                }
             }
-            let Path::Pdot(argument_parent, argument_type_name, _) = &argument_arg_path else {
-                return None;
-            };
-            if argument_type_name == "t" {
-                // OCaml compiler/ml/ctype.ml:2340-2344 expands both heads
-                // before unify3, so package value-carrier `t` manifests (for
-                // example `M.t = Icmp2.t`) become equal without an explicit ref
-                // mutation. Keep this compensation for the non-`t` package
-                // fields where OCaml's local unpack refs still win later.
-                return None;
+            PairAction::Children(children) => {
+                for (parameter_child, argument_child) in children {
+                    visit_pair(
+                        tctx,
+                        env,
+                        parameter_child,
+                        argument_child,
+                        allow_local_aliases,
+                        seen,
+                    );
+                }
             }
-            let Path::Pident(argument_module_id) = argument_parent.as_ref() else {
-                return None;
-            };
-            let (manifest_path, manifest_arity) = raw_signature_manifest_path(
-                ctx,
-                env,
-                argument_module_id,
-                argument_type_name.as_str(),
-            )?;
-            if manifest_arity != parameter_arg_arity {
-                return None;
-            }
-            if parameter_arg_path.same(&manifest_path)
-                || crate::types::ctype::flattened_alias_paths_equivalent(
-                    ctx,
-                    env,
-                    &parameter_arg_path,
-                    &manifest_path,
-                    parameter_arg_arity,
-                )
-            {
-                Some((*parameter_arg, *argument_arg))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let shares_direct_identity = resolved_type_items_share_identity(
-        &parameter_path,
-        &argument_path,
-        env,
-        &mut tctx.persistent_env,
-        ctx,
-    );
-    let shares_ctype_identity = crate::types::ctype::resolved_type_items_share_identity(
-        ctx,
-        env,
-        &parameter_path,
-        &argument_path,
-        arity,
-    );
-    let selected_local_parameter_alias = path_head_is_local_module_alias(env, &parameter_path)
-        && !path_head_is_local_module_alias(env, &argument_path)
-        && !local_manifest_arg_pairs.is_empty();
-    if path_head_is_local_module_alias(env, &parameter_path)
-        && !path_head_is_local_module_alias(env, &argument_path)
-        && !selected_local_parameter_alias
-    {
-        // OCaml compiler/ml/typecore.ml:4171-4176 types each argument
-        // against the selected parameter instance, but compiler/ml/ctype.ml:2361-2379
-        // does not force the local alias representative to win for ordinary
-        // value arguments. Keep the explicit Rust compensation limited to the
-        // unpack/package manifest case identified below.
-        return;
-    }
-    let shares_flattened_alias = crate::types::ctype::flattened_alias_paths_equivalent(
-        ctx,
-        env,
-        &parameter_path,
-        &argument_path,
-        arity,
-    );
-    let shares_identity = shares_direct_identity
-        || shares_ctype_identity
-        || selected_local_parameter_alias
-        || shares_flattened_alias;
-    if !shares_identity {
-        return;
-    }
-
-    // OCaml compiler/ml/typecore.ml:4171-4176 types an application argument
-    // against the original parameter type, then typecore.ml:3771-3773 unifies
-    // the result with that parameter instance. Through compiler/ml/ctype.ml:2361-2364
-    // and ctype.ml:2393-2397, a local module-alias argument can become the
-    // representative; for flattened persistent backing units, keep the
-    // selected qualified parameter as representative when OCaml's value lookup
-    // already exposed it that way.
-    match direction {
-        AliasLinkDirection::ParameterToArgument => {
-            if !crate::types::ctype::deep_occur(ctx, parameter_repr, argument_repr) {
-                crate::types::ctype::link_type(ctx, parameter_repr, argument_repr);
-            }
-        }
-        AliasLinkDirection::ArgumentToParameter => {
-            if !crate::types::ctype::deep_occur(ctx, argument_repr, parameter_repr) {
-                crate::types::ctype::link_type(ctx, argument_repr, parameter_repr);
-            }
+            PairAction::None => {}
         }
     }
-    if selected_local_parameter_alias {
-        // OCaml compiler/ml/typecore.ml:2124-2133 wraps unpacked module
-        // patterns as local `let module`s, and typecore.ml:3404-3407 enters
-        // those modules before typing the body. The package signature can
-        // expose a manifest like `type identity = Icmp2.identity`, while the
-        // value selected from the local module carries `Mm.identity`. OCaml's
-        // ctype.ml:2367-2379 expression unification mutates the shared refs so
-        // the local unpack path wins for that manifest argument; mirror that
-        // explicit alias argument sharing after the top-level constructor link.
-        for (parameter_arg, argument_arg) in local_manifest_arg_pairs {
-            let parameter_arg = ctx.repr(parameter_arg);
-            let argument_arg = ctx.repr(argument_arg);
-            if parameter_arg != argument_arg
-                && !crate::types::ctype::deep_occur(ctx, parameter_arg, argument_arg)
-            {
-                crate::types::ctype::link_type(ctx, parameter_arg, argument_arg);
-            }
-        }
-    }
+
+    let mut seen = HashSet::new();
+    visit_pair(
+        tctx,
+        env,
+        parameter_ty,
+        argument_ty,
+        allow_local_aliases,
+        &mut seen,
+    );
 }
 
 /// Unify pattern types, raising PatternTypeClash on error.
@@ -3525,7 +3630,7 @@ fn build_as_type(
 /// Merge variables from two or-pattern branches.
 fn merge_or_pattern_variables(
     tctx: &mut TypeCheckContext<'_>,
-    _env: &Env,
+    env: &Env,
     loc: LocIdx,
     p1_vars: &[PatternVariable],
     p2_vars: &[PatternVariable],
@@ -3547,6 +3652,13 @@ fn merge_or_pattern_variables(
         match v1.id.name().cmp(v2.id.name()) {
             std::cmp::Ordering::Equal => {
                 if !v1.id.same(&v2.id) {
+                    // OCaml compiler/ml/typecore.ml:551-566
+                    // `enter_orpat_variables` calls `unify env t1 t2` in
+                    // branch order before alpha-renaming branch 2. Preserve the
+                    // same selected representative before Rust's unification so
+                    // nested flattened aliases from the second branch do not win
+                    // over the first branch's selected component path.
+                    preserve_alias_unify_representative(tctx, env, v1.ty, v2.ty, true);
                     unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
                     // Match OCaml alpha_pat: rename branch-2 ids onto branch-1 ids.
                     result.push((v2.id.clone(), v1.id.clone()));
@@ -5740,6 +5852,14 @@ pub fn type_expect<'a>(
 
             let ty = crate::types::instance(ctx, desc.val_type);
             force_qualified_value_type_paths(tctx, env, &path, ty);
+            // OCaml compiler/ml/typecore.ml:2404-2457 builds the identifier
+            // expression with `instance env desc.val_type`, then `rue` calls
+            // `unify_exp` on that expression before returning it. Preserve the
+            // selected persistent representative before Rust's identifier-level
+            // unification so an expected application type does not relink a
+            // selected component path such as `Web.MediaStream.t` back to its
+            // flattened backing unit.
+            preserve_alias_unify_representative(tctx, env, ty, expected_ty, false);
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
@@ -8636,12 +8756,13 @@ fn type_application(
                 );
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
-                let mut typed_arg = typed_arg_result?;
-                preserve_apply_argument_alias_representative(
+                let typed_arg = typed_arg_result?;
+                preserve_alias_unify_representative(
                     tctx,
                     env,
                     arg_expected_ty,
                     typed_arg.exp_type,
+                    true,
                 );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
@@ -8652,6 +8773,20 @@ fn type_application(
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
                 if !skip_post_unify {
+                    // OCaml compiler/ml/typecore.ml:3771-3773 types the
+                    // source argument against `ty_expected'`, then unifies the
+                    // resulting expression type with the instantiated
+                    // `ty_expected`. Preserve alias representatives from the
+                    // expression side before that second unification so Rust's
+                    // copied instance does not make flattened backing-unit
+                    // paths win where OCaml keeps the selected component refs.
+                    preserve_alias_unify_representative(
+                        tctx,
+                        env,
+                        typed_arg.exp_type,
+                        unify_ty,
+                        false,
+                    );
                     unify_expression_types(
                         tctx,
                         typed_arg.exp_loc,
@@ -8659,11 +8794,12 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
-                    preserve_apply_argument_alias_representative(
+                    preserve_alias_unify_representative(
                         tctx,
                         env,
                         unify_ty,
                         typed_arg.exp_type,
+                        true,
                     );
                 }
                 let typed_arg = if enforce_optional {
@@ -10052,6 +10188,19 @@ fn type_match_cases_batch_non_gadt<'a>(
                 // OCaml uses `unify_pat ext_env ...` where each pattern is
                 // unified under its own extended environment.
                 tctx.unify_state.set_env(&pending.case_env);
+                // OCaml compiler/ml/typecore.ml:4441-4444 delays pattern
+                // unification until every case has been typed, then runs
+                // `unify_pat ext_env pat ty_arg'` in case order. Preserve the
+                // selected representative before each delayed unify so a later
+                // case can mutate the shared match-argument refs exactly like
+                // OCaml's ctype.ml:2393-2397 expression-mode link.
+                preserve_alias_unify_representative(
+                    tctx,
+                    &pending.case_env,
+                    pending.typed_pat.pat_type,
+                    ty_arg_prime,
+                    true,
+                );
                 unify_pattern_types(
                     tctx,
                     pending.typed_pat.pat_loc,
@@ -10086,6 +10235,17 @@ fn type_match_cases_batch_non_gadt<'a>(
             let propagate_result = (|| -> TypeCoreResult<()> {
                 for pending in &pending_cases {
                     tctx.unify_state.set_env(&pending.case_env);
+                    // OCaml compiler/ml/typecore.ml:4455-4457 repeats
+                    // `unify_pats propagated` after variant finalization. Keep
+                    // the same representative-preserving order for aliases
+                    // embedded inside tuple/constructor pattern types.
+                    preserve_alias_unify_representative(
+                        tctx,
+                        &pending.case_env,
+                        pending.typed_pat.pat_type,
+                        propagated_ty,
+                        true,
+                    );
                     unify_pattern_types(
                         tctx,
                         pending.typed_pat.pat_loc,
@@ -22184,15 +22344,23 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             access_path,
         );
     }
+    let alias_access_is_persistent_child = matches!((mty, access_path), (
+            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id)),
+            Path::Pdot(parent, _, _),
+        ) if alias_id.is_persistent() && parent.head().is_persistent());
     if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty
         && !target.same(access_path)
-        && !access_path_has_persistent_root
+        && (!access_path_has_persistent_root || alias_access_is_persistent_child)
     {
         // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
         // compiler/ml/env.ml:1530-1538 prefixes component declarations with the
         // selected access path. Rust persistent signatures are already finalized
         // under their saved unit path, so rewrite that target prefix to the
-        // selected local alias path before applying the component substitution.
+        // selected alias path before applying the component substitution.
+        // This also covers persistent child aliases such as `Web.MediaStream =
+        // Web__MediaStream`: env.ml:1008-1013 selects the child component path,
+        // then env.ml:1542-1556 exposes value/type descriptions through that
+        // selected path rather than the flattened backing unit.
         match target {
             Path::Pident(alias_id) => {
                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
