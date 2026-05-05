@@ -1399,6 +1399,13 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         }
         env.add_type(id, decl);
     };
+    let add_internal_type_only = |env: &mut Env, id: Ident, decl: TypeDeclaration| {
+        // OCaml compiler/ml/predef.ml:388-405 installs only the real language
+        // predefs into the initial environment. The Rust comptime reflection
+        // records are compiler-internal, so they must not add labels to the
+        // `Typetexp.find_all_labels` scope used by typecore.ml:3666-3670.
+        env.add_type(id, decl);
+    };
 
     use super::predef;
 
@@ -1813,7 +1820,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         );
 
         // fieldInfo record type: { name: string, typ: typeInfo, optional: bool, mutable_: bool }
-        add_type_with_constrs(
+        add_internal_type_only(
             &mut env,
             predef::ident_field_info(),
             TypeDeclaration {
@@ -1856,11 +1863,10 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                 ),
                 ..decl_abstr(0, false)
             },
-            ctx,
         );
 
         // constructorInfo record type: { name: string, args: array<typeInfo> }
-        add_type_with_constrs(
+        add_internal_type_only(
             &mut env,
             predef::ident_constructor_info(),
             TypeDeclaration {
@@ -1887,7 +1893,6 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
                 ),
                 ..decl_abstr(0, false)
             },
-            ctx,
         );
     }
 
