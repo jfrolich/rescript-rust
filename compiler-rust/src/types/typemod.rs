@@ -3337,7 +3337,7 @@ fn type_path_decl_mentions_path_root(
         Path::Pdot(parent, type_name, _) => crate::types::typecore::lookup_type_in_resolved_path(
             parent, type_name, env, pers_env, ctx,
         )
-        .map(|(_, _, decl)| decl),
+        .map(|(_, _, decl)| (*decl).clone()),
         Path::Pident(_) => env.lookup_type(path).ok().cloned(),
         Path::Papply(_, _) => None,
     };

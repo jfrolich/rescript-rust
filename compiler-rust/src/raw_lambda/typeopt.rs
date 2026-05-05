@@ -300,14 +300,20 @@ fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDecla
             // `option` must still resolve through the current environment when
             // they are not present in Rust's auxiliary declaration side table.
             .or_else(|| crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path))
-            .or_else(|| ctx.find_resolved_pdot_type(&path.name()))
+            .or_else(|| {
+                ctx.find_resolved_pdot_type(&path.name())
+                    .map(|decl| (*decl).clone())
+            })
             .or_else(|| {
                 ctx.find_type_decl_by_path(&path.name())
                     .map(|decl| decl.clone())
             })
             .or_else(|| env.lookup_type(path).ok().cloned()),
         _ => crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
-            .or_else(|| ctx.find_resolved_pdot_type(&path.name()))
+            .or_else(|| {
+                ctx.find_resolved_pdot_type(&path.name())
+                    .map(|decl| (*decl).clone())
+            })
             .or_else(|| {
                 ctx.find_type_decl_by_path(&path.name())
                     .map(|decl| decl.clone())

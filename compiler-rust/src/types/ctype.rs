@@ -391,7 +391,7 @@ fn get_level_with_lookup_capture(
                 &mut no_persistent_env,
                 ctx,
             )
-            .map(|(_, _, decl)| decl)
+            .map(|(_, _, decl)| (*decl).clone())
         }
         Path::Papply(_, _) => None,
     };
@@ -1858,7 +1858,7 @@ fn resolve_type_item_through_env<'a>(
         // `lookup_type_in_resolved_path` already reads from the cached
         // env_lazy-qualified module view. Keep that declaration graph shared
         // instead of re-copying it on every lookup.
-        let resolved_decl = decl.clone();
+        let resolved_decl = (*decl).clone();
         // OCaml compiler/ml/env.ml:1438-1444 scrapes `Mty_alias` by looking
         // up the target module with `path`, compiler/ml/mtype.ml:55-70 then
         // strengthens abstract types to that alias target, and

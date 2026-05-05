@@ -1229,7 +1229,7 @@ fn resolve_type_constructor_path(
                     // up the type table after resolving module components.
                     return (
                         Path::pdot(resolved_module_path, type_name.to_string()),
-                        Some(decl),
+                        Some((*decl).clone()),
                     );
                 }
             }
@@ -1246,10 +1246,10 @@ fn resolve_type_constructor_path(
                         .type_ctx
                         .find_resolved_module_type(&module_path, type_name)
                     {
-                        return Some((cached_path, decl));
+                        return Some((cached_path, (*decl).clone()));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
-                        let decl = decl.clone();
+                        let decl = Arc::new(decl.clone());
                         tctx.type_ctx.register_resolved_module_type(
                             &module_path,
                             type_name,
@@ -1257,7 +1257,7 @@ fn resolve_type_constructor_path(
                             id.clone(),
                             decl.clone(),
                         );
-                        (module_path, decl)
+                        (module_path, (*decl).clone())
                     })
                 },
             ) {
@@ -13775,13 +13775,13 @@ fn lookup_inline_record_decl_for_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
+) -> Option<(Path, Vec<TypeExprRef>, Arc<crate::types::TypeDeclaration>)> {
     if let Path::Pdot(parent_path, cstr_name, _) = path {
         if let Some(parent_decl) = lookup_type_decl_for_path(parent_path, env, pers_env, ctx) {
             if let Some(inline_decl) =
                 inline_record_decl_from_variant_type(ctx, &parent_decl, cstr_name)
             {
-                return Some((path.clone(), actual_args.to_vec(), inline_decl));
+                return Some((path.clone(), actual_args.to_vec(), Arc::new(inline_decl)));
             }
         }
     }
@@ -13789,7 +13789,11 @@ fn lookup_inline_record_decl_for_path<'a>(
     for cstr in env.find_all_constructors(path.last()).iter().rev() {
         if constructor_matches_inline_record_path(path, cstr, env, pers_env, ctx) {
             if let Some(inlined) = &cstr.cstr_inlined {
-                return Some((path.clone(), actual_args.to_vec(), (**inlined).clone()));
+                return Some((
+                    path.clone(),
+                    actual_args.to_vec(),
+                    Arc::new((**inlined).clone()),
+                ));
             }
         }
     }
@@ -19933,7 +19937,7 @@ fn extract_concrete_record_type_info<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
+) -> Option<(Path, Vec<TypeExprRef>, Arc<crate::types::TypeDeclaration>)> {
     let mut current = ctx.repr(record_ty);
     let mut visited_types = HashSet::new();
     let mut visited_paths = HashSet::new();
@@ -22210,7 +22214,7 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
+) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
     }
@@ -22222,7 +22226,11 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     // do not consume `Subst.signature` stamps before OCaml would.
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components.lookup_type(type_name).map(|(id, decl)| {
-            let result = (components.access_path().clone(), id.clone(), decl.clone());
+            let result = (
+                components.access_path().clone(),
+                id.clone(),
+                Arc::new(decl.clone()),
+            );
             ctx.register_resolved_module_type(
                 parent_module_path,
                 type_name,
@@ -22994,13 +23002,13 @@ fn lookup_type_decl_for_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<crate::types::decl::TypeDeclaration> {
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     fn lookup_raw_type_decl_from_module_path<'a>(
         module_path: &Path,
         type_name: &str,
         env: &Env,
         ctx: &'a crate::types::context::TypeContext,
-    ) -> Option<crate::types::decl::TypeDeclaration> {
+    ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
         let mut no_persistent_env = None;
         with_resolved_module_components_for_path(
             module_path,
@@ -23010,7 +23018,7 @@ fn lookup_type_decl_for_path<'a>(
             |components| {
                 components
                     .lookup_type(type_name)
-                    .map(|(_, decl)| decl.clone())
+                    .map(|(_, decl)| Arc::new(decl.clone()))
             },
         )
         .flatten()
@@ -23025,7 +23033,7 @@ fn lookup_type_decl_for_path<'a>(
         // alias cannot mask the imported identifier whose stamp is being
         // expanded by ctype.ml:1367-1372.
         if let Ok(decl) = env.find_type_by_ident(id) {
-            return Some(decl.clone());
+            return Some(Arc::new(decl.clone()));
         }
     }
 
@@ -23036,7 +23044,7 @@ fn lookup_type_decl_for_path<'a>(
     if let Path::Pident(id) = type_path {
         if id.stamp() != 0 {
             if let Ok(decl) = env.find_type_by_ident(id) {
-                return Some(decl.clone());
+                return Some(Arc::new(decl.clone()));
             }
         }
 
@@ -23051,7 +23059,7 @@ fn lookup_type_decl_for_path<'a>(
             )
         {
             if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
-                return Some(decl.clone());
+                return Some(Arc::new(decl.clone()));
             }
         }
     }
@@ -23061,13 +23069,14 @@ fn lookup_type_decl_for_path<'a>(
     // name and can return an unrelated declaration with the same type name.
     if let Path::Pident(_) = type_path {
         if let Ok(decl) = env.lookup_type(type_path) {
-            return Some(decl.clone());
+            return Some(Arc::new(decl.clone()));
         }
     }
 
     // Try path-based lookup for Pdot paths
     if let Path::Pdot(parent, type_name, _) = type_path {
-        let mut deferred_self_manifest_decl: Option<crate::types::decl::TypeDeclaration> = None;
+        let mut deferred_self_manifest_decl: Option<Arc<crate::types::decl::TypeDeclaration>> =
+            None;
         let cache_key = path_cache_key(type_path);
         let path_name = type_path.name();
 
@@ -23120,7 +23129,7 @@ fn lookup_type_decl_for_path<'a>(
                         {
                             let inline_params =
                                 inline_record_type_params(ctx, &parent_decl.type_params, labels);
-                            return Some(crate::types::TypeDeclaration {
+                            return Some(Arc::new(crate::types::TypeDeclaration {
                                 type_params: inline_params.clone(),
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
@@ -23149,7 +23158,7 @@ fn lookup_type_decl_for_path<'a>(
                                 type_unboxed: crate::types::UnboxedStatus::default(),
                                 type_inlined_types: vec![],
                                 type_path: None,
-                            });
+                            }));
                         }
                     }
 
@@ -23166,7 +23175,7 @@ fn lookup_type_decl_for_path<'a>(
                     Some(found) => found,
                     None => return None,
                 };
-                let decl = decl.clone();
+                let decl = Arc::new(decl.clone());
                 let self_manifest = decl
                     .type_manifest
                     .and_then(|manifest| {
@@ -23274,12 +23283,12 @@ fn lookup_type_decl_for_path<'a>(
                     ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                         let resolved_path = Path::pdot(alias_path.clone(), type_name.as_str());
                         if let Some(decl) = ctx.find_type_decl_by_path(&resolved_path.name()) {
-                            return Some(decl.clone());
+                            return Some(Arc::new(decl.clone()));
                         }
                         if let Some(decl) =
                             crate::types::ctype::resolve_type_through_modules(ctx, &resolved_path)
                         {
-                            return Some(decl);
+                            return Some(Arc::new(decl));
                         }
                     }
                     ModuleType::MtySignature(_) => {
@@ -23292,7 +23301,7 @@ fn lookup_type_decl_for_path<'a>(
                             ctx,
                             |components| {
                                 components.lookup_type(type_name.as_str()).map(|(_, decl)| {
-                                    let decl = decl.clone();
+                                    let decl = Arc::new(decl.clone());
                                     if let Some(cache_key) = cache_key.as_deref() {
                                         ctx.register_resolved_pdot_type(cache_key, decl.clone());
                                     }
@@ -23320,13 +23329,13 @@ fn lookup_type_decl_for_path<'a>(
         // returning stale unqualified recursive paths (e.g. JSON.t self refs as Pident "t").
         if cache_key.is_some() {
             if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
-                return Some(decl.clone());
+                return Some(Arc::new(decl.clone()));
             }
         }
 
         // Try resolving through modules (loading CMI files on demand)
         if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, type_path) {
-            return Some(decl);
+            return Some(Arc::new(decl));
         }
 
         // Try Stdlib alias patterns as fallback.
@@ -23335,11 +23344,11 @@ fn lookup_type_decl_for_path<'a>(
         if let Path::Pident(parent_id) = parent.as_ref() {
             let stdlib_path = format!("Stdlib.{}.{}", parent_id.name(), type_name);
             if let Some(decl) = ctx.find_type_decl_by_path(&stdlib_path) {
-                return Some(decl.clone());
+                return Some(Arc::new(decl.clone()));
             }
             let flat_name = format!("Stdlib_{}.{}", parent_id.name(), type_name);
             if let Some(decl) = ctx.find_type_decl_by_path(&flat_name) {
-                return Some(decl.clone());
+                return Some(Arc::new(decl.clone()));
             }
             // Try loading CMI directly by module name
             let direct_path = Path::pdot(
@@ -23348,7 +23357,7 @@ fn lookup_type_decl_for_path<'a>(
             );
             if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, &direct_path)
             {
-                return Some(decl);
+                return Some(Arc::new(decl));
             }
         }
 
@@ -23362,7 +23371,7 @@ fn lookup_type_decl_for_path<'a>(
     // resolve to an unrelated type that happens to share the same leaf name.
     if let Path::Pident(id) = type_path {
         if let Some(decl) = ctx.find_type_decl(id.name()) {
-            return Some(decl.clone());
+            return Some(Arc::new(decl.clone()));
         }
     }
 

@@ -213,7 +213,7 @@ pub struct TypeContext {
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -243,7 +243,10 @@ pub struct TypeContext {
 
     /// Cached dotted type lookups keyed by resolved module access path.
     resolved_module_type_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, Ident, super::decl::TypeDeclaration)>>,
+        ahash::AHashMap<
+            Path,
+            ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
+        >,
     >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
@@ -644,14 +647,14 @@ impl TypeContext {
     }
 
     /// Cache a type declaration resolved through module signatures (Pdot paths).
-    pub fn register_resolved_pdot_type(&self, path: &str, decl: super::decl::TypeDeclaration) {
+    pub fn register_resolved_pdot_type(&self, path: &str, decl: Arc<super::decl::TypeDeclaration>) {
         self.resolved_pdot_type_cache
             .borrow_mut()
             .insert(path.to_string(), decl);
     }
 
     /// Look up a cached resolved Pdot type declaration.
-    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<super::decl::TypeDeclaration> {
+    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<Arc<super::decl::TypeDeclaration>> {
         self.resolved_pdot_type_cache.borrow().get(path).cloned()
     }
 
@@ -799,7 +802,7 @@ impl TypeContext {
         type_name: &str,
         access_path: Path,
         id: Ident,
-        decl: super::decl::TypeDeclaration,
+        decl: Arc<super::decl::TypeDeclaration>,
     ) {
         self.resolved_module_type_cache
             .borrow_mut()
@@ -813,7 +816,7 @@ impl TypeContext {
         &self,
         module_path: &Path,
         type_name: &str,
-    ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
+    ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_module_type_cache
             .borrow()
             .get(module_path)
