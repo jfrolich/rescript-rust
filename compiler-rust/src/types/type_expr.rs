@@ -254,6 +254,62 @@ impl TypeExprRef {
     }
 }
 
+/// Scratch map keyed by dense `TypeExprRef` arena indices.
+///
+/// This preserves physical-identity semantics: the key is still the exact
+/// `TypeExprRef`, matching the OCaml compiler's type-node identity model. The
+/// storage avoids hashing for short-lived copy/substitution caches.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeExprRefMap<T> {
+    offset: usize,
+    values: Vec<Option<T>>,
+}
+
+impl<T> TypeExprRefMap<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            offset: 0,
+            values: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, key: TypeExprRef) -> Option<&T> {
+        let idx = key.0.checked_sub(self.offset)?;
+        self.values.get(idx)?.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, key: TypeExprRef, value: T) -> Option<T> {
+        if self.values.is_empty() {
+            self.offset = key.0;
+            self.values.push(Some(value));
+            return None;
+        }
+
+        if key.0 < self.offset {
+            let prepend = self.offset - key.0;
+            let mut values = Vec::with_capacity(self.values.len() + prepend);
+            values.resize_with(prepend, || None);
+            values.append(&mut self.values);
+            self.values = values;
+            self.offset = key.0;
+        }
+
+        let idx = key.0 - self.offset;
+        if idx >= self.values.len() {
+            self.values.resize_with(idx + 1, || None);
+        }
+        self.values[idx].replace(value)
+    }
+}
+
+impl<T> Default for TypeExprRefMap<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An argument in a function type.
 #[derive(Debug, Clone)]
 pub struct TypeArg {

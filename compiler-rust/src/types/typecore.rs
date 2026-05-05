@@ -39,7 +39,7 @@ use crate::types::typedtree::{
 };
 use crate::types::{
     Commutable, Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
-    UnifyState, ValueDescription,
+    TypeExprRefMap, UnifyState, ValueDescription,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::borrow::Cow;
@@ -14765,7 +14765,7 @@ fn instantiate_poly_body_for_send(
     body: TypeExprRef,
     vars: &[TypeExprRef],
 ) -> TypeExprRef {
-    let mut cache = HashMap::new();
+    let mut cache = TypeExprRefMap::new();
     for var in vars {
         cache.insert(ctx.repr(*var), ctx.new_var(None));
     }
@@ -17114,7 +17114,7 @@ pub fn type_binding<'a>(
 fn copy_lookup_type_expr(
     ctx: &TypeContext,
     ty: TypeExprRef,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> TypeExprRef {
     use crate::types::type_expr::{FieldKind, RowDesc, RowField};
 
@@ -17175,7 +17175,7 @@ fn copy_lookup_type_expr(
     }
 
     let ty = ctx.repr(ty);
-    if let Some(&copied) = cache.get(&ty) {
+    if let Some(&copied) = cache.get(ty) {
         return copied;
     }
 
@@ -17439,7 +17439,7 @@ fn copy_lookup_type_expr(
 fn copy_lookup_constructor_args(
     args: &crate::types::decl::ConstructorArguments,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::ConstructorArguments {
     match args {
         crate::types::decl::ConstructorArguments::CstrTuple(items) => {
@@ -17471,7 +17471,7 @@ fn copy_lookup_constructor_args(
 fn copy_lookup_type_kind(
     kind: &crate::types::decl::TypeKind,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeKind {
     match kind {
         crate::types::decl::TypeKind::TypeAbstract => crate::types::decl::TypeKind::TypeAbstract,
@@ -17514,7 +17514,7 @@ fn copy_lookup_type_kind(
 fn copy_lookup_type_inlined(
     inlined: &crate::types::decl::TypeInlinedType,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeInlinedType {
     match inlined {
         crate::types::decl::TypeInlinedType::Record { type_name, labels } => {
@@ -17539,7 +17539,7 @@ fn copy_lookup_type_inlined(
 fn copy_lookup_type_decl(
     decl: &crate::types::decl::TypeDeclaration,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::TypeDeclaration {
     crate::types::decl::TypeDeclaration {
         type_params: decl
@@ -17572,14 +17572,14 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     decl: &crate::types::decl::TypeDeclaration,
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
-    let mut cache = HashMap::new();
+    let mut cache = TypeExprRefMap::new();
     copy_lookup_type_decl(decl, ctx, &mut cache)
 }
 
 fn copy_lookup_extension_constructor(
     ext: &crate::types::decl::ExtensionConstructor,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::ExtensionConstructor {
     crate::types::decl::ExtensionConstructor {
         ext_type_path: ext.ext_type_path.clone(),
@@ -17602,7 +17602,7 @@ fn copy_lookup_extension_constructor(
 fn copy_lookup_module_type(
     module_type: &crate::types::decl::ModuleType,
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::ModuleType {
     match module_type {
         crate::types::decl::ModuleType::MtyIdent(path) => {
@@ -17633,7 +17633,7 @@ fn copy_lookup_module_type(
 fn copy_lookup_signature(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
-    cache: &mut HashMap<TypeExprRef, TypeExprRef>,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::Signature {
     sig_items
         .iter()
@@ -17796,7 +17796,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
 ) -> crate::types::decl::Signature {
-    let mut cache = HashMap::new();
+    let mut cache = TypeExprRefMap::new();
     copy_lookup_signature(sig_items, ctx, &mut cache)
 }
 
@@ -17808,7 +17808,7 @@ pub(crate) fn copy_lookup_module_type_for_subst(
     module_type: &crate::types::decl::ModuleType,
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
-    let mut cache = HashMap::new();
+    let mut cache = TypeExprRefMap::new();
     copy_lookup_module_type(module_type, ctx, &mut cache)
 }
 
@@ -20005,7 +20005,7 @@ fn qualify_label_description_paths<'a>(
         return;
     }
 
-    let mut copy_cache = HashMap::new();
+    let mut copy_cache = TypeExprRefMap::new();
     label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
     label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
 
