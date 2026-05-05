@@ -416,7 +416,7 @@ fn path_root_ident(path: &Path) -> Option<&Ident> {
     }
 }
 
-fn decl_manifest_aliases_path(
+pub(crate) fn decl_manifest_aliases_path(
     ctx: &TypeContext,
     decl: &super::decl::TypeDeclaration,
     target: &Path,
@@ -2191,6 +2191,7 @@ fn normalize_path_full_inner<'a>(
     // paths like `Pervasives.ref` and `Stdlib.Iterator.result` consume
     // compiler/ml/env.ml:865-875 `ps_sig` stamps at the same point.
     if let Path::Pident(id) = &path {
+        let has_local_module = env.find_module_same(id).is_ok();
         let has_component_cache = {
             let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
                 path.clone(),
@@ -2216,7 +2217,7 @@ fn normalize_path_full_inner<'a>(
         // normalize-path forcing.
         let should_force_persistent_sig = id.is_persistent()
             && !(id.name() == "Belt" && has_component_cache)
-            && (!env.has_module_ident(id)
+            && (!has_local_module
                 || id.name() == "Pervasives"
                 || (id.name() == "Stdlib" && !stdlib_array_buffer_component_lookup));
         if should_force_persistent_sig {
@@ -2297,8 +2298,19 @@ fn normalize_path_full_inner<'a>(
                 );
             }
         }
-    } else if let Ok(md) = env.lookup_module(&path) {
-        if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+    } else {
+        let md = match &path {
+            Path::Pident(id) => env.find_module_same(id),
+            _ => env.lookup_module(&path),
+        };
+        if let Ok(md) = md
+            && let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type
+        {
+            // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
+            // exact `Path.Pident` module lookup, and env.ml:285-290 skips
+            // opened component tables. Do not let an opened alias such as
+            // `Webapi.Dom` satisfy normalization of the persistent runtime
+            // root `Dom`; env.ml:872-874 would force `Dom.ps_sig` first.
             return normalize_path_full_inner(
                 ctx,
                 env,
@@ -2774,11 +2786,7 @@ fn try_expand_head_with_mode<'a>(
     }
 }
 
-fn try_expand_head<'a>(
-    ctx: &'a TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> Option<TypeExprRef> {
+fn try_expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> Option<TypeExprRef> {
     try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::General)
 }
 
@@ -2815,11 +2823,7 @@ pub(crate) fn expand_head_unif<'a>(
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
 }
 
-pub(crate) fn touch_constraint_match_head_expansion(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) {
+pub(crate) fn touch_constraint_match_head_expansion(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
     let (path, arg_count) = {
         let desc = ctx.get_desc(ty);
@@ -5611,10 +5615,7 @@ fn force_generalize_module_type_rec(
     }
 }
 
-pub fn force_generalize_module_sig_values(
-    ctx: &TypeContext,
-    mty: &crate::types::decl::ModuleType,
-) {
+pub fn force_generalize_module_sig_values(ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
     let mut seen = HashSet::new();
     force_generalize_module_type_rec(ctx, mty, &mut seen);
 }

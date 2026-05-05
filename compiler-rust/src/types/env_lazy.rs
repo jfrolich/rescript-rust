@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crate::ident::Ident;
 
 use super::decl::{
-    ConstructorDescription, ConstructorTag, ModtypeDeclaration, ModuleDeclaration, Signature,
-    SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
+    ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    ModuleDeclaration, Signature, SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
 };
 use super::path::Path;
 
@@ -179,12 +179,47 @@ fn add_type_constructors(
     }
 }
 
+fn add_type_labels(
+    labels_by_name: &mut HashMap<String, Vec<LabelDescription>>,
+    access_path: &Path,
+    type_name: &str,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) {
+    let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
+        return;
+    };
+
+    let type_path = Path::pdot(access_path.clone(), type_name);
+    let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
+    for (pos, ld) in labels.iter().enumerate() {
+        let label_desc = LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: res_ty,
+            lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: super::decl::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: decl.type_private,
+            lbl_loc: ld.ld_loc,
+            lbl_attributes: ld.ld_attributes.clone(),
+        };
+        labels_by_name
+            .entry(ld.ld_id.name().to_string())
+            .or_insert_with(Vec::new)
+            .insert(0, label_desc);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
     values: Arc<HashMap<String, (usize, usize)>>,
     constructors: Arc<HashMap<String, Vec<ConstructorDescription>>>,
+    labels: Arc<HashMap<String, Vec<LabelDescription>>>,
     types: Arc<HashMap<String, usize>>,
     modules: Arc<HashMap<String, (usize, usize)>>,
     modtypes: Arc<HashMap<String, usize>>,
@@ -287,6 +322,7 @@ impl QualifiedModuleComponents {
         };
         let mut values = HashMap::new();
         let mut constructors = HashMap::new();
+        let mut labels = HashMap::new();
         let mut types = HashMap::new();
         let mut modules = HashMap::new();
         let mut modtypes = HashMap::new();
@@ -364,6 +400,7 @@ impl QualifiedModuleComponents {
                 }
                 SignatureItem::SigType(id, decl, _) => {
                     add_type_constructors(&mut constructors, &access_path, id.name(), decl, ctx);
+                    add_type_labels(&mut labels, &access_path, id.name(), decl, ctx);
                 }
                 SignatureItem::SigTypext(id, ext, _) => {
                     let ext_slot = runtime_pos;
@@ -449,6 +486,7 @@ impl QualifiedModuleComponents {
             signature,
             values: Arc::new(values),
             constructors: Arc::new(constructors),
+            labels: Arc::new(labels),
             types: Arc::new(types),
             modules: Arc::new(modules),
             modtypes: Arc::new(modtypes),
@@ -485,6 +523,10 @@ impl QualifiedModuleComponents {
 
     pub(crate) fn lookup_constructors(&self, name: &str) -> Option<&[ConstructorDescription]> {
         self.constructors.get(name).map(Vec::as_slice)
+    }
+
+    pub(crate) fn lookup_labels(&self, name: &str) -> Option<&[LabelDescription]> {
+        self.labels.get(name).map(Vec::as_slice)
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {

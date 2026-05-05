@@ -1400,11 +1400,7 @@ impl PersistentEnv {
     /// for all dependent modules (via components_of_module_maker → scrape_alias
     /// → find_module). We match this by triggering ALL registered module renames
     /// when any module is first accessed.
-    pub fn get_renamed_sig<'a>(
-        &mut self,
-        name: &str,
-        ctx: &'a TypeContext,
-    ) -> Option<Signature> {
+    pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
         if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
             return Some(cached.clone());
@@ -2577,10 +2573,7 @@ fn freshen_signature_bound_idents_with_maps(
     }
 }
 
-pub(crate) fn freshen_signature_bound_idents(
-    sig_items: &mut [SignatureItem],
-    ctx: &TypeContext,
-) {
+pub(crate) fn freshen_signature_bound_idents(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
     // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
     // then subst.ml:378-400 renames signature binders and applies that
     // substitution to the copied components.
@@ -2609,10 +2602,7 @@ pub(crate) fn freshen_copied_signature_bound_idents(
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 
-pub(crate) fn freshen_module_type_bound_idents(
-    module_type: &mut ModuleType,
-    ctx: &TypeContext,
-) {
+pub(crate) fn freshen_module_type_bound_idents(module_type: &mut ModuleType, ctx: &TypeContext) {
     // OCaml compiler/ml/subst.ml:365-376 implements `Subst.modtype` by
     // returning a fresh module type; for signatures it reaches subst.ml:378-400,
     // where component types are copied before binder substitutions are applied.
@@ -4304,11 +4294,7 @@ pub fn substitute_submodule_paths_pub(
 /// For a module like Belt with sub-modules Array, Map, etc.,
 /// the types in Belt.Array should have paths like Pdot(Pdot(Pident "Belt") "Array") "t"
 /// instead of Pident "t".
-fn substitute_submodule_paths(
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    ctx: &TypeContext,
-) {
+fn substitute_submodule_paths(sig_items: &[SignatureItem], module_path: &Path, ctx: &TypeContext) {
     // Match OCaml `prefix_idents`/`Subst` behavior: when descending into a
     // submodule, keep parent substitutions visible so child signatures can
     // reference parent-defined types through qualified paths.
