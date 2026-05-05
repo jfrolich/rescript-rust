@@ -92,9 +92,16 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             });
             match build_result {
                 Err(e) => Err(e),
-                Ok(_) => {
+                Ok(build_state) => {
                     if let Some(args_after_build) = (*build_args.after_build).clone() {
-                        cmd::run(args_after_build)
+                        drop(build_state);
+                        cmd::run(args_after_build);
+                    } else {
+                        // `rescript build` is a one-shot command and `main` exits
+                        // immediately after this match. Dropping the full build graph
+                        // walks every package/module/AST and shows up in clean-build
+                        // wall time; let the OS reclaim it at process exit instead.
+                        std::mem::forget(build_state);
                     }
                     Ok(())
                 }
