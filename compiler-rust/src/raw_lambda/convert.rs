@@ -615,6 +615,25 @@ fn raw_record_mutable_flag(
         .unwrap_or(ParserMutableFlag::Immutable)
 }
 
+fn record_field_is_static_optional_none(
+    lbl: &LabelDescription,
+    def: &RecordLabelDefinition,
+) -> bool {
+    if !lbl.lbl_optional {
+        return false;
+    }
+
+    let RecordLabelDefinition::Overridden(_, expr) = def else {
+        return false;
+    };
+
+    matches!(
+        &expr.exp_desc,
+        ExpressionDesc::Texp_construct(_, cstr, args)
+            if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
+    )
+}
+
 fn inlined_record_representation(
     cstr: &crate::types::ConstructorDescription,
 ) -> Option<RecordRepresentation> {
@@ -3237,13 +3256,29 @@ impl<'a> RawLambdaConverter<'a> {
             let init_id = base_lam.as_ref().map(|_| self.fresh_ident("init"));
             let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
 
+            let can_skip_static_optional_none_fields = base.is_none()
+                && fields.len() >= 20
+                && matches!(repres, RecordRepresentation::RecordRegular);
             let mut elems = Vec::with_capacity(fields.len());
+            let mut fields_info = Vec::with_capacity(fields.len());
             for (lid, lbl, def, _) in fields {
+                // OCaml typecore.ml:2833-2842 materializes omitted optional
+                // fields as `option_none`; the Rust typedtree still does that.
+                // The JS backend already omits optional `undefined` fields
+                // when printing record blocks (compiler-rust/src/js_ir/printer.rs:1943-1945),
+                // so skip lowering statically-None regular fields here.
+                if can_skip_static_optional_none_fields
+                    && record_field_is_static_optional_none(lbl, def)
+                {
+                    continue;
+                }
+
                 let value = match def {
                     RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
                     RecordLabelDefinition::Kept(_) => {
                         let Some(base_var) = &init_var else {
                             elems.push(RawLambda::unit());
+                            fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
                             continue;
                         };
                         if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -3260,12 +3295,8 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 elems.push(value);
+                fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
             }
-
-            let fields_info = fields
-                .iter()
-                .map(|(_, lbl, _, _)| (label_runtime_name(lbl), lbl.lbl_optional))
-                .collect::<Vec<_>>();
 
             let result = match repres {
                 RecordRepresentation::RecordRegular => {
