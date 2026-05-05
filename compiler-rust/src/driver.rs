@@ -41,18 +41,11 @@ static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 // modules a rayon worker compiles is the natural next lever for in-process
 // build time. The plumbing for it (`TypeContext::begin_compile`,
 // `Arc<IdGenerator>` ownership, `PersistentEnv::from_registry_with_cache`)
-// is in place but the wire-up was reverted on this branch after one
-// blocker showed up against tella-fusion:
-//
-//   `find_pers_struct`'s cache hit path skips `collect_alias_rewrites`
-//   and a few other side effects that the miss path applies to
-//   `PersistentEnv::alias_prefix_rewrites.local`. With the cache shared
-//   across compiles, those rewrites disappear after the first compile,
-//   producing `TypeExprRef(0)` lookup failures on later modules.
-//
-// Fix path: promote `alias_prefix_rewrites.local` into the shared cache
-// (or run the per-compile side effects on every cache hit regardless).
-// Pending; see `projects/shared-interfaces/PROGRESS.md`.
+// is in place but the wire-up is intentionally still inactive. Tella
+// validation found two blockers: cache-hit persistent-env side effects
+// (partially addressed in `PersistentEnv::prepare_cached_pers_struct`) and
+// semantic JS output drift from reused type-context state. See
+// `projects/shared-interfaces/PROGRESS.md`.
 //
 // A 7.8GB peak-memory spike observed during the wire-up attempt was an
 // artifact of running with cache sharing *disabled* and `TypeContext`

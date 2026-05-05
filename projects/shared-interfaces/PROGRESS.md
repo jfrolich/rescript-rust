@@ -41,7 +41,7 @@ wire-up that actually shares state across compiles is *not yet active*.
    context can be parked back in thread-local storage between compiles.
    Currently unused.
 
-5. **Project tracker.** This document and `PLAN.md` live in
+5. **Project tracker.** This document lives in
    `projects/shared-interfaces/`. The driver.rs file has a comment block
    referencing this PROGRESS.md so future sessions find the rationale.
 
@@ -137,7 +137,60 @@ Typedtree parity (`./scripts/test_typedtree_parity.sh`): 660/660. The
 parity test invokes standalone `bsc`, not rewatch's in-process flow, so
 it's insensitive to driver.rs / rewatch changes.
 
-### Next session
+## Session 2 — 2026-05-05
+
+### What was checked
+
+The worker-session wire-up was re-tested against tella-fusion after adding
+cache-hit preparation in `PersistentEnv::find_pers_struct`. The alias-rewrite
+miss/hit mismatch from Session 1 is no longer the only issue.
+
+### What makes sense to keep
+
+1. **Cache-hit persistent-env preparation.** A cached `PersStruct` now still
+   runs the per-`PersistentEnv` side effects that OCaml gets while
+   acknowledging/loading persistent structures (`compiler/ml/env.ml:669-688,
+   695-712`): alias rewrites are collected for the current env and lazy raw
+   signatures are registered when needed.
+
+2. **Stale negative shared-cache invalidation.** A shared worker cache can
+   hold an old `None` miss while the `ModuleRegistry` has since published the
+   module. OCaml overwrites its persistent table on save/load
+   (`compiler/ml/env.ml:642-645, 687-688, 707-709, 1960-1977`), so Rust now
+   discards that stale negative entry and falls through to the registry.
+
+3. **`TypeContext::begin_compile` abbrev safety.** The abbrev memo side table
+   must stay append-only because preserved arena types contain
+   `AbbrevMemoRef` indices. Truncating the table between worker compiles can
+   make cached type nodes observe unrelated memo cells.
+
+### What was rejected
+
+The active driver wire-up is still unsafe and was not retained. With a reused
+worker `TypeContext`, tella-fusion clean builds either failed on
+`UndefinedMethod { ty: TypeExprRef(0), method: "Command.make" }` or produced
+semantic JS output drift. A direct diff in `PublicApiLogger.bs.js` changed
+variant lowering shape, not just temporary variable names, so this is a real
+type-representation freshness issue.
+
+Measured during review:
+
+- Default in-process Tella clean build: ~5.1-5.3s wall.
+- Worker-session experiment: one successful 4.65s run, then unstable
+  5.07s/semantic drift. Not acceptable.
+- Non-Tella typedtree parity after retained changes: 660/660.
+- Non-Tella JS output parity after retained changes: 660/660.
+
+### Updated next session
+
+The next worker-session attempt must fix type-representation freshness before
+the driver wire-up can be enabled. Concretely: identify which `TypeContext`
+stores/caches encode per-module representation decisions or stamp-sensitive
+state, then either reset them per compile or make them key by enough
+per-module identity that cached dependency declarations cannot affect the
+current module's data representation/lowering.
+
+### Superseded Session 1 next session
 
 The next session needs *one* focused fix, not two. With the memory
 re-diagnosis above, the only true blocker is cache-hit-path side
@@ -160,6 +213,7 @@ effects:
    into permanent + scratch regions. Not on the critical path for the
    first measurable speedup.
 
-Until step 1 and 2 land, the infrastructure committed in this session
-is dead code (deliberately so) and the in-process build behaves
-identically to the pre-session state.
+This section is kept as historical context. Session 2 supersedes it: the
+cache-hit side effects are partially addressed, but shared `TypeContext`
+reuse still has type-representation freshness problems and must remain
+inactive.

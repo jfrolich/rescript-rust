@@ -514,6 +514,13 @@ pub struct PersistentEnv {
     /// module's transient signature must be removed before raw/JS compilation
     /// without copy-on-writing the shared in-process registry maps.
     hidden_modules: HashSet<String>,
+    /// Cache entries whose alias-rewrite side effects have already been
+    /// applied to this PersistentEnv. OCaml's persistent structures keep lazy
+    /// module components in the environment table (`compiler/ml/env.ml:711-746,
+    /// 1516-1605`); Rust shares loaded structures across env clones, so each
+    /// env still has to rebuild its local flattened-alias table when it first
+    /// observes a cached signature.
+    prepared_cached_alias_rewrites: HashSet<String>,
 }
 
 fn should_register_lazy_raw_sig(name: &str) -> bool {
@@ -541,6 +548,7 @@ impl PersistentEnv {
             portable_cache: SharedRegistryMap::default(),
             portable_cache_overrides: HashMap::new(),
             hidden_modules: HashSet::new(),
+            prepared_cached_alias_rewrites: HashSet::new(),
         }
     }
 
@@ -584,16 +592,24 @@ impl PersistentEnv {
             portable_cache: registry.cached_modules.clone(),
             portable_cache_overrides: registry.local_cached_modules.clone(),
             hidden_modules: HashSet::new(),
+            prepared_cached_alias_rewrites: HashSet::new(),
         }
     }
 
     fn cache_lookup(&self, name: &str) -> Option<Option<Arc<PersStruct>>> {
+        self.cache_lookup_entry(name).map(|(_, value)| value)
+    }
+
+    fn cache_lookup_entry(&self, name: &str) -> Option<(String, Option<Arc<PersStruct>>)> {
         if self.hidden_modules.contains(name) {
-            return Some(None);
+            return Some((name.to_string(), None));
         }
         let cache = self.cache.lock().unwrap();
         let cache_key = resolve_first_char_case_key(&cache, name)?;
-        cache.get(cache_key).cloned()
+        cache
+            .get(cache_key)
+            .cloned()
+            .map(|value| (cache_key.to_string(), value))
     }
 
     fn cache_contains_key(&self, name: &str) -> bool {
@@ -758,13 +774,27 @@ impl PersistentEnv {
         ctx: &'a TypeContext,
     ) -> Option<Arc<PersStruct>> {
         // Check cache first (already internalized)
-        if let Some(cached) = self.cache_lookup(name) {
+        if let Some((cache_key, cached)) = self.cache_lookup_entry(name) {
             if let Some(ps) = cached.as_ref() {
-                if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
-                    ctx.register_raw_module_sig(name, ps.ps_sig.clone());
-                }
+                self.prepare_cached_pers_struct(&cache_key, ps, ctx);
+            } else if self.in_process_mode
+                && !self.hidden_modules.contains(&cache_key)
+                && (self.portable_cache_entry(name).is_some()
+                    || self.in_memory_info(name).is_some())
+            {
+                // OCaml overwrites the persistent table with `Some ps` when a
+                // unit is saved/loaded (`compiler/ml/env.ml:642-645,
+                // 687-688, 707-709, 1960-1977`). A shared in-process worker
+                // cache can still hold an earlier miss placeholder while the
+                // ModuleRegistry has since published the module, so discard
+                // the stale negative entry and fall through to the registry.
+                self.cache_remove(&cache_key);
+            } else {
+                return cached;
             }
-            return cached;
+            if cached.is_some() {
+                return cached;
+            }
         }
 
         // Check portable cache (from ModuleRegistry, needs internalization).
@@ -796,6 +826,8 @@ impl PersistentEnv {
             if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
                 ctx.register_raw_module_sig(name, ps.ps_sig.clone());
             }
+            self.prepared_cached_alias_rewrites
+                .insert(portable_key.clone());
             self.cache_insert(portable_key, Some(ps.clone()));
             return Some(ps);
         }
@@ -825,8 +857,37 @@ impl PersistentEnv {
 
         // Try to load from disk
         let result = self.load_module(&load_name, ctx).map(Arc::new);
+        if let Some(ps) = result.as_ref() {
+            self.prepared_cached_alias_rewrites
+                .insert(load_name.clone());
+            if should_register_lazy_raw_sig(&load_name) && !ctx.has_raw_module_sig(&load_name) {
+                ctx.register_raw_module_sig(&load_name, ps.ps_sig.clone());
+            }
+        }
         self.cache_insert(load_name, result.clone());
         result
+    }
+
+    fn prepare_cached_pers_struct(&mut self, cache_key: &str, ps: &PersStruct, ctx: &TypeContext) {
+        if self
+            .prepared_cached_alias_rewrites
+            .insert(cache_key.to_string())
+        {
+            let module_path = Path::Pident(Ident::create_persistent(cache_key));
+            let effective_module_path = self
+                .alias_prefix_rewrites
+                .get(cache_key)
+                .unwrap_or_else(|| module_path.clone());
+            collect_alias_rewrites(
+                &ps.ps_sig,
+                &effective_module_path,
+                &mut self.alias_prefix_rewrites,
+            );
+        }
+
+        if should_register_lazy_raw_sig(cache_key) && !ctx.has_raw_module_sig(cache_key) {
+            ctx.register_raw_module_sig(cache_key, ps.ps_sig.clone());
+        }
     }
 
     fn finalize_loaded_signature<'a>(
@@ -1057,6 +1118,7 @@ impl PersistentEnv {
             portable_cache: self.portable_cache.clone(),
             portable_cache_overrides: self.portable_cache_overrides.clone(),
             hidden_modules: self.hidden_modules.clone(),
+            prepared_cached_alias_rewrites: HashSet::new(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();

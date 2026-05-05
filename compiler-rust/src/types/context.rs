@@ -476,22 +476,18 @@ impl TypeContext {
         self.global_level.set(1);
         self.saved_levels.borrow_mut().clear();
 
-        // Abbreviation memo state. The simple_abbrevs slot points back to
-        // index 1 of `abbrevs`, which we keep but reset to Mnil.
+        // Abbreviation memo state. Keep the side table append-only because
+        // preserved arena types store `AbbrevMemoRef` indices into it; reusing
+        // those indices for new memo cells would make cached types observe
+        // unrelated abbreviation expansions.
         self.trace_gadt_instances.set(false);
         self.simple_abbrevs.set(AbbrevMemoRef(1));
         self.current_abbreviations.set(AbbrevMemoRef::nil());
         self.previous_env_id.set(0);
-        // Truncate abbrevs back to the two reserved Mnil slots so subsequent
-        // alloc_abbrev_memo calls are deterministic.
-        {
-            let mut abbrevs = self.abbrevs.borrow_mut();
-            abbrevs.truncate(2);
-            // Reset the dedicated simple_abbrevs cell to Mnil (it shares index 1).
-            *abbrevs[0].borrow_mut() = AbbrevMemo::Mnil;
-            *abbrevs[1].borrow_mut() = AbbrevMemo::Mnil;
+        self.clear_abbrev_memos();
+        if let Some(simple) = self.abbrevs.borrow().get(1) {
+            *simple.borrow_mut() = AbbrevMemo::Mnil;
         }
-        self.memoized_abbrev_refs.borrow_mut().clear();
 
         // Per-compile env-keyed caches. Cheaper to drop than to grow.
         self.qualified_module_components_cache.borrow_mut().clear();
