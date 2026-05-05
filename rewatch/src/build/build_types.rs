@@ -507,8 +507,12 @@ impl BuildCommandState {
         self.in_memory_deps.lock().unwrap().clone()
     }
 
-    pub fn get_stored_ast(&self, key: &str) -> Option<StoredAst> {
-        self.stored_asts.lock().unwrap().get(key).cloned()
+    /// Clone the parse-phase AST table once for an in-process compile wave.
+    /// Stored AST payloads are already behind `Arc`, so this keeps worker
+    /// lookups immutable and avoids a contended mutex plus per-lookup Arc
+    /// cloning while modules compile in parallel.
+    pub fn snapshot_stored_asts(&self) -> AHashMap<String, StoredAst> {
+        self.stored_asts.lock().unwrap().clone()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

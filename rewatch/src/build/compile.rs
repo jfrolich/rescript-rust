@@ -243,22 +243,34 @@ fn unblock_dependents(
 fn compute_module_costs(
     build_state: &BuildCommandState,
     universe: &AHashSet<String>,
+    stored_asts_snapshot: Option<&AHashMap<String, StoredAst>>,
 ) -> AHashMap<String, i64> {
-    let stored_asts = build_state.stored_asts.lock().unwrap();
-    let mut costs = AHashMap::with_capacity(universe.len());
-    for name in universe {
-        let impl_key = format!("{name}:impl");
-        let intf_key = format!("{name}:intf");
-        let mut source_len = 0usize;
-        if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
-            source_len = source_len.saturating_add(stored.source_len);
+    fn compute_from_asts(
+        universe: &AHashSet<String>,
+        stored_asts: &AHashMap<String, StoredAst>,
+    ) -> AHashMap<String, i64> {
+        let mut costs = AHashMap::with_capacity(universe.len());
+        for name in universe {
+            let impl_key = format!("{name}:impl");
+            let intf_key = format!("{name}:intf");
+            let mut source_len = 0usize;
+            if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
+                source_len = source_len.saturating_add(stored.source_len);
+            }
+            if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
+                source_len = source_len.saturating_add(stored.source_len);
+            }
+            costs.insert(name.clone(), source_len.max(1) as i64);
         }
-        if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
-            source_len = source_len.saturating_add(stored.source_len);
-        }
-        costs.insert(name.clone(), source_len.max(1) as i64);
+        costs
     }
-    costs
+
+    if let Some(stored_asts) = stored_asts_snapshot {
+        return compute_from_asts(universe, stored_asts);
+    }
+
+    let stored_asts = build_state.stored_asts.lock().unwrap();
+    compute_from_asts(universe, &stored_asts)
 }
 
 /// Compute the weighted critical-path priority of every module in the universe:
@@ -325,6 +337,7 @@ fn compile_one(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     registry_snapshot: &ModuleRegistry,
+    stored_asts: Option<&AHashMap<String, StoredAst>>,
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
@@ -375,6 +388,7 @@ fn compile_one(
                 module,
                 module_name,
                 registry_snapshot,
+                stored_asts.expect("in-process compile requires stored AST snapshot"),
                 build_state,
                 build_command_state,
                 in_process_hooks.as_ref(),
@@ -596,8 +610,10 @@ pub fn compile(
     let compile_universe_count = compile_universe.len();
     set_length(compile_universe_count as u64);
 
+    let in_process_mode = build_state.build_mode().is_in_process();
+    let stored_asts_snapshot = in_process_mode.then(|| build_state.snapshot_stored_asts());
     let compile_universe = Arc::new(compile_universe);
-    let module_costs = compute_module_costs(build_state, &compile_universe);
+    let module_costs = compute_module_costs(build_state, &compile_universe, stored_asts_snapshot.as_ref());
     let priorities =
         compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
 
@@ -641,8 +657,6 @@ pub fn compile(
     // registrations have already been published to the shared registry —
     // but workers need a lock-free view, so each worker gets a snapshot taken
     // at spawn time. (Taking one per spawn is cheap vs. type-checking.)
-    let in_process_mode = build_state.build_mode().is_in_process();
-
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
     // orders work — dumping everything into rayon's deque would defeat #2.
@@ -675,6 +689,7 @@ pub fn compile(
                 } else {
                     ModuleRegistry::new()
                 };
+                let stored_asts = stored_asts_snapshot.as_ref();
                 let parent_span = compile_parent_span.clone();
                 let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
                     tx: tx.clone(),
@@ -686,6 +701,7 @@ pub fn compile(
                         build_state_ref,
                         build_command_state_ref,
                         &registry_snapshot,
+                        stored_asts,
                         &module_name,
                         is_dirty,
                         warn_override,
@@ -2396,6 +2412,7 @@ fn compile_module_in_process(
     module: &Module,
     module_name: &str,
     registry: &ModuleRegistry,
+    stored_asts: &AHashMap<String, StoredAst>,
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     scheduler_hooks: Option<&InProcessSchedulerHooks>,
@@ -2456,7 +2473,7 @@ fn compile_module_in_process(
         .entered();
         let intf_source_abs = Path::new(&package.path).join(&interface.path);
         let intf_key = format!("{module_name}:intf");
-        let intf_result = match build_command_state.get_stored_ast(&intf_key) {
+        let intf_result = match stored_asts.get(&intf_key) {
             Some(StoredAst::Signature(stored)) => {
                 rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
                     &stored.arena,
@@ -2650,7 +2667,7 @@ fn compile_module_in_process(
         )
         .entered();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match build_command_state.get_stored_ast(&impl_key) {
+            match stored_asts.get(&impl_key) {
                 Some(StoredAst::Structure(stored)) => {
                     let signature_hook: Option<
                         &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
