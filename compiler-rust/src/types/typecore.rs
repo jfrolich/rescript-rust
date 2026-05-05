@@ -12615,6 +12615,41 @@ fn record_labels_match_ids(
     }
 }
 
+fn record_label_descriptions_match_names(
+    labels: &[crate::types::decl::LabelDescription],
+    field_names: &[String],
+    closed_record: bool,
+) -> bool {
+    if field_names.len() <= 8 {
+        if !field_names
+            .iter()
+            .all(|name| labels.iter().any(|ld| ld.lbl_name == name.as_str()))
+        {
+            return false;
+        }
+    } else {
+        let label_names: HashSet<&str> = labels.iter().map(|ld| ld.lbl_name.as_str()).collect();
+        if !field_names
+            .iter()
+            .all(|name| label_names.contains(name.as_str()))
+        {
+            return false;
+        }
+    }
+
+    if !closed_record {
+        return true;
+    }
+
+    let mandatory_count = labels.iter().filter(|ld| !ld.lbl_optional).count();
+    let has_optional = labels.iter().any(|ld| ld.lbl_optional);
+    if has_optional {
+        field_names.len() >= mandatory_count
+    } else {
+        field_names.len() == labels.len()
+    }
+}
+
 fn find_record_label_description_by_name(
     labels: Option<&[crate::types::LabelDescription]>,
     label_name: &str,
@@ -12635,8 +12670,12 @@ fn select_record_type_for_fields<'a>(
     closed_record: bool,
 ) -> Option<TypeExprRef> {
     for candidate_ty in [Some(expected_ty), base_ty].into_iter().flatten() {
-        if let Some(labels) = get_record_labels(ctx, env, pers_env, candidate_ty) {
-            if record_labels_match_ids(&labels, field_names, closed_record) {
+        // OCaml compiler/ml/typecore.ml:1163-1198 disambiguates against the
+        // shared label array carried by label descriptions. Reuse Rust's
+        // reconstructed shared array here instead of cloning the full record
+        // declaration just to check whether field names fit a candidate.
+        if let Some(labels) = build_record_label_descriptions(candidate_ty, env, pers_env, ctx) {
+            if record_label_descriptions_match_names(&labels, field_names, closed_record) {
                 return Some(candidate_ty);
             }
         }
@@ -12646,8 +12685,8 @@ fn select_record_type_for_fields<'a>(
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     let candidates = env.find_all_labels(first_name);
     for label in candidates.into_iter().rev() {
-        if let Some(labels) = get_record_labels(ctx, env, pers_env, label.lbl_res) {
-            if record_labels_match_ids(&labels, field_names, closed_record) {
+        if let Some(labels) = build_record_label_descriptions(label.lbl_res, env, pers_env, ctx) {
+            if record_label_descriptions_match_names(&labels, field_names, closed_record) {
                 let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
                 if matching.iter().any(|(existing, _)| *existing == key) {
                     continue;
