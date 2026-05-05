@@ -37,23 +37,6 @@ use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature,
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
-// Per-worker `TypeContext` reuse and shared `PersStruct` cache across the
-// modules a rayon worker compiles is the natural next lever for in-process
-// build time. The plumbing for it (`TypeContext::begin_compile`,
-// `Arc<IdGenerator>` ownership, `PersistentEnv::from_registry_with_cache`)
-// is in place but the wire-up is intentionally still inactive. Tella
-// validation found two blockers: cache-hit persistent-env side effects
-// (partially addressed in `PersistentEnv::prepare_cached_pers_struct`) and
-// semantic JS output drift from reused type-context state. See
-// `projects/shared-interfaces/PROGRESS.md`.
-//
-// A 7.8GB peak-memory spike observed during the wire-up attempt was an
-// artifact of running with cache sharing *disabled* and `TypeContext`
-// shared — every compile re-materialized its full dep closure into the
-// same arena, accumulating ~213 duplicate copies per worker. With cache
-// sharing working, materialization is amortized and per-worker memory
-// stays bounded similarly to the per-compile-fresh-`TypeContext` baseline.
-
 /// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
 /// (Instant::now panics on WASM since time isn't implemented there).
 #[inline]
