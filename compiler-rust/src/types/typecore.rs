@@ -4801,7 +4801,6 @@ fn force_qualified_value_type_paths<'a>(
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
         selected_module_path: Option<&Path>,
-        allow_enclosing_selected_stdlib_component: bool,
     ) -> Option<Path> {
         if !matches!(path, Path::Pdot(_, type_name, _) if type_name == "t") {
             return None;
@@ -4828,9 +4827,17 @@ fn force_qualified_value_type_paths<'a>(
             // `Subst.value_description`. That substitution rewrites flattened
             // persistent alias prefixes at any depth under the selected value
             // module, e.g. `Webapi__Fetch.RequestInit.t` becomes
-            // `Webapi.Fetch.RequestInit.t`. For selected Stdlib values, keep
-            // the existing delayed enclosing-component rule so array argument
-            // typing does not force `Stdlib.JSON.t` earlier than OCaml.
+            // `Webapi.Fetch.RequestInit.t`. OCaml compiler/ml/env.ml:1517
+            // scrapes aliases before env.ml:1530-1538 prefixes component
+            // values; for a non-Stdlib alias root such as `AWS.DocumentClient =
+            // AWS__DocumentClient`, compiler/ml/subst.ml:303-309 rewrites all
+            // type paths under that selected root, including sibling modules
+            // like `DocumentClient.t` while selecting `StringSet.make`.
+            // For selected Stdlib values, leave the scraped alias value scheme
+            // flattened. OCaml compiler/ml/mtype.ml:41-49 does not rewrite
+            // value descriptions while strengthening the alias target, so
+            // `JSON.Encode.null` keeps `Stdlib_JSON.t` even though the selected
+            // value path is `Stdlib.JSON.Encode.null`.
             let candidate_parent_is_selected_or_child = candidate_parent.same(selected_module_path)
                 || path_descendant_depth(&candidate_parent, selected_module_path).is_some();
             let selected_is_inside_candidate_parent =
@@ -4838,9 +4845,14 @@ fn force_qualified_value_type_paths<'a>(
                     .is_some_and(|depth| depth > 0);
             let candidate_root_is_stdlib = path_root_ident(&candidate_parent)
                 .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+            let candidate_and_selected_share_non_stdlib_alias_root = !candidate_root_is_stdlib
+                && path_descendant_depth(selected_module_path, &qualified_root)
+                    .is_some_and(|depth| depth > 0)
+                && path_descendant_depth(&candidate_parent, &qualified_root)
+                    .is_some_and(|depth| depth > 0);
             if !candidate_parent_is_selected_or_child
-                && !(selected_is_inside_candidate_parent
-                    && (!candidate_root_is_stdlib || allow_enclosing_selected_stdlib_component))
+                && !(selected_is_inside_candidate_parent && !candidate_root_is_stdlib)
+                && !candidate_and_selected_share_non_stdlib_alias_root
             {
                 return None;
             }
@@ -4976,7 +4988,6 @@ fn force_qualified_value_type_paths<'a>(
         value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
         infer_stdlib_root_from_flat_parent: bool,
-        allow_enclosing_selected_stdlib_component: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
             ctx: &TypeContext<'_>,
@@ -5072,8 +5083,13 @@ fn force_qualified_value_type_paths<'a>(
             // unit (`Stdlib_JSON.t`) where OCaml's selected value description
             // has already gone through the visible `Stdlib.JSON.t` component.
             // If the selected value is itself under `Stdlib`, keep the exact
-            // selected-table restriction so sibling paths such as
-            // `Stdlib_RegExp.t` stay flattened like OCaml.
+            // selected-table restriction. OCaml compiler/ml/env.ml:1517 scrapes
+            // aliases before env.ml:1530-1538 prefixes component values, while
+            // compiler/ml/mtype.ml:41-50 leaves value descriptions untouched
+            // when strengthening an alias target. Therefore a selected value
+            // like `Stdlib.JSON.Encode.null` still exposes the scraped
+            // `Stdlib_JSON.t` value scheme, and sibling paths such as
+            // `Stdlib_RegExp.t` stay flattened too.
             if let Some(selected_module_path) = selected_module_path {
                 let selected_module_root_is_stdlib = path_root_ident(selected_module_path)
                     .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
@@ -5081,26 +5097,7 @@ fn force_qualified_value_type_paths<'a>(
                     && !selected_module_root_is_stdlib
                     && path_root_ident(&candidate_parent)
                         .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
-                // OCaml compiler/ml/env.ml:1091-1100 selects values through the
-                // component table for the visible module path, and env.ml:1530-1538
-                // prefixes that table with the selected component path. For a value
-                // selected from `Stdlib.JSON.Encode`, a result-side enclosing
-                // type path `Stdlib.JSON.t` is therefore visible through that
-                // same selected table; for `Stdlib.String`, a sibling type like
-                // `Stdlib_RegExp.t` is not. Keep this off for the argument-side
-                // `type_argument` path from compiler/ml/typecore.ml:4171-4192:
-                // OCaml leaves `JSON.Encode.array`'s argument element type as
-                // the flattened runtime unit while rewriting its result.
-                let enclosing_selected_stdlib_component = allow_enclosing_selected_stdlib_component
-                    && selected_module_root_is_stdlib
-                    && path_root_ident(&candidate_parent)
-                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-                    && path_descendant_depth(selected_module_path, &candidate_parent)
-                        .is_some_and(|depth| depth > 0);
-                if !candidate_parent.same(selected_module_path)
-                    && !implicit_stdlib_component
-                    && !enclosing_selected_stdlib_component
-                {
+                if !candidate_parent.same(selected_module_path) && !implicit_stdlib_component {
                     continue;
                 }
             }
@@ -5242,10 +5239,14 @@ fn force_qualified_value_type_paths<'a>(
                 // result-side side effects still run like OCaml. For selected
                 // `Stdlib` functions, leave the return side lazy until
                 // typecore.ml:4219-4224 returns the application result and the
-                // caller's `rue` unifies it with the expected type; this keeps
-                // `JSON.Encode.string` flat when it is typed as an array
-                // element, while direct non-function values such as
-                // `JSON.Encode.null` still use the selected component path.
+                // caller's `rue` unifies it with the expected type. OCaml
+                // compiler/ml/env.ml:1517 scrapes aliases before
+                // env.ml:1530-1538 prefixes component values, and
+                // compiler/ml/mtype.ml:41-49 leaves value descriptions
+                // unchanged when strengthening an alias target. That keeps
+                // selected `Stdlib.JSON.Encode.*` value result types on the
+                // flattened `Stdlib_JSON.t` scheme until later unification
+                // forces them.
                 let selected_module_root_is_stdlib = selected_module_path.is_some_and(|selected| {
                     path_root_ident(selected)
                         .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
@@ -5427,7 +5428,6 @@ fn force_qualified_value_type_paths<'a>(
                         &tctx.persistent_env,
                         &path,
                         selected_module_path,
-                        !allow_stdlib_flat_parent_inference,
                     )
                 })
                 .or_else(|| {
@@ -5439,7 +5439,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         false,
-                        !allow_stdlib_flat_parent_inference,
                     )
                 })
                 .or_else(|| {
@@ -5453,7 +5452,6 @@ fn force_qualified_value_type_paths<'a>(
                                 value_access_root,
                                 selected_module_path,
                                 true,
-                                false,
                             )
                         })
                         .flatten()
