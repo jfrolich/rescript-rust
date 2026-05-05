@@ -22952,10 +22952,11 @@ pub(crate) fn alias_target_for_module_path<'a>(
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
-            let md = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-                .ok()?;
+            // OCaml compiler/ml/env.ml:865-875 resolves an exact
+            // `Path.Pident` module through `IdTbl.find_same`; env.ml:285-290
+            // skips opened component tables. Do not let a same-name opened
+            // alias answer alias-target scraping for an already-selected path.
+            let md = env.find_module_same(id).ok()?;
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, target)
                 | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
@@ -22985,10 +22986,12 @@ pub(crate) fn module_alias_target_for_path<'a>(
 ) -> Option<Path> {
     match module_path {
         Path::Pident(id) => {
-            let md = env
-                .lookup_module(module_path)
-                .or_else(|_| env.find_module(id.name()))
-                .ok()?;
+            // OCaml compiler/ml/env.ml:865-875 resolves an exact
+            // `Path.Pident` module through `IdTbl.find_same`; env.ml:285-290
+            // skips opened component tables. This keeps persistent runtime roots
+            // such as `Dom` from being strengthened through opened aliases before
+            // compiler/ml/ctype.ml:1367-1372 normalizes the path.
+            let md = env.find_module_same(id).ok()?;
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, target) => Some(target.clone()),
                 _ => None,

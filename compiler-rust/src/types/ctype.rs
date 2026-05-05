@@ -2173,6 +2173,7 @@ fn normalize_path_full_inner<'a>(
     // paths like `Pervasives.ref` and `Stdlib.Iterator.result` consume
     // compiler/ml/env.ml:865-875 `ps_sig` stamps at the same point.
     if let Path::Pident(id) = &path {
+        let has_local_module = env.find_module_same(id).is_ok();
         let has_component_cache = {
             let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
                 path.clone(),
@@ -2198,7 +2199,7 @@ fn normalize_path_full_inner<'a>(
         // normalize-path forcing.
         let should_force_persistent_sig = id.is_persistent()
             && !(id.name() == "Belt" && has_component_cache)
-            && (!env.has_module_ident(id)
+            && (!has_local_module
                 || id.name() == "Pervasives"
                 || (id.name() == "Stdlib" && !stdlib_array_buffer_component_lookup));
         if should_force_persistent_sig {
@@ -2279,8 +2280,19 @@ fn normalize_path_full_inner<'a>(
                 );
             }
         }
-    } else if let Ok(md) = env.lookup_module(&path) {
-        if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+    } else {
+        let md = match &path {
+            Path::Pident(id) => env.find_module_same(id),
+            _ => env.lookup_module(&path),
+        };
+        if let Ok(md) = md
+            && let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type
+        {
+            // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
+            // exact `Path.Pident` module lookup, and env.ml:285-290 skips
+            // opened component tables. Do not let an opened alias such as
+            // `Webapi.Dom` satisfy normalization of the persistent runtime
+            // root `Dom`; env.ml:872-874 would force `Dom.ps_sig` first.
             return normalize_path_full_inner(
                 ctx,
                 env,
