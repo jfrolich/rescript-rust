@@ -2946,7 +2946,7 @@ fn preserve_alias_unify_representative(
     ) -> Option<(Path, usize)> {
         use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
-        let md = env.find_module(module_id.name()).ok()?;
+        let md = env.find_module_same(module_id).ok()?;
         let DeclMty::MtySignature(sig) = &md.md_type else {
             return None;
         };
@@ -16835,8 +16835,7 @@ fn copy_lookup_type_expr(
     // so during normal substitution and `Subst.identity` freshening (which is
     // what these copy helpers mirror) every Tvar/Tunivar is shared with the
     // source. Allocating fresh nodes here advances the typedtree stamp stream
-    // ahead of OCaml's, producing the strict-parity drift documented in
-    // memory/tella_strict_parity_findings_20260504.md.
+    // ahead of OCaml's typedtree stamp stream when copying shared row variables.
     {
         let desc = ctx.get_desc(ty);
         if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {

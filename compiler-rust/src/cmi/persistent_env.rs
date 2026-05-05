@@ -728,17 +728,6 @@ impl PersistentEnv {
         self.alias_prefix_rewrites.get(flat_head)
     }
 
-    /// Snapshot all known alias rewrites (flattened backing-unit name → access
-    /// path). Used by typecore's qualify pipeline to expand cross-unit
-    /// references like `Pident("Web__MediaDevices")` to their access path
-    /// (`Pdot(Pident("Web"), "MediaDevices")`). OCaml compiler/ml/env.ml:1517
-    /// scrapes aliases lazily through `find_module`, so any signature item
-    /// referencing a flattened backing unit gets rewritten to the alias path
-    /// at the access site.
-    pub fn alias_rewrites_snapshot(&self) -> HashMap<String, Path> {
-        self.alias_prefix_rewrites.to_hash_map()
-    }
-
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
         // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
         // forcing its signature when `lookup_module ~load:false` only needs to
