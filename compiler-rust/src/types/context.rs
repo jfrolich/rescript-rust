@@ -524,7 +524,7 @@ impl TypeContext {
 
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
-            let env_ref = EnvRef(typed_envs.len());
+            let env_ref = EnvRef::from_usize(typed_envs.len());
             typed_envs.push(Arc::new(env.clone_preserve_id()));
             env_ref
         };
@@ -534,7 +534,7 @@ impl TypeContext {
 
     /// Resolve a typedtree environment reference.
     pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
-        self.typed_envs.borrow().get(env_ref.0).cloned()
+        self.typed_envs.borrow().get(env_ref.index()).cloned()
     }
 
     /// Intern a CMI longident component and return a synthetic StrIdx.
@@ -1375,7 +1375,7 @@ impl TypeContext {
         let refs = self.memoized_abbrev_refs.borrow().clone();
         let abbrevs = self.abbrevs.borrow();
         for memo in refs {
-            if let Some(cell) = abbrevs.get(memo.0) {
+            if let Some(cell) = abbrevs.get(memo.index()) {
                 *cell.borrow_mut() = AbbrevMemo::Mnil;
             }
         }
@@ -1405,7 +1405,7 @@ impl TypeContext {
             let node = {
                 let abbrevs = self.abbrevs.borrow();
                 abbrevs
-                    .get(current.0)
+                    .get(current.index())
                     .map(|cell| cell.borrow().clone())
                     .unwrap_or(AbbrevMemo::Mnil)
             };
@@ -1440,7 +1440,7 @@ impl TypeContext {
             let node = {
                 let abbrevs = self.abbrevs.borrow();
                 abbrevs
-                    .get(current.0)
+                    .get(current.index())
                     .map(|cell| cell.borrow().clone())
                     .unwrap_or(AbbrevMemo::Mnil)
             };
@@ -1472,7 +1472,7 @@ impl TypeContext {
     pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
         let abbrevs = self.abbrevs.borrow();
         abbrevs
-            .get(memo.0)
+            .get(memo.index())
             .map(|cell| cell.borrow().clone())
             .unwrap_or(AbbrevMemo::Mnil)
     }
@@ -1532,7 +1532,7 @@ impl TypeContext {
             return;
         }
         let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.0) {
+        if let Some(cell) = abbrevs.get(memo.index()) {
             *cell.borrow_mut() = AbbrevMemo::Mnil;
         }
     }
@@ -1543,7 +1543,7 @@ impl TypeContext {
             return;
         }
         let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.0) {
+        if let Some(cell) = abbrevs.get(memo.index()) {
             *cell.borrow_mut() = value;
         }
     }
@@ -1564,20 +1564,21 @@ impl TypeContext {
 
         {
             let mut abbrevs = self.abbrevs.borrow_mut();
-            if memo.0 >= abbrevs.len() {
+            let memo_idx = memo.index();
+            if memo_idx >= abbrevs.len() {
                 return;
             }
 
-            let previous = abbrevs[memo.0].borrow().clone();
+            let previous = abbrevs[memo_idx].borrow().clone();
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
                 let idx = abbrevs.len();
                 abbrevs.push(RefCell::new(previous));
-                AbbrevMemoRef(idx)
+                AbbrevMemoRef::from_usize(idx)
             };
 
-            *abbrevs[memo.0].borrow_mut() = AbbrevMemo::Mcons {
+            *abbrevs[memo_idx].borrow_mut() = AbbrevMemo::Mcons {
                 private_flag,
                 path,
                 abbrev,
@@ -1602,7 +1603,7 @@ impl TypeContext {
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
         abbrevs.push(RefCell::new(memo));
-        AbbrevMemoRef(idx)
+        AbbrevMemoRef::from_usize(idx)
     }
 
     // ========================================================================
@@ -1614,7 +1615,7 @@ impl TypeContext {
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
         row_fields.push(RefCell::new(field));
-        RowFieldRef(idx)
+        RowFieldRef::from_usize(idx)
     }
 
     /// Get the value stored in a row field reference.
@@ -1623,7 +1624,9 @@ impl TypeContext {
             return None;
         }
         let row_fields = self.row_fields.borrow();
-        row_fields.get(rf.0).and_then(|cell| cell.borrow().clone())
+        row_fields
+            .get(rf.index())
+            .and_then(|cell| cell.borrow().clone())
     }
 
     /// Set the value of a row field reference (like OCaml's set_row_field).
@@ -1632,7 +1635,7 @@ impl TypeContext {
             return;
         }
         let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.0) {
+        if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = Some(field);
         }
     }
@@ -1643,7 +1646,7 @@ impl TypeContext {
             return;
         }
         let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.0) {
+        if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = None;
         }
     }
@@ -1657,7 +1660,7 @@ impl TypeContext {
         let mut commutables = self.commutables.borrow_mut();
         let idx = commutables.len();
         commutables.push(RefCell::new(c));
-        CommutableRef(idx)
+        CommutableRef::from_usize(idx)
     }
 
     // ========================================================================
@@ -1669,7 +1672,7 @@ impl TypeContext {
         let mut field_kinds = self.field_kinds.borrow_mut();
         let idx = field_kinds.len();
         field_kinds.push(RefCell::new(kind));
-        FieldKindRef(idx)
+        FieldKindRef::from_usize(idx)
     }
 
     // ========================================================================

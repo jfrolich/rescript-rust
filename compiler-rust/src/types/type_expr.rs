@@ -360,7 +360,14 @@ pub enum Commutable {
 
 /// Reference to a commutable flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CommutableRef(pub usize);
+pub struct CommutableRef(pub u32);
+
+impl CommutableRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("commutable arena index exceeds u32::MAX"))
+    }
+}
 
 /// Abbreviation memo for type expansion caching.
 #[derive(Debug, Clone)]
@@ -381,12 +388,22 @@ pub enum AbbrevMemo {
 
 /// Reference to an abbreviation memo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AbbrevMemoRef(pub usize);
+pub struct AbbrevMemoRef(pub u32);
 
 impl AbbrevMemoRef {
     /// Create a nil memo reference.
     pub fn nil() -> Self {
         AbbrevMemoRef(0)
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -395,7 +412,7 @@ pub type ObjectName = Option<(Path, Vec<TypeExprRef>)>;
 
 /// Object name reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectNameRef(pub usize);
+pub struct ObjectNameRef(pub u32);
 
 /// Field kind for object fields.
 #[derive(Debug, Clone)]
@@ -410,7 +427,14 @@ pub enum FieldKind {
 
 /// Reference to a field kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldKindRef(pub usize);
+pub struct FieldKindRef(pub u32);
+
+impl FieldKindRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("field kind arena index exceeds u32::MAX"))
+    }
+}
 
 /// Row description for polymorphic variants.
 #[derive(Debug, Clone)]
@@ -449,17 +473,27 @@ pub enum RowField {
 
 /// Reference to a row field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowFieldRef(pub usize);
+pub struct RowFieldRef(pub u32);
 
 impl RowFieldRef {
     /// Create a null reference.
     pub fn null() -> Self {
-        RowFieldRef(usize::MAX)
+        RowFieldRef(u32::MAX)
     }
 
     /// Check if this is a null reference.
     pub fn is_null(&self) -> bool {
-        self.0 == usize::MAX
+        self.0 == u32::MAX
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("row field arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 

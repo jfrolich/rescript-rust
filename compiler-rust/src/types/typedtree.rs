@@ -1007,11 +1007,23 @@ pub struct LabelDeclaration {
 /// Reference to an environment (placeholder).
 /// In the full implementation, this would be an index or reference to the Env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnvRef(pub usize);
+pub struct EnvRef(pub u32);
+
+impl EnvRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("typed env arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Reference to a row description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RowDescRef(pub usize);
+pub struct RowDescRef(pub u32);
 
 // ============================================================================
 // Helper Functions
