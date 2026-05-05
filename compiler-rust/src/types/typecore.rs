@@ -12621,38 +12621,39 @@ fn record_labels_match_ids(
     }
 }
 
-fn record_label_descriptions_match_names(
-    labels: &[crate::types::decl::LabelDescription],
-    field_names: &[String],
-    closed_record: bool,
-) -> bool {
-    if field_names.len() <= 8 {
+#[derive(Clone)]
+struct RecordLabelDescriptionsInfo {
+    labels: Arc<Vec<crate::types::LabelDescription>>,
+    summary: Arc<crate::types::context::RecordLabelDescriptionSummary>,
+}
+
+impl RecordLabelDescriptionsInfo {
+    #[inline]
+    fn label_by_name(&self, name: &str) -> Option<crate::types::LabelDescription> {
+        self.summary
+            .label_index(name)
+            .and_then(|idx| self.labels.get(idx))
+            .cloned()
+    }
+
+    #[inline]
+    fn matches_field_names(&self, field_names: &[String], closed_record: bool) -> bool {
         if !field_names
             .iter()
-            .all(|name| labels.iter().any(|ld| ld.lbl_name == name.as_str()))
+            .all(|name| self.summary.contains_label(name.as_str()))
         {
             return false;
         }
-    } else {
-        let label_names: HashSet<&str> = labels.iter().map(|ld| ld.lbl_name.as_str()).collect();
-        if !field_names
-            .iter()
-            .all(|name| label_names.contains(name.as_str()))
-        {
-            return false;
+
+        if !closed_record {
+            return true;
         }
-    }
 
-    if !closed_record {
-        return true;
-    }
-
-    let mandatory_count = labels.iter().filter(|ld| !ld.lbl_optional).count();
-    let has_optional = labels.iter().any(|ld| ld.lbl_optional);
-    if has_optional {
-        field_names.len() >= mandatory_count
-    } else {
-        field_names.len() == labels.len()
+        if self.summary.has_optional {
+            field_names.len() >= self.summary.mandatory_count
+        } else {
+            field_names.len() == self.labels.len()
+        }
     }
 }
 
@@ -12680,8 +12681,8 @@ fn select_record_type_for_fields<'a>(
         // shared label array carried by label descriptions. Reuse Rust's
         // reconstructed shared array here instead of cloning the full record
         // declaration just to check whether field names fit a candidate.
-        if let Some(labels) = build_record_label_descriptions(candidate_ty, env, pers_env, ctx) {
-            if record_label_descriptions_match_names(&labels, field_names, closed_record) {
+        if let Some(info) = build_record_label_descriptions_info(candidate_ty, env, pers_env, ctx) {
+            if info.matches_field_names(field_names, closed_record) {
                 return Some(candidate_ty);
             }
         }
@@ -12691,8 +12692,9 @@ fn select_record_type_for_fields<'a>(
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     let candidates = env.find_all_labels(first_name);
     for label in candidates.into_iter().rev() {
-        if let Some(labels) = build_record_label_descriptions(label.lbl_res, env, pers_env, ctx) {
-            if record_label_descriptions_match_names(&labels, field_names, closed_record) {
+        if let Some(info) = build_record_label_descriptions_info(label.lbl_res, env, pers_env, ctx)
+        {
+            if info.matches_field_names(field_names, closed_record) {
                 let key = extract_type_path_from_expected(label.lbl_res, env, ctx);
                 if matching.iter().any(|(existing, _)| *existing == key) {
                     continue;
@@ -12929,9 +12931,9 @@ fn type_record(
     // shared array too; building per-record name maps for JSX prop records
     // turns every small JSX literal into a full-props allocation.
     let disambiguation_label_descriptions =
-        build_record_label_descriptions(disambiguation_ty, env, &mut tctx.persistent_env, ctx);
+        build_record_label_descriptions_info(disambiguation_ty, env, &mut tctx.persistent_env, ctx);
     let expected_label_descriptions =
-        build_record_label_descriptions(expected_ty, env, &mut tctx.persistent_env, ctx);
+        build_record_label_descriptions_info(expected_ty, env, &mut tctx.persistent_env, ctx);
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
@@ -12973,23 +12975,20 @@ fn type_record(
             Some(disambiguation_ty),
         )
         .or_else(|| {
-            find_record_label_description_by_name(
-                disambiguation_label_descriptions
-                    .as_deref()
-                    .map(Vec::as_slice),
-                &field_name,
-            )
-            .map(|mut label| {
-                // OCaml compiler/ml/typecore.ml:1163-1198 sends record
-                // fields through `Label.disambiguate`; its
-                // compiler/ml/typecore.ml:942-967 `lookup_from_type` observes
-                // labels after env.ml:1542-1548 `Subst.type_declaration`.
-                // Labels rebuilt directly from Rust's selected record type need
-                // the same path qualification before `type_label_exp`
-                // instantiates them.
-                qualify_label_description_paths(&mut label, env, &mut tctx.persistent_env, ctx);
-                label
-            })
+            disambiguation_label_descriptions
+                .as_ref()
+                .and_then(|info| info.label_by_name(&field_name))
+                .map(|mut label| {
+                    // OCaml compiler/ml/typecore.ml:1163-1198 sends record
+                    // fields through `Label.disambiguate`; its
+                    // compiler/ml/typecore.ml:942-967 `lookup_from_type` observes
+                    // labels after env.ml:1542-1548 `Subst.type_declaration`.
+                    // Labels rebuilt directly from Rust's selected record type need
+                    // the same path qualification before `type_label_exp`
+                    // instantiates them.
+                    qualify_label_description_paths(&mut label, env, &mut tctx.persistent_env, ctx);
+                    label
+                })
         })
         .or_else(|| {
             disambiguate_label(
@@ -13042,10 +13041,9 @@ fn type_record(
             // Build label description (prefer env-disambiguated metadata).
             let (label_desc, field_input_ty, poly_vars) =
                 if let Some(env_label) = disambiguated {
-                    let expected_label = find_record_label_description_by_name(
-                        expected_label_descriptions.as_deref().map(Vec::as_slice),
-                        &field_name,
-                    )
+                    let expected_label = expected_label_descriptions
+                        .as_ref()
+                        .and_then(|info| info.label_by_name(&field_name))
                     .map(|mut label| {
                         // OCaml compiler/ml/typecore.ml:3677-3717 receives the
                         // already-substituted label chosen by
@@ -13239,12 +13237,12 @@ fn type_record(
         .iter()
         .any(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)) == "...");
 
-    let mut all_label_descriptions = if has_dotdotdot_field {
+    let mut all_label_descriptions_info = if has_dotdotdot_field {
         None
     } else {
-        build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
+        build_record_label_descriptions_info(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
             || {
-                build_record_label_descriptions(
+                build_record_label_descriptions_info(
                     disambiguation_ty,
                     env,
                     &mut tctx.persistent_env,
@@ -13253,9 +13251,9 @@ fn type_record(
             },
         )
     };
-    if all_label_descriptions.is_none() {
+    if all_label_descriptions_info.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
-            all_label_descriptions = build_record_label_descriptions(
+            all_label_descriptions_info = build_record_label_descriptions_info(
                 base_expr.exp_type,
                 env,
                 &mut tctx.persistent_env,
@@ -13263,18 +13261,28 @@ fn type_record(
             );
         }
     }
-    if all_label_descriptions.is_none() {
+    if all_label_descriptions_info.is_none() {
         if let Some(lbl) = first_disambiguated_label.as_ref() {
-            all_label_descriptions =
-                build_record_label_descriptions(lbl.lbl_res, env, &mut tctx.persistent_env, ctx);
+            all_label_descriptions_info = build_record_label_descriptions_info(
+                lbl.lbl_res,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            );
         }
     }
-    if all_label_descriptions
+    if all_label_descriptions_info
         .as_ref()
-        .is_some_and(|labels| labels.iter().any(|ld| ld.lbl_name == "..."))
+        .is_some_and(|info| info.summary.has_dotdotdot)
     {
-        all_label_descriptions = None;
+        all_label_descriptions_info = None;
     }
+    let all_label_descriptions_summary = all_label_descriptions_info
+        .as_ref()
+        .map(|info| info.summary.clone());
+    let mut all_label_descriptions = all_label_descriptions_info
+        .as_ref()
+        .map(|info| info.labels.clone());
 
     // Resolve the full label set for this record type (OCaml builds
     // definitions over lbl_all). Prefer the shared LabelDescription array above:
@@ -13314,11 +13322,18 @@ fn type_record(
     // Do not synthesize explicit `None` overrides for the all-optional case.
     if typed_base.is_none() && fields.is_empty() {
         if let Some(labels) = all_label_descriptions.as_ref() {
-            let labels_missing: Vec<String> = labels
-                .iter()
-                .filter(|ld| !ld.lbl_optional)
-                .map(|ld| ld.lbl_name.clone())
-                .collect();
+            let labels_missing: Vec<String> = if all_label_descriptions_summary
+                .as_ref()
+                .is_some_and(|summary| summary.mandatory_count == 0)
+            {
+                Vec::new()
+            } else {
+                labels
+                    .iter()
+                    .filter(|ld| !ld.lbl_optional)
+                    .map(|ld| ld.lbl_name.clone())
+                    .collect()
+            };
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
                     labels: labels_missing,
@@ -13356,14 +13371,18 @@ fn type_record(
     // inside Rust so JSX prop bags don't copy hundreds of label descriptions.
     let sparse_all_label_descriptions = if typed_base.is_none() && !fields.is_empty() {
         all_label_descriptions.as_ref().and_then(|labels| {
-            (labels.len() >= 20
-                && labels.iter().all(|label| {
-                    matches!(
-                        label.lbl_repres,
-                        crate::types::RecordRepresentation::RecordRegular
-                    )
-                }))
-            .then(|| labels.clone())
+            let all_regular = all_label_descriptions_summary.as_ref().map_or_else(
+                || {
+                    labels.iter().all(|label| {
+                        matches!(
+                            label.lbl_repres,
+                            crate::types::RecordRepresentation::RecordRegular
+                        )
+                    })
+                },
+                |summary| summary.all_regular,
+            );
+            (labels.len() >= 20 && all_regular).then(|| labels.clone())
         })
     } else {
         None
@@ -13372,19 +13391,27 @@ fn type_record(
 
     if let Some(all_label_descriptions) = all_label_descriptions.clone() {
         if use_sparse_large_record {
-            let mut labels_missing = Vec::new();
-            for raw_label_desc in all_label_descriptions
-                .iter()
-                .filter(|label| !label.lbl_optional)
+            let labels_missing = if all_label_descriptions_summary
+                .as_ref()
+                .is_some_and(|summary| summary.mandatory_count == 0)
             {
-                let key_pos = raw_label_desc.lbl_pos;
-                if explicit_overrides.contains_key(&key_pos)
-                    || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
+                Vec::new()
+            } else {
+                let mut labels_missing = Vec::new();
+                for raw_label_desc in all_label_descriptions
+                    .iter()
+                    .filter(|label| !label.lbl_optional)
                 {
-                    continue;
+                    let key_pos = raw_label_desc.lbl_pos;
+                    if explicit_overrides.contains_key(&key_pos)
+                        || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
+                    {
+                        continue;
+                    }
+                    labels_missing.push(raw_label_desc.lbl_name.clone());
                 }
-                labels_missing.push(raw_label_desc.lbl_name.clone());
-            }
+                labels_missing
+            };
 
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
@@ -20323,11 +20350,20 @@ fn build_record_label_descriptions<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    build_record_label_descriptions_info(record_ty, env, pers_env, ctx).map(|info| info.labels)
+}
+
+fn build_record_label_descriptions_info<'a>(
+    record_ty: TypeExprRef,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<RecordLabelDescriptionsInfo> {
     // OCaml reuses the installed `lbl_all` array during record typing
     // (compiler/ml/typecore.ml:2802,2840-2842). Rust reconstructs that array
     // lazily, so a constructor-path cache hit can return before cloning the
     // full record declaration again.
-    if let Some(cached) = cached_record_label_descriptions_for_constr(record_ty, ctx) {
+    if let Some(cached) = cached_record_label_descriptions_info_for_constr(record_ty, ctx) {
         return Some(cached);
     }
 
@@ -20338,7 +20374,15 @@ fn build_record_label_descriptions<'a>(
         _ => return None,
     };
     if let Some(cached) = ctx.get_record_label_descriptions(&record_path) {
-        return Some(cached);
+        let summary = ctx
+            .get_record_label_description_summary(&record_path)
+            .unwrap_or_else(|| {
+                Arc::new(crate::types::context::RecordLabelDescriptionSummary::from_labels(&cached))
+            });
+        return Some(RecordLabelDescriptionsInfo {
+            labels: cached,
+            summary,
+        });
     }
 
     let shared_res = ctx.new_generic_constr(record_path.clone(), decl.type_params.clone());
@@ -20371,20 +20415,33 @@ fn build_record_label_descriptions<'a>(
             .collect::<Vec<_>>(),
     );
     ctx.register_record_label_descriptions(&record_path, descriptions.clone());
-    Some(descriptions)
+    let summary = ctx.get_record_label_description_summary(&record_path)?;
+    Some(RecordLabelDescriptionsInfo {
+        labels: descriptions,
+        summary,
+    })
 }
 
 fn cached_record_label_descriptions_for_constr(
     record_ty: TypeExprRef,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    cached_record_label_descriptions_info_for_constr(record_ty, ctx).map(|info| info.labels)
+}
+
+fn cached_record_label_descriptions_info_for_constr(
+    record_ty: TypeExprRef,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<RecordLabelDescriptionsInfo> {
     let mut current = ctx.repr(record_ty);
     for _ in 0..32 {
         let next = {
             let desc = ctx.borrow_desc(current);
             match &*desc {
                 TypeDesc::Tconstr { path, .. } => {
-                    return ctx.get_record_label_descriptions(path);
+                    let labels = ctx.get_record_label_descriptions(path)?;
+                    let summary = ctx.get_record_label_description_summary(path)?;
+                    return Some(RecordLabelDescriptionsInfo { labels, summary });
                 }
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
                 _ => return None,

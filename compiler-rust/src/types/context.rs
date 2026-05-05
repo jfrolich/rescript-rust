@@ -123,6 +123,61 @@ impl QualifiedRecordLabelCacheKey {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RecordLabelDescriptionSummary {
+    label_positions: Arc<ahash::AHashMap<String, usize>>,
+    pub(crate) mandatory_count: usize,
+    pub(crate) has_optional: bool,
+    pub(crate) has_dotdotdot: bool,
+    pub(crate) all_regular: bool,
+}
+
+impl RecordLabelDescriptionSummary {
+    pub(crate) fn from_labels(labels: &[super::decl::LabelDescription]) -> Self {
+        let mut label_positions = ahash::AHashMap::with_capacity(labels.len());
+        let mut mandatory_count = 0;
+        let mut has_optional = false;
+        let mut has_dotdotdot = false;
+        let mut all_regular = true;
+
+        for (idx, label) in labels.iter().enumerate() {
+            label_positions.insert(label.lbl_name.clone(), idx);
+            if label.lbl_optional {
+                has_optional = true;
+            } else {
+                mandatory_count += 1;
+            }
+            if label.lbl_name == "..." {
+                has_dotdotdot = true;
+            }
+            if !matches!(
+                label.lbl_repres,
+                super::decl::RecordRepresentation::RecordRegular
+            ) {
+                all_regular = false;
+            }
+        }
+
+        Self {
+            label_positions: Arc::new(label_positions),
+            mandatory_count,
+            has_optional,
+            has_dotdotdot,
+            all_regular,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn label_index(&self, name: &str) -> Option<usize> {
+        self.label_positions.get(name).copied()
+    }
+
+    #[inline]
+    pub(crate) fn contains_label(&self, name: &str) -> bool {
+        self.label_positions.contains_key(name)
+    }
+}
+
 fn normalize_component_cache_path(path: Path) -> Path {
     match path {
         Path::Pident(_) => path,
@@ -360,6 +415,8 @@ pub struct TypeContext {
     /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
         RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
+    record_label_description_summaries_cache:
+        RefCell<ahash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
 
     /// Qualified persistent record labels keyed by environment and label slot.
     /// OCaml caches module components with already-substituted `lbl_all`
@@ -450,6 +507,7 @@ impl TypeContext {
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
+            record_label_description_summaries_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
@@ -1166,9 +1224,13 @@ impl TypeContext {
         type_path: &Path,
         labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
+        let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
         self.record_label_descriptions_cache
             .borrow_mut()
             .insert(type_path.clone(), labels);
+        self.record_label_description_summaries_cache
+            .borrow_mut()
+            .insert(type_path.clone(), summary);
     }
 
     /// Look up reconstructed record label descriptions for a type path.
@@ -1177,6 +1239,16 @@ impl TypeContext {
         type_path: &Path,
     ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
         self.record_label_descriptions_cache
+            .borrow()
+            .get(type_path)
+            .cloned()
+    }
+
+    pub(crate) fn get_record_label_description_summary(
+        &self,
+        type_path: &Path,
+    ) -> Option<Arc<RecordLabelDescriptionSummary>> {
+        self.record_label_description_summaries_cache
             .borrow()
             .get(type_path)
             .cloned()
