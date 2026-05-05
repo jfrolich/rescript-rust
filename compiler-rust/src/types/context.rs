@@ -127,11 +127,14 @@ fn normalize_component_cache_path(path: Path) -> Path {
             // `Path.same`; component lookup in env.ml:781-793 keys module
             // identity by that path equality while still carrying positions in
             // the selected access path. Mirror that only for Rust's cache key.
-            Path::pdot(normalize_component_cache_path(*parent), name)
+            Path::pdot(
+                normalize_component_cache_path(parent.as_ref().clone()),
+                name,
+            )
         }
         Path::Papply(functor, arg) => Path::papply(
-            normalize_component_cache_path(*functor),
-            normalize_component_cache_path(*arg),
+            normalize_component_cache_path(functor.as_ref().clone()),
+            normalize_component_cache_path(arg.as_ref().clone()),
         ),
     }
 }

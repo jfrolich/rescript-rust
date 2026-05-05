@@ -3785,13 +3785,13 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_module_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                Box::new(self.normalize_module_path_in_env(env, left)),
-                Box::new(self.normalize_module_path_in_env(env, right)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, left)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, right)),
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
@@ -3838,13 +3838,13 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                Box::new(self.normalize_value_prefix_path_in_env(env, left)),
-                Box::new(self.normalize_value_prefix_path_in_env(env, right)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, left)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, right)),
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
@@ -3892,7 +3892,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
@@ -11964,9 +11964,9 @@ external myJson: Js.Json.t = "default"
             },
         );
 
-        let alias_path = crate::types::Path::Pdot(
-            Box::new(crate::types::Path::Pident(original_module.clone())),
-            "N".to_string(),
+        let alias_path = crate::types::Path::pdot_pos(
+            crate::types::Path::Pident(original_module.clone()),
+            "N",
             0,
         );
         let coercion = ModuleCoercion::Tcoerce_alias(
@@ -12470,13 +12470,13 @@ external myJson: Js.Json.t = "default"
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
-            &crate::types::Path::Pdot(
-                Box::new(crate::types::Path::Pdot(
-                    Box::new(crate::types::Path::Pident(inner_define.clone())),
-                    "N0".to_string(),
+            &crate::types::Path::pdot_pos(
+                crate::types::Path::pdot_pos(
+                    crate::types::Path::Pident(inner_define.clone()),
+                    "N0",
                     1,
-                )),
-                "f1".to_string(),
+                ),
+                "f1",
                 0,
             ),
             Location::none(),

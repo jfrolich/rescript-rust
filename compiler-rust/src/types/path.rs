@@ -24,6 +24,7 @@
 use crate::ident::Ident;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 /// A module path in the type system.
 ///
@@ -36,9 +37,9 @@ pub enum Path {
     Pident(Ident),
     /// A dotted access: `Array.t` is `Pdot(Pident(Array), "t", -1)`
     /// The integer is a position hint (usually -1 for no hint).
-    Pdot(Box<Path>, String, i32),
+    Pdot(Arc<Path>, String, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
-    Papply(Box<Path>, Box<Path>),
+    Papply(Arc<Path>, Arc<Path>),
 }
 
 /// Position constant for no position hint.
@@ -75,7 +76,7 @@ impl Path {
     /// Create a dotted path.
     #[inline]
     pub fn pdot(prefix: Path, name: impl Into<String>) -> Self {
-        Path::Pdot(Box::new(prefix), name.into(), NOPOS)
+        Path::Pdot(Arc::new(prefix), name.into(), NOPOS)
     }
 
     /// Get the parent module path (strip the last component).
@@ -91,13 +92,13 @@ impl Path {
     /// Create a dotted path with position.
     #[inline]
     pub fn pdot_pos(prefix: Path, name: impl Into<String>, pos: i32) -> Self {
-        Path::Pdot(Box::new(prefix), name.into(), pos)
+        Path::Pdot(Arc::new(prefix), name.into(), pos)
     }
 
     /// Create a functor application path.
     #[inline]
     pub fn papply(functor: Path, arg: Path) -> Self {
-        Path::Papply(Box::new(functor), Box::new(arg))
+        Path::Papply(Arc::new(functor), Arc::new(arg))
     }
 
     /// Check if two paths refer to the same entity.

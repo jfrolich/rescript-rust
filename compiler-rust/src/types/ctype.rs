@@ -1230,7 +1230,7 @@ fn normalize_module_path_through_components<'a>(
             let parent =
                 normalize_module_path_through_components(ctx, load_paths, parent, visiting)
                     .unwrap_or_else(|| (**parent).clone());
-            Path::Pdot(Box::new(parent), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(parent), name.clone(), *pos)
         }
         Path::Papply(functor, arg) => {
             let functor =
@@ -1238,7 +1238,7 @@ fn normalize_module_path_through_components<'a>(
                     .unwrap_or_else(|| (**functor).clone());
             let arg = normalize_module_path_through_components(ctx, load_paths, arg, visiting)
                 .unwrap_or_else(|| (**arg).clone());
-            Path::Papply(Box::new(functor), Box::new(arg))
+            Path::Papply(std::sync::Arc::new(functor), std::sync::Arc::new(arg))
         }
         Path::Pident(_) => module_path.clone(),
     };
@@ -1678,10 +1678,7 @@ fn strengthen_module_type_for_module_access_path<'a>(
                 ctx,
                 env,
                 false,
-                &Path::Papply(
-                    Box::new(module_access_path.clone()),
-                    Box::new(Path::pident(param.clone())),
-                ),
+                &Path::papply(module_access_path.clone(), Path::pident(param.clone())),
                 result,
             )),
         },
@@ -1754,11 +1751,7 @@ fn strengthen_signature_for_module_access_path<'a>(
                 SignatureItem::SigTypext(id.clone(), ext.clone(), *ext_status)
             }
             SignatureItem::SigModule(id, md, rec_status) => {
-                let child_path = Path::Pdot(
-                    Box::new(module_access_path.clone()),
-                    id.name().to_string(),
-                    pos,
-                );
+                let child_path = Path::pdot_pos(module_access_path.clone(), id.name(), pos);
                 pos += 1;
                 let strengthened_md = strengthen_module_decl_for_module_access_path(
                     ctx,
@@ -2059,7 +2052,11 @@ fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Opt
     match path {
         Path::Pdot(parent, name, pos) => {
             let rewritten_parent = rewrite_path_prefix(parent, old_prefix, new_prefix)?;
-            Some(Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos))
+            Some(Path::Pdot(
+                std::sync::Arc::new(rewritten_parent),
+                name.clone(),
+                *pos,
+            ))
         }
         Path::Pident(_) | Path::Papply(_, _) => None,
     }
@@ -2174,7 +2171,7 @@ fn normalize_path_full_inner<'a>(
             if p_norm == **p {
                 path.clone()
             } else {
-                Path::Pdot(Box::new(p_norm), s.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
             }
         }
         _ => path.clone(),
@@ -2647,7 +2644,7 @@ fn try_expand_head_with_mode<'a>(
                                         _,
                                         target_module_path,
                                     )) if !target_module_path.same(parent) => Some(Path::Pdot(
-                                        Box::new(target_module_path),
+                                        std::sync::Arc::new(target_module_path),
                                         type_name.clone(),
                                         *pos,
                                     )),

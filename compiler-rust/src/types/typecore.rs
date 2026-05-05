@@ -4631,7 +4631,7 @@ fn force_qualified_value_type_paths<'a>(
             match path {
                 Path::Pdot(prefix, name, pos) => {
                     rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
-                        Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+                        Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
                     })
                 }
                 _ => None,
@@ -4715,7 +4715,11 @@ fn force_qualified_value_type_paths<'a>(
                     if candidate_parent.same(parent) {
                         return None;
                     }
-                    let candidate = Path::Pdot(Box::new(candidate_parent), type_name.clone(), *pos);
+                    let candidate = Path::Pdot(
+                        std::sync::Arc::new(candidate_parent),
+                        type_name.clone(),
+                        *pos,
+                    );
                     if candidate.same(path) {
                         return None;
                     }
@@ -4774,7 +4778,7 @@ fn force_qualified_value_type_paths<'a>(
                     }
                     let mut rewritten = new_root.clone();
                     for (name, pos) in segments.into_iter().rev() {
-                        rewritten = Path::Pdot(Box::new(rewritten), name, pos);
+                        rewritten = Path::Pdot(std::sync::Arc::new(rewritten), name, pos);
                     }
                     return Some(rewritten);
                 }
@@ -5179,7 +5183,7 @@ fn force_qualified_value_type_paths<'a>(
             match path {
                 Path::Pdot(prefix, name, pos) => {
                     rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
-                        Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+                        Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
                     })
                 }
                 _ => None,
@@ -5199,7 +5203,7 @@ fn force_qualified_value_type_paths<'a>(
             // scheme therefore exposes `TellaStd.Response.t`, not the alias
             // target's `Webapi__Fetch.Response.t`.
             Some(Path::Pdot(
-                Box::new(candidate_parent),
+                std::sync::Arc::new(candidate_parent),
                 type_name.clone(),
                 *pos,
             ))
@@ -5727,7 +5731,9 @@ fn force_qualified_value_type_paths<'a>(
                             // target so `Response.t` can be rewritten to the
                             // opened path.
                             push_target(Path::Pdot(
-                                Box::new(Path::pident(Ident::create_persistent(flat_head))),
+                                std::sync::Arc::new(Path::pident(Ident::create_persistent(
+                                    flat_head,
+                                ))),
                                 name.clone(),
                                 *pos,
                             ));
@@ -17921,11 +17927,7 @@ impl Env {
                             return Some(cached);
                         }
                         components.lookup_value(value_name).map(|(pos, _, vd)| {
-                            let path = Path::Pdot(
-                                Box::new(module_path.clone()),
-                                value_name.to_string(),
-                                pos as i32,
-                            );
+                            let path = Path::pdot_pos(module_path.clone(), value_name, pos as i32);
                             let result = (path, vd.clone());
                             ctx.register_resolved_module_value(
                                 &module_path,
@@ -17958,8 +17960,11 @@ impl Env {
                             },
                         )
                     {
-                        let path =
-                            Path::Pdot(Box::new(mod_path), value_name.to_string(), pos as i32);
+                        let path = Path::Pdot(
+                            std::sync::Arc::new(mod_path),
+                            value_name.to_string(),
+                            pos as i32,
+                        );
                         let result = (path, vd);
                         ctx.register_resolved_module_value(
                             &module_path,
@@ -17984,14 +17989,8 @@ impl Env {
                             if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item
                                 && id.name() == value_name
                             {
-                                let result = (
-                                    Path::Pdot(
-                                        Box::new(mod_path.clone()),
-                                        value_name.to_string(),
-                                        0,
-                                    ),
-                                    vd.clone(),
-                                );
+                                let result =
+                                    (Path::pdot_pos(mod_path.clone(), value_name, 0), vd.clone());
                                 ctx.register_resolved_module_value(
                                     &module_path,
                                     value_name,
@@ -18170,11 +18169,7 @@ impl Env {
                                     pos as i32,
                                 )
                             } else {
-                                Path::Pdot(
-                                    Box::new(parent_path.clone()),
-                                    submod_name.to_string(),
-                                    pos as i32,
-                                )
+                                Path::pdot_pos(parent_path.clone(), submod_name, pos as i32)
                             }
                         })
                     },
@@ -18525,11 +18520,7 @@ impl Env {
                         parent_sig.as_ref(),
                         submod_name,
                     ) {
-                        let sub_path = Path::Pdot(
-                            Box::new(parent_path.clone()),
-                            submod_name.to_string(),
-                            pos as i32,
-                        );
+                        let sub_path = Path::pdot_pos(parent_path.clone(), submod_name, pos as i32);
                         if apply_subst {
                             return resolve_module_signature_for_path(
                                 &sub_path, self, pers_env, ctx,
@@ -20851,7 +20842,9 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         }
         match path {
             Path::Pdot(prefix, name, pos) => rewrite_path_prefix(prefix, old_prefix, new_prefix)
-                .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)),
+                .map(|rewritten_prefix| {
+                    Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
+                }),
             _ => None,
         }
     }
@@ -20866,7 +20859,9 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             Path::Pdot(prefix, name, pos) => rewrite_flattened_head_prefix(
                 prefix, flat_head, new_prefix,
             )
-            .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)),
+            .map(|rewritten_prefix| {
+                Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
+            }),
             _ => None,
         }
     }
@@ -20950,8 +20945,11 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
     fn prepend_module_prefix(path: &Path, prefix: &Path) -> Option<Path> {
         match path {
             Path::Pident(id) => Some(Path::pdot(prefix.clone(), id.name())),
-            Path::Pdot(parent, name, pos) => prepend_module_prefix(parent, prefix)
-                .map(|rewritten_parent| Path::Pdot(Box::new(rewritten_parent), name.clone(), *pos)),
+            Path::Pdot(parent, name, pos) => {
+                prepend_module_prefix(parent, prefix).map(|rewritten_parent| {
+                    Path::Pdot(std::sync::Arc::new(rewritten_parent), name.clone(), *pos)
+                })
+            }
             Path::Papply(_, _) => None,
         }
     }

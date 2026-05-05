@@ -737,7 +737,9 @@ fn rewrite_included_path_to_local(
                 local_module_ids,
                 local_modtype_ids,
             )
-            .map(|rewritten_prefix| Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos))
+            .map(|rewritten_prefix| {
+                Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
+            })
         }
         Path::Papply(functor, arg) => {
             let rewritten_functor = rewrite_included_path_to_local(
@@ -760,8 +762,10 @@ fn rewrite_included_path_to_local(
                 None
             } else {
                 Some(Path::Papply(
-                    Box::new(rewritten_functor.unwrap_or_else(|| functor.as_ref().clone())),
-                    Box::new(rewritten_arg.unwrap_or_else(|| arg.as_ref().clone())),
+                    std::sync::Arc::new(
+                        rewritten_functor.unwrap_or_else(|| functor.as_ref().clone()),
+                    ),
+                    std::sync::Arc::new(rewritten_arg.unwrap_or_else(|| arg.as_ref().clone())),
                 ))
             }
         }
@@ -1342,13 +1346,13 @@ fn rewrite_module_path_prefix(path: &Path, old_param: &Ident, new_prefix: &Path)
     match path {
         Path::Pident(id) if id.same(old_param) => new_prefix.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(rewrite_module_path_prefix(prefix, old_param, new_prefix)),
+            std::sync::Arc::new(rewrite_module_path_prefix(prefix, old_param, new_prefix)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(rewrite_module_path_prefix(functor, old_param, new_prefix)),
-            Box::new(rewrite_module_path_prefix(arg, old_param, new_prefix)),
+            std::sync::Arc::new(rewrite_module_path_prefix(functor, old_param, new_prefix)),
+            std::sync::Arc::new(rewrite_module_path_prefix(arg, old_param, new_prefix)),
         ),
         _ => path.clone(),
     }
@@ -1910,15 +1914,15 @@ fn rewrite_module_path_prefix_with_aliases(
                     }
                 }
             }
-            Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(rewrite_module_path_prefix_with_aliases(
+            std::sync::Arc::new(rewrite_module_path_prefix_with_aliases(
                 functor,
                 old_param,
                 arg_aliases,
             )),
-            Box::new(rewrite_module_path_prefix_with_aliases(
+            std::sync::Arc::new(rewrite_module_path_prefix_with_aliases(
                 arg,
                 old_param,
                 arg_aliases,
@@ -4355,13 +4359,13 @@ fn rewrite_package_freshened_type_path(path: &Path, fresh_type_ids: &HashMap<i32
             .map(Path::pident)
             .unwrap_or_else(|| path.clone()),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(rewrite_package_freshened_type_path(prefix, fresh_type_ids)),
+            std::sync::Arc::new(rewrite_package_freshened_type_path(prefix, fresh_type_ids)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(rewrite_package_freshened_type_path(functor, fresh_type_ids)),
-            Box::new(rewrite_package_freshened_type_path(arg, fresh_type_ids)),
+            std::sync::Arc::new(rewrite_package_freshened_type_path(functor, fresh_type_ids)),
+            std::sync::Arc::new(rewrite_package_freshened_type_path(arg, fresh_type_ids)),
         ),
     }
 }
@@ -7980,13 +7984,13 @@ fn anchor_local_module_aliases_to_owner(
                 }
             }
             Path::Pdot(prefix, name, pos) => Path::Pdot(
-                Box::new(qualify_local_module_type_path(prefix, maps)),
+                std::sync::Arc::new(qualify_local_module_type_path(prefix, maps)),
                 name.clone(),
                 *pos,
             ),
             Path::Papply(functor, arg) => Path::Papply(
-                Box::new(qualify_local_module_type_path(functor, maps)),
-                Box::new(qualify_local_module_type_path(arg, maps)),
+                std::sync::Arc::new(qualify_local_module_type_path(functor, maps)),
+                std::sync::Arc::new(qualify_local_module_type_path(arg, maps)),
             ),
         }
     }
@@ -8066,10 +8070,7 @@ fn anchor_local_module_aliases_to_owner(
                 anchor_local_module_aliases_to_owner(param_type, owner_path);
             }
             let result_owner_path = if param.name() != "*" {
-                Path::Papply(
-                    Box::new(owner_path.clone()),
-                    Box::new(Path::pident(param.clone())),
-                )
+                Path::papply(owner_path.clone(), Path::pident(param.clone()))
             } else {
                 owner_path.clone()
             };
@@ -8266,7 +8267,7 @@ fn strip_self_module_prefix_in_sig(
                     }
                 }
                 rewrite_self_path(prefix, module_id, direct_items).map(|rewritten_prefix| {
-                    Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
                 })
             }
             _ => None,

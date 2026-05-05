@@ -7298,7 +7298,7 @@ fn normalize_path_via_ctx(
             if norm_prefix == **prefix {
                 path.clone()
             } else {
-                Path::Pdot(Box::new(norm_prefix), name.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(norm_prefix), name.clone(), *pos)
             }
         }
         _ => path.clone(),
@@ -7320,7 +7320,7 @@ fn normalize_module_path_via_ctx(
             if norm_prefix == **prefix {
                 path.clone()
             } else {
-                Path::Pdot(Box::new(norm_prefix), name.clone(), *pos)
+                Path::Pdot(std::sync::Arc::new(norm_prefix), name.clone(), *pos)
             }
         }
         _ => path.clone(),

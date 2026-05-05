@@ -1314,17 +1314,17 @@ fn substitute_type_constructor_path(
             .cloned()
             .unwrap_or_else(|| path.clone()),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(substitute_type_constructor_path(
+            std::sync::Arc::new(substitute_type_constructor_path(
                 functor,
                 type_subst,
                 module_subst,
             )),
-            Box::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
         ),
     }
 }
@@ -1336,13 +1336,13 @@ fn substitute_module_path(path: &Path, module_subst: &HashMap<String, Path>) -> 
             .cloned()
             .unwrap_or_else(|| path.clone()),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(substitute_module_path(functor, module_subst)),
-            Box::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_module_path(functor, module_subst)),
+            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
         ),
     }
 }
@@ -1358,13 +1358,13 @@ fn substitute_type_path(
             .cloned()
             .unwrap_or_else(|| path.clone()),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(substitute_type_path(functor, type_subst, module_subst)),
-            Box::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_type_path(functor, type_subst, module_subst)),
+            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
         ),
     }
 }
@@ -1381,17 +1381,17 @@ fn substitute_modtype_path(
             .or_else(|| module_subst.get(id.name()).cloned())
             .unwrap_or_else(|| path.clone()),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            Box::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            Box::new(substitute_modtype_path(
+            std::sync::Arc::new(substitute_modtype_path(
                 functor,
                 module_subst,
                 modtype_subst,
             )),
-            Box::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
         ),
     }
 }

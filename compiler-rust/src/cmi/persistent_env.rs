@@ -3564,16 +3564,16 @@ fn substitute_type_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
-            Box::new(substitute_module_path(
+            std::sync::Arc::new(substitute_module_path(
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             )),
-            Box::new(substitute_module_path(
+            std::sync::Arc::new(substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
@@ -3622,16 +3622,16 @@ fn substitute_module_path(
                 module_name_map,
                 protected_module_head,
             );
-            Path::Pdot(Box::new(rewritten_prefix), name.clone(), *pos)
+            Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
         }
         Path::Papply(left, right) => Path::Papply(
-            Box::new(substitute_module_path(
+            std::sync::Arc::new(substitute_module_path(
                 left,
                 module_stamp_map,
                 module_name_map,
                 protected_module_head,
             )),
-            Box::new(substitute_module_path(
+            std::sync::Arc::new(substitute_module_path(
                 right,
                 module_stamp_map,
                 module_name_map,
@@ -3742,12 +3742,17 @@ fn rewrite_path_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option
         Path::Pdot(inner, name, pos) => {
             if let Path::Pident(id) = inner.as_ref() {
                 if id.name() == old_name {
-                    return Some(Path::Pdot(Box::new(new_prefix.clone()), name.clone(), *pos));
+                    return Some(Path::Pdot(
+                        std::sync::Arc::new(new_prefix.clone()),
+                        name.clone(),
+                        *pos,
+                    ));
                 }
             }
             // Recursively check deeper paths
             let rewritten_inner = rewrite_path_prefix(inner, old_name, new_prefix);
-            rewritten_inner.map(|new_inner| Path::Pdot(Box::new(new_inner), name.clone(), *pos))
+            rewritten_inner
+                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), name.clone(), *pos))
         }
         _ => None,
     }
@@ -3991,10 +3996,14 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
     match path {
         Path::Pdot(inner, name, pos) => {
             if inner.same(old_prefix) {
-                return Some(Path::Pdot(Box::new(new_prefix.clone()), name.clone(), *pos));
+                return Some(Path::Pdot(
+                    std::sync::Arc::new(new_prefix.clone()),
+                    name.clone(),
+                    *pos,
+                ));
             }
             rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
-                .map(|new_inner| Path::Pdot(Box::new(new_inner), name.clone(), *pos))
+                .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), name.clone(), *pos))
         }
         _ => None,
     }
@@ -4579,7 +4588,11 @@ fn rewrite_path_deep(path: &Path, old_name: &str, new_prefix: &Path) -> Option<P
                 // Pdot(Pdot(...), name) -> check if inner has a rewritable prefix
                 _ => {
                     let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
-                    Some(Path::Pdot(Box::new(rewritten_inner), name.clone(), *pos))
+                    Some(Path::Pdot(
+                        std::sync::Arc::new(rewritten_inner),
+                        name.clone(),
+                        *pos,
+                    ))
                 }
             }
         }
@@ -4594,7 +4607,11 @@ fn rewrite_inner_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Optio
         Path::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
         Path::Pdot(inner, name, pos) => {
             let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
-            Some(Path::Pdot(Box::new(rewritten_inner), name.clone(), *pos))
+            Some(Path::Pdot(
+                std::sync::Arc::new(rewritten_inner),
+                name.clone(),
+                *pos,
+            ))
         }
         _ => None,
     }
@@ -4749,8 +4766,13 @@ fn add_signature_to_env_with_options(
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
     for item in sig_items.iter() {
-        let slot_path =
-            |name: &str, p: i32| Path::Pdot(Box::new(module_path.clone()), name.to_string(), p);
+        let slot_path = |name: &str, p: i32| {
+            Path::Pdot(
+                std::sync::Arc::new(module_path.clone()),
+                name.to_string(),
+                p,
+            )
+        };
         match item {
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
@@ -5038,13 +5060,28 @@ fn add_signature_to_env_with_options(
                                 }
                             }
                             Path::Pdot(prefix, name, pos) => Path::Pdot(
-                                Box::new(go(*prefix, module_path, module_name, access_path)),
+                                std::sync::Arc::new(go(
+                                    prefix.as_ref().clone(),
+                                    module_path,
+                                    module_name,
+                                    access_path,
+                                )),
                                 name,
                                 pos,
                             ),
                             Path::Papply(functor, arg) => Path::Papply(
-                                Box::new(go(*functor, module_path, module_name, access_path)),
-                                Box::new(go(*arg, module_path, module_name, access_path)),
+                                std::sync::Arc::new(go(
+                                    functor.as_ref().clone(),
+                                    module_path,
+                                    module_name,
+                                    access_path,
+                                )),
+                                std::sync::Arc::new(go(
+                                    arg.as_ref().clone(),
+                                    module_path,
+                                    module_name,
+                                    access_path,
+                                )),
                             ),
                         }
                     }

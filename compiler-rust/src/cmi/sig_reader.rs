@@ -1070,12 +1070,12 @@ fn read_path(value: &OcamlValue) -> Path {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::Pdot(Box::new(prefix), name, pos)
+            Path::Pdot(std::sync::Arc::new(prefix), name, pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);
             let a = read_path(&fields[1]);
-            Path::Papply(Box::new(f), Box::new(a))
+            Path::Papply(std::sync::Arc::new(f), std::sync::Arc::new(a))
         }
         _ => Path::Pident(Ident::create_persistent("?")), // fallback
     }

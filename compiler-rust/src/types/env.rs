@@ -1096,7 +1096,7 @@ impl Env {
                 if normalized_prefix == **prefix {
                     path.clone()
                 } else {
-                    Path::Pdot(Box::new(normalized_prefix), name.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(normalized_prefix), name.clone(), *pos)
                 }
             }
             Path::Pident(_) => path.clone(),
@@ -1115,7 +1115,7 @@ impl Env {
                 if p_norm == **p {
                     path.clone()
                 } else {
-                    Path::Pdot(Box::new(p_norm), s.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
                 }
             }
             _ => path.clone(),
