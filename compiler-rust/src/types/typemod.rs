@@ -11659,22 +11659,18 @@ fn type_structure_item<'a>(
                     typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
                 }
 
-                // Convert manifest type (type alias)
-                let (mut typ_manifest, mut manifest_type_ref) = match &decl.ptype_manifest {
-                    Some(manifest) => {
-                        let manifest_ct = arena.get_core_type(*manifest);
-                        let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, manifest_ct)?;
-                        touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
-                        (Some(typed_manifest), Some(type_ref))
-                    }
-                    None => (None, None),
-                };
-
                 // Check for @unboxed attribute (only applies to single-constructor variants)
                 let decl_has_unboxed_attr = decl
                     .ptype_attributes
                     .iter()
                     .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
+
+                // OCaml compiler/ml/typedecl.ml:449-607 translates the kind
+                // first, creating variant constructor identifiers at
+                // typedecl.ml:481-482, then translates the manifest at
+                // typedecl.ml:692-699. Keep this ordering because manifest
+                // lookup can force persistent signatures and consume stamps.
+                let mut manifest_from_kind = None;
 
                 // Convert the type kind - create both internal and typed tree versions
                 let (internal_type_kind, typed_tree_kind, constructors) = match &decl.ptype_kind {
@@ -12696,10 +12692,11 @@ fn type_structure_item<'a>(
                                 (internal_labels, typed_tree_labels, None)
                             };
                         if let Some(object_manifest) = spread_only_object_manifest {
-                            let (typed_manifest, manifest_ref) =
-                                transl_type(tctx, &temp_env, &object_manifest)?;
-                            typ_manifest = Some(typed_manifest);
-                            manifest_type_ref = Some(manifest_ref);
+                            // OCaml compiler/ml/typedecl.ml:630-689 rewrites
+                            // spread-only records to an abstract declaration
+                            // with an object manifest, and that manifest is
+                            // still translated later by typedecl.ml:692-699.
+                            manifest_from_kind = Some(object_manifest);
                             (
                                 crate::types::TypeKind::TypeAbstract,
                                 TypedTypeKind::Ttype_abstract,
@@ -12723,6 +12720,27 @@ fn type_structure_item<'a>(
                         TypedTypeKind::Ttype_open,
                         vec![],
                     ),
+                };
+
+                // OCaml compiler/ml/typedecl.ml:692-699 translates the
+                // manifest after the kind has been translated.
+                let (typ_manifest, manifest_type_ref) = if let Some(object_manifest) =
+                    manifest_from_kind.as_ref()
+                {
+                    let (typed_manifest, type_ref) = transl_type(tctx, &temp_env, object_manifest)?;
+                    touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
+                    (Some(typed_manifest), Some(type_ref))
+                } else {
+                    match &decl.ptype_manifest {
+                        Some(manifest) => {
+                            let manifest_ct = arena.get_core_type(*manifest);
+                            let (typed_manifest, type_ref) =
+                                transl_type(tctx, &temp_env, manifest_ct)?;
+                            touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
+                            (Some(typed_manifest), Some(type_ref))
+                        }
+                        None => (None, None),
+                    }
                 };
 
                 let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
