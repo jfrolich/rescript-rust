@@ -13361,18 +13361,6 @@ fn type_record(
 
             if raw_label_desc.lbl_optional {
                 let option_ty = raw_label_desc.lbl_arg;
-                let none_cstr = make_none_constructor(ctx);
-                let none_lid = Located {
-                    txt: tctx.arena.none_lid(),
-                    loc,
-                };
-                let none_expr = Expression::new(
-                    ExpressionDesc::Texp_construct(none_lid.clone(), none_cstr, vec![]),
-                    loc,
-                    option_ty,
-                    EnvRef(0),
-                    Attributes::new(),
-                );
                 let label_desc = crate::types::LabelDescription {
                     lbl_res: record_ty,
                     ..raw_label_desc.clone()
@@ -13396,7 +13384,7 @@ fn type_record(
                 typed_fields.push((
                     label_lid.clone(),
                     label_desc,
-                    RecordLabelDefinition::Overridden(label_lid, none_expr),
+                    RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
                     false,
                 ));
             } else {
@@ -13504,18 +13492,6 @@ fn type_record(
                 let option_ty = raw_label_desc
                     .as_ref()
                     .map_or_else(|| label_decl.ld_type, |l| l.lbl_arg);
-                let none_cstr = make_none_constructor(ctx);
-                let none_lid = Located {
-                    txt: tctx.arena.none_lid(),
-                    loc,
-                };
-                let none_expr = Expression::new(
-                    ExpressionDesc::Texp_construct(none_lid.clone(), none_cstr, vec![]),
-                    loc,
-                    option_ty,
-                    EnvRef(0),
-                    Attributes::new(),
-                );
                 // Build label desc using the raw label's lbl_arg (not instanced)
                 let label_desc = if let Some(raw_label_desc) = raw_label_desc {
                     crate::types::LabelDescription {
@@ -13557,7 +13533,7 @@ fn type_record(
                 typed_fields.push((
                     label_lid.clone(),
                     label_desc,
-                    RecordLabelDefinition::Overridden(label_lid, none_expr),
+                    RecordLabelDefinition::OmittedOptionalNone(label_lid, option_ty),
                     false,
                 ));
             } else {
@@ -16435,7 +16411,10 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
                         label.lbl_mut == crate::types::MutableFlag::Immutable
                             && is_nonexpansive_expression(tctx, expr)
                     }
-                    crate::types::typedtree::RecordLabelDefinition::Kept(_) => true,
+                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
+                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                        true
+                    }
                 })
                 && extended_expression
                     .as_deref()

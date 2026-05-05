@@ -95,6 +95,26 @@ fn raw_constructor_constant(cstr: &crate::types::ConstructorDescription, tag: i3
     }
 }
 
+fn raw_optional_none_constant() -> Constant {
+    Constant::Int {
+        i: 0,
+        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+            name: "None".to_string(),
+            const_: 1,
+            non_const: 1,
+            runtime_tag: None,
+        })),
+    }
+}
+
+fn raw_optional_none() -> RawLambda {
+    RawLambda::const_(raw_optional_none_constant())
+}
+
+fn lambda_optional_none() -> Lambda {
+    Lambda::const_(Constant::Pointer("0a".to_string()))
+}
+
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
     fn collect(lam: &RawLambda, fv: &mut HashSet<Ident>) {
         match lam {
@@ -623,15 +643,15 @@ fn record_field_is_static_optional_none(
         return false;
     }
 
-    let RecordLabelDefinition::Overridden(_, expr) = def else {
-        return false;
-    };
-
-    matches!(
-        &expr.exp_desc,
-        ExpressionDesc::Texp_construct(_, cstr, args)
-            if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
-    )
+    match def {
+        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
+        RecordLabelDefinition::Overridden(_, expr) => matches!(
+            &expr.exp_desc,
+            ExpressionDesc::Texp_construct(_, cstr, args)
+                if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
+        ),
+        RecordLabelDefinition::Kept(_) => false,
+    }
 }
 
 fn inlined_record_representation(
@@ -3245,9 +3265,13 @@ impl<'a> RawLambdaConverter<'a> {
         // - all fields are overridden (no Kept), OR
         // - size < 20 AND no optional fields (OCaml's transl_record line 1130)
         let build_direct = base.is_none()
-            || fields
-                .iter()
-                .all(|(_, _, def, _)| matches!(def, RecordLabelDefinition::Overridden(_, _)))
+            || fields.iter().all(|(_, _, def, _)| {
+                matches!(
+                    def,
+                    RecordLabelDefinition::Overridden(_, _)
+                        | RecordLabelDefinition::OmittedOptionalNone(_, _)
+                )
+            })
             || (fields.len() < 20 && !has_optional);
 
         if build_direct {
@@ -3275,6 +3299,7 @@ impl<'a> RawLambdaConverter<'a> {
 
                 let value = match def {
                     RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
+                    RecordLabelDefinition::OmittedOptionalNone(_, _) => raw_optional_none(),
                     RecordLabelDefinition::Kept(_) => {
                         let Some(base_var) = &init_var else {
                             elems.push(RawLambda::unit());
@@ -3425,8 +3450,12 @@ impl<'a> RawLambdaConverter<'a> {
         // Each Lsequence(upd, cont) wraps the update around the continuation,
         // so the LAST field ends up outermost in the sequence chain.
         for (_, lbl, def, _) in fields.iter() {
-            let RecordLabelDefinition::Overridden(_, expr) = def else {
-                continue;
+            let expr = match def {
+                RecordLabelDefinition::Overridden(_, expr) => expr,
+                RecordLabelDefinition::Kept(_)
+                | RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                    continue;
+                }
             };
             let Some((pos, info)) = raw_record_setfield_access(lbl) else {
                 continue;
@@ -9344,6 +9373,7 @@ impl<'a> RawLambdaConverter<'a> {
         for (idx, (lid, lbl, def, _opt)) in fields.iter().enumerate() {
             let value = match def {
                 RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
+                RecordLabelDefinition::OmittedOptionalNone(_, _) => lambda_optional_none(),
                 RecordLabelDefinition::Kept(_) => {
                     if let Some(base_expr) = &base_lam {
                         let field_pos = match lbl.lbl_repres {

@@ -311,6 +311,10 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                         crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
                             visit_expression(max_stamp, expr);
                         }
+                        crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
+                            _,
+                            _,
+                        ) => {}
                     }
                 }
                 if let Some(base) = extended_expression {

@@ -1003,6 +1003,9 @@ impl<'a> LambdaConverter<'a> {
         for (idx, (lid, lbl, def, _opt)) in fields.iter().enumerate() {
             let value = match def {
                 RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
+                RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                    Lambda::const_(Constant::Pointer("0a".to_string()))
+                }
                 RecordLabelDefinition::Kept(_) => {
                     if let Some(base_expr) = &base_lam {
                         let field_pos = match lbl.lbl_repres {

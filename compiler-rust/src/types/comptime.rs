@@ -1070,6 +1070,7 @@ pub fn specialize_expression(
                 .map(|(lid, desc, def, opt)| {
                     let spec_def = match def {
                         typedtree::RecordLabelDefinition::Kept(_) => def.clone(),
+                        typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => def.clone(),
                         typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
                             match specialize_expression(field_expr, env, ctx, type_env) {
                                 Ok(spec) => {

@@ -329,6 +329,13 @@ pub enum RecordLabelDefinition {
     Kept(TypeExprRef),
     /// Label is overridden with new expression.
     Overridden(Loc<LidentIdx>, Expression),
+    /// Omitted optional label synthesized as `None`.
+    ///
+    /// OCaml compiler/ml/typecore.ml:2833-2842 materializes this as
+    /// `Overridden ({loc; txt = Lident lbl.lbl_name}, option_none lbl.lbl_arg loc)`.
+    /// Keep the same typedtree boundary semantics without allocating a full
+    /// `Texp_construct None` expression for every sparse JSX record field.
+    OmittedOptionalNone(Loc<LidentIdx>, TypeExprRef),
 }
 
 /// An argument in a function application.

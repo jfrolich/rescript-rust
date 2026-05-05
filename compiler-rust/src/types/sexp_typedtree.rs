@@ -2,7 +2,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload,
     PrivateFlag, RecFlag,
@@ -20,7 +20,7 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, FunctionParamPattern, ModuleBinding, ModuleExpr, ModuleExprDesc,
+    FunctionParam, FunctionParamPattern, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
     ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordLabelDefinition,
     Structure, StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
     TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
@@ -961,6 +961,34 @@ fn sexp_expression(
     Sexp::list(items)
 }
 
+fn sexp_omitted_optional_none_expression(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    li: &Loc<LidentIdx>,
+    option_ty: TypeExprRef,
+) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, li.loc)]
+    } else {
+        vec![]
+    };
+    let desc = Sexp::list(vec![
+        Sexp::atom("Texp_construct"),
+        sexp_longident_idx(arena, ctx, arena.none_lid()),
+        Sexp::list(Vec::new()),
+    ]);
+    let ty = sexp_type_expr(arena, ctx, dedup, option_ty);
+
+    let mut items = vec![Sexp::atom("expression")];
+    items.extend(loc_sexp);
+    items.push(desc);
+    items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
+    items.push(Sexp::list(vec![Sexp::atom("attributes")]));
+    Sexp::list(items)
+}
+
 fn sexp_exp_extra(
     arena: &ParseArena,
     ctx: &TypeContext,
@@ -1196,6 +1224,13 @@ fn sexp_expression_desc(
                         Sexp::atom("Overridden"),
                         sexp_longident_idx(arena, ctx, li.txt),
                         sexp_expression(arena, ctx, with_locs, dedup, e),
+                    ]),
+                    RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
+                        Sexp::atom("Overridden"),
+                        sexp_longident_idx(arena, ctx, li.txt),
+                        sexp_omitted_optional_none_expression(
+                            arena, ctx, with_locs, dedup, li, *option_ty,
+                        ),
                     ]),
                 };
                 field_items.push(Sexp::list(vec![
