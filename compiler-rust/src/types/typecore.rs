@@ -4625,9 +4625,9 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
-    fn path_root_ident(path: &Path) -> Option<Ident> {
+    fn path_root_ident(path: &Path) -> Option<&Ident> {
         match path {
-            Path::Pident(id) => Some(id.clone()),
+            Path::Pident(id) => Some(id),
             Path::Pdot(parent, _, _) => path_root_ident(parent),
             Path::Papply(_, _) => None,
         }
@@ -4693,7 +4693,7 @@ fn force_qualified_value_type_paths<'a>(
         }
 
         if let Some(selected_module_path) = selected_module_path
-            && let Some(candidate_parent) = candidate.parent()
+            && let Path::Pdot(candidate_parent, _, _) = &candidate
         {
             // OCaml compiler/ml/env.ml:1091-1100 selects values from the
             // visible module path's component table, and env.ml:1530-1538
@@ -4705,11 +4705,11 @@ fn force_qualified_value_type_paths<'a>(
             // the existing delayed enclosing-component rule so array argument
             // typing does not force `Stdlib.JSON.t` earlier than OCaml.
             let candidate_parent_is_selected_or_child = candidate_parent.same(selected_module_path)
-                || path_descendant_depth(&candidate_parent, selected_module_path).is_some();
+                || path_descendant_depth(candidate_parent, selected_module_path).is_some();
             let selected_is_inside_candidate_parent =
-                path_descendant_depth(selected_module_path, &candidate_parent)
+                path_descendant_depth(selected_module_path, candidate_parent)
                     .is_some_and(|depth| depth > 0);
-            let candidate_root_is_stdlib = path_root_ident(&candidate_parent)
+            let candidate_root_is_stdlib = path_root_ident(candidate_parent)
                 .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
             if !candidate_parent_is_selected_or_child
                 && !(selected_is_inside_candidate_parent
@@ -4921,7 +4921,11 @@ fn force_qualified_value_type_paths<'a>(
 
         for root in root_candidates {
             let root_name = root.name();
-            let Some(suffix) = flat_parent.name().strip_prefix(&format!("{root_name}_")) else {
+            let Some(suffix) = flat_parent
+                .name()
+                .strip_prefix(root_name)
+                .and_then(|suffix| suffix.strip_prefix('_'))
+            else {
                 continue;
             };
             if suffix.is_empty() || suffix.contains("__") {
@@ -5220,7 +5224,7 @@ fn force_qualified_value_type_paths<'a>(
                             path_root_ident(selected)
                                 .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
                         });
-                    let resolved = if nested_inside_selected_module
+                    let resolved_decl = if nested_inside_selected_module
                         && !selected_module_is_implicit_stdlib_path
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
@@ -5232,7 +5236,7 @@ fn force_qualified_value_type_paths<'a>(
                         // later through `get_level` while lowering arguments.
                         None
                     } else {
-                        lookup_type_in_resolved_path(
+                        lookup_type_decl_in_resolved_path(
                             parent,
                             name.as_str(),
                             env,
@@ -5248,7 +5252,7 @@ fn force_qualified_value_type_paths<'a>(
                     // typecore.ml:4171-4177 types the actual argument.
                     if !allow_stdlib_flat_parent_inference
                         && !type_parent_is_selected_value_module
-                        && let Some((_, _, decl)) = resolved
+                        && let Some(decl) = resolved_decl
                         && type_decl_manifest_mentions_path_root(ctx, &decl, "Primitive_js_extern")
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 instances
@@ -5546,7 +5550,7 @@ fn force_qualified_value_type_paths<'a>(
     let value_access_root_is_local = path_root_is_local(value_path);
     let value_access_root = path_root_ident(value_path);
     let selected_module_path = match value_path {
-        Path::Pdot(parent, _, _) => Some(parent.as_ref().clone()),
+        Path::Pdot(parent, _, _) => Some(parent.as_ref()),
         _ => None,
     };
     let ctx = tctx.type_ctx;
@@ -5579,7 +5583,6 @@ fn force_qualified_value_type_paths<'a>(
         // module-declaration thunk and compiler/ml/subst.ml:352-400
         // `Subst.modtype` renames too early.
         selected_module_path
-            .as_ref()
             .and_then(|path| {
                 selected_value_module_alias_target(path, env, &mut tctx.persistent_env, ctx)
             })
@@ -5641,8 +5644,8 @@ fn force_qualified_value_type_paths<'a>(
         env,
         ty,
         value_access_root_is_local,
-        value_access_root.as_ref(),
-        selected_module_path.as_ref(),
+        value_access_root,
+        selected_module_path,
         selected_alias_targets.as_slice(),
         false,
         true,
@@ -22282,6 +22285,33 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
                 result.2.clone(),
             );
             result
+        })
+    })
+    .flatten()
+}
+
+fn lookup_type_decl_in_resolved_path<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
+        return Some(decl);
+    }
+
+    with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
+        components.lookup_type(type_name).map(|(id, decl)| {
+            let decl = Arc::new(decl.clone());
+            ctx.register_resolved_module_type(
+                parent_module_path,
+                type_name,
+                parent_module_path.clone(),
+                id.clone(),
+                decl.clone(),
+            );
+            decl
         })
     })
     .flatten()
