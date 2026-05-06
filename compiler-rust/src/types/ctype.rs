@@ -1784,7 +1784,7 @@ fn strengthen_signature_for_module_access_path<'a>(
 /// Resolve a type through local environment modules.
 /// For paths like Pdot(Pident(Ord), "t"), look up module Ord in env,
 /// follow aliases (MtyAlias/MtyIdent), and then find type t in its signature.
-fn lookup_raw_module_sig_type<'a>(
+fn lookup_component_module_sig_type<'a>(
     ctx: &'a TypeContext<'a>,
     env: &super::env::Env,
     module_path: &Path,
@@ -1792,7 +1792,28 @@ fn lookup_raw_module_sig_type<'a>(
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use super::decl::SignatureItem;
 
-    let mut visiting = HashSet::new();
+    if matches!(module_path, Path::Pdot(..) | Path::Papply(..)) {
+        let mut no_persistent_env = None;
+        // OCaml compiler/ml/env.ml:800-813 resolves type lookup through
+        // component tables, and env.ml:1573-1578 keeps child component
+        // signatures separate from env.ml:1568's module-declaration thunks.
+        // Read the component signature directly here: this Rust-only identity
+        // fallback must not force `Subst.modtype` on a dotted parent just to
+        // prove alias identity during Ctype.unify.
+        return crate::types::typecore::with_resolved_module_components_for_path(
+            module_path,
+            env,
+            &mut no_persistent_env,
+            ctx,
+            |components| {
+                components
+                    .lookup_type(type_name)
+                    .map(|(id, decl)| (id.clone(), decl.clone()))
+            },
+        )
+        .flatten();
+    }
+
     let raw_sig = match module_path {
         Path::Pident(id) => env
             .lookup_module(module_path)
@@ -1802,12 +1823,42 @@ fn lookup_raw_module_sig_type<'a>(
                 super::decl::ModuleType::MtySignature(sig) => Some(sig.clone()),
                 _ => None,
             }),
+        Path::Pdot(..) | Path::Papply(..) => None,
+    }?;
+    raw_sig.iter().find_map(|item| match item {
+        SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
+            Some((id.clone(), decl.clone()))
+        }
         _ => None,
+    })
+}
+
+fn lookup_raw_module_sig_type<'a>(
+    ctx: &'a TypeContext<'a>,
+    env: &super::env::Env,
+    module_path: &Path,
+    type_name: &str,
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+    use super::decl::SignatureItem;
+
+    if let Some((id, decl)) = lookup_component_module_sig_type(ctx, env, module_path, type_name) {
+        let queried_type_path = Path::pdot(module_path.clone(), type_name.to_string());
+        let is_self_manifest = decl.type_manifest.is_some_and(|manifest| {
+            matches!(
+                &*ctx.get_desc(ctx.repr(manifest)),
+                TypeDesc::Tconstr { path, .. } if path.same(&queried_type_path)
+            )
+        });
+        if !is_self_manifest {
+            return Some((id, decl));
+        }
     }
-    .or_else(|| {
-        let resolved = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)?;
-        resolve_signature_through_env_module_type(ctx, env, &resolved, &mut visiting)
-    })?;
+
+    let mut visiting = HashSet::new();
+    let raw_sig = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)
+        .and_then(|resolved| {
+            resolve_signature_through_env_module_type(ctx, env, &resolved, &mut visiting)
+        })?;
     raw_sig.iter().find_map(|item| match item {
         SignatureItem::SigType(id, decl, _) if id.name() == type_name => {
             Some((id.clone(), decl.clone()))
@@ -1994,8 +2045,10 @@ pub(crate) fn resolved_type_items_share_identity(
                     )
                     .unwrap_or_else(|| parent2.as_ref().clone())
                 };
-                let raw1 = lookup_raw_module_sig_type(ctx, env, &raw_parent1, name1.as_str());
-                let raw2 = lookup_raw_module_sig_type(ctx, env, &raw_parent2, name2.as_str());
+                let raw1 =
+                    lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str());
+                let raw2 =
+                    lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str());
                 matches!(
                     (raw1, raw2),
                     (
