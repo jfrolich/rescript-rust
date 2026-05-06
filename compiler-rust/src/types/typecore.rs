@@ -12951,10 +12951,20 @@ fn type_record(
         bool,
     );
 
+    fn build_explicit_overrides_by_name(
+        explicit_entries: &[Option<ExplicitOverrideEntry>],
+    ) -> HashMap<String, usize> {
+        let mut by_name = HashMap::with_capacity(explicit_entries.len());
+        for (idx, entry) in explicit_entries.iter().enumerate() {
+            if let Some((_lid, label_desc, _def, _opt)) = entry {
+                by_name.insert(label_desc.lbl_name.clone(), idx);
+            }
+        }
+        by_name
+    }
+
     let mut explicit_entries: Vec<Option<ExplicitOverrideEntry>> = Vec::with_capacity(fields.len());
     let mut explicit_overrides: HashMap<i32, usize> = HashMap::with_capacity(fields.len());
-    let mut explicit_overrides_by_name: HashMap<String, usize> =
-        HashMap::with_capacity(fields.len());
     let mut explicit_overrides_in_order = Vec::with_capacity(fields.len());
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
 
@@ -13021,7 +13031,7 @@ fn type_record(
     });
 
     // Type check explicitly written fields in lbl_pos order.
-    for (sorted_idx, explicit_field) in explicit_fields.iter().enumerate() {
+    for explicit_field in explicit_fields.iter() {
         let idx = explicit_field.original_index;
         let field = explicit_field.field;
         let field_name = explicit_field.field_name;
@@ -13233,7 +13243,6 @@ fn type_record(
         let entry_idx = explicit_entries.len();
         explicit_entries.push(Some(entry));
         explicit_overrides.insert(label_desc.lbl_pos, entry_idx);
-        explicit_overrides_by_name.insert(label_desc.lbl_name.clone(), entry_idx);
         explicit_overrides_in_order.push(entry_idx);
     }
 
@@ -13396,27 +13405,30 @@ fn type_record(
 
     if let Some(all_label_descriptions) = all_label_descriptions.clone() {
         if use_sparse_large_record {
-            let labels_missing = if all_label_descriptions_summary
-                .as_ref()
-                .is_some_and(|summary| summary.mandatory_count == 0)
-            {
-                Vec::new()
-            } else {
-                let mut labels_missing = Vec::new();
-                for raw_label_desc in all_label_descriptions
-                    .iter()
-                    .filter(|label| !label.lbl_optional)
+            let labels_missing =
+                if all_label_descriptions_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.mandatory_count == 0)
                 {
-                    let key_pos = raw_label_desc.lbl_pos;
-                    if explicit_overrides.contains_key(&key_pos)
-                        || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
+                    Vec::new()
+                } else {
+                    let explicit_overrides_by_name =
+                        build_explicit_overrides_by_name(&explicit_entries);
+                    let mut labels_missing = Vec::new();
+                    for raw_label_desc in all_label_descriptions
+                        .iter()
+                        .filter(|label| !label.lbl_optional)
                     {
-                        continue;
+                        let key_pos = raw_label_desc.lbl_pos;
+                        if explicit_overrides.contains_key(&key_pos)
+                            || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
+                        {
+                            continue;
+                        }
+                        labels_missing.push(raw_label_desc.lbl_name.clone());
                     }
-                    labels_missing.push(raw_label_desc.lbl_name.clone());
-                }
-                labels_missing
-            };
+                    labels_missing
+                };
 
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
@@ -13436,6 +13448,8 @@ fn type_record(
                     .filter_map(|idx| explicit_entries[idx].take()),
             );
         } else {
+            let mut explicit_overrides_by_name =
+                build_explicit_overrides_by_name(&explicit_entries);
             if all_label_descriptions.len() > typed_fields.capacity() {
                 typed_fields.reserve(
                     all_label_descriptions
@@ -13536,6 +13550,7 @@ fn type_record(
             );
         }
     } else if let Some(all_labels) = all_labels {
+        let mut explicit_overrides_by_name = build_explicit_overrides_by_name(&explicit_entries);
         if all_labels.len() > typed_fields.capacity() {
             typed_fields.reserve(all_labels.len().saturating_sub(typed_fields.len()));
         }
