@@ -86,6 +86,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Add low-overhead, env-gated counters that are disabled on normal builds.
   - [x] Print compact aggregate reports suitable for comparing before/after builds.
   - [x] Add scheduler queue counters for in-process typecheck/JS ready work and idle slots.
+  - [x] Add qualified record-label cache counters, including local-root labels that currently bypass caching.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus

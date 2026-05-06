@@ -49,6 +49,12 @@ static QUALIFIED_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
 
+static QUALIFIED_RECORD_LABEL_HITS: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
+
 static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -197,6 +203,11 @@ pub fn reset() {
         &QUALIFIED_COMPONENT_HITS,
         &QUALIFIED_COMPONENT_MISSES,
         &QUALIFIED_COMPONENT_REGISTERED,
+        &QUALIFIED_RECORD_LABEL_HITS,
+        &QUALIFIED_RECORD_LABEL_MISSES,
+        &QUALIFIED_RECORD_LABEL_REGISTERED,
+        &QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT,
+        &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -259,6 +270,46 @@ pub(crate) fn record_qualified_component_registered() {
     QUALIFIED_COMPONENT_REGISTERED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record a qualified record-label cache hit.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_hit() {
+    QUALIFIED_RECORD_LABEL_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a qualified record-label cache miss.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_miss() {
+    QUALIFIED_RECORD_LABEL_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a newly cached qualified record label.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_registered() {
+    QUALIFIED_RECORD_LABEL_REGISTERED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a local-root record label that is currently not cacheable.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_uncached_local_root() {
+    QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a record label that is not eligible for the qualified-label cache.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_uncached_other() {
+    QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -300,6 +351,14 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_HITS.load(Ordering::Relaxed),
         QUALIFIED_COMPONENT_MISSES.load(Ordering::Relaxed),
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] qualified_record_labels hits={} misses={} registered={} uncached_local_root={} uncached_other={}",
+        QUALIFIED_RECORD_LABEL_HITS.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_MISSES.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_REGISTERED.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
     );
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",

@@ -19912,21 +19912,33 @@ fn qualify_label_description_paths<'a>(
         label: &crate::types::LabelDescription,
         env: &Env,
         ctx: &crate::types::context::TypeContext,
-    ) -> Option<(u64, Path, i32)> {
+    ) -> QualifiedRecordLabelCacheKeyResult {
         if label.lbl_pos < 0
             || !matches!(
                 label.lbl_repres,
                 crate::types::RecordRepresentation::RecordRegular
             )
         {
-            return None;
+            return QualifiedRecordLabelCacheKeyResult::Other;
         }
 
         let desc = ctx.get_desc(ctx.repr(label.lbl_res));
         let TypeDesc::Tconstr { path, .. } = &*desc else {
-            return None;
+            return QualifiedRecordLabelCacheKeyResult::Other;
         };
-        path_non_apply_root_is_persistent(path).then(|| (env.id(), path.clone(), label.lbl_pos))
+        if path_non_apply_root_is_persistent(path) {
+            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+        } else if path_non_apply_root_ident(path).is_some() {
+            QualifiedRecordLabelCacheKeyResult::LocalRoot
+        } else {
+            QualifiedRecordLabelCacheKeyResult::Other
+        }
+    }
+
+    enum QualifiedRecordLabelCacheKeyResult {
+        Key(u64, Path, i32),
+        LocalRoot,
+        Other,
     }
 
     fn rewrite_direct_root_type_family_in_place<'a>(
@@ -20121,12 +20133,35 @@ fn qualify_label_description_paths<'a>(
         }
     }
 
-    let cache_key = qualified_record_label_cache_key(label, env, ctx);
+    let counters_enabled = ctx.compiler_counters_enabled();
+    let cache_key = match qualified_record_label_cache_key(label, env, ctx) {
+        QualifiedRecordLabelCacheKeyResult::Key(env_id, path, lbl_pos) => {
+            Some((env_id, path, lbl_pos))
+        }
+        QualifiedRecordLabelCacheKeyResult::LocalRoot => {
+            if counters_enabled {
+                crate::perf_counters::record_qualified_record_label_uncached_local_root();
+            }
+            None
+        }
+        QualifiedRecordLabelCacheKeyResult::Other => {
+            if counters_enabled {
+                crate::perf_counters::record_qualified_record_label_uncached_other();
+            }
+            None
+        }
+    };
     if let Some((env_id, path, lbl_pos)) = cache_key.as_ref()
         && let Some(cached) = ctx.get_qualified_record_label(*env_id, path, *lbl_pos)
     {
+        if counters_enabled {
+            crate::perf_counters::record_qualified_record_label_hit();
+        }
         *label = cached;
         return;
+    }
+    if counters_enabled && cache_key.is_some() {
+        crate::perf_counters::record_qualified_record_label_miss();
     }
 
     let mut copy_cache = TypeExprRefMap::new();
@@ -20233,6 +20268,9 @@ fn qualify_label_description_paths<'a>(
 
     if let Some((env_id, path, lbl_pos)) = cache_key {
         ctx.cache_qualified_record_label(env_id, &path, lbl_pos, label.clone());
+        if counters_enabled {
+            crate::perf_counters::record_qualified_record_label_registered();
+        }
     }
 }
 

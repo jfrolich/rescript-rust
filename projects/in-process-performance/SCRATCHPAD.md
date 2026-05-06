@@ -58,6 +58,19 @@ Tella clean build registry snapshot report:
 
 Conclusion: Tella clean builds are already using shared registry chunks for snapshots; local overlay cloning is not currently a cold-build target.
 
+## Qualified Record Label Counter Baseline
+
+`RESCRIPT_COMPILER_COUNTERS=1` now includes `qualified_record_labels`, which tracks the cache inside `qualify_label_description_paths`.
+
+Tella clean build report after adding the counters:
+
+- hits: `78549`
+- misses / registered: `46594 / 46594`
+- uncached local-root labels: `50742`
+- uncached other labels: `2693`
+
+Conclusion: local-root record labels bypass enough qualification-cache work to justify testing an env-scoped local-root cache, guarded by parity and `hyperfine`.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`
