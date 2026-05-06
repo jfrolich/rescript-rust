@@ -4173,6 +4173,7 @@ fn type_pattern_record(
     });
 
     let mut typed_fields = Vec::new();
+    let mut deferred_label_arg_path_forces = Vec::new();
     for field in pending_fields {
         let field_lid_for_error = tctx.arena.get_longident(field.lid.txt).clone();
         let (label_desc, field_ty, poly_vars, force_label_arg_paths) =
@@ -4244,20 +4245,7 @@ fn type_pattern_record(
             type_pattern_inner(tctx, env, parsed_pat, field_ty, mode, state, 0)?
         };
         if force_label_arg_paths {
-            // OCaml compiler/ml/typecore.ml:1623-1632 types the field
-            // subpattern through `type_label_pat`, after labels have been
-            // selected by `Label.disambiguate` (typecore.ml:990-1018) from
-            // environment component labels built at compiler/ml/env.ml:1542-1559.
-            // Rust keeps label argument types more direct, so force nested paths
-            // immediately after the field subpattern is typed: this preserves
-            // OCaml's binder-before-label-argument module-load order.
-            force_type_paths_for_lookup_from_type(
-                ctx,
-                env,
-                &mut tctx.persistent_env,
-                field_ty,
-                &mut HashSet::new(),
-            );
+            deferred_label_arg_path_forces.push(field_ty);
         }
         if !poly_vars.is_empty() {
             ctx.end_def();
@@ -4277,6 +4265,23 @@ fn type_pattern_record(
             }
         }
         typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
+    }
+
+    for field_ty in deferred_label_arg_path_forces {
+        // OCaml compiler/ml/typecore.ml:1192-1198 resolves and sorts all record
+        // fields before `map_fold_cont type_lbl_a` types their subpatterns, and
+        // typecore.ml:1623-1644's `type_label_pat` does not force nested label
+        // argument paths per field. Rust still needs this direct-label
+        // compensation for component tables built at compiler/ml/env.ml:1542-1559,
+        // but it must run only after every field binder has been allocated so
+        // later lazy module-signature forces keep OCaml's stamp order.
+        force_type_paths_for_lookup_from_type(
+            ctx,
+            env,
+            &mut tctx.persistent_env,
+            field_ty,
+            &mut HashSet::new(),
+        );
     }
 
     // OCaml unifies the inferred record type with the pattern expected type.
