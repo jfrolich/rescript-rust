@@ -637,6 +637,20 @@ fn qualified_submodule_access_path(
     }
 }
 
+fn ctype_only_alias_force_matches_ocaml(access_path: &Path, alias_id: &Ident) -> bool {
+    matches!(
+        access_path,
+        Path::Pdot(parent, child, _)
+            if child == "Promise"
+                && alias_id.name() == "Stdlib_Promise"
+                && matches!(
+                    parent.as_ref(),
+                    Path::Pident(parent_id)
+                        if parent_id.is_persistent() && parent_id.name() == "Stdlib"
+                )
+    )
+}
+
 fn build_local_module_components<'a>(
     env: &super::env::Env,
     access_path: &Path,
@@ -655,6 +669,16 @@ fn build_local_module_components<'a>(
             Path::Pident(id) if id.is_persistent() => {
                 if let Some(pers) = pers_env.as_mut() {
                     let _ = pers.get_renamed_sig(id.name(), ctx);
+                } else if ctype_only_alias_force_matches_ocaml(access_path, id) {
+                    // OCaml compiler/ml/env.ml:1517 calls `scrape_alias`;
+                    // env.ml:1441-1444 resolves the `Stdlib.Promise =
+                    // Stdlib_Promise` alias via `find_module`, whose Pident
+                    // persistent case at env.ml:865-875 forces `ps_sig`.
+                    // Keep this ctype-only compensation to that observed
+                    // implicit-Stdlib force point; env.ml:1000-1007 can serve
+                    // aliases like `Js.Undefined` through `ps_comps` without
+                    // forcing their target `ps_sig` at the same time.
+                    ctx.trigger_module_sig_rename(id.name());
                 }
             }
             Path::Pident(_) => {}
