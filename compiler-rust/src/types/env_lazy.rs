@@ -568,6 +568,33 @@ impl QualifiedModuleComponents {
             SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
             _ => return None,
         };
+        if let Some((raw_id, raw_md, raw_parent_sig)) =
+            self_alias_raw_parent_module_item(&self.access_path, name, runtime_pos, &md, ctx)
+        {
+            // OCaml compiler/ml/env.ml:1568 stores component module
+            // declarations as `EnvLazy.create (sub, md)`, where `md` is the
+            // raw parent signature item from env.ml:1530-1578. A strengthened
+            // persistent child can appear here as a self alias, but forcing the
+            // thunk must still apply compiler/ml/subst.ml:352-400 to the raw
+            // child signature and consume those child binder stamps.
+            md = raw_md;
+            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+                &mut md,
+                &raw_parent_sig,
+                &self.access_path,
+                ctx,
+            );
+            self.qualified_modules
+                .borrow_mut()
+                .insert(name.to_string(), (raw_id.clone(), md.clone()));
+            ctx.register_qualified_module_decl(
+                self.access_path.as_ref(),
+                name,
+                raw_id.clone(),
+                md.clone(),
+            );
+            return Some((runtime_pos, raw_id, md));
+        }
         // OCaml compiler/ml/env.ml:1568 stores component modules as
         // EnvLazy thunks, and forcing them through env.ml:475 applies
         // `Subst.modtype sub md.md_type`. For `Mty_signature`, that reaches
@@ -649,6 +676,84 @@ fn ctype_only_alias_force_matches_ocaml(access_path: &Path, alias_id: &Ident) ->
                         if parent_id.is_persistent() && parent_id.name() == "Stdlib"
                 )
     )
+}
+
+fn raw_sig_candidate_names_for_access_path(access_path: &Path) -> Vec<String> {
+    let Ok((head, components)) = access_path.flatten() else {
+        return Vec::new();
+    };
+    if !(head.is_persistent() || head.stamp() == 0) {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    if !components.is_empty() {
+        // OCaml compiler/ml/env.ml:1517 scrapes a module alias before
+        // env.ml:1530 prefixes component identifiers, so `Webapi.Fetch`
+        // component forcing starts from the aliased backing signature
+        // (`Webapi__Fetch`) before the outer namespace (`Webapi`).
+        candidates.push(format!("{}__{}", head.name(), components.join("__")));
+        candidates.push(format!("{}_{}", head.name(), components.join("_")));
+    }
+    candidates.push(head.name().to_string());
+    candidates
+}
+
+fn self_alias_raw_parent_module_item(
+    access_path: &Path,
+    module_name: &str,
+    runtime_pos: usize,
+    md: &ModuleDeclaration,
+    ctx: &super::context::TypeContext<'_>,
+) -> Option<(Ident, ModuleDeclaration, Signature)> {
+    let selected_path = qualified_submodule_access_path(access_path, module_name, runtime_pos, md);
+    let is_self_alias = matches!(
+        &md.md_type,
+        super::decl::ModuleType::MtyAlias(_, target)
+            if target.same(&selected_path)
+                || alias_target_matches_raw_parent_child(target, access_path, module_name)
+    );
+    if !is_self_alias {
+        return None;
+    }
+
+    raw_sig_candidate_names_for_access_path(access_path)
+        .into_iter()
+        .filter_map(|name| ctx.find_raw_module_sig(&name))
+        .find_map(|raw_parent_sig| {
+            raw_parent_sig.iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, raw_md, _) if id.name() == module_name => {
+                    Some((id.clone(), raw_md.clone(), raw_parent_sig.clone()))
+                }
+                _ => None,
+            })
+        })
+}
+
+fn alias_target_matches_raw_parent_child(
+    target: &Path,
+    access_path: &Path,
+    module_name: &str,
+) -> bool {
+    if target.last() != module_name {
+        return false;
+    }
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    if parent.same(access_path) {
+        return true;
+    }
+
+    raw_sig_candidate_names_for_access_path(access_path)
+        .into_iter()
+        .any(|candidate| {
+            matches!(
+                &parent,
+                Path::Pident(id)
+                    if (id.is_persistent() || id.stamp() == 0) && id.name() == candidate
+            )
+        })
 }
 
 fn build_local_module_components<'a>(
