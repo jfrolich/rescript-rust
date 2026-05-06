@@ -28,7 +28,8 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [ ] Replace hot owned signature/component returns with borrowed, shared, or forced-result views.
   - [ ] Keep mutation only in memo caches keyed by module path plus contextual overlay identity.
   - [x] Cache normal-compile qualified record labels for local-root record paths with canonical typedtree mode disabled.
-  - [ ] Validate with Tella `hyperfine`, JS output parity, and canonical typedtree parity.
+  - [x] Reuse cached persistent-root type declarations before resolving/scanning module signatures again.
+  - [x] Validate retained signature/env skip-work changes with Tella `hyperfine`, JS output parity, and canonical typedtree parity.
 
 - [ ] **2. Keep typecheck/signature work on the critical path.**
   The JS/typecheck split is useful, but cold builds must prioritize signature-producing typecheck work that unlocks downstream modules. JS/codegen should run when no typecheck work is ready or under a separate cap. A previous naive scheduler priority flip regressed Tella, so this needs measured tuning.

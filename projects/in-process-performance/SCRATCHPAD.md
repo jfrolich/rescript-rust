@@ -4,9 +4,10 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `ec5c9803f` (`Cache local-root record label qualification`)
+- Commit: `Reuse cached persistent type declarations`
 - Tella `hyperfine`: `2.848s +/- 0.021s` over 20 runs, range `2.817s..2.886s`
 - A later same-commit benchmark during heavy system load reported `3.031s +/- 0.048s`, range `2.853s..3.080s`, while `uptime` showed load averages above 30 from macOS background services. Treat that run as contaminated; the minimum still matched the retained baseline band.
+- Candidate persistent-root type-declaration cache reuse benchmarked at `2.907s +/- 0.043s` over 20 runs, range `2.782s..2.971s`, under continuing Spotlight load. It passed Tella clean compile, JS output parity `660/660`, and canonical typedtree parity `660/660`.
 - Previous retained baseline: `2.941s +/- 0.017s` over 20 runs at `127969d9d`
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
@@ -118,6 +119,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - CSS files contain many polymorphic-variant spreads and row traversals. The retained row-field traversal change avoided cloning full variant-row maps while forcing qualified value type paths.
 - Row unification now skips the sort/allocation step for large strictly-sorted polymorphic-variant rows. The strictness keeps duplicate-label rows on the old unstable-sort path, preserving codegen parity while removing work from CSS-like row-heavy modules.
 - Qualified record-label caching now includes local-root record paths in normal compile mode. Canonical typedtree mode still bypasses this local-root cache to preserve debug/parity physical sharing.
+- Persistent-root `resolve_type_through_modules` now checks the full-path type declaration cache before resolving/scanning the dependency module signature again. This skips repeated signature walks for already-forced persistent type paths while leaving local stamped module paths on the old resolution path.
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
 - Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.

@@ -1356,6 +1356,13 @@ pub fn resolve_type_through_modules<'a>(
     ctx: &'a TypeContext,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
+    if path_root_is_persistent(path) {
+        let path_name = path.name();
+        if let Some(decl) = ctx.find_type_decl_by_path(&path_name) {
+            return Some(decl.clone());
+        }
+    }
+
     resolve_type_item_through_modules(ctx, path).map(|(_, decl)| decl)
 }
 
