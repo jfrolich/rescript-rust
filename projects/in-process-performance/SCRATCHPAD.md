@@ -4,9 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `127969d9d Skip sorting strictly sorted variant rows`
-- Tella `hyperfine`: `2.941s +/- 0.017s` over 20 runs
-- Same-session retained recheck after a noisy sample: `2.954s +/- 0.019s` over 10 runs, range `2.925s..2.994s`
+- Commit: pending local-root qualified record-label cache commit
+- Tella `hyperfine`: `2.848s +/- 0.021s` over 20 runs, range `2.817s..2.886s`
+- Previous retained baseline: `2.941s +/- 0.017s` over 20 runs at `127969d9d`
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -62,14 +62,21 @@ Conclusion: Tella clean builds are already using shared registry chunks for snap
 
 `RESCRIPT_COMPILER_COUNTERS=1` now includes `qualified_record_labels`, which tracks the cache inside `qualify_label_description_paths`.
 
-Tella clean build report after adding the counters:
+Tella clean build report after adding the counters, before local-root caching:
 
 - hits: `78549`
 - misses / registered: `46594 / 46594`
 - uncached local-root labels: `50742`
 - uncached other labels: `2693`
 
-Conclusion: local-root record labels bypass enough qualification-cache work to justify testing an env-scoped local-root cache, guarded by parity and `hyperfine`.
+After enabling normal-compile local-root caching:
+
+- hits: `103809`
+- misses / registered: `72076 / 72076`
+- uncached local-root labels: `0`
+- uncached other labels: `2693`
+
+Conclusion: normal-compile local-root caching removes about 25k repeated label-qualification copies from Tella and improved clean-build `hyperfine` from `2.941s +/- 0.017s` to `2.848s +/- 0.021s`. Canonical typedtree mode keeps local-root caching disabled and still passes `660/660`.
 
 ## Slow Non-Icon Files To Watch
 
@@ -87,6 +94,7 @@ Conclusion: local-root record labels bypass enough qualification-cache work to j
 
 - CSS files contain many polymorphic-variant spreads and row traversals. The retained row-field traversal change avoided cloning full variant-row maps while forcing qualified value type paths.
 - Row unification now skips the sort/allocation step for large strictly-sorted polymorphic-variant rows. The strictness keeps duplicate-label rows on the old unstable-sort path, preserving codegen parity while removing work from CSS-like row-heavy modules.
+- Qualified record-label caching now includes local-root record paths in normal compile mode. Canonical typedtree mode still bypasses this local-root cache to preserve debug/parity physical sharing.
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
 - Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.

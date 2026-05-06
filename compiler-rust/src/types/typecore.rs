@@ -19928,6 +19928,14 @@ fn qualify_label_description_paths<'a>(
         };
         if path_non_apply_root_is_persistent(path) {
             QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+        } else if path_non_apply_root_ident(path)
+            .is_some_and(|id| !id.is_persistent() && id.stamp() != 0)
+        {
+            if !ctx.preserve_canonical_typedtree() {
+                QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+            } else {
+                QualifiedRecordLabelCacheKeyResult::LocalRoot
+            }
         } else if path_non_apply_root_ident(path).is_some() {
             QualifiedRecordLabelCacheKeyResult::LocalRoot
         } else {
