@@ -864,7 +864,8 @@ fn build_local_module_components<'a>(
     }
 
     let qualified_sig = Arc::new(qualified_sig);
-    let mut working_env = env.clone_preserve_id();
+    let eager_child_components = ctx.preserve_canonical_typedtree();
+    let mut working_env = eager_child_components.then(|| env.clone_preserve_id());
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
     let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();
@@ -884,12 +885,14 @@ fn build_local_module_components<'a>(
                 SignatureItem::SigType(id, decl, _),
                 SignatureItem::SigType(qualified_id, qualified_decl, _),
             ) => {
-                let env_decl = if use_qualified_items_for_env {
-                    qualified_decl.clone()
-                } else {
-                    decl.clone()
-                };
-                working_env.add_type(id.clone(), env_decl);
+                if let Some(working_env) = working_env.as_mut() {
+                    let env_decl = if use_qualified_items_for_env {
+                        qualified_decl.clone()
+                    } else {
+                        decl.clone()
+                    };
+                    working_env.add_type(id.clone(), env_decl);
+                }
                 ctx.register_type_decl(qualified_id.name(), qualified_decl.clone());
                 if qualified_id.stamp() != 0 {
                     ctx.register_type_decl_by_stamp(qualified_id.stamp(), qualified_decl.clone());
@@ -900,49 +903,54 @@ fn build_local_module_components<'a>(
                 runtime_pos += 1;
             }
             (SignatureItem::SigModule(id, child_md, _), SignatureItem::SigModule(_, qmd, _)) => {
-                let child_access_path =
-                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
-                // OCaml compiler/ml/env.ml:1573-1575 builds child
-                // `comp_components` from the same `md` item that
-                // env.ml:1517 got after `scrape_alias`. For alias parents,
-                // compiler/ml/mtype.ml:76-102 has already strengthened child
-                // modules to `Mty_alias` declarations; using the raw child
-                // declaration would skip the later scrape/find_module force.
-                let component_decl = if use_qualified_items_for_env {
-                    qmd.clone()
-                } else {
-                    child_md.clone()
-                };
-                working_env.add_module_with_component_context(
-                    id.clone(),
-                    component_decl.clone(),
-                    // OCaml compiler/ml/env.ml:1573-1578 stores
-                    // `comp_components` as its own lazy over the child module
-                    // declaration. It shares the persistent-alias force point
-                    // above, but otherwise keeps the child declaration separate
-                    // from env.ml:1568's `comp_modules` thunk.
-                    component_decl,
-                    child_access_path,
-                    Some((access_path.clone(), qualified_sig_for_children.clone())),
-                );
+                if let Some(working_env) = working_env.as_mut() {
+                    let child_access_path =
+                        qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
+                    // OCaml compiler/ml/env.ml:1573-1575 builds child
+                    // `comp_components` from the same `md` item that
+                    // env.ml:1517 got after `scrape_alias`. For alias parents,
+                    // compiler/ml/mtype.ml:76-102 has already strengthened child
+                    // modules to `Mty_alias` declarations; using the raw child
+                    // declaration would skip the later scrape/find_module force.
+                    let component_decl = if use_qualified_items_for_env {
+                        qmd.clone()
+                    } else {
+                        child_md.clone()
+                    };
+                    working_env.add_module_with_component_context(
+                        id.clone(),
+                        component_decl.clone(),
+                        // OCaml compiler/ml/env.ml:1573-1578 stores
+                        // `comp_components` as its own lazy over the child module
+                        // declaration. It shares the persistent-alias force point
+                        // above, but otherwise keeps the child declaration separate
+                        // from env.ml:1568's `comp_modules` thunk.
+                        component_decl,
+                        child_access_path,
+                        Some((access_path.clone(), qualified_sig_for_children.clone())),
+                    );
+                }
                 crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
-                if let Some(stored) =
-                    working_env.local_module_components_arc(&Path::pident(id.clone()))
+                if let Some(working_env) = working_env.as_ref()
+                    && let Some(stored) =
+                        working_env.local_module_components_arc(&Path::pident(id.clone()))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
                 runtime_pos += 1;
             }
             (SignatureItem::SigModtype(id, mtd), SignatureItem::SigModtype(_, _)) => {
-                let env_mtd = if use_qualified_items_for_env {
-                    match qualified_item {
-                        SignatureItem::SigModtype(_, qualified_mtd) => qualified_mtd.clone(),
-                        _ => return None,
-                    }
-                } else {
-                    mtd.clone()
-                };
-                working_env.add_modtype(id.clone(), env_mtd);
+                if let Some(working_env) = working_env.as_mut() {
+                    let env_mtd = if use_qualified_items_for_env {
+                        match qualified_item {
+                            SignatureItem::SigModtype(_, qualified_mtd) => qualified_mtd.clone(),
+                            _ => return None,
+                        }
+                    } else {
+                        mtd.clone()
+                    };
+                    working_env.add_modtype(id.clone(), env_mtd);
+                }
             }
             (SignatureItem::SigClassType, SignatureItem::SigClassType) => {}
             _ => return None,
