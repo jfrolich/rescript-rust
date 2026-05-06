@@ -1020,6 +1020,20 @@ impl Env {
         Some(f(components.as_ref()))
     }
 
+    pub(crate) fn local_module_components_arc(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::env_lazy::StoredModuleComponents>> {
+        let Path::Pident(id) = path else {
+            return None;
+        };
+        // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
+        // component table and shares the forced lazy value. Return the stored
+        // Arc directly so child component maps keep the same thunk instead of
+        // deep-cloning its captured seed environment.
+        self.module_components.find_by_ident(id).cloned()
+    }
+
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
         fn lookup_submodule_in_module_type<'a>(

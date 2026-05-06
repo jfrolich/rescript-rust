@@ -276,10 +276,8 @@ fn build_child_components_from_signature(
                     child_access_path,
                     Some((access_path.clone(), signature.clone())),
                 );
-                if let Some(stored) = working_env
-                    .with_local_module_components(&Path::pident(id.clone()), |stored| {
-                        Arc::new(stored.clone())
-                    })
+                if let Some(stored) =
+                    working_env.local_module_components_arc(&Path::pident(id.clone()))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
@@ -757,10 +755,8 @@ fn build_local_module_components<'a>(
                     Some((access_path.clone(), qualified_sig_for_children.clone())),
                 );
                 crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
-                if let Some(stored) = working_env
-                    .with_local_module_components(&Path::pident(id.clone()), |stored| {
-                        Arc::new(stored.clone())
-                    })
+                if let Some(stored) =
+                    working_env.local_module_components_arc(&Path::pident(id.clone()))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
