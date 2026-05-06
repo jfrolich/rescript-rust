@@ -15993,9 +15993,14 @@ fn type_pack(
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
     // typedtree parity depends on doing that work at the same program points.
-    let coercion =
-        crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
-            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    // The scoped env_lazy guard keeps the Rust-only implicit-open alias
+    // compensation out of this inclusion walk, matching compiler/ml/env.ml:800-813
+    // component-table laziness during typemod.ml:1710-1719 package wrapping.
+    let coercion = ctx
+        .with_component_alias_sig_force_suppressed(|| {
+            crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
+        })
+        .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
