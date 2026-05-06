@@ -1298,6 +1298,12 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
     };
+    let path_name = path_root_is_persistent(path).then(|| path.name());
+    if let Some(path_name) = path_name.as_deref()
+        && let Some(cached) = ctx.find_type_item_by_path(path_name)
+    {
+        return Some(cached);
+    }
 
     let load_paths = ctx.load_paths();
     if load_paths.is_empty() && !ctx.persistent_env_is_in_process() {
@@ -1342,8 +1348,9 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
             }
             if id.name() == type_name {
                 // Cache the target type in the path store
-                let path_name = path.name();
+                let path_name = path_name.clone().unwrap_or_else(|| path.name());
                 ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
+                ctx.register_type_item_by_path(&path_name, id.clone(), qualified_decl.clone());
                 result = Some((id.clone(), qualified_decl));
             }
         }

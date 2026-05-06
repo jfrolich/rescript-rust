@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-06
-**Status:** Tella clean in-process builds are around 2.85s on the current branch after the latest retained qualified record-label cache optimization. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** Tella clean in-process builds are around 2.75-2.9s best-case on the current branch after the latest retained persistent type lookup cache optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
 
 ## Goal
 
@@ -29,6 +29,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [ ] Keep mutation only in memo caches keyed by module path plus contextual overlay identity.
   - [x] Cache normal-compile qualified record labels for local-root record paths with canonical typedtree mode disabled.
   - [x] Reuse cached persistent-root type declarations before resolving/scanning module signatures again.
+  - [x] Reuse cached persistent-root type items before resolving/scanning module signatures again.
   - [x] Validate retained signature/env skip-work changes with Tella `hyperfine`, JS output parity, and canonical typedtree parity.
 
 - [ ] **2. Keep typecheck/signature work on the critical path.**

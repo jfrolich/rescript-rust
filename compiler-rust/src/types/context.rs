@@ -296,6 +296,7 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
     type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
@@ -493,6 +494,7 @@ impl TypeContext {
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            type_item_by_path: RefCell::new(ahash::AHashMap::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
@@ -663,6 +665,24 @@ impl TypeContext {
         self.type_decl_by_path
             .borrow_mut()
             .insert(path.to_string(), decl);
+    }
+
+    pub(crate) fn register_type_item_by_path(
+        &self,
+        path: &str,
+        id: Ident,
+        decl: super::decl::TypeDeclaration,
+    ) {
+        self.type_item_by_path
+            .borrow_mut()
+            .insert(path.to_string(), (id, decl));
+    }
+
+    pub(crate) fn find_type_item_by_path(
+        &self,
+        path: &str,
+    ) -> Option<(Ident, super::decl::TypeDeclaration)> {
+        self.type_item_by_path.borrow().get(path).cloned()
     }
 
     /// Cache a type declaration resolved through module signatures (Pdot paths).
