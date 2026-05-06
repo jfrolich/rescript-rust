@@ -321,6 +321,63 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
+/// Scratch set keyed by dense `TypeExprRef` arena indices.
+///
+/// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
+/// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
+/// type traversals without changing OCaml physical-sharing semantics.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeExprRefSet {
+    offset: u32,
+    values: Vec<u8>,
+}
+
+impl TypeExprRefSet {
+    pub(crate) fn new() -> Self {
+        Self {
+            offset: 0,
+            values: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
+        if self.values.is_empty() {
+            self.offset = key.0;
+            self.values.push(1);
+            return true;
+        }
+
+        if key.0 < self.offset {
+            let prepend = (self.offset - key.0) as usize;
+            let mut values = Vec::with_capacity(self.values.len() + prepend);
+            values.resize(prepend, 0);
+            values.append(&mut self.values);
+            self.values = values;
+            self.offset = key.0;
+        }
+
+        let idx = (key.0 - self.offset) as usize;
+        if idx >= self.values.len() {
+            self.values.resize(idx + 1, 0);
+        }
+
+        let slot = &mut self.values[idx];
+        if *slot == 0 {
+            *slot = 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for TypeExprRefSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An argument in a function type.
 #[derive(Debug, Clone)]
 pub struct TypeArg {

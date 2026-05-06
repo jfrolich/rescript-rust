@@ -29,6 +29,7 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
+    TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
@@ -636,7 +637,7 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
         ctx: &TypeContext,
         needle: TypeExprRef,
         haystack: TypeExprRef,
-        visited: &mut HashSet<TypeExprRef>,
+        visited: &mut TypeExprRefSet,
     ) -> bool {
         let haystack = ctx.repr(haystack);
         if needle == haystack {
@@ -666,7 +667,7 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     }
 
     let needle = ctx.repr(needle);
-    let mut visited = HashSet::new();
+    let mut visited = TypeExprRefSet::new();
     occurs_rec(ctx, needle, haystack, &mut visited)
 }
 
@@ -676,7 +677,7 @@ pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef)
         ctx: &TypeContext,
         needle: TypeExprRef,
         haystack: TypeExprRef,
-        visited: &mut HashSet<TypeExprRef>,
+        visited: &mut TypeExprRefSet,
     ) -> bool {
         let haystack = ctx.repr(haystack);
         if needle == haystack {
@@ -705,7 +706,7 @@ pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef)
     }
 
     let needle = ctx.repr(needle);
-    let mut visited = HashSet::new();
+    let mut visited = TypeExprRefSet::new();
     deep_occur_rec(ctx, needle, haystack, &mut visited)
 }
 
@@ -5386,7 +5387,7 @@ fn lower_nongen_type_expr_rec(
     ctx: &TypeContext,
     nglev: i32,
     ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) {
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
@@ -5413,7 +5414,7 @@ fn lower_nongen_type_decl_rec(
     ctx: &TypeContext,
     nglev: i32,
     decl: &crate::types::decl::TypeDeclaration,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) {
     use crate::types::decl::ConstructorArguments;
     use crate::types::decl::TypeInlinedType;
@@ -5467,7 +5468,7 @@ fn lower_nongen_extension_constructor_rec(
     ctx: &TypeContext,
     nglev: i32,
     ext: &crate::types::decl::ExtensionConstructor,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) {
     use crate::types::decl::ConstructorArguments;
 
@@ -5495,7 +5496,7 @@ fn lower_nongen_module_type_rec(
     ctx: &TypeContext,
     nglev: i32,
     mty: &crate::types::decl::ModuleType,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) {
     use crate::types::decl::ModuleType;
     use crate::types::decl::SignatureItem;
@@ -5542,15 +5543,11 @@ pub fn lower_nongen_module_type(
     nglev: i32,
     mty: &crate::types::decl::ModuleType,
 ) {
-    let mut seen = HashSet::new();
+    let mut seen = TypeExprRefSet::new();
     lower_nongen_module_type_rec(ctx, nglev, mty, &mut seen);
 }
 
-fn force_generalize_sig_type_rec(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-    seen: &mut HashSet<TypeExprRef>,
-) {
+fn force_generalize_sig_type_rec(ctx: &TypeContext, ty: TypeExprRef, seen: &mut TypeExprRefSet) {
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
         return;
@@ -5569,14 +5566,14 @@ fn force_generalize_sig_type_rec(
 
 pub fn force_generalize_sig_type(ctx: &TypeContext, ty: TypeExprRef) {
     ctx.clear_simple_abbrevs();
-    let mut seen = HashSet::new();
+    let mut seen = TypeExprRefSet::new();
     force_generalize_sig_type_rec(ctx, ty, &mut seen);
 }
 
 fn force_generalize_module_type_rec(
     ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) {
     use crate::types::decl::ModuleType;
     use crate::types::decl::SignatureItem;
@@ -5613,7 +5610,7 @@ fn force_generalize_module_type_rec(
 }
 
 pub fn force_generalize_module_sig_values(ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
-    let mut seen = HashSet::new();
+    let mut seen = TypeExprRefSet::new();
     force_generalize_module_type_rec(ctx, mty, &mut seen);
 }
 
@@ -5623,7 +5620,7 @@ pub fn force_generalize_signature_values(
 ) {
     use crate::types::decl::SignatureItem;
 
-    let mut seen = HashSet::new();
+    let mut seen = TypeExprRefSet::new();
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_, vd) => {
@@ -5725,7 +5722,7 @@ fn generalize_expansive_rec(
     ctx: &TypeContext,
     env: &Env,
     var_level: i32,
-    visited: &mut HashSet<TypeExprRef>,
+    visited: &mut TypeExprRefSet,
     ty: TypeExprRef,
 ) {
     let ty = ctx.repr(ty);
@@ -5801,7 +5798,7 @@ fn generalize_expansive_rec(
 pub fn generalize_expansive(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
-    let mut visited = HashSet::new();
+    let mut visited = TypeExprRefSet::new();
     generalize_expansive_rec(ctx, env, ctx.nongen_level(), &mut visited, ty);
 }
 
@@ -7258,7 +7255,7 @@ fn type_expr_contains_ident_stamp(
     ctx: &TypeContext,
     ty: TypeExprRef,
     target_stamp: i32,
-    seen: &mut HashSet<TypeExprRef>,
+    seen: &mut TypeExprRefSet,
 ) -> bool {
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
@@ -7343,7 +7340,7 @@ pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Pat
     };
 
     let contains_self = |ty: TypeExprRef| {
-        let mut seen = HashSet::new();
+        let mut seen = TypeExprRefSet::new();
         type_expr_contains_ident_stamp(ctx, ty, id.stamp(), &mut seen)
     };
 
