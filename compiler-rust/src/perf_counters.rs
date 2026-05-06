@@ -49,6 +49,16 @@ static QUALIFIED_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
 
+static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_MAX_SHARED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_MAX_LOCAL_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_MODULES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_INFO_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_ALIASES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
 #[derive(Clone, Copy)]
 pub(crate) enum LazyLookupKind {
@@ -187,6 +197,15 @@ pub fn reset() {
         &QUALIFIED_COMPONENT_HITS,
         &QUALIFIED_COMPONENT_MISSES,
         &QUALIFIED_COMPONENT_REGISTERED,
+        &REGISTRY_SNAPSHOTS,
+        &REGISTRY_SHARED_ENTRIES_TOTAL,
+        &REGISTRY_LOCAL_ENTRIES_TOTAL,
+        &REGISTRY_MAX_SHARED_ENTRIES,
+        &REGISTRY_MAX_LOCAL_ENTRIES,
+        &REGISTRY_LOCAL_MODULES_TOTAL,
+        &REGISTRY_LOCAL_INFO_TOTAL,
+        &REGISTRY_LOCAL_ALIASES_TOTAL,
+        &REGISTRY_LOCAL_FALLBACKS_TOTAL,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -240,6 +259,26 @@ pub(crate) fn record_qualified_component_registered() {
     QUALIFIED_COMPONENT_REGISTERED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record a per-worker in-process module-registry snapshot.
+pub(crate) fn record_module_registry_snapshot(
+    shared_entries: usize,
+    local_modules: usize,
+    local_info: usize,
+    local_aliases: usize,
+    local_fallbacks: usize,
+) {
+    let local_entries = local_modules + local_info + local_aliases + local_fallbacks;
+    REGISTRY_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+    REGISTRY_SHARED_ENTRIES_TOTAL.fetch_add(shared_entries as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_ENTRIES_TOTAL.fetch_add(local_entries as u64, Ordering::Relaxed);
+    REGISTRY_MAX_SHARED_ENTRIES.fetch_max(shared_entries as u64, Ordering::Relaxed);
+    REGISTRY_MAX_LOCAL_ENTRIES.fetch_max(local_entries as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_MODULES_TOTAL.fetch_add(local_modules as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_INFO_TOTAL.fetch_add(local_info as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_ALIASES_TOTAL.fetch_add(local_aliases as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_FALLBACKS_TOTAL.fetch_add(local_fallbacks as u64, Ordering::Relaxed);
+}
+
 /// Print compiler performance counters to stderr.
 pub fn print_report() {
     if !enabled() {
@@ -261,6 +300,18 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_HITS.load(Ordering::Relaxed),
         QUALIFIED_COMPONENT_MISSES.load(Ordering::Relaxed),
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
+        REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
+        REGISTRY_SHARED_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_MAX_SHARED_ENTRIES.load(Ordering::Relaxed),
+        REGISTRY_MAX_LOCAL_ENTRIES.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_MODULES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_INFO_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
 }
 

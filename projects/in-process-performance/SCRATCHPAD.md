@@ -44,6 +44,19 @@ Tella clean build scheduler counter report:
 
 Disabled-counter Tella `hyperfine` after adding scheduler counters: `2.959s +/- 0.019s` over 10 runs. A previous local `3.31s` no-diff run appears to have been transient machine noise, not retained code drift.
 
+## Registry Snapshot Counter Baseline
+
+`RESCRIPT_COMPILER_COUNTERS=1` now includes `module_registry_snapshots`. It reports how many per-worker snapshots are created and whether those snapshots copy local overlay maps.
+
+Tella clean build registry snapshot report:
+
+- snapshots: `4436`
+- shared entries total / max: `12437996 / 4975`
+- local entries total / max: `0 / 0`
+- local module/info/alias/fallback totals: `0 / 0 / 0 / 0`
+
+Conclusion: Tella clean builds are already using shared registry chunks for snapshots; local overlay cloning is not currently a cold-build target.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`

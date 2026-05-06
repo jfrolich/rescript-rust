@@ -312,6 +312,19 @@ impl ModuleRegistry {
     }
 
     pub fn for_worker_snapshot(&self) -> Self {
+        if crate::perf_counters::enabled() {
+            let shared_entries = self.cached_modules.len()
+                + self.module_info.len()
+                + self.alias_rewrites.len()
+                + self.source_fallback_paths.len();
+            crate::perf_counters::record_module_registry_snapshot(
+                shared_entries,
+                self.local_cached_modules.len(),
+                self.local_module_info.len(),
+                self.local_alias_rewrites.len(),
+                self.local_source_fallback_paths.len(),
+            );
+        }
         let mut snapshot = self.clone();
         snapshot.write_to_local = true;
         snapshot

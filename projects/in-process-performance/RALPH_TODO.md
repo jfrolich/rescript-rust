@@ -69,7 +69,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 - [ ] **8. Turn module registry snapshots into cheap persistent views.**
   Registry snapshots taken for spawned compile tasks should be immutable shared chunks plus small delta overlays, not cloned large maps or alias rewrite state.
-  - [ ] Measure snapshot counts and copied map sizes during a Tella clean build.
+  - [x] Measure snapshot counts and copied map sizes during a Tella clean build.
   - [ ] Split immutable registry data from compile-local delta state.
   - [ ] Ensure worker-local overlays do not leak incomplete signatures across tasks.
 
