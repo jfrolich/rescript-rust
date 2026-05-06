@@ -664,20 +664,6 @@ fn qualified_submodule_access_path(
     }
 }
 
-fn ctype_only_alias_force_matches_ocaml(access_path: &Path, alias_id: &Ident) -> bool {
-    matches!(
-        access_path,
-        Path::Pdot(parent, child, _)
-            if child == "Promise"
-                && alias_id.name() == "Stdlib_Promise"
-                && matches!(
-                    parent.as_ref(),
-                    Path::Pident(parent_id)
-                        if parent_id.is_persistent() && parent_id.name() == "Stdlib"
-                )
-    )
-}
-
 fn raw_sig_candidate_names_for_access_path(access_path: &Path) -> Vec<String> {
     let Ok((head, components)) = access_path.flatten() else {
         return Vec::new();
@@ -765,25 +751,23 @@ fn build_local_module_components<'a>(
 ) -> Option<QualifiedModuleComponents> {
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
-        // component tables. Dotted aliases are resolved by `resolve_module_type`
-        // below through env.ml:1440-1446's `find_module` path; do not force the
-        // env.ml:1568 module-declaration thunk early just to descend through
-        // env.ml:1573-1578 child components.
+        // component tables. `scrape_alias` at env.ml:1440-1446 resolves an
+        // alias with `find_module`, and env.ml:865-882 forces the final
+        // env.ml:1568 `comp_modules` thunk for that target before returning
+        // the module type whose signature is used below.
         match alias_path {
-            Path::Pdot(_, _, _) => {}
+            Path::Pdot(parent, name, _) => {
+                let _ = crate::types::typecore::lookup_module_in_resolved_path(
+                    parent,
+                    name.as_str(),
+                    env,
+                    pers_env,
+                    ctx,
+                );
+            }
             Path::Pident(id) if id.is_persistent() => {
                 if let Some(pers) = pers_env.as_mut() {
                     let _ = pers.get_renamed_sig(id.name(), ctx);
-                } else if ctype_only_alias_force_matches_ocaml(access_path, id) {
-                    // OCaml compiler/ml/env.ml:1517 calls `scrape_alias`;
-                    // env.ml:1441-1444 resolves the `Stdlib.Promise =
-                    // Stdlib_Promise` alias via `find_module`, whose Pident
-                    // persistent case at env.ml:865-875 forces `ps_sig`.
-                    // Keep this ctype-only compensation to that observed
-                    // implicit-Stdlib force point; env.ml:1000-1007 can serve
-                    // aliases like `Js.Undefined` through `ps_comps` without
-                    // forcing their target `ps_sig` at the same time.
-                    ctx.trigger_module_sig_rename(id.name());
                 }
             }
             Path::Pident(_) => {}
