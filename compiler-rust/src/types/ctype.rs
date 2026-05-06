@@ -1299,10 +1299,22 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
         _ => return None,
     };
     let path_name = path_root_is_persistent(path).then(|| path.name());
+    let counters_enabled = ctx.compiler_counters_enabled();
     if let Some(path_name) = path_name.as_deref()
         && let Some(cached) = ctx.find_type_item_by_path(path_name)
     {
+        if counters_enabled {
+            crate::perf_counters::record_type_item_resolve_cache_hit();
+        }
         return Some(cached);
+    }
+    if let Some(path_name) = path_name.as_deref()
+        && ctx.is_missing_type_item_by_path(path_name)
+    {
+        if counters_enabled {
+            crate::perf_counters::record_type_item_resolve_missing_cache_hit();
+        }
+        return None;
     }
 
     let load_paths = ctx.load_paths();
@@ -1330,8 +1342,16 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     // (e.g., type component<'a> = componentLike<'a, element>), and those
     // sibling types need to be available for expansion later.
     let mut result = None;
+    let mut scanned_items = 0usize;
+    let mut type_items = 0usize;
     for item in current_sig.iter() {
+        if counters_enabled {
+            scanned_items += 1;
+        }
         if let SignatureItem::SigType(id, decl, _) = item {
+            if counters_enabled {
+                type_items += 1;
+            }
             let qualified_decl =
                 qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
             // Register every type by stamp
@@ -1354,6 +1374,18 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
                 result = Some((id.clone(), qualified_decl));
             }
         }
+    }
+    if counters_enabled {
+        crate::perf_counters::record_type_item_resolve_scan(
+            scanned_items,
+            type_items,
+            result.is_some(),
+        );
+    }
+    if result.is_none()
+        && let Some(path_name) = path_name.as_deref()
+    {
+        ctx.register_missing_type_item_by_path(path_name);
     }
 
     result

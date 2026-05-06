@@ -55,6 +55,13 @@ static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
 
+static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_SCANS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_FOUND: AtomicU64 = AtomicU64::new(0);
+
 static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -208,6 +215,12 @@ pub fn reset() {
         &QUALIFIED_RECORD_LABEL_REGISTERED,
         &QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT,
         &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
+        &TYPE_ITEM_RESOLVE_CACHE_HITS,
+        &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
+        &TYPE_ITEM_RESOLVE_SCANS,
+        &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
+        &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
+        &TYPE_ITEM_RESOLVE_FOUND,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -310,6 +323,35 @@ pub(crate) fn record_qualified_record_label_uncached_other() {
     QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record a cached type-item path lookup.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_cache_hit() {
+    TYPE_ITEM_RESOLVE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a cached missing type-item path lookup.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_missing_cache_hit() {
+    TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a type-item signature scan.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_scan(scanned_items: usize, type_items: usize, found: bool) {
+    TYPE_ITEM_RESOLVE_SCANS.fetch_add(1, Ordering::Relaxed);
+    TYPE_ITEM_RESOLVE_SCANNED_ITEMS.fetch_add(scanned_items as u64, Ordering::Relaxed);
+    TYPE_ITEM_RESOLVE_TYPE_ITEMS.fetch_add(type_items as u64, Ordering::Relaxed);
+    if found {
+        TYPE_ITEM_RESOLVE_FOUND.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -359,6 +401,15 @@ pub fn print_report() {
         QUALIFIED_RECORD_LABEL_REGISTERED.load(Ordering::Relaxed),
         QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.load(Ordering::Relaxed),
         QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",
+        TYPE_ITEM_RESOLVE_CACHE_HITS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_SCANS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_SCANNED_ITEMS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_TYPE_ITEMS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_FOUND.load(Ordering::Relaxed),
     );
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",

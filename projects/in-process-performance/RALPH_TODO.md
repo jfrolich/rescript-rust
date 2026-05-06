@@ -30,6 +30,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Cache normal-compile qualified record labels for local-root record paths with canonical typedtree mode disabled.
   - [x] Reuse cached persistent-root type declarations before resolving/scanning module signatures again.
   - [x] Reuse cached persistent-root type items before resolving/scanning module signatures again.
+  - [x] Cache persistent-root type-item misses to avoid rescanning signatures for paths that are known absent.
   - [x] Validate retained signature/env skip-work changes with Tella `hyperfine`, JS output parity, and canonical typedtree parity.
 
 - [ ] **2. Keep typecheck/signature work on the critical path.**
@@ -91,6 +92,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Print compact aggregate reports suitable for comparing before/after builds.
   - [x] Add scheduler queue counters for in-process typecheck/JS ready work and idle slots.
   - [x] Add qualified record-label cache counters, including local-root labels that currently bypass caching.
+  - [x] Add type-item resolve counters for positive cache hits, missing cache hits, signature scans, scanned items, and found items.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus
