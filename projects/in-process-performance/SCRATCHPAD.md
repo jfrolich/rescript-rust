@@ -4,9 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `140fca525 Add registry snapshot counters`
-- Tella `hyperfine`: `3.048s +/- 0.051s` over 20 runs, after a same-session retained baseline sample of `3.056s +/- 0.014s` over 10 runs
-- Later retained recheck: phase-timed clean build completed in `2896ms`; a noisy `hyperfine` recheck reported `3.118s +/- 0.074s` over 10 runs with a best run of `3.052s`
+- Commit: `127969d9d Skip sorting strictly sorted variant rows`
+- Tella `hyperfine`: `2.941s +/- 0.017s` over 20 runs
+- Same-session retained recheck after a noisy sample: `2.954s +/- 0.019s` over 10 runs, range `2.925s..2.994s`
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -87,3 +87,4 @@ Conclusion: Tella clean builds are already using shared registry chunks for snap
 - Capping JS finishing to `capacity / 4` workers while typecheck work was ready reduced aggressive JS scheduling but increased idle-slot wait in the counter run (`444.377ms` vs the retained `202.217ms`) and regressed Tella `hyperfine` to `3.078s +/- 0.044s` over 20 runs, compared with an immediately measured retained baseline of `3.056s +/- 0.014s` over 10 runs. The scheduler needs a smarter policy than a fixed JS cap.
 - Storing cached qualified module-component views behind one outer `Arc` reduced the number of handle clones on cache hits, but Tella `hyperfine` did not improve (`3.314s +/- 0.856s` over 20 runs, best `3.090s`, with one large outlier). It was reverted because it only reduced cache-hit bookkeeping, not the underlying semantic work.
 - Skipping row-field sorting for already-sorted large polymorphic-variant rows produced a plausible Tella timing (`3.033s +/- 0.032s` over 20 runs, best `2.992s`) but regressed JS output parity to `659/660` by changing `src/js_re_test.res` output. It was reverted; the rebuilt retained binary returned to `660/660`.
+- Borrowed iterators for record-label environment lookup removed temporary `Vec<&LabelDescription>` allocations in hot disambiguation paths and passed JS output parity plus a clean Tella compile, but did not improve Tella `hyperfine` (`2.958s +/- 0.074s` over 20 runs, with outliers) versus the retained same-session baseline (`2.954s +/- 0.019s` over 10 runs). It was reverted because the allocation skip was not on the wall-clock path.
