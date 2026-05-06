@@ -30,6 +30,38 @@ The highest-leverage work is removing whole classes of repeated work, not polish
 9. Adaptive indexing for large signatures.
 10. Built-in counters for clone/scan/allocation/queue behavior.
 
+## Top 10 Improvements
+
+1. **Finish shared immutable signatures and lazy env/component views.**
+   Dependency signatures should be canonical, immutable, shared, and read through contextual lazy overlays. Avoid APIs that require cloned mutable `Signature` values. Materialize only the specific value/type/module lookup result that is forced.
+
+2. **Keep typecheck/signature work on the critical path.**
+   Typechecking signatures unlocks downstream modules; JS finishing usually does not. Scheduler changes should prioritize ready signature-producing work, then run JS/codegen when no typecheck work is ready or under a separate concurrency cap.
+
+3. **Pipeline parse/deps/interface compile with typecheck.**
+   Remove avoidable phase barriers. As soon as a module or `.resi` is parsed and deps are known, enqueue interface/typecheck if its deps are ready so signatures unlock dependents earlier.
+
+4. **Move Lambda/JS IR to indexed arenas before typedtree.**
+   Lambda still uses recursive owned trees and gets traversed/transformed repeatedly. Arena/index Lambda and JS IR should reduce allocation, cloning, and pointer chasing before attempting a full typedtree arena rewrite.
+
+5. **Create a lean normal-compile typedtree mode.**
+   Normal JS compilation should avoid storing debug/canonical-only fields on every typedtree node. Preserve the full canonical shape for sexp/debug/tooling modes.
+
+6. **Replace dense-ID hash maps/sets with indexed vectors.**
+   Extend dense `TypeExprRef` work to other arena/index keys such as type refs, location refs, lident refs, module indices, and signature item indices.
+
+7. **Intern paths, identifiers, labels, and common short strings per package/worker.**
+   Avoid repeated `String`, `Path`, label, and property-name allocation/cloning in typecheck, Lambda, and JS codegen. Prefer compact IDs and per-package/per-worker interners to avoid global lock contention.
+
+8. **Turn module registry snapshots into cheap persistent views.**
+   Registry snapshots taken for spawned compile tasks should be immutable shared chunks plus small delta overlays, not cloned large maps or alias rewrite state.
+
+9. **Add adaptive lazy indexing for large signatures.**
+   Lazy lookup should scan initially, then build a compact per-kind index after repeated distinct lookups into the same large signature. Add counters for scans, hits, misses, and forced item counts before picking thresholds.
+
+10. **Treat measurement infrastructure as a compiler feature.**
+    Add counters for signature clones avoided, component scans, env overlays, registry snapshot sizes, Lambda/typedtree node counts, allocation pressure, and queued pre-JS payloads.
+
 ## Active Benchmark Target
 
 Tella clean build:
