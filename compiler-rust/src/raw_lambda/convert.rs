@@ -3615,6 +3615,43 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> Option<i32> {
         use crate::types::decl::{ModuleType, SignatureItem, ValueKind};
 
+        fn runtime_field_position(sig: &[SignatureItem], field_name: &str) -> Option<i32> {
+            let mut runtime_pos = 0i32;
+            for item in sig {
+                match item {
+                    SignatureItem::SigValue(id, desc)
+                        if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
+                    {
+                        if id.name() == field_name {
+                            return Some(runtime_pos);
+                        }
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigModule(id, _, _) | SignatureItem::SigTypext(id, _, _) => {
+                        if id.name() == field_name {
+                            return Some(runtime_pos);
+                        }
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigValue(_, _) => {}
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        if let Some(pos) = crate::types::typecore::with_resolved_module_components_for_path(
+            module_path,
+            env,
+            &mut self.persistent_env,
+            self.type_ctx,
+            |components| runtime_field_position(components.signature(), field_name),
+        )
+        .flatten()
+        {
+            return Some(pos);
+        }
+
         fn module_type_for_path(
             this: &mut RawLambdaConverter<'_>,
             env: &crate::types::env::Env,
@@ -3697,36 +3734,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
 
             match mty {
-                ModuleType::MtySignature(sig) => {
-                    // OCaml compiler/ml/lambda.ml:635-643 preserves the
-                    // normalized Pdot runtime position. When Rust receives a
-                    // synthetic -1 from alias normalization, count runtime
-                    // signature items in the same order used by
-                    // compiler/ml/translmod.ml:307/343 to build module blocks.
-                    let mut runtime_pos = 0i32;
-                    for item in sig {
-                        match item {
-                            SignatureItem::SigValue(id, desc)
-                                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
-                            {
-                                if id.name() == field_name {
-                                    return Some(runtime_pos);
-                                }
-                                runtime_pos += 1;
-                            }
-                            SignatureItem::SigModule(id, _, _)
-                            | SignatureItem::SigTypext(id, _, _) => {
-                                if id.name() == field_name {
-                                    return Some(runtime_pos);
-                                }
-                                runtime_pos += 1;
-                            }
-                            SignatureItem::SigValue(_, _) => {}
-                            _ => {}
-                        }
-                    }
-                    None
-                }
+                ModuleType::MtySignature(sig) => runtime_field_position(&sig, field_name),
                 ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                     if alias_path.same(module_path) {
                         return None;
