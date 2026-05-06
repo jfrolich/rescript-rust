@@ -348,12 +348,11 @@ fn build_labels_for_name(
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
-    values: Arc<HashMap<String, (usize, usize)>>,
+    values: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
     constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
     labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
-    types: Arc<HashMap<String, usize>>,
-    modules: Arc<HashMap<String, (usize, usize)>>,
-    modtypes: Arc<HashMap<String, usize>>,
+    types: Arc<RefCell<HashMap<String, Option<usize>>>>,
+    modules: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
     component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
@@ -451,29 +450,21 @@ impl QualifiedModuleComponents {
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        let mut values = HashMap::new();
-        let mut types = HashMap::new();
-        let mut modules = HashMap::new();
-        let mut modtypes = HashMap::new();
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
-        for (idx, item) in signature.iter().enumerate() {
+        for item in signature.iter() {
             match item {
-                SignatureItem::SigValue(id, desc) => {
-                    values.insert(id.name().to_string(), (idx, runtime_pos));
+                SignatureItem::SigValue(_, desc) => {
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                         runtime_pos += 1;
                     }
                 }
-                SignatureItem::SigType(id, _, _) => {
-                    types.insert(id.name().to_string(), idx);
-                }
+                SignatureItem::SigType(_, _, _) => {}
                 SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModule(id, _, _) => {
-                    modules.insert(id.name().to_string(), (idx, runtime_pos));
                     if let SignatureItem::SigModule(_, md, _) = item {
                         if let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
                         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
@@ -495,14 +486,11 @@ impl QualifiedModuleComponents {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(id, mtd) => {
-                    modtypes.insert(id.name().to_string(), idx);
                     let mut component_mtd = mtd.clone();
                     // OCaml compiler/ml/env.ml:1530 and 1581-1585 apply the
-                    // `prefix_idents` substitution to component modtypes while
-                    // keeping the original declaration in the evolving env.
-                    // Keep that split so forced components consume the same
-                    // fresh identifiers without changing the raw signature used
-                    // by package/include checks.
+                    // `prefix_idents` substitution while building component
+                    // modtypes. Keep this eager side effect because it consumes
+                    // fresh identifiers in canonical typedtree order.
                     crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
                         &mut component_mtd,
                         &signature,
@@ -523,12 +511,11 @@ impl QualifiedModuleComponents {
         Self {
             access_path: Arc::new(access_path),
             signature,
-            values: Arc::new(values),
+            values: Arc::new(RefCell::new(HashMap::new())),
             constructors: Arc::new(RefCell::new(HashMap::new())),
             labels: Arc::new(RefCell::new(HashMap::new())),
-            types: Arc::new(types),
-            modules: Arc::new(modules),
-            modtypes: Arc::new(modtypes),
+            types: Arc::new(RefCell::new(HashMap::new())),
+            modules: Arc::new(RefCell::new(HashMap::new())),
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
@@ -552,8 +539,98 @@ impl QualifiedModuleComponents {
         self.signature.as_ref().clone()
     }
 
+    fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
+        if let Some(cached) = self.values.borrow().get(name).cloned() {
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1513-1514 stores component tables lazily.
+        // Keep the canonical signature immutable and force only this env.ml:1132
+        // value lookup bucket instead of allocating indexes for every sibling.
+        let mut found = None;
+        let mut runtime_pos = 0usize;
+        for (idx, item) in self.signature.iter().enumerate() {
+            match item {
+                SignatureItem::SigValue(id, desc) => {
+                    if id.name() == name {
+                        found = Some((idx, runtime_pos));
+                    }
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(_, _, _) => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigType(_, _, _)
+                | SignatureItem::SigModtype(_, _)
+                | SignatureItem::SigClassType => {}
+            }
+        }
+        self.values.borrow_mut().insert(name.to_string(), found);
+        found
+    }
+
+    fn cached_type_index(&self, name: &str) -> Option<usize> {
+        if let Some(cached) = self.types.borrow().get(name).cloned() {
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1542 stores type declarations in the
+        // component table, but the table itself is behind EnvLazy. Defer this
+        // per-name index until a type lookup actually asks for it.
+        let mut found = None;
+        for (idx, item) in self.signature.iter().enumerate() {
+            if let SignatureItem::SigType(id, _, _) = item
+                && id.name() == name
+            {
+                found = Some(idx);
+            }
+        }
+        self.types.borrow_mut().insert(name.to_string(), found);
+        found
+    }
+
+    fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
+        if let Some(cached) = self.modules.borrow().get(name).cloned() {
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1568 and 1573-1578 expose module
+        // declarations/components through separate lazy thunks. Force only the
+        // requested child name here; the full shared signature stays untouched.
+        let mut found = None;
+        let mut runtime_pos = 0usize;
+        for (idx, item) in self.signature.iter().enumerate() {
+            match item {
+                SignatureItem::SigValue(_, desc) => {
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(id, _, _) => {
+                    if id.name() == name {
+                        found = Some((idx, runtime_pos));
+                    }
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigType(_, _, _)
+                | SignatureItem::SigModtype(_, _)
+                | SignatureItem::SigClassType => {}
+            }
+        }
+        self.modules.borrow_mut().insert(name.to_string(), found);
+        found
+    }
+
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
-        let (idx, runtime_pos) = *self.values.get(name)?;
+        let (idx, runtime_pos) = self.cached_value_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigValue(id, desc) => Some((runtime_pos, id, desc)),
             _ => None,
@@ -612,7 +689,7 @@ impl QualifiedModuleComponents {
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {
-        let idx = *self.types.get(name)?;
+        let idx = self.cached_type_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigType(id, decl, _) => Some((id, decl)),
             _ => None,
@@ -620,7 +697,7 @@ impl QualifiedModuleComponents {
     }
 
     pub(crate) fn lookup_module(&self, name: &str) -> Option<(usize, &Ident, &ModuleDeclaration)> {
-        let (idx, runtime_pos) = *self.modules.get(name)?;
+        let (idx, runtime_pos) = self.cached_module_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigModule(id, md, _) => Some((runtime_pos, id, md)),
             _ => None,
@@ -647,7 +724,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
-        let (idx, runtime_pos) = *self.modules.get(name)?;
+        let (idx, runtime_pos) = self.cached_module_index(name)?;
         if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
             return Some((runtime_pos, id, md));
         }
