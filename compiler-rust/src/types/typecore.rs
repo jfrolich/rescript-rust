@@ -18957,10 +18957,13 @@ impl Env {
                         visiting.remove(path);
                         return result;
                     }
-                    if let Some(pers) = pers_env.as_mut()
-                        && let Some(renamed_sig) = pers.get_renamed_sig_shared(mod_name, ctx)
-                    {
-                        let sig = copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx);
+                    if let Some(pers) = pers_env.as_mut() {
+                        let sig = if ctx.preserve_canonical_typedtree() {
+                            let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
+                            copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
+                        } else {
+                            pers.read_raw_sig_shared(mod_name, ctx)?.as_ref().clone()
+                        };
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
