@@ -7,7 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use ahash::AHashMap as HashMap;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -17,6 +17,9 @@ use super::decl::{
     ModuleDeclaration, Signature, SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
 };
 use super::path::Path;
+
+const ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS: usize = 32;
+const ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES: usize = 2;
 
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
@@ -349,6 +352,7 @@ pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
     values: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    values_indexed: Arc<Cell<bool>>,
     constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
     labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
     types: Arc<RefCell<HashMap<String, Option<usize>>>>,
@@ -513,6 +517,7 @@ impl QualifiedModuleComponents {
             access_path: Arc::new(access_path),
             signature,
             values: Arc::new(RefCell::new(HashMap::new())),
+            values_indexed: Arc::new(Cell::new(false)),
             constructors: Arc::new(RefCell::new(HashMap::new())),
             labels: Arc::new(RefCell::new(HashMap::new())),
             types: Arc::new(RefCell::new(HashMap::new())),
@@ -547,6 +552,18 @@ impl QualifiedModuleComponents {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
             }
             return cached;
+        }
+        if self.values_indexed.get() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            }
+            return None;
+        }
+
+        if self.signature.len() >= ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS
+            && self.values.borrow().len() >= ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES
+        {
+            return self.build_value_index_and_get(name);
         }
 
         // OCaml compiler/ml/env.ml:1513-1514 stores component tables lazily.
@@ -584,6 +601,43 @@ impl QualifiedModuleComponents {
             );
         }
         found
+    }
+
+    fn build_value_index_and_get(&self, name: &str) -> Option<(usize, usize)> {
+        let mut values = self.values.borrow_mut();
+        if !self.values_indexed.get() {
+            let mut runtime_pos = 0usize;
+            let mut result_items = 0usize;
+            for (idx, item) in self.signature.iter().enumerate() {
+                match item {
+                    SignatureItem::SigValue(id, desc) => {
+                        values.insert(id.name().to_string(), Some((idx, runtime_pos)));
+                        result_items += 1;
+                        if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                            runtime_pos += 1;
+                        }
+                    }
+                    SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigModule(_, _, _) => {
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigType(_, _, _)
+                    | SignatureItem::SigModtype(_, _)
+                    | SignatureItem::SigClassType => {}
+                }
+            }
+            self.values_indexed.set(true);
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_scan(
+                    crate::perf_counters::LazyLookupKind::Value,
+                    self.signature.len(),
+                    result_items,
+                );
+            }
+        }
+        values.get(name).cloned().unwrap_or(None)
     }
 
     fn cached_type_index(&self, name: &str) -> Option<usize> {

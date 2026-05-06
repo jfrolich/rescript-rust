@@ -83,7 +83,8 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   Lazy lookup should scan initially, then build a compact per-kind index after repeated distinct lookups into the same large signature. Add counters for scans, hits, misses, and forced item counts before picking thresholds.
   - [x] Add env-gated counters for lazy signature scans, cache hits, cache misses, scanned item counts, and forced result counts.
   - [ ] Use counters on Tella slow non-Icon modules to find repeated large-signature scans.
-  - [ ] Add adaptive per-kind indexes only where counters show repeated distinct lookups.
+  - [x] Add a retained adaptive value-name index for large signatures after repeated distinct value lookups.
+  - [ ] Add adaptive per-kind indexes only where counters show repeated distinct lookups and `hyperfine` shows a win.
   - [ ] Benchmark thresholds with `hyperfine`.
 
 - [ ] **10. Treat measurement infrastructure as a compiler feature.**
