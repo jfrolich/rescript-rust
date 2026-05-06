@@ -1823,7 +1823,7 @@ fn compute_raw_implementation_coercion(
         pers.add_load_path(source_dir);
     }
     let _ = pers.find_pers_struct(&module_name, type_ctx);
-    let target_sig = match pers.read_raw_sig(&module_name, type_ctx) {
+    let target_sig = match pers.read_raw_sig_shared(&module_name, type_ctx) {
         Some(sig) => sig,
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
     };
@@ -1834,7 +1834,7 @@ fn compute_raw_implementation_coercion(
         source_file,
         impl_sig,
         "(inferred signature)",
-        &target_sig,
+        target_sig.as_ref(),
     ) {
         Ok(cc) => cc,
         Err(_) if has_resi => {
@@ -2101,8 +2101,14 @@ pub fn load_pervasives<'a>(
             }
         }
         if pers_env.open_module(module_name, env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                env.add_module(Ident::create_persistent(module_name), md);
+            // Keep bsc's standalone path unchanged, but in-process builds can
+            // resolve explicit `Module.X` lookups through the persistent
+            // registry. Creating this binding would clone the full raw
+            // signature after `open_module` already added the opened contents.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
+                    env.add_module(Ident::create_persistent(module_name), md);
+                }
             }
         }
     }
@@ -2296,7 +2302,7 @@ fn apply_moregen_constraints(
         // Ensure the module is loaded first (for side effects like registering types)
         let _ = pers.find_pers_struct(&module_name, type_ctx);
         // Then read raw sig without path substitution for moregen
-        let result = pers.read_raw_sig(&module_name, type_ctx);
+        let result = pers.read_raw_sig_shared(&module_name, type_ctx);
         match result {
             Some(sig) => sig,
             None => return,
@@ -2314,7 +2320,7 @@ fn apply_moregen_constraints(
         let impl_sig = &typed_structure.str_type;
         let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> = ahash::AHashMap::new();
         // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
-        for iface_item in &iface_sig {
+        for iface_item in iface_sig.iter() {
             let (iface_id, find_fn): (
                 &crate::ident::Ident,
                 Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>,
@@ -2360,7 +2366,7 @@ fn apply_moregen_constraints(
         if !stamp_remap.is_empty() {
             // Apply stamp remapping to interface type_exprs
             crate::cmi::persistent_env::substitute_type_paths_in_sig_with_stamp_map(
-                &iface_sig,
+                iface_sig.as_ref(),
                 &stamp_remap,
                 type_ctx,
             );
@@ -2369,7 +2375,7 @@ fn apply_moregen_constraints(
 
     // Build a map from value name -> interface type
     let mut iface_val_types: ahash::AHashMap<String, TypeExprRef> = ahash::AHashMap::new();
-    for item in &iface_sig {
+    for item in iface_sig.iter() {
         if let SignatureItem::SigValue(id, vd) = item {
             iface_val_types.insert(id.name().to_string(), vd.val_type);
         }

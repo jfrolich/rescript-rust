@@ -672,7 +672,7 @@ fn build_local_module_components<'a>(
             Path::Pdot(_, _, _) => {}
             Path::Pident(id) if id.is_persistent() => {
                 if let Some(pers) = pers_env.as_mut() {
-                    let _ = pers.get_renamed_sig(id.name(), ctx);
+                    let _ = pers.force_lazy_signature_rename(id.name(), ctx);
                 }
             }
             Path::Pident(_) => {}

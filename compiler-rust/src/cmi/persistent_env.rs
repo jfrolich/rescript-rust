@@ -495,7 +495,7 @@ pub struct PersistentEnv {
     compiling_module: Option<String>,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
-    renamed_sig_cache: Arc<HashMap<String, Signature>>,
+    renamed_sig_cache: Arc<HashMap<String, Arc<Signature>>>,
     /// In-memory module registry for `--in-process` builds.
     /// When a module is registered here, its metadata (source path, purity)
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
@@ -1424,7 +1424,11 @@ impl PersistentEnv {
     /// for all dependent modules (via components_of_module_maker → scrape_alias
     /// → find_module). We match this by triggering ALL registered module renames
     /// when any module is first accessed.
-    pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+    pub fn get_renamed_sig_shared<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext,
+    ) -> Option<Arc<Signature>> {
         // Check TypeContext cache first (populated by trigger_module_sig_rename)
         if let Some(cached) = ctx.renamed_module_sigs.borrow().get(name) {
             return Some(cached.clone());
@@ -1439,6 +1443,11 @@ impl PersistentEnv {
             .get(name)
             .cloned()
             .or_else(|| self.renamed_sig_cache.get(name).cloned())
+    }
+
+    pub fn get_renamed_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+        self.get_renamed_sig_shared(name, ctx)
+            .map(|sig| sig.as_ref().clone())
     }
 
     /// Force the lazy `Subst.signature Subst.identity` side effect for a
@@ -1462,11 +1471,11 @@ impl PersistentEnv {
         // signature here; the helper below owns that single OCaml-equivalent
         // copy.
         let ps = self.find_pers_struct(name, ctx)?;
-        let renamed = freshened_signature_bound_idents_from(&ps.ps_sig, ctx);
+        let renamed = Arc::new(freshened_signature_bound_idents_from(&ps.ps_sig, ctx));
         Arc::make_mut(&mut self.renamed_sig_cache).insert(name.to_string(), renamed.clone());
         ctx.renamed_module_sigs
             .borrow_mut()
-            .insert(name.to_string(), renamed.clone());
+            .insert(name.to_string(), renamed);
         Some(())
     }
 

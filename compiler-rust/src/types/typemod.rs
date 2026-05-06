@@ -3942,7 +3942,7 @@ pub fn lookup_module_type_by_lid<'b>(
                     // freshens the extracted signature at typemod.ml:1575-1578.
                     let _ = pers_env
                         .as_mut()
-                        .and_then(|pers| pers.get_renamed_sig(mod_name, ctx));
+                        .and_then(|pers| pers.force_lazy_signature_rename(mod_name, ctx));
                 }
                 return Some(md.md_type.clone());
             }
@@ -6923,7 +6923,7 @@ fn force_persistent_sigs_for_normalize_path<'a>(
             // as `Subst.signature Subst.identity`, whose binder-renaming order
             // is implemented in compiler/ml/subst.ml:378-400.
             if let Some(pers) = pers_env.as_mut() {
-                let _ = pers.get_renamed_sig(id.name(), ctx);
+                let _ = pers.force_lazy_signature_rename(id.name(), ctx);
             } else {
                 ctx.trigger_module_sig_rename(id.name());
             }

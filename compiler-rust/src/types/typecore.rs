@@ -18508,9 +18508,9 @@ impl Env {
                 }
                 // Then try persistent environment (external modules)
                 if let Some(pers) = pers_env.as_mut() {
-                    if let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx) {
+                    if let Some(renamed_sig) = pers.get_renamed_sig_shared(mod_name, ctx) {
                         let module_path = Path::pident(Ident::create_persistent(mod_name));
-                        let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
+                        let sig = copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx);
                         if let Some(qualified_alias_path) =
                             pers.qualified_alias_path_for_flattened_head(mod_name)
                         {
@@ -18953,9 +18953,9 @@ impl Env {
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut()
-                        && let Some(renamed_sig) = pers.get_renamed_sig(mod_name, ctx)
+                        && let Some(renamed_sig) = pers.get_renamed_sig_shared(mod_name, ctx)
                     {
-                        let sig = copy_lookup_signature_for_subst(&renamed_sig, ctx);
+                        let sig = copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx);
                         let result = Some((sig, Some(mod_name.to_string())));
                         visiting.remove(path);
                         return result;
