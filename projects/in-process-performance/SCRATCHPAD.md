@@ -10,6 +10,22 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
 
+## Counter Baseline
+
+`RESCRIPT_COMPILER_COUNTERS=1` prints aggregate compiler counters at the end of an in-process build. The counters are disabled by default.
+
+Tella clean build counter report after adding lazy signature/component counters:
+
+- value lazy lookup: `hits=0 misses=39129 scanned_items=1565341 result_items=39129`
+- type lazy lookup: `hits=152600 misses=41990 scanned_items=1522394 result_items=40159`
+- module lazy lookup: `hits=767151 misses=29981 scanned_items=1348646 result_items=15655`
+- constructor lazy lookup: `hits=12600 misses=4697 scanned_items=72046 result_items=4973`
+- label lazy lookup: `hits=538 misses=353 scanned_items=7066 result_items=396`
+- child component lazy lookup: `hits=62908 misses=17491 scanned_items=1002353 result_items=16719`
+- qualified component views: `hits=1249987 misses=138619 registered=47876`
+
+Disabled-counter Tella `hyperfine`: `2.952s +/- 0.015s` over 20 runs, compared with the retained pre-counter baseline of about `2.918s +/- 0.070s`.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`

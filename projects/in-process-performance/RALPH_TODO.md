@@ -75,16 +75,16 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 - [ ] **9. Add adaptive lazy indexing for large signatures.**
   Lazy lookup should scan initially, then build a compact per-kind index after repeated distinct lookups into the same large signature. Add counters for scans, hits, misses, and forced item counts before picking thresholds.
-  - [ ] Add env-gated counters for lazy signature scans, cache hits, cache misses, scanned item counts, and forced result counts.
+  - [x] Add env-gated counters for lazy signature scans, cache hits, cache misses, scanned item counts, and forced result counts.
   - [ ] Use counters on Tella slow non-Icon modules to find repeated large-signature scans.
   - [ ] Add adaptive per-kind indexes only where counters show repeated distinct lookups.
   - [ ] Benchmark thresholds with `hyperfine`.
 
 - [ ] **10. Treat measurement infrastructure as a compiler feature.**
   Add counters for signature clones avoided, component scans, env overlays, registry snapshot sizes, Lambda/typedtree node counts, allocation pressure, and queued pre-JS payloads.
-  - [ ] Add low-overhead, env-gated counters that are disabled on normal builds.
-  - [ ] Print compact aggregate reports suitable for comparing before/after builds.
-  - [ ] Keep measurement code committed when it guides future retained optimizations.
+  - [x] Add low-overhead, env-gated counters that are disabled on normal builds.
+  - [x] Print compact aggregate reports suitable for comparing before/after builds.
+  - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus
 

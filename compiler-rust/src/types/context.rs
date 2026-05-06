@@ -265,6 +265,9 @@ pub struct TypeContext {
     /// only to keep typedtree identity and traversal order stable for dumps.
     preserve_canonical_typedtree: Cell<bool>,
 
+    /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
+    compiler_counters_enabled: bool,
+
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
     /// Refs that have been written via memorize_abbrev_expansion since the
@@ -476,6 +479,7 @@ impl TypeContext {
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
             preserve_canonical_typedtree: Cell::new(false),
+            compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -553,6 +557,11 @@ impl TypeContext {
 
     pub(crate) fn preserve_canonical_typedtree(&self) -> bool {
         self.preserve_canonical_typedtree.get()
+    }
+
+    #[inline]
+    pub(crate) fn compiler_counters_enabled(&self) -> bool {
+        self.compiler_counters_enabled
     }
 
     /// Intern a CMI longident component and return a synthetic StrIdx.
@@ -694,6 +703,9 @@ impl TypeContext {
         key: QualifiedModuleComponentsCacheKey,
         components: super::env_lazy::QualifiedModuleComponents,
     ) {
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_qualified_component_registered();
+        }
         self.qualified_module_components_cache
             .borrow_mut()
             .insert(key, components);
@@ -712,7 +724,16 @@ impl TypeContext {
     ) -> Option<R> {
         let components = {
             let cache = self.qualified_module_components_cache.borrow();
-            cache.get(key)?.clone()
+            let Some(components) = cache.get(key) else {
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::record_qualified_component_miss();
+                }
+                return None;
+            };
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_qualified_component_hit();
+            }
+            components.clone()
         };
         Some(f(&components))
     }

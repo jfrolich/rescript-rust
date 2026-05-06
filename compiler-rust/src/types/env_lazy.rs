@@ -353,6 +353,7 @@ pub(crate) struct QualifiedModuleComponents {
     labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
     types: Arc<RefCell<HashMap<String, Option<usize>>>>,
     modules: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    compiler_counters_enabled: bool,
     component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
@@ -516,6 +517,7 @@ impl QualifiedModuleComponents {
             labels: Arc::new(RefCell::new(HashMap::new())),
             types: Arc::new(RefCell::new(HashMap::new())),
             modules: Arc::new(RefCell::new(HashMap::new())),
+            compiler_counters_enabled: ctx.compiler_counters_enabled(),
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
@@ -541,6 +543,9 @@ impl QualifiedModuleComponents {
 
     fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
         if let Some(cached) = self.values.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            }
             return cached;
         }
 
@@ -571,11 +576,21 @@ impl QualifiedModuleComponents {
             }
         }
         self.values.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Value,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
         found
     }
 
     fn cached_type_index(&self, name: &str) -> Option<usize> {
         if let Some(cached) = self.types.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
+            }
             return cached;
         }
 
@@ -591,11 +606,21 @@ impl QualifiedModuleComponents {
             }
         }
         self.types.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Type,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
         found
     }
 
     fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
         if let Some(cached) = self.modules.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
+            }
             return cached;
         }
 
@@ -626,6 +651,13 @@ impl QualifiedModuleComponents {
             }
         }
         self.modules.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Module,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
         found
     }
 
@@ -643,6 +675,11 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Arc<Vec<ConstructorDescription>> {
         if let Some(cached) = self.constructors.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(
+                    crate::perf_counters::LazyLookupKind::Constructor,
+                );
+            }
             return cached;
         }
 
@@ -657,6 +694,13 @@ impl QualifiedModuleComponents {
             name,
             ctx,
         ));
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Constructor,
+                self.signature.len(),
+                built.len(),
+            );
+        }
         self.constructors
             .borrow_mut()
             .insert(name.to_string(), built.clone());
@@ -669,6 +713,9 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Arc<Vec<LabelDescription>> {
         if let Some(cached) = self.labels.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Label);
+            }
             return cached;
         }
 
@@ -682,6 +729,13 @@ impl QualifiedModuleComponents {
             name,
             ctx,
         ));
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Label,
+                self.signature.len(),
+                built.len(),
+            );
+        }
         self.labels
             .borrow_mut()
             .insert(name.to_string(), built.clone());
@@ -709,10 +763,22 @@ impl QualifiedModuleComponents {
         name: &str,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
         if let Some(cached) = self.child_components.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(
+                    crate::perf_counters::LazyLookupKind::ChildComponent,
+                );
+            }
             return cached;
         }
 
         let built = build_child_component_from_signature(self.access_path(), &self.signature, name);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::ChildComponent,
+                self.signature.len(),
+                usize::from(built.is_some()),
+            );
+        }
         self.child_components
             .borrow_mut()
             .insert(name.to_string(), built.clone());

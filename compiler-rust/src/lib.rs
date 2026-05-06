@@ -55,6 +55,8 @@ pub mod lambda;
 pub mod location;
 pub mod parse_arena;
 pub mod parser;
+/// Optional aggregate compiler performance counters.
+pub mod perf_counters;
 pub mod raw_lambda;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
