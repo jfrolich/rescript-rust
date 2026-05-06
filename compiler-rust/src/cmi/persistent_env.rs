@@ -164,6 +164,15 @@ impl<V: Clone> SharedRegistryMap<V> {
     }
 }
 
+impl<V> SharedRegistryMap<V> {
+    fn for_each(&self, mut f: impl FnMut(&String, &V)) {
+        let map = self.inner.read().unwrap();
+        for (key, value) in map.iter() {
+            f(key, value);
+        }
+    }
+}
+
 /// A cached persistent module structure.
 #[derive(Debug, Clone)]
 pub struct PersStruct {
@@ -254,11 +263,11 @@ impl AliasPrefixRewrites {
 
     fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
         let mut heads = Vec::new();
-        for (flat_head, qualified) in self.base.iter_cloned() {
-            if !self.local.contains_key(&flat_head) && qualified.same(qualified_path) {
-                heads.push(flat_head);
+        self.base.for_each(|flat_head, qualified| {
+            if !self.local.contains_key(flat_head) && qualified.same(qualified_path) {
+                heads.push(flat_head.clone());
             }
-        }
+        });
         for (flat_head, qualified) in self.local.iter() {
             if qualified.same(qualified_path) {
                 heads.push(flat_head.clone());
