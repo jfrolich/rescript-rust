@@ -22,6 +22,8 @@ SPICE_PPX="${SPICE_PPX:-/Users/jaapf/conductor/repos/ppx_spice/ppx}"
 SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
 INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
+export RESCRIPT_RUNTIME
 
 # Output directories
 TEMP_DIR="$PROJECT_ROOT/temp/rust-parity"
@@ -736,7 +738,18 @@ run_js_compilation_tests() {
             while IFS= read -r arg; do
                 compiler_args+=("$arg")
             done < <(
-                printf '%s' "$compiler_args_json" | python3 -c 'import json,sys; [print(arg) for arg in json.load(sys.stdin).get("compiler_args", [])]'
+                printf '%s' "$compiler_args_json" | python3 -c 'import json, os, sys
+args = json.load(sys.stdin).get("compiler_args", [])
+runtime = os.environ.get("RESCRIPT_RUNTIME")
+i = 0
+while i < len(args):
+    if args[i] == "-runtime-path" and i + 1 < len(args) and runtime:
+        print(args[i])
+        print(runtime)
+        i += 2
+    else:
+        print(args[i])
+        i += 1'
             )
         fi
 

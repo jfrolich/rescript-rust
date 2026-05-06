@@ -492,7 +492,20 @@ test_single_file() {
         # Extract compiler args from JSON and build command
         # Parse the compiler_args array from JSON
         local args
-        args=$(echo "$compiler_args_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(' '.join(d.get('compiler_args', [])))" 2>/dev/null) || args=""
+        args=$(echo "$compiler_args_json" | python3 -c "import os, sys, json
+d = json.load(sys.stdin)
+compiler_args = d.get('compiler_args', [])
+runtime = os.environ.get('RESCRIPT_RUNTIME')
+rewritten = []
+i = 0
+while i < len(compiler_args):
+    if compiler_args[i] == '-runtime-path' and i + 1 < len(compiler_args) and runtime:
+        rewritten.extend([compiler_args[i], runtime])
+        i += 2
+    else:
+        rewritten.append(compiler_args[i])
+        i += 1
+print(' '.join(rewritten))" 2>/dev/null) || args=""
 
         if [[ -n "$args" ]]; then
             # Tella keeps some checked-in JS outputs that a normal build can
@@ -506,6 +519,7 @@ test_single_file() {
                 if [[ -n "$parser_args" ]]; then
                     (
                         cd "$TEST_PROJECT/lib/bs"
+                        mkdir -p "$(dirname "$ast_arg")"
                         timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" $parser_args 2> "$file_temp/parser.err" 1>/dev/null
                     ) || true
                 fi
