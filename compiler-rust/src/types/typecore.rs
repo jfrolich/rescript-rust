@@ -23052,12 +23052,20 @@ fn build_module_signature_for_path<'a>(
                     None
                 }
             } else {
-                if id.is_persistent()
-                    && let Some(raw_sig) = ctx.find_raw_module_sig(id.name())
-                    && raw_sig.iter().any(|item| {
-                        matches!(item, crate::types::decl::SignatureItem::SigModtype(_, _))
+                let raw_sig_with_modtype = if id.is_persistent() {
+                    ctx.with_raw_module_sig(id.name(), |raw_sig| {
+                        raw_sig
+                            .iter()
+                            .any(|item| {
+                                matches!(item, crate::types::decl::SignatureItem::SigModtype(_, _))
+                            })
+                            .then(|| raw_sig.clone())
                     })
-                {
+                    .flatten()
+                } else {
+                    None
+                };
+                if let Some(raw_sig) = raw_sig_with_modtype {
                     // OCaml compiler/ml/env.ml:669-678 stores persistent
                     // `ps_comps` from the raw `sign` separately from the lazy
                     // `ps_sig = Subst.signature ...`; env.ml:1000-1007 returns
