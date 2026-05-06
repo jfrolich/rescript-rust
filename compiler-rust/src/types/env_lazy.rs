@@ -840,7 +840,9 @@ fn build_local_module_components<'a>(
         match alias_path {
             Path::Pdot(_, _, _) => {}
             Path::Pident(id) if id.is_persistent() => {
-                if let Some(pers) = pers_env.as_mut() {
+                if ctx.preserve_canonical_typedtree()
+                    && let Some(pers) = pers_env.as_mut()
+                {
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
                 }
             }
