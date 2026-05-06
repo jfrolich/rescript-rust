@@ -232,7 +232,11 @@ pub(crate) struct QualifiedModuleComponents {
     // those clones to preserve the same lazy identifier-renaming order.
     qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
     qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
-    child_components: Arc<HashMap<String, (usize, Arc<StoredModuleComponents>)>>,
+    // OCaml keeps `comp_components` lazy (compiler/ml/env.ml:1573-1578).
+    // Build the child component table only when a qualified child lookup needs
+    // it; constructing it for every parent view clones module declarations and
+    // recursively seeds environments even when no child is referenced.
+    child_components: Arc<RefCell<Option<HashMap<String, (usize, Arc<StoredModuleComponents>)>>>>,
 }
 
 fn build_child_components_from_signature(
@@ -315,11 +319,6 @@ impl QualifiedModuleComponents {
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        let child_components = if child_components.is_empty() {
-            build_child_components_from_signature(&access_path, &signature)
-        } else {
-            child_components
-        };
         let mut values = HashMap::new();
         let mut constructors = HashMap::new();
         let mut labels = HashMap::new();
@@ -493,7 +492,9 @@ impl QualifiedModuleComponents {
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
-            child_components: Arc::new(child_components),
+            child_components: Arc::new(RefCell::new(
+                (!child_components.is_empty()).then_some(child_components),
+            )),
         }
     }
 
@@ -549,7 +550,14 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+        if self.child_components.borrow().is_none() {
+            let child_components =
+                build_child_components_from_signature(self.access_path(), &self.signature);
+            *self.child_components.borrow_mut() = Some(child_components);
+        }
         self.child_components
+            .borrow()
+            .as_ref()?
             .get(name)
             .map(|(runtime_pos, stored)| (*runtime_pos, stored.clone()))
     }
