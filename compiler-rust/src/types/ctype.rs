@@ -3923,6 +3923,14 @@ fn unify_types<'a>(
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
                     let p2_flat_persistent = flat_persistent_parent(path2);
+                    let implicit_namespace_alias = |path: &Path| {
+                        path_root_ident(path).is_some_and(|root| {
+                            root.is_persistent()
+                                && matches!(root.name(), "Js" | "Stdlib" | "Pervasives")
+                        })
+                    };
+                    let p1_implicit_namespace_alias = implicit_namespace_alias(path1);
+                    let p2_implicit_namespace_alias = implicit_namespace_alias(path2);
                     let p1_strengthened_flat_alias = p1_flat_persistent
                         && !p2_flat_persistent
                         && lookup_type_decl_for_path(ctx, env, path1)
@@ -3960,6 +3968,33 @@ fn unify_types<'a>(
                     if p1_strengthened_flat_alias {
                         link_type(ctx, t1, t2);
                     } else if p2_strengthened_flat_alias {
+                        link_type(ctx, t2, t1);
+                    } else if p1_flat_persistent
+                        && !p2_flat_persistent
+                        && !p2_implicit_namespace_alias
+                    {
+                        // OCaml compiler/ml/typecore.ml:3771-3773 types an
+                        // argument against the constructor parameter and then
+                        // unifies the typed expression with the second parameter
+                        // instance. When compiler/ml/ctype.ml:2361-2364 enters
+                        // unify3 and ctype.ml:2393-2397 links expression-mode
+                        // representatives, a direct flattened persistent path
+                        // that shares env.ml:800-813 component identity with a
+                        // selected module-alias path is relinked to that visible
+                        // alias, e.g. `Transcript__EditedWord.t` to
+                        // `Transcript__Edit.EditedWord.t`.
+                        //
+                        // Keep implicit namespace opens out of this compensation:
+                        // compiler/core/res_compmisc.ml:58-62 opens Stdlib and
+                        // Pervasives implicitly, and compiler/ml/env.ml:1874-1877
+                        // adds their components without making selected namespace
+                        // paths like `Stdlib.Date.t` the representative.
+                        link_type(ctx, t1, t2);
+                    } else if p2_flat_persistent
+                        && !p1_flat_persistent
+                        && !p1_implicit_namespace_alias
+                    {
+                        // See the symmetric OCaml reference above.
                         link_type(ctx, t2, t1);
                     } else if p1_persistent != p2_persistent {
                         if p1_flat_persistent {
