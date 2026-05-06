@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::parse_arena::ParseArena;
 use crate::parser::longident::Longident;
@@ -560,7 +561,7 @@ pub fn serialize_pers_struct(
         entries: Vec::new(),
         cache: HashMap::new(),
     };
-    let mut sig = ps.ps_sig.clone();
+    let mut sig = ps.ps_sig.as_ref().clone();
     ser.remap_signature(&mut sig);
     let entries = ser.entries;
     let fingerprint = compute_type_graph_fingerprint(&entries, &sig);
@@ -891,16 +892,12 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> P
 
     PersStruct {
         ps_name: pps.ps_name.clone(),
-        ps_sig: sig,
+        ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
     }
 }
 
-fn internalize_desc(
-    desc: &PortableTypeDesc,
-    remap: &[TypeExprRef],
-    ctx: &TypeContext,
-) -> TypeDesc {
+fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
         PortableTypeDesc::Tarrow {

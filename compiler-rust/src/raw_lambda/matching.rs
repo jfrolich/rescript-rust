@@ -2755,11 +2755,7 @@ pub fn simplify_cases(
 
     let (ref arg, _) = args[0];
 
-    fn simplify(
-        ctx_ref: Option<&TypeContext>,
-        arg: &RawLambda,
-        cls: Vec<Clause>,
-    ) -> Vec<Clause> {
+    fn simplify(ctx_ref: Option<&TypeContext>, arg: &RawLambda, cls: Vec<Clause>) -> Vec<Clause> {
         let mut pending: VecDeque<Clause> = cls.into();
         let mut result = Vec::with_capacity(pending.len());
         while let Some((pats, action)) = pending.pop_front() {
@@ -6048,22 +6044,14 @@ fn make_test_sequence(
                     const_lambda_list,
                 )),
                 Box::new(make_test_seq_inner_owned(
-                    loc,
-                    fail,
-                    tst,
-                    lt_tst,
-                    arg,
-                    list2,
+                    loc, fail, tst, lt_tst, arg, list2,
                 )),
             )
         } else {
             match fail {
-                None => do_tests_nofail_owned(
-                    loc.clone(),
-                    tst.clone(),
-                    arg.clone(),
-                    const_lambda_list,
-                ),
+                None => {
+                    do_tests_nofail_owned(loc.clone(), tst.clone(), arg.clone(), const_lambda_list)
+                }
                 Some(fail) => do_tests_fail_owned(
                     loc.clone(),
                     fail,

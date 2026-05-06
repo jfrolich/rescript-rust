@@ -358,7 +358,7 @@ pub struct TypeContext {
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<ahash::AHashMap<String, super::decl::Signature>>,
+    raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
@@ -1749,7 +1749,7 @@ impl TypeContext {
 
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
-    pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {
+    pub fn register_raw_module_sig(&self, name: &str, sig: Arc<super::decl::Signature>) {
         self.raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -1760,7 +1760,11 @@ impl TypeContext {
     }
 
     pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<super::decl::Signature> {
-        self.raw_module_sigs.borrow().get(name).cloned()
+        self.raw_module_sigs
+            .borrow()
+            .get(name)
+            .cloned()
+            .map(|sig| (*sig).clone())
     }
 
     pub(crate) fn with_raw_module_sig<T>(
@@ -1769,7 +1773,7 @@ impl TypeContext {
         f: impl FnOnce(&super::decl::Signature) -> T,
     ) -> Option<T> {
         let raw = self.raw_module_sigs.borrow();
-        raw.get(name).map(f)
+        raw.get(name).map(|sig| f(sig.as_ref()))
     }
 
     /// Trigger module signature renaming for a persistent module.
@@ -1815,8 +1819,10 @@ impl TypeContext {
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
-            let renamed =
-                crate::cmi::persistent_env::freshened_signature_bound_idents_from(&sig, self);
+            let renamed = crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+                sig.as_ref(),
+                self,
+            );
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
@@ -1826,14 +1832,14 @@ impl TypeContext {
     fn load_lazy_raw_module_sig_for_rename(
         &self,
         module_name: &str,
-    ) -> Option<super::decl::Signature> {
+    ) -> Option<Arc<super::decl::Signature>> {
         if self.persistent_env_is_in_process() {
             let mut pers_env = self.persistent_env_clone().unwrap_or_else(|| {
                 panic!(
                     "in-process invariant violated: missing PersistentEnv while forcing raw signature for {module_name}"
                 )
             });
-            return Some(pers_env.read_raw_sig(module_name, self).unwrap_or_else(|| {
+            return Some(pers_env.read_raw_sig_shared(module_name, self).unwrap_or_else(|| {
                 panic!(
                     "in-process invariant violated: raw signature for {module_name} was not in the module registry"
                 )
@@ -1871,7 +1877,7 @@ impl TypeContext {
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
         crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, &module_path, self);
-        Some(sig)
+        Some(Arc::new(sig))
     }
 
     /// Create a new identifier using the typing context's shared stamp source.

@@ -2071,7 +2071,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Pervasives", sig.clone());
+                        ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
                     }
                     env.add_module(Ident::create_persistent("Pervasives"), md);
                 }
@@ -2085,7 +2085,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Stdlib", sig.clone());
+                        ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
                     }
                     env.add_module(Ident::create_persistent("Stdlib"), md);
                 }
@@ -3609,7 +3609,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         // (compiler/ml/env.ml:1960-1977). In-process builds do not write/read
         // the `.cmi`, so keep the just-saved current signature in the
         // TypeContext raw-signature cache before hiding the transient module.
-        let current_raw_sig = internal_env.read_raw_sig(module_name, &type_ctx).unwrap_or_else(|| {
+        let current_raw_sig = internal_env.read_raw_sig_shared(module_name, &type_ctx).unwrap_or_else(|| {
             panic!(
                 "in-process invariant violated: saved signature for {module_name} was not available"
             )

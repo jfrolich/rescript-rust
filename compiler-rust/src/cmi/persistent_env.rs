@@ -170,7 +170,7 @@ pub struct PersStruct {
     /// Module name
     pub ps_name: String,
     /// Loaded signature
-    pub ps_sig: Signature,
+    pub ps_sig: Arc<Signature>,
     /// Source filename
     pub ps_filename: String,
 }
@@ -918,6 +918,7 @@ impl PersistentEnv {
             &mut self.alias_prefix_rewrites,
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
+        let signature = Arc::new(signature);
         if should_register_lazy_raw_sig(name) {
             ctx.register_raw_module_sig(name, signature.clone());
         }
@@ -1351,7 +1352,11 @@ impl PersistentEnv {
     /// Pident paths that match the implementation's local paths.
     /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
     /// lazily in components_of_module_maker, not on ps_sig.
-    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+    pub fn read_raw_sig_shared<'a>(
+        &mut self,
+        name: &str,
+        ctx: &'a TypeContext,
+    ) -> Option<Arc<Signature>> {
         if self.in_process_mode {
             if let Some(cached) = self.cache_lookup(name) {
                 return cached.map(|loaded| loaded.ps_sig.clone());
@@ -1365,7 +1370,17 @@ impl PersistentEnv {
         let full_path = self.find_in_path_uncap(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
         let mut sig_ctx = SigReadContext::new(ctx);
-        Some(sig_ctx.read_signature(&cmi.cmi_sign))
+        Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
+    }
+
+    /// Read a module's signature from CMI without applying path substitution.
+    /// Used for interface constraint propagation (moregen) where we need raw
+    /// Pident paths that match the implementation's local paths.
+    /// In OCaml, ps_sig retains raw Pident paths; path substitution happens
+    /// lazily in components_of_module_maker, not on ps_sig.
+    pub fn read_raw_sig<'a>(&mut self, name: &str, ctx: &'a TypeContext) -> Option<Signature> {
+        self.read_raw_sig_shared(name, ctx)
+            .map(|sig| (*sig).clone())
     }
 
     /// Search the load path for a file (case-insensitive on first char).
@@ -1466,9 +1481,10 @@ impl PersistentEnv {
         let components = ctx
             .with_qualified_module_components(&components_key, |components| components.clone())
             .unwrap_or_else(|| {
-                let components = crate::types::env_lazy::QualifiedModuleComponents::new(
+                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc(
                     module_path.clone(),
                     ps.ps_sig.clone(),
+                    ahash::AHashMap::new(),
                     ctx,
                 );
                 ctx.register_qualified_module_components(components_key, components.clone());
@@ -1496,7 +1512,7 @@ impl PersistentEnv {
     ) -> Option<ModuleDeclaration> {
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ModuleDeclaration {
-            md_type: ModuleType::MtySignature(ps.ps_sig.clone()),
+            md_type: ModuleType::MtySignature(ps.ps_sig.as_ref().clone()),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -1596,7 +1612,7 @@ impl PersistentEnv {
 
         let ps = PersStruct {
             ps_name: namespace_name.to_string(),
-            ps_sig: sig_items,
+            ps_sig: Arc::new(sig_items),
             ps_filename: format!("{}.mlmap", namespace_name),
         };
         self.hidden_modules.remove(namespace_name);

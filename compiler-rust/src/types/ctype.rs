@@ -1179,7 +1179,7 @@ fn resolve_module_signature_through_persistent_env<'a>(
             let mut pers_env = ctx.persistent_env_clone()?;
             let ps = pers_env.find_pers_struct(id.name(), ctx)?;
             ctx.set_persistent_env(pers_env);
-            Some(ps.ps_sig.clone())
+            Some(ps.ps_sig.as_ref().clone())
         }
         Path::Pdot(parent, module_name, _) => {
             let parent_sig =

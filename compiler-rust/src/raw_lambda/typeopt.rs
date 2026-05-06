@@ -32,11 +32,7 @@ pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> b
         .any(|attr| attr.attr_name.txt == INTERNAL_OPTIONAL_ATTR_NAME)
 }
 
-pub(crate) fn type_cannot_contain_undefined(
-    ctx: &TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) -> bool {
+pub(crate) fn type_cannot_contain_undefined(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     let mut seen = HashSet::new();
     type_cannot_contain_undefined_rec(ctx, env, ty, &mut seen)
 }

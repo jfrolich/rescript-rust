@@ -18842,7 +18842,7 @@ impl Env {
                         && let Some(pers) = pers_env.as_mut()
                         && let Some(parent_ps) = pers.find_pers_struct(parent_id.name(), ctx)
                     {
-                        let parent_sig = parent_ps.ps_sig.clone();
+                        let parent_sig = parent_ps.ps_sig.as_ref().clone();
                         if let Some((raw_id, raw_md)) =
                             parent_sig.iter().find_map(|item| match item {
                                 SignatureItem::SigModule(id, md, _)
