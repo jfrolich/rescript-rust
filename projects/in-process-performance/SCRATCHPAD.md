@@ -4,8 +4,8 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `994691b89 Avoid copying variant rows during path forcing`
-- Tella `hyperfine`: about `2.918s +/- 0.070s` over 20 runs
+- Commit: `0fa452a4a Reuse shared components for lambda field positions`
+- Tella `hyperfine`: `3.048s +/- 0.051s` over 20 runs, after a same-session retained baseline sample of `3.056s +/- 0.014s` over 10 runs
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -61,6 +61,7 @@ Disabled-counter Tella `hyperfine` after adding scheduler counters: `2.959s +/- 
 - CSS files contain many polymorphic-variant spreads and row traversals. The retained row-field traversal change avoided cloning full variant-row maps while forcing qualified value type paths.
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
+- Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.
 
 ## Rejected Experiments
 
