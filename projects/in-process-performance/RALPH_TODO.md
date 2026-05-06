@@ -60,6 +60,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [ ] Find hash maps/sets keyed by dense IDs in typecheck, Lambda, JS, and serializers.
   - [ ] Replace hot per-file scratch maps with generation-marked dense vectors where the key range is known.
   - [ ] Reject candidates that pass parity but regress Tella `hyperfine`.
+  - [x] Skip row-field sort allocation for large strictly-sorted polymorphic-variant rows without changing duplicate-label behavior.
 
 - [ ] **7. Intern paths, identifiers, labels, and common short strings per package/worker.**
   Avoid repeated `String`, `Path`, label, and property-name allocation/cloning in typecheck, Lambda, and JS codegen. Prefer compact IDs and per-package/per-worker interners to avoid global lock contention.
@@ -90,7 +91,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 ## Active Non-Icon File Focus
 
 - [ ] Profile current Tella after excluding Icon analytically from the top-module list.
-- [ ] Inspect CSS polymorphic-variant-heavy files for avoidable broad row/signature forcing.
+- [x] Inspect CSS polymorphic-variant-heavy files for avoidable broad row/signature forcing.
 - [ ] Inspect Layout/JSX-heavy files for record/label/signature lookup amplification.
 - [ ] Inspect Lambda conversion and optimization costs in `Layout`, `Css_Legacy_Core`, and JSX-heavy modules.
 - [ ] Keep `Icon` visible in total build timing, but do not optimize only for Icon-shaped sparse JSX records.

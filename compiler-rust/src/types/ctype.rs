@@ -4737,6 +4737,10 @@ fn sort_row_fields<'a>(fields: &'a [(Label, RowField)]) -> Vec<RowFieldEntryRef<
     sorted
 }
 
+fn row_fields_are_strictly_sorted(fields: &[(Label, RowField)]) -> bool {
+    fields.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
+
 /// Merge two sorted row field lists, matching OCaml's `merge_rf`.
 /// Returns (r1, r2, pairs) where:
 /// - r1: fields only in fi1 (sorted)
@@ -4790,6 +4794,52 @@ fn merge_rf<'a, 'b>(
     (r1, r2, pairs)
 }
 
+fn merge_strictly_sorted_row_fields<'a, 'b>(
+    fi1: &'a [(Label, RowField)],
+    fi2: &'b [(Label, RowField)],
+) -> (
+    Vec<RowFieldEntryRef<'a>>,
+    Vec<RowFieldEntryRef<'b>>,
+    Vec<RowPairRef<'a, 'b>>,
+) {
+    let mut r1 = Vec::new();
+    let mut r2 = Vec::new();
+    let mut pairs = Vec::new();
+
+    let mut i1 = 0;
+    let mut i2 = 0;
+
+    while i1 < fi1.len() && i2 < fi2.len() {
+        let (l1, f1) = (&fi1[i1].0, &fi1[i1].1);
+        let (l2, f2) = (&fi2[i2].0, &fi2[i2].1);
+        if l1 == l2 {
+            pairs.push((l1.as_str(), f1, f2));
+            i1 += 1;
+            i2 += 1;
+        } else if l1 < l2 {
+            r1.push((l1, f1));
+            i1 += 1;
+        } else {
+            r2.push((l2, f2));
+            i2 += 1;
+        }
+    }
+    while i1 < fi1.len() {
+        let (label, field) = (&fi1[i1].0, &fi1[i1].1);
+        r1.push((label, field));
+        i1 += 1;
+    }
+    while i2 < fi2.len() {
+        let (label, field) = (&fi2[i2].0, &fi2[i2].1);
+        r2.push((label, field));
+        i2 += 1;
+    }
+
+    pairs.reverse();
+
+    (r1, r2, pairs)
+}
+
 /// Merge row fields matching OCaml's `merge_row_fields`.
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
@@ -4822,6 +4872,13 @@ fn merge_row_fields<'a, 'b>(
             fi2.iter().map(|(label, field)| (label, field)).collect(),
             Vec::new(),
         );
+    }
+    if fi1.len() >= 8
+        && fi2.len() >= 8
+        && row_fields_are_strictly_sorted(fi1)
+        && row_fields_are_strictly_sorted(fi2)
+    {
+        return merge_strictly_sorted_row_fields(fi1, fi2);
     }
     let sorted1 = sort_row_fields(fi1);
     let sorted2 = sort_row_fields(fi2);
