@@ -4867,6 +4867,10 @@ fn force_qualified_value_type_paths<'a>(
         root_name: &str,
         seen: &mut HashSet<TypeExprRef>,
     ) -> bool {
+        // Rust-only inspection used to decide whether a copied component scheme
+        // needs the same head-expansion side effect that OCaml reaches later via
+        // compiler/ml/typecore.ml:4171-4177 and compiler/ml/ctype.ml:2338-2344.
+        // This does not mutate the type graph.
         let ty = ctx.repr(ty);
         if !seen.insert(ty) {
             return false;
@@ -4934,16 +4938,6 @@ fn force_qualified_value_type_paths<'a>(
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
         }
-    }
-
-    fn type_decl_manifest_mentions_path_root(
-        ctx: &TypeContext<'_>,
-        decl: &crate::types::decl::TypeDeclaration,
-        root_name: &str,
-    ) -> bool {
-        decl.type_manifest.is_some_and(|manifest| {
-            type_expr_mentions_path_root(ctx, manifest, root_name, &mut HashSet::new())
-        })
     }
 
     fn selected_value_module_alias_target<'a>(
@@ -5329,11 +5323,6 @@ fn force_qualified_value_type_paths<'a>(
                     // the local component path, so do not force the underlying
                     // persistent path again for alias-rooted values like
                     // `J.classify`.
-                    let type_parent_is_selected_value_module = selected_module_path
-                        .is_some_and(|selected| parent.same(selected))
-                        || selected_alias_targets
-                            .iter()
-                            .any(|target| parent.same(target));
                     let nested_inside_selected_module = selected_module_path
                         .and_then(|selected| path_descendant_depth(parent, selected))
                         .is_some_and(|depth| depth > 1);
@@ -5341,6 +5330,16 @@ fn force_qualified_value_type_paths<'a>(
                         selected_module_path.is_some_and(|selected| {
                             path_root_ident(selected)
                                 .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+                        });
+                    let type_parent_is_selected_value_module = selected_module_path
+                        .is_some_and(|selected| parent.same(selected))
+                        || selected_alias_targets
+                            .iter()
+                            .any(|target| parent.same(target));
+                    let type_parent_root_is_implicit_stdlib =
+                        path_root_ident(parent).is_some_and(|root| {
+                            root.is_persistent()
+                                && (root.name() == "Stdlib" || root.name() == "Pervasives")
                         });
                     let resolved = if nested_inside_selected_module
                         && !selected_module_is_implicit_stdlib_path
@@ -5362,37 +5361,37 @@ fn force_qualified_value_type_paths<'a>(
                             ctx,
                         )
                     };
-                    // This extra manifest expansion is only for result-side
-                    // aliases: the OCaml path above observes them after the
-                    // selected value returns. Argument-side aliases such as
-                    // React.forwardRef's callback ref still perform the type
-                    // lookup above, but stay otherwise lazy until
-                    // typecore.ml:4171-4177 types the actual argument.
+                    // OCaml compiler/ml/typecore.ml:2421-2457 instances a
+                    // qualified value scheme immediately, while
+                    // compiler/ml/typecore.ml:4171-4177 delays argument typing
+                    // until the source argument boundary. Rust's in-process
+                    // signatures can still expose non-Stdlib flattened component
+                    // paths such as `Js_null_undefined.t`; when env.ml:800-813
+                    // resolves that type component, consume the same
+                    // compiler/ml/ctype.ml:2338-2344 head expansion OCaml later
+                    // observes before callback binders are named. Keep implicit
+                    // `Stdlib`/`Pervasives` paths lazy: compiler/core/res_compmisc.ml:58-62
+                    // opens those as components, and env.ml:1874-1877 reads them
+                    // without selecting a persistent root module here.
                     if !allow_stdlib_flat_parent_inference
                         && !type_parent_is_selected_value_module
-                        && let Some((_, _, decl)) = resolved
-                        && type_decl_manifest_mentions_path_root(ctx, &decl, "Primitive_js_extern")
+                        && !type_parent_root_is_implicit_stdlib
+                        && let Some((_, _, decl)) = &resolved
+                        && decl.type_manifest.is_some_and(|manifest| {
+                            type_expr_mentions_path_root(
+                                ctx,
+                                manifest,
+                                "Primitive_js_extern",
+                                &mut HashSet::new(),
+                            )
+                        })
                     {
-                        // OCaml compiler/ml/typecore.ml:2421-2457 instances
-                        // a qualified value's `desc.val_type`; for actual
-                        // applications, typecore.ml:4171-4177 reaches
-                        // `type_argument`, whose typecore.ml:3771-3774
-                        // `unify_exp` calls compiler/ml/ctype.ml:2338-2344
-                        // `expand_head_unif`. That expansion follows
-                        // ctype.ml:1346-1372 to env.ml:903-914
-                        // `normalize_path`, forcing the persistent
-                        // `Primitive_js_extern` signature before later binders
-                        // are named. Rust's value-type path visitor already
-                        // mirrors the selected component lookup here, so
-                        // consume the same manifest head-expansion side effect
-                        // when a different selected declaration exposes the
-                        // primitive JS family.
                         crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
                     }
                 }
                 // Keep `allow_stdlib_flat_parent_inference` available inside
-                // callback arrows for the lazy manifest-touch behavior above,
-                // but require the separate gate before applying Rust's
+                // callback arrows for the lazy selected-value path behavior
+                // above, but require the separate gate before applying Rust's
                 // non-Stdlib implicit `Stdlib_*` rewrite. OCaml
                 // compiler/ml/typecore.ml:4171-4192 only calls
                 // `type_argument` at the source argument boundary; callback
@@ -8617,7 +8616,6 @@ fn type_application(
                 } else {
                     arg_ty0
                 };
-
                 pending_args.push(PendingApplyArg::Provided {
                     label: apply_arg_label_for_param(&fn_label, call_label, tctx.arena),
                     expr: arg_expr,

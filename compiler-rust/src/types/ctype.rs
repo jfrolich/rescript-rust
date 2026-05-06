@@ -2833,13 +2833,6 @@ pub(crate) fn touch_constraint_match_head_expansion(
     let ty_for_match = copy_type_deep(ctx, ty, &mut cache);
     let ty_prime_args = (0..arg_count).map(|_| ctx.new_var(None)).collect();
     let ty_prime = ctx.new_constr(path.clone(), ty_prime_args);
-    // OCaml compiler/ml/typedecl.ml:773-781 reaches
-    // compiler/ml/ctype.ml:2338-2344 `expand_head_unif` through
-    // `Ctype.matches`. The caller has already followed the declaration
-    // manifest the same way compiler/ml/ctype.ml:1346-1372 does, so aliases
-    // in the primitive JS family force `Primitive_js_extern` before later
-    // declarations are named.
-    ctx.trigger_module_sig_rename("Primitive_js_extern");
     let _ = expand_head_unif(ctx, env, ty_for_match);
     let _ = expand_head_unif(ctx, env, ty_prime);
 }
@@ -7979,13 +7972,10 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                     arity: *arity,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                TypeDesc::Tconstr { path, args, .. } => {
-                    let path_name = path.name();
-                    CopyAction::Constr {
-                        path: path.clone(),
-                        args: args.clone(),
-                    }
-                }
+                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
+                    path: path.clone(),
+                    args: args.clone(),
+                },
                 TypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
                     name: name.clone(),
@@ -8106,10 +8096,17 @@ fn copy_type_cached(ctx: &TypeContext<'_>, ty: TypeExprRef, cache: &mut CopyCach
                         // copying, so a memo whose source now reprs to a
                         // different constructor path is a stale Rust relink,
                         // not a valid `find_repr` result.
+                        // OCaml compiler/ml/ctype.ml:1052-1060 calls
+                        // `cleanup_types` after each `instance`, so a non-generic
+                        // abbreviation copy from a previous instance is likewise
+                        // outside the current `Tsubst` window.
                         let stale_local_hit = is_local_nonpersistent && found_cached.is_none();
+                        let stale_previous_copy_hit = found_cached.is_none()
+                            && ctx.get_level(ctx.repr(found_ty)) != GENERIC_LEVEL;
                         let found_repr = found_cached.unwrap_or(found_ty);
                         if !stale_local_hit
                             && !stale_relinked_alias_hit
+                            && !stale_previous_copy_hit
                             && found_repr != placeholder
                         {
                             cache.nodes.insert(ty, found_repr);
