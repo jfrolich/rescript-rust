@@ -430,6 +430,9 @@ fn get_primitive_arity_from_type(
     env: &Env,
     ty: TypeExprRef,
 ) -> Option<i32> {
+    // OCaml compiler/ml/ctype.ml:4515-4518 implements get_arity as
+    // expand_head followed by a Tarrow check. Keep expansion scoped to this
+    // helper so primitive typing does not force unrelated aliases eagerly.
     get_primitive_arity_from_type_depth(ctx, env, ty, 0)
 }
 
@@ -3355,6 +3358,126 @@ fn type_path_decl_mentions_path_root(
     })
 }
 
+fn type_expr_manifest_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    root_name: &str,
+    visited: &mut HashSet<TypeExprRef>,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    if depth > 12 {
+        return false;
+    }
+
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return false;
+    }
+
+    let path = {
+        let desc = ctx.get_desc(ty);
+        if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*desc {
+            Some(path.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(path) = path {
+        if path_root_is_named(&path, root_name) {
+            return true;
+        }
+        if type_path_decl_manifest_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            &path,
+            root_name,
+            visited_paths,
+            depth + 1,
+        ) {
+            return true;
+        }
+    }
+
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    children.into_iter().any(|child| {
+        type_expr_manifest_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            child,
+            root_name,
+            visited,
+            visited_paths,
+            depth,
+        )
+    })
+}
+
+fn type_path_decl_manifest_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+    root_name: &str,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    if depth > 12 || !visited_paths.insert(path.clone()) {
+        return false;
+    }
+
+    let decl = match path {
+        Path::Pdot(parent, type_name, _) => crate::types::typecore::lookup_type_in_resolved_path(
+            parent, type_name, env, pers_env, ctx,
+        )
+        .map(|(_, _, decl)| decl),
+        Path::Pident(_) => env.lookup_type(path).ok().cloned(),
+        Path::Papply(_, _) => None,
+    };
+
+    decl.is_some_and(|decl| {
+        type_decl_manifest_mentions_path_root(
+            ctx,
+            env,
+            pers_env,
+            &decl,
+            root_name,
+            visited_paths,
+            depth + 1,
+        )
+    })
+}
+
+fn type_decl_manifest_mentions_path_root(
+    ctx: &crate::types::context::TypeContext<'_>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    decl: &crate::types::decl::TypeDeclaration,
+    root_name: &str,
+    visited_paths: &mut HashSet<Path>,
+    depth: usize,
+) -> bool {
+    let Some(manifest) = decl.type_manifest else {
+        return false;
+    };
+    let mut visited = HashSet::default();
+    type_expr_manifest_mentions_path_root(
+        ctx,
+        env,
+        pers_env,
+        manifest,
+        root_name,
+        &mut visited,
+        visited_paths,
+        depth,
+    )
+}
+
 fn constraint_path_needs_primitive_js_match_force(
     ctx: &crate::types::context::TypeContext<'_>,
     env: &Env,
@@ -3377,7 +3500,13 @@ fn constraint_path_needs_primitive_js_match_force(
             parent, type_name, env, pers_env, ctx,
         )
         .is_some_and(|(_, _, decl)| {
-            type_decl_mentions_path_root(
+            // OCaml compiler/ml/typedecl.ml:773-781 checks constraints for the
+            // current `Tconstr`, then recurses only into that constructor's type
+            // arguments. It does not inspect record fields inside an imported
+            // declaration while looking for alias-manifest side effects. Limit
+            // this Rust compensation to manifests so fields such as
+            // `Webapi__WebSocket.messageEvent.data: Js.Json.t` stay lazy.
+            type_decl_manifest_mentions_path_root(
                 ctx,
                 env,
                 pers_env,
@@ -11469,13 +11598,10 @@ fn type_structure_item<'a>(
             ctx.end_def();
             crate::types::ctype::generalize(ctx, val_ty);
 
-            // OCaml's transl_value_decl calls parse_arity -> get_arity ->
-            // expand_head AFTER generalize. The expand_head side effect
-            // populates simple_abbrevs with the nullary Tconstr expansion.
-            // When instance() is later called for Pexp_ident, copy() finds
-            // this entry via find_simple_abbrev and returns Tlink to the
-            // original instead of a fresh copy — creating node sharing.
-            crate::types::ctype::expand_head(ctx, env, val_ty);
+            // OCaml compiler/ml/typedecl.ml:1889-1908 calls parse_arity and
+            // Primitive.parse_declaration before Env.enter_value allocates the
+            // external id. parse_arity itself delegates to Ctype.get_arity at
+            // typedecl.ml:1863-1872; do not expand the whole value type here.
             let prim_desc = primitive_description_from_value_decl(
                 arena,
                 ctx,
