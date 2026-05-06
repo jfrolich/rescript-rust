@@ -4160,6 +4160,7 @@ fn type_pattern_record(
             &mut tctx.persistent_env,
             ctx,
             Some(record_ty),
+            None,
         )
         .or_else(|| {
             disambiguate_label(
@@ -12585,6 +12586,14 @@ fn record_labels_match_ids(
     field_names: &[String],
     closed_record: bool,
 ) -> bool {
+    record_labels_have_field_ids(labels, field_names)
+        && (!closed_record || record_labels_satisfy_closed(labels, field_names))
+}
+
+fn record_labels_have_field_ids(
+    labels: &[crate::types::decl::LabelDeclaration],
+    field_names: &[String],
+) -> bool {
     let label_names: HashSet<&str> = labels.iter().map(|ld| ld.ld_id.name()).collect();
     if !field_names
         .iter()
@@ -12593,10 +12602,13 @@ fn record_labels_match_ids(
         return false;
     }
 
-    if !closed_record {
-        return true;
-    }
+    true
+}
 
+fn record_labels_satisfy_closed(
+    labels: &[crate::types::decl::LabelDeclaration],
+    field_names: &[String],
+) -> bool {
     let mandatory_count = labels.iter().filter(|ld| !ld.ld_optional).count();
     let has_optional = labels.iter().any(|ld| ld.ld_optional);
     if has_optional {
@@ -12784,28 +12796,22 @@ fn type_record(
         None
     };
 
+    let mut record_ty = expected_ty;
+    // OCaml compiler/ml/typecore.ml:2745-2752 and 2869-2891 keep
+    // `opath` separate from the `ty_record` used to type the fields. In
+    // particular, a record type selected later from the field set
+    // (typecore.ml:1098-1126) is not passed as `opath` to
+    // `Label.disambiguate`; otherwise typecore.ml:983-988 would force
+    // `compare_type_path` too early for qualified labels.
+    let mut record_opath_ty =
+        extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx)
+            .map(|_| expected_ty);
     // Match OCaml Pexp_record(Some exp):
     // when expected type does not reveal a concrete record path, but the base
     // expression does, use a fresh constructor instance from the base path as
     // the record typing anchor (`ty_record`) instead of reusing base.exp_type.
-    let mut record_ty = expected_ty;
     if let Some(base_expr) = typed_base.as_ref() {
-        let expected_record_path = extract_type_path_from_expected_with_persistent_env(
-            expected_ty,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-        )
-        .and_then(|path| {
-            lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx).and_then(|decl| {
-                match decl.type_kind {
-                    crate::types::TypeKind::TypeRecord(_, _) => Some(path),
-                    _ => None,
-                }
-            })
-        });
-
-        if expected_record_path.is_none() {
+        if record_opath_ty.is_none() {
             let base_record_path = extract_type_path_from_expected_with_persistent_env(
                 base_expr.exp_type,
                 env,
@@ -12830,6 +12836,7 @@ fn type_record(
                 ctx.end_def();
                 crate::types::generalize_structure(ctx, ctx.current_level(), ty);
                 record_ty = ty;
+                record_opath_ty = Some(record_ty);
             } else {
                 record_ty = ctx.new_var(None);
             }
@@ -12925,7 +12932,8 @@ fn type_record(
             env,
             &mut tctx.persistent_env,
             ctx,
-            Some(disambiguation_ty),
+            record_opath_ty,
+            Some((&field_names, closed_record)),
         )
         .or_else(|| {
             disambiguation_labels_by_name
@@ -13885,6 +13893,7 @@ fn type_field(
         &mut tctx.persistent_env,
         tctx.type_ctx,
         Some(ty_exp),
+        None,
     )
     .or_else(|| {
         disambiguate_label(
@@ -14014,6 +14023,7 @@ fn type_setfield(
         &mut tctx.persistent_env,
         ctx,
         Some(ty_exp),
+        None,
     )
     .or_else(|| {
         disambiguate_label(
@@ -20083,6 +20093,7 @@ fn lookup_label_by_lid<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
     expected_record_ty: Option<TypeExprRef>,
+    record_field_names: Option<(&[String], bool)>,
 ) -> Option<crate::types::LabelDescription> {
     let Longident::Ldot(module_lid, label_idx) = lid else {
         return None;
@@ -20095,7 +20106,7 @@ fn lookup_label_by_lid<'a>(
     // module component `comp_labels` table. Do the same instead of resolving and
     // copying the full module signature, which would force unrelated
     // compiler/ml/subst.ml:378-400 binder freshening before OCaml does.
-    let candidates = with_resolved_module_components_for_lid(
+    let mut candidates = with_resolved_module_components_for_lid(
         module_lid,
         arena,
         env,
@@ -20139,6 +20150,47 @@ fn lookup_label_by_lid<'a>(
                         qualify_label_description_paths(&mut selected, env, pers_env, ctx);
                         return Some(selected);
                     }
+                }
+            }
+        }
+    }
+
+    if expected_record_ty.is_none() {
+        if let Some((field_names, closed_record)) = record_field_names {
+            // OCaml compiler/ml/typecore.ml:1098-1126 passes qualified label
+            // scope through `disambiguate_label_by_ids` before
+            // `Label.disambiguate` when `opath = None`. That helper first keeps
+            // labels whose `lbl_all` contains every source field
+            // (typecore.ml:1071-1077), then applies the closed-record check
+            // (typecore.ml:1078-1095). Do the same narrowing without calling
+            // typecore.ml:983-988 `disambiguate_by_type`, so qualified labels do
+            // not force `compare_type_path` earlier than the reference compiler.
+            let matching_ids: Vec<_> = candidates
+                .iter()
+                .filter(|label| {
+                    get_record_labels(ctx, env, pers_env, label.lbl_res)
+                        .is_some_and(|labels| record_labels_have_field_ids(&labels, field_names))
+                })
+                .cloned()
+                .collect();
+            if !matching_ids.is_empty() {
+                if closed_record {
+                    let matching_closed: Vec<_> = matching_ids
+                        .iter()
+                        .filter(|label| {
+                            get_record_labels(ctx, env, pers_env, label.lbl_res).is_some_and(
+                                |labels| record_labels_satisfy_closed(&labels, field_names),
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    candidates = if matching_closed.is_empty() {
+                        matching_ids
+                    } else {
+                        matching_closed
+                    };
+                } else {
+                    candidates = matching_ids;
                 }
             }
         }
