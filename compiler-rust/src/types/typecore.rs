@@ -3842,10 +3842,32 @@ fn type_pattern_construct(
     let lid_txt = tctx.arena.get_longident(lid.txt);
     let lid_name = tctx.longident_last_name(lid_txt);
     let is_qualified = matches!(lid_txt, Longident::Ldot(..));
+    let qualified_opath = if is_qualified {
+        // OCaml compiler/ml/typecore.ml:1456-1478 computes `opath`, gets
+        // candidates through `Typetexp.find_all_constructors`, then still
+        // calls `Constructor.disambiguate`. Its by-type path reaches
+        // compare_type_path at typecore.ml:983-988 and expand_path at
+        // typecore.ml:775-787, preserving Env.normalize_path side effects.
+        extract_variant_type_path_from_expected_with_persistent_env(
+            expected_ty,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+    } else {
+        None
+    };
     let (cstr_desc, _cstr_path) = if is_qualified {
         if let Some((path, desc)) =
             lookup_predef_option_constructor(lid_txt, tctx.arena, env, tctx.type_ctx)
         {
+            force_constructor_disambiguate_by_type_compare(
+                qualified_opath.as_ref(),
+                &desc,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            );
             (desc, path)
         } else {
             // Module-qualified: use direct lookup
@@ -3857,7 +3879,16 @@ fn type_pattern_construct(
                 tctx.type_ctx,
                 Some(expected_ty),
             ) {
-                Some((path, desc)) => (desc, path),
+                Some((path, desc)) => {
+                    force_constructor_disambiguate_by_type_compare(
+                        qualified_opath.as_ref(),
+                        &desc,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    );
+                    (desc, path)
+                }
                 None => match env.find_constructor(&lid_name) {
                     Ok(desc) => (
                         desc.clone(),
