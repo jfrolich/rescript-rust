@@ -7981,7 +7981,6 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => {
-                    let path_name = path.name();
                     CopyAction::Constr {
                         path: path.clone(),
                         args: args.clone(),
