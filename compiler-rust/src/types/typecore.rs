@@ -823,7 +823,12 @@ impl<'a> TypeCheckContext<'a> {
     /// Get the last component name of a Longident as a string.
     /// For `Lident("int")` returns `"int"`, for `Ldot(_, "bar")` returns `"bar"`.
     pub fn longident_last_name(&self, lid: &Longident) -> String {
-        self.arena.get_string(lid.last_idx()).to_string()
+        self.longident_last_name_str(lid).to_string()
+    }
+
+    /// Borrow the last component name of a Longident from the parse arena.
+    pub fn longident_last_name_str(&self, lid: &Longident) -> &str {
+        self.arena.get_string(lid.last_idx())
     }
 
     /// Get the full dotted name of a Longident as a string.
@@ -12589,22 +12594,19 @@ fn type_variant(
 
 fn record_labels_match_ids(
     labels: &[crate::types::decl::LabelDeclaration],
-    field_names: &[String],
+    field_names: &[&str],
     closed_record: bool,
 ) -> bool {
     if field_names.len() <= 8 {
         if !field_names
             .iter()
-            .all(|name| labels.iter().any(|ld| ld.ld_id.name() == name.as_str()))
+            .all(|name| labels.iter().any(|ld| ld.ld_id.name() == *name))
         {
             return false;
         }
     } else {
         let label_names: HashSet<&str> = labels.iter().map(|ld| ld.ld_id.name()).collect();
-        if !field_names
-            .iter()
-            .all(|name| label_names.contains(name.as_str()))
-        {
+        if !field_names.iter().all(|name| label_names.contains(*name)) {
             return false;
         }
     }
@@ -12638,10 +12640,10 @@ impl RecordLabelDescriptionsInfo {
     }
 
     #[inline]
-    fn matches_field_names(&self, field_names: &[String], closed_record: bool) -> bool {
+    fn matches_field_names(&self, field_names: &[&str], closed_record: bool) -> bool {
         if !field_names
             .iter()
-            .all(|name| self.summary.contains_label(name.as_str()))
+            .all(|name| self.summary.contains_label(name))
         {
             return false;
         }
@@ -12672,7 +12674,7 @@ fn select_record_type_for_fields<'a>(
     ctx: &'a TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    field_names: &[String],
+    field_names: &[&str],
     expected_ty: TypeExprRef,
     base_ty: Option<TypeExprRef>,
     closed_record: bool,
@@ -12689,7 +12691,7 @@ fn select_record_type_for_fields<'a>(
         }
     }
 
-    let first_name = field_names.first()?;
+    let first_name = *field_names.first()?;
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     let candidates = env.find_all_labels(first_name);
     for label in candidates.into_iter().rev() {
@@ -12718,7 +12720,7 @@ fn select_record_type_from_qualified_fields<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     fields: &[crate::parser::ast::ExpressionRecordField],
-    field_names: &[String],
+    field_names: &[&str],
     closed_record: bool,
 ) -> Option<TypeExprRef> {
     use crate::types::decl::SignatureItem;
@@ -12896,9 +12898,13 @@ fn type_record(
 
     let fields = qualify_unqualified_record_fields(tctx, fields);
 
-    let field_names: Vec<String> = fields
+    let arena = tctx.arena;
+    let field_names: Vec<&str> = fields
         .iter()
-        .map(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)))
+        .map(|field| {
+            let lid = arena.get_longident(field.lid.txt);
+            arena.get_string(lid.last_idx())
+        })
         .collect();
     let closed_record = typed_base.is_none();
     let disambiguation_ty = select_record_type_for_fields(
@@ -12955,8 +12961,7 @@ fn type_record(
     struct ExplicitField<'a> {
         original_index: usize,
         field: &'a crate::parser::ast::ExpressionRecordField,
-        resolved_lid: crate::parser::longident::Longident,
-        field_name: String,
+        field_name: &'a str,
         disambiguated: Option<crate::types::LabelDescription>,
     }
 
@@ -12965,10 +12970,10 @@ fn type_record(
     // 2) sort by lbl_pos before typing each field
     let mut explicit_fields: Vec<ExplicitField<'_>> = Vec::with_capacity(fields.len());
     for (idx, field) in fields.iter().enumerate() {
-        let resolved_lid = tctx.resolve_lid(field.lid.txt).clone();
-        let field_name = tctx.longident_last_name(&resolved_lid);
+        let resolved_lid = arena.get_longident(field.lid.txt);
+        let field_name = arena.get_string(resolved_lid.last_idx());
         let disambiguated = lookup_label_by_lid(
-            &resolved_lid,
+            resolved_lid,
             tctx.arena,
             env,
             &mut tctx.persistent_env,
@@ -13003,7 +13008,6 @@ fn type_record(
         explicit_fields.push(ExplicitField {
             original_index: idx,
             field,
-            resolved_lid,
             field_name,
             disambiguated,
         });
@@ -13020,8 +13024,7 @@ fn type_record(
     for (sorted_idx, explicit_field) in explicit_fields.iter().enumerate() {
         let idx = explicit_field.original_index;
         let field = explicit_field.field;
-        let resolved_lid = explicit_field.resolved_lid.clone();
-        let field_name = explicit_field.field_name.clone();
+        let field_name = explicit_field.field_name;
         let disambiguated = explicit_field.disambiguated.clone();
         let prefer_expected_closed_record_label = typed_base.is_none();
         if first_disambiguated_label.is_none() {
@@ -13159,7 +13162,7 @@ fn type_record(
 
                     (
                         crate::types::LabelDescription {
-                            lbl_name: field_name,
+                            lbl_name: field_name.to_string(),
                             lbl_res: record_ty,
                             lbl_arg,
                             lbl_mut: crate::types::MutableFlag::Immutable,
@@ -13234,9 +13237,10 @@ fn type_record(
         explicit_overrides_in_order.push(entry_idx);
     }
 
-    let has_dotdotdot_field = fields
-        .iter()
-        .any(|field| tctx.longident_last_name(tctx.resolve_lid(field.lid.txt)) == "...");
+    let has_dotdotdot_field = fields.iter().any(|field| {
+        let lid = arena.get_longident(field.lid.txt);
+        arena.get_string(lid.last_idx()) == "..."
+    });
 
     let mut all_label_descriptions_info = if has_dotdotdot_field {
         None
