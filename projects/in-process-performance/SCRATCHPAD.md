@@ -4,8 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `0fa452a4a Reuse shared components for lambda field positions`
+- Commit: `140fca525 Add registry snapshot counters`
 - Tella `hyperfine`: `3.048s +/- 0.051s` over 20 runs, after a same-session retained baseline sample of `3.056s +/- 0.014s` over 10 runs
+- Later retained recheck: phase-timed clean build completed in `2896ms`; a noisy `hyperfine` recheck reported `3.118s +/- 0.074s` over 10 runs with a best run of `3.052s`
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -83,3 +84,4 @@ Conclusion: Tella clean builds are already using shared registry chunks for snap
 - Adaptive full per-kind signature indexes reduced value/type/module scanned items by roughly 16-18%, but disabled-counter Tella `hyperfine` regressed to `3.009s +/- 0.067s` over 20 runs, so it was reverted.
 - Converting current `lookup_module_in_resolved_path` callers to shared `Arc<ModuleDeclaration>` avoided owned declaration clones but regressed Tella `hyperfine` to `3.380s +/- 0.077s` over 20 runs. The extra shared-pointer path did not remove enough downstream work, so it was reverted.
 - Capping JS finishing to `capacity / 4` workers while typecheck work was ready reduced aggressive JS scheduling but increased idle-slot wait in the counter run (`444.377ms` vs the retained `202.217ms`) and regressed Tella `hyperfine` to `3.078s +/- 0.044s` over 20 runs, compared with an immediately measured retained baseline of `3.056s +/- 0.014s` over 10 runs. The scheduler needs a smarter policy than a fixed JS cap.
+- Storing cached qualified module-component views behind one outer `Arc` reduced the number of handle clones on cache hits, but Tella `hyperfine` did not improve (`3.314s +/- 0.856s` over 20 runs, best `3.090s`, with one large outlier). It was reverted because it only reduced cache-hit bookkeeping, not the underlying semantic work.
