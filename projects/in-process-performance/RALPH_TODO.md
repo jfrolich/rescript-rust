@@ -1,14 +1,14 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-06
-**Status:** Tella clean in-process builds are around 2.9s on the current branch after the latest retained row-field traversal optimization. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** Tella clean in-process builds are around 2.9s on the current branch after the latest retained row-field traversal optimization. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
 
 ## Goal
 
-Make clean in-process builds fast enough for large real projects, with Tella as the active benchmark target. The near-term target is a clean parallel in-process Tella build below 1s while preserving:
+Make clean in-process builds fast enough for large real projects, with Tella as the active benchmark target. The hard target is a clean parallel in-process compile of the Tella repo below 1s while preserving:
 
 - `bsc` subprocess path support
-- 100% JavaScript output parity on the 660-file test corpus
+- 100% codegen parity, measured as JavaScript output parity on the 660-file test corpus
 - 100% canonical typedtree parity on the test corpus
 - successful Tella compilation with the configured runtime and project output extension
 
@@ -59,4 +59,3 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [ ] Inspect Layout/JSX-heavy files for record/label/signature lookup amplification.
 - [ ] Inspect Lambda conversion and optimization costs in `Layout`, `Css_Legacy_Core`, and JSX-heavy modules.
 - [ ] Keep `Icon` visible in total build timing, but do not optimize only for Icon-shaped sparse JSX records.
-

@@ -6,6 +6,7 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 - Commit: `994691b89 Avoid copying variant rows during path forcing`
 - Tella `hyperfine`: about `2.918s +/- 0.070s` over 20 runs
+- Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
 
@@ -31,4 +32,3 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 - Naively prioritizing ready JS work behind all typecheck work regressed Tella badly in one trial. Scheduler changes need a more careful cap or mixed policy and must be kept only with `hyperfine` evidence.
 - Replacing one small `Vec<TypeExprRef>` visited list with `TypeExprRefSet` in a path-root search passed parity but regressed Tella `hyperfine`, so it was reverted.
-

@@ -8,9 +8,9 @@ The subprocess `bsc` path must remain supported. Optimizations here should impro
 
 ## Success Criteria
 
-- Clean Tella in-process build below 1s on the local benchmark machine.
+- Clean in-process compile of the Tella repo below 1s on the local benchmark machine.
 - Tella compiles completely with `RESCRIPT_RUNTIME` pointing at the local runtime sources.
-- JavaScript output parity remains 100% on the test corpus.
+- Codegen parity remains 100%, measured as JavaScript output parity on the test corpus.
 - Canonical typedtree parity remains 100% on the test corpus.
 - Benchmarks use `hyperfine` and include before/after numbers before retaining performance changes.
 - Meaningful improvements are committed atomically.
@@ -42,4 +42,3 @@ RESCRIPT_BSC_EXE=/Users/jake/dev/workspaces/rescript-rust/in-process-new/compile
 ```
 
 Use `rescript clean` as the `hyperfine --prepare` step for clean-build measurements.
-
