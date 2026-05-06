@@ -1105,9 +1105,8 @@ pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
             Some(Arc::new(sig))
         }
         Path::Pdot(parent, module_name, _) => {
-            let parent_sig = resolve_module_signature_through_cmi_shared(
-                ctx, load_paths, parent, visiting,
-            )?;
+            let parent_sig =
+                resolve_module_signature_through_cmi_shared(ctx, load_paths, parent, visiting)?;
             let mut resolved = None;
             for item in parent_sig.iter() {
                 if let SignatureItem::SigModule(id, md, _) = item {
@@ -7991,12 +7990,10 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
                     arity: *arity,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                TypeDesc::Tconstr { path, args, .. } => {
-                    CopyAction::Constr {
-                        path: path.clone(),
-                        args: args.clone(),
-                    }
-                }
+                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
+                    path: path.clone(),
+                    args: args.clone(),
+                },
                 TypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
                     name: name.clone(),

@@ -13405,30 +13405,29 @@ fn type_record(
 
     if let Some(all_label_descriptions) = all_label_descriptions.clone() {
         if use_sparse_large_record {
-            let labels_missing =
-                if all_label_descriptions_summary
-                    .as_ref()
-                    .is_some_and(|summary| summary.mandatory_count == 0)
+            let labels_missing = if all_label_descriptions_summary
+                .as_ref()
+                .is_some_and(|summary| summary.mandatory_count == 0)
+            {
+                Vec::new()
+            } else {
+                let explicit_overrides_by_name =
+                    build_explicit_overrides_by_name(&explicit_entries);
+                let mut labels_missing = Vec::new();
+                for raw_label_desc in all_label_descriptions
+                    .iter()
+                    .filter(|label| !label.lbl_optional)
                 {
-                    Vec::new()
-                } else {
-                    let explicit_overrides_by_name =
-                        build_explicit_overrides_by_name(&explicit_entries);
-                    let mut labels_missing = Vec::new();
-                    for raw_label_desc in all_label_descriptions
-                        .iter()
-                        .filter(|label| !label.lbl_optional)
+                    let key_pos = raw_label_desc.lbl_pos;
+                    if explicit_overrides.contains_key(&key_pos)
+                        || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
                     {
-                        let key_pos = raw_label_desc.lbl_pos;
-                        if explicit_overrides.contains_key(&key_pos)
-                            || explicit_overrides_by_name.contains_key(&raw_label_desc.lbl_name)
-                        {
-                            continue;
-                        }
-                        labels_missing.push(raw_label_desc.lbl_name.clone());
+                        continue;
                     }
-                    labels_missing
-                };
+                    labels_missing.push(raw_label_desc.lbl_name.clone());
+                }
+                labels_missing
+            };
 
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
@@ -18312,12 +18311,13 @@ impl Env {
                         return Some(cached);
                     }
                     if apply_subst {
-                        let (resolved_path, resolved_sig) = resolve_module_signature_for_path_shared(
-                            &access_path_hint,
-                            self,
-                            pers_env,
-                            ctx,
-                        )?;
+                        let (resolved_path, resolved_sig) =
+                            resolve_module_signature_for_path_shared(
+                                &access_path_hint,
+                                self,
+                                pers_env,
+                                ctx,
+                            )?;
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
                             resolved_path.clone(),
@@ -18334,7 +18334,10 @@ impl Env {
                         if let Some(access_path) = md.md_path.as_ref() {
                             if let Some((resolved_path, sig)) =
                                 resolve_module_signature_for_path_shared(
-                                    access_path, self, pers_env, ctx,
+                                    access_path,
+                                    self,
+                                    pers_env,
+                                    ctx,
                                 )
                             {
                                 return Some((resolved_path, sig));
@@ -18809,14 +18812,15 @@ impl Env {
                     }
                 }
                 Path::Pdot(parent, modtype_name, _) => {
-                    let (_, parent_sig) =
-                        match resolve_module_signature_for_path_shared(parent, env, pers_env, ctx) {
-                            Some(x) => x,
-                            None => {
-                                visiting.remove(path);
-                                return None;
-                            }
-                        };
+                    let (_, parent_sig) = match resolve_module_signature_for_path_shared(
+                        parent, env, pers_env, ctx,
+                    ) {
+                        Some(x) => x,
+                        None => {
+                            visiting.remove(path);
+                            return None;
+                        }
+                    };
                     parent_sig.iter().find_map(|sig_item| {
                         if let SignatureItem::SigModtype(id, mtd) = sig_item {
                             if id.name() == modtype_name.as_str() {
@@ -18964,14 +18968,15 @@ impl Env {
                     None
                 }
                 Path::Pdot(parent, submod_name, _) => {
-                    let (_, parent_sig) =
-                        match resolve_module_signature_for_path_shared(parent, env, pers_env, ctx) {
-                            Some(x) => x,
-                            None => {
-                                visiting.remove(path);
-                                return None;
-                            }
-                        };
+                    let (_, parent_sig) = match resolve_module_signature_for_path_shared(
+                        parent, env, pers_env, ctx,
+                    ) {
+                        Some(x) => x,
+                        None => {
+                            visiting.remove(path);
+                            return None;
+                        }
+                    };
                     for sig_item in parent_sig.iter() {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {
@@ -19112,7 +19117,8 @@ pub(crate) fn lookup_constructor_in_module<'b>(
                 pers_env,
                 ctx,
                 |components| {
-                    components.lookup_constructors(cstr_name).map(|descs| {
+                    let descs = components.lookup_constructors(cstr_name, ctx);
+                    (!descs.is_empty()).then(|| {
                         descs
                             .iter()
                             .map(|desc| {
@@ -20254,9 +20260,8 @@ fn lookup_label_by_lid<'a>(
         pers_env,
         ctx,
         |components| {
-            components
-                .lookup_labels(label_name)
-                .map(|labels| labels.to_vec())
+            let labels = components.lookup_labels(label_name, ctx);
+            (!labels.is_empty()).then(|| labels.as_ref().clone())
         },
     )
     .flatten()?;
@@ -21343,19 +21348,17 @@ fn lookup_constructor_from_type_descrs<'b>(
     let desc = with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
         let (_, _) = components.lookup_type(type_name.as_str())?;
         let component_type_path = Path::pdot(components.access_path().clone(), type_name.as_str());
-        components
-            .lookup_constructors(cstr_name)?
-            .iter()
-            .find_map(|desc| {
-                let res_repr = ctx.repr(desc.cstr_res);
-                let res_desc = ctx.get_desc(res_repr);
-                let matches = match &*res_desc {
-                    TypeDesc::Tconstr { path, .. } => path.same(&component_type_path),
-                    _ => false,
-                };
-                drop(res_desc);
-                matches.then(|| desc.clone())
-            })
+        let constructors = components.lookup_constructors(cstr_name, ctx);
+        constructors.iter().find_map(|desc| {
+            let res_repr = ctx.repr(desc.cstr_res);
+            let res_desc = ctx.get_desc(res_repr);
+            let matches = match &*res_desc {
+                TypeDesc::Tconstr { path, .. } => path.same(&component_type_path),
+                _ => false,
+            };
+            drop(res_desc);
+            matches.then(|| desc.clone())
+        })
     })
     .flatten()?;
 
@@ -23345,10 +23348,7 @@ pub(crate) fn resolve_module_signature_for_path_shared<'a>(
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, std::sync::Arc<crate::types::decl::Signature>)> {
     with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
-        (
-            components.access_path().clone(),
-            components.signature_arc(),
-        )
+        (components.access_path().clone(), components.signature_arc())
     })
 }
 

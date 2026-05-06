@@ -30,11 +30,12 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
-fn add_type_constructors(
-    constructors: &mut HashMap<String, Vec<ConstructorDescription>>,
+fn build_matching_type_constructors(
+    out: &mut Vec<ConstructorDescription>,
     access_path: &Path,
     type_name: &str,
     decl: &TypeDeclaration,
+    constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
     let super::decl::TypeKind::TypeVariant(cstrs) = &decl.type_kind else {
@@ -67,6 +68,15 @@ fn add_type_constructors(
         } else {
             ConstructorTag::CstrBlock(block_idx)
         };
+
+        if cd.cd_id.name() != constructor_name {
+            if is_constant {
+                const_idx += 1;
+            } else {
+                block_idx += 1;
+            }
+            continue;
+        }
 
         let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
             super::decl::ConstructorArguments::CstrTuple(args) => {
@@ -148,29 +158,24 @@ fn add_type_constructors(
         } else {
             ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
         };
-        constructors
-            .entry(cd.cd_id.name().to_string())
-            .or_insert_with(Vec::new)
-            .insert(
-                0,
-                ConstructorDescription {
-                    cstr_name: cd.cd_id.name().to_string(),
-                    cstr_res,
-                    cstr_existentials: vec![],
-                    cstr_args,
-                    cstr_arity,
-                    cstr_tag: tag,
-                    cstr_consts: num_consts,
-                    cstr_nonconsts: num_nonconsts,
-                    cstr_generalized: cd.cd_res.is_some(),
-                    cstr_private: decl.type_private,
-                    cstr_loc: cd.cd_loc,
-                    cstr_attributes: super::decl::constructor_description_attrs_for_variant(
-                        cstrs, cd,
-                    ),
-                    cstr_inlined,
-                },
-            );
+        out.insert(
+            0,
+            ConstructorDescription {
+                cstr_name: cd.cd_id.name().to_string(),
+                cstr_res,
+                cstr_existentials: vec![],
+                cstr_args,
+                cstr_arity,
+                cstr_tag: tag,
+                cstr_consts: num_consts,
+                cstr_nonconsts: num_nonconsts,
+                cstr_generalized: cd.cd_res.is_some(),
+                cstr_private: decl.type_private,
+                cstr_loc: cd.cd_loc,
+                cstr_attributes: super::decl::constructor_description_attrs_for_variant(cstrs, cd),
+                cstr_inlined,
+            },
+        );
         if is_constant {
             const_idx += 1;
         } else {
@@ -179,20 +184,27 @@ fn add_type_constructors(
     }
 }
 
-fn add_type_labels(
-    labels_by_name: &mut HashMap<String, Vec<LabelDescription>>,
+fn build_matching_type_labels(
+    out: &mut Vec<LabelDescription>,
     access_path: &Path,
     type_name: &str,
     decl: &TypeDeclaration,
+    label_name: &str,
     ctx: &super::context::TypeContext,
 ) {
     let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
         return;
     };
 
-    let type_path = Path::pdot(access_path.clone(), type_name);
-    let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
+    let mut res_ty = None;
     for (pos, ld) in labels.iter().enumerate() {
+        if ld.ld_id.name() != label_name {
+            continue;
+        }
+        let res_ty = *res_ty.get_or_insert_with(|| {
+            let type_path = Path::pdot(access_path.clone(), type_name);
+            ctx.new_generic_constr(type_path, decl.type_params.clone())
+        });
         let label_desc = LabelDescription {
             lbl_name: ld.ld_id.name().to_string(),
             lbl_res: res_ty,
@@ -206,11 +218,130 @@ fn add_type_labels(
             lbl_loc: ld.ld_loc,
             lbl_attributes: ld.ld_attributes.clone(),
         };
-        labels_by_name
-            .entry(ld.ld_id.name().to_string())
-            .or_insert_with(Vec::new)
-            .insert(0, label_desc);
+        out.insert(0, label_desc);
     }
+}
+
+fn build_constructors_for_name(
+    access_path: &Path,
+    signature: &[SignatureItem],
+    constructor_name: &str,
+    ctx: &super::context::TypeContext,
+) -> Vec<ConstructorDescription> {
+    let mut constructors = Vec::new();
+    let mut runtime_pos = 0i32;
+
+    for item in signature {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigType(id, decl, _) => {
+                build_matching_type_constructors(
+                    &mut constructors,
+                    access_path,
+                    id.name(),
+                    decl,
+                    constructor_name,
+                    ctx,
+                );
+            }
+            SignatureItem::SigTypext(id, ext, _) => {
+                let ext_slot = runtime_pos;
+                runtime_pos += 1;
+                if id.name() != constructor_name {
+                    continue;
+                }
+                let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
+                let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
+                    super::decl::ConstructorArguments::CstrTuple(args) => {
+                        (args.clone(), args.len() as i32, None)
+                    }
+                    super::decl::ConstructorArguments::CstrRecord(labels) => {
+                        let inline_params = super::typecore::inline_record_type_params(
+                            ctx,
+                            &ext.ext_type_params,
+                            labels,
+                        );
+                        let inline_path = ext_path.clone();
+                        let inline_constr =
+                            ctx.new_generic_constr(inline_path.clone(), inline_params.clone());
+                        let inline_decl = TypeDeclaration {
+                            type_params: inline_params.clone(),
+                            type_arity: inline_params.len() as i32,
+                            type_kind: super::decl::TypeKind::TypeRecord(
+                                labels.clone(),
+                                super::decl::RecordRepresentation::RecordExtension,
+                            ),
+                            type_private: ext.ext_private,
+                            type_manifest: None,
+                            type_variance: inline_params
+                                .iter()
+                                .map(|_| super::variance::Variance::full())
+                                .collect(),
+                            type_newtype_level: None,
+                            type_loc: ext.ext_loc,
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_unboxed: super::decl::UnboxedStatus::default(),
+                            type_inlined_types: vec![],
+                            type_path: None,
+                        };
+                        (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+                    }
+                };
+                let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
+                    &ext.ext_type_path,
+                    signature,
+                    access_path,
+                );
+                let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
+                constructors.insert(
+                    0,
+                    ConstructorDescription {
+                        cstr_name: id.name().to_string(),
+                        cstr_res,
+                        cstr_existentials: vec![],
+                        cstr_args,
+                        cstr_arity,
+                        cstr_tag: ConstructorTag::CstrExtension(ext_path),
+                        cstr_consts: -1,
+                        cstr_nonconsts: -1,
+                        cstr_generalized: ext.ext_ret_type.is_some(),
+                        cstr_private: ext.ext_private,
+                        cstr_loc: ext.ext_loc,
+                        cstr_attributes: ext.ext_attributes.clone(),
+                        cstr_inlined,
+                    },
+                );
+            }
+            SignatureItem::SigModule(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
+        }
+    }
+
+    constructors
+}
+
+fn build_labels_for_name(
+    access_path: &Path,
+    signature: &[SignatureItem],
+    label_name: &str,
+    ctx: &super::context::TypeContext,
+) -> Vec<LabelDescription> {
+    let mut labels = Vec::new();
+
+    for item in signature {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            build_matching_type_labels(&mut labels, access_path, id.name(), decl, label_name, ctx);
+        }
+    }
+
+    labels
 }
 
 #[derive(Debug, Clone)]
@@ -218,8 +349,8 @@ pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
     values: Arc<HashMap<String, (usize, usize)>>,
-    constructors: Arc<HashMap<String, Vec<ConstructorDescription>>>,
-    labels: Arc<HashMap<String, Vec<LabelDescription>>>,
+    constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
+    labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
     types: Arc<HashMap<String, usize>>,
     modules: Arc<HashMap<String, (usize, usize)>>,
     modtypes: Arc<HashMap<String, usize>>,
@@ -318,8 +449,6 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Self {
         let mut values = HashMap::new();
-        let mut constructors = HashMap::new();
-        let mut labels = HashMap::new();
         let mut types = HashMap::new();
         let mut modules = HashMap::new();
         let mut modtypes = HashMap::new();
@@ -383,107 +512,12 @@ impl QualifiedModuleComponents {
             }
         }
 
-        // OCaml compiler/ml/env.ml:1542-1556 builds `comp_constrs`
-        // while forcing module components, using the selected component
-        // path from env.ml:1530-1538. Later env.ml:1132-1137 reads this
-        // table directly for qualified constructor lookup.
-        let mut runtime_pos = 0i32;
-        for item in signature.iter() {
-            match item {
-                SignatureItem::SigValue(_, desc) => {
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                        runtime_pos += 1;
-                    }
-                }
-                SignatureItem::SigType(id, decl, _) => {
-                    add_type_constructors(&mut constructors, &access_path, id.name(), decl, ctx);
-                    add_type_labels(&mut labels, &access_path, id.name(), decl, ctx);
-                }
-                SignatureItem::SigTypext(id, ext, _) => {
-                    let ext_slot = runtime_pos;
-                    runtime_pos += 1;
-                    let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
-                    let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
-                        super::decl::ConstructorArguments::CstrTuple(args) => {
-                            (args.clone(), args.len() as i32, None)
-                        }
-                        super::decl::ConstructorArguments::CstrRecord(labels) => {
-                            let inline_params = super::typecore::inline_record_type_params(
-                                ctx,
-                                &ext.ext_type_params,
-                                labels,
-                            );
-                            let inline_constr =
-                                ctx.new_generic_constr(ext_path.clone(), inline_params.clone());
-                            let inline_decl = TypeDeclaration {
-                                type_params: inline_params.clone(),
-                                type_arity: inline_params.len() as i32,
-                                type_kind: super::decl::TypeKind::TypeRecord(
-                                    labels.clone(),
-                                    super::decl::RecordRepresentation::RecordExtension,
-                                ),
-                                type_private: ext.ext_private,
-                                type_manifest: None,
-                                type_variance: inline_params
-                                    .iter()
-                                    .map(|_| super::variance::Variance::full())
-                                    .collect(),
-                                type_newtype_level: None,
-                                type_loc: ext.ext_loc,
-                                type_attributes: vec![],
-                                type_immediate: false,
-                                type_unboxed: super::decl::UnboxedStatus::default(),
-                                type_inlined_types: vec![],
-                                type_path: None,
-                            };
-                            (vec![inline_constr], 1, Some(Box::new(inline_decl)))
-                        }
-                    };
-                    let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
-                        &ext.ext_type_path,
-                        &signature,
-                        &access_path,
-                    );
-                    let cstr_res =
-                        ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
-                    constructors
-                        .entry(id.name().to_string())
-                        .or_insert_with(Vec::new)
-                        .insert(
-                            0,
-                            ConstructorDescription {
-                                cstr_name: id.name().to_string(),
-                                cstr_res,
-                                cstr_existentials: vec![],
-                                cstr_args,
-                                cstr_arity,
-                                cstr_tag: ConstructorTag::CstrExtension(ext_path),
-                                cstr_consts: -1,
-                                cstr_nonconsts: -1,
-                                cstr_generalized: ext.ext_ret_type.is_some(),
-                                cstr_private: ext.ext_private,
-                                cstr_loc: ext.ext_loc,
-                                cstr_attributes: ext.ext_attributes.clone(),
-                                cstr_inlined,
-                            },
-                        );
-                }
-                SignatureItem::SigModule(_, _, _) => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
-                SignatureItem::SigClass => {
-                    runtime_pos += 1;
-                }
-            }
-        }
-
         Self {
             access_path: Arc::new(access_path),
             signature,
             values: Arc::new(values),
-            constructors: Arc::new(constructors),
-            labels: Arc::new(labels),
+            constructors: Arc::new(RefCell::new(HashMap::new())),
+            labels: Arc::new(RefCell::new(HashMap::new())),
             types: Arc::new(types),
             modules: Arc::new(modules),
             modtypes: Arc::new(modtypes),
@@ -520,12 +554,55 @@ impl QualifiedModuleComponents {
         }
     }
 
-    pub(crate) fn lookup_constructors(&self, name: &str) -> Option<&[ConstructorDescription]> {
-        self.constructors.get(name).map(Vec::as_slice)
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<ConstructorDescription>> {
+        if let Some(cached) = self.constructors.borrow().get(name).cloned() {
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1542-1556 populates `comp_constrs`
+        // while forcing a module's components. Rust keeps the canonical
+        // signature immutable and forces only the requested constructor bucket,
+        // preserving env.ml:1132-1137 lookup semantics without materializing
+        // every constructor in large dependency signatures.
+        let built = Arc::new(build_constructors_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
+        self.constructors
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
     }
 
-    pub(crate) fn lookup_labels(&self, name: &str) -> Option<&[LabelDescription]> {
-        self.labels.get(name).map(Vec::as_slice)
+    pub(crate) fn lookup_labels(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<LabelDescription>> {
+        if let Some(cached) = self.labels.borrow().get(name).cloned() {
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1548-1559 computes `comp_labels` from the
+        // selected component path. For normal compilation, force just the label
+        // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
+        // avoids constructing hundreds of unused JSX record labels per module view.
+        let built = Arc::new(build_labels_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
+        self.labels
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {

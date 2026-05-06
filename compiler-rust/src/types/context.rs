@@ -353,8 +353,7 @@ pub struct TypeContext {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs:
-        RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
@@ -1820,10 +1819,12 @@ impl TypeContext {
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
-            let renamed = Arc::new(crate::cmi::persistent_env::freshened_signature_bound_idents_from(
-                sig.as_ref(),
-                self,
-            ));
+            let renamed = Arc::new(
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+                    sig.as_ref(),
+                    self,
+                ),
+            );
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
