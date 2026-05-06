@@ -18312,13 +18312,12 @@ impl Env {
                         return Some(cached);
                     }
                     if apply_subst {
-                        let (resolved_path, resolved_sig) = resolve_module_signature_for_path(
+                        let (resolved_path, resolved_sig) = resolve_module_signature_for_path_shared(
                             &access_path_hint,
                             self,
                             pers_env,
                             ctx,
                         )?;
-                        let resolved_sig = Arc::new(resolved_sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
                             resolved_path.clone(),
@@ -18334,9 +18333,11 @@ impl Env {
                     if result.is_none() && apply_subst {
                         if let Some(access_path) = md.md_path.as_ref() {
                             if let Some((resolved_path, sig)) =
-                                resolve_module_signature_for_path(access_path, self, pers_env, ctx)
+                                resolve_module_signature_for_path_shared(
+                                    access_path, self, pers_env, ctx,
+                                )
                             {
-                                return Some((resolved_path, Arc::new(sig)));
+                                return Some((resolved_path, sig));
                             }
                         }
                     }
@@ -18569,10 +18570,9 @@ impl Env {
                     ) {
                         let sub_path = Path::pdot_pos(parent_path.clone(), submod_name, pos as i32);
                         if apply_subst {
-                            return resolve_module_signature_for_path(
+                            return resolve_module_signature_for_path_shared(
                                 &sub_path, self, pers_env, ctx,
-                            )
-                            .map(|(path, sig)| (path, Arc::new(sig)));
+                            );
                         }
                         let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
                         if let Some((sig, resolved_name)) = result {
@@ -18810,7 +18810,7 @@ impl Env {
                 }
                 Path::Pdot(parent, modtype_name, _) => {
                     let (_, parent_sig) =
-                        match resolve_module_signature_for_path(parent, env, pers_env, ctx) {
+                        match resolve_module_signature_for_path_shared(parent, env, pers_env, ctx) {
                             Some(x) => x,
                             None => {
                                 visiting.remove(path);
@@ -18862,7 +18862,7 @@ impl Env {
                         && let Some(pers) = pers_env.as_mut()
                         && let Some(parent_ps) = pers.find_pers_struct(parent_id.name(), ctx)
                     {
-                        let parent_sig = parent_ps.ps_sig.as_ref().clone();
+                        let parent_sig = parent_ps.ps_sig.clone();
                         if let Some((raw_id, raw_md)) =
                             parent_sig.iter().find_map(|item| match item {
                                 SignatureItem::SigModule(id, md, _)
@@ -18894,7 +18894,7 @@ impl Env {
                                 let mut md = raw_md;
                                 crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
                                     &mut md,
-                                    &parent_sig,
+                                    parent_sig.as_ref(),
                                     parent,
                                     ctx,
                                 );
@@ -18965,14 +18965,14 @@ impl Env {
                 }
                 Path::Pdot(parent, submod_name, _) => {
                     let (_, parent_sig) =
-                        match resolve_module_signature_for_path(parent, env, pers_env, ctx) {
+                        match resolve_module_signature_for_path_shared(parent, env, pers_env, ctx) {
                             Some(x) => x,
                             None => {
                                 visiting.remove(path);
                                 return None;
                             }
                         };
-                    for sig_item in &parent_sig {
+                    for sig_item in parent_sig.iter() {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {
                                 let result = resolve_module_type_inner(
@@ -23334,10 +23334,20 @@ pub(crate) fn resolve_module_signature_for_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
+    resolve_module_signature_for_path_shared(module_path, env, pers_env, ctx)
+        .map(|(path, sig)| (path, sig.as_ref().clone()))
+}
+
+pub(crate) fn resolve_module_signature_for_path_shared<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<(Path, std::sync::Arc<crate::types::decl::Signature>)> {
     with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
         (
             components.access_path().clone(),
-            components.cloned_signature(),
+            components.signature_arc(),
         )
     })
 }
