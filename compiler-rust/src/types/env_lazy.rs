@@ -364,17 +364,17 @@ pub(crate) struct QualifiedModuleComponents {
     qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
     qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
     // OCaml keeps `comp_components` lazy (compiler/ml/env.ml:1573-1578).
-    // Build the child component table only when a qualified child lookup needs
-    // it; constructing it for every parent view clones module declarations and
-    // recursively seeds environments even when no child is referenced.
-    child_components: Arc<RefCell<Option<HashMap<String, (usize, Arc<StoredModuleComponents>)>>>>,
+    // Cache forced child component thunks by name, including misses, so a
+    // lookup for one child does not materialize every sibling in the parent
+    // signature.
+    child_components: Arc<RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>>,
 }
 
-fn build_child_components_from_signature(
+fn build_child_component_from_signature(
     access_path: &Path,
     signature: &Arc<Signature>,
-) -> HashMap<String, (usize, Arc<StoredModuleComponents>)> {
-    let mut child_components = HashMap::new();
+    child_name: &str,
+) -> Option<(usize, Arc<StoredModuleComponents>)> {
     let mut working_env = super::env::Env::empty();
     let mut runtime_pos = 0usize;
 
@@ -407,10 +407,13 @@ fn build_child_components_from_signature(
                     child_access_path,
                     Some((access_path.clone(), signature.clone())),
                 );
-                if let Some(stored) =
-                    working_env.local_module_components_arc(&Path::pident(id.clone()))
-                {
-                    child_components.insert(id.name().to_string(), (runtime_pos, stored));
+                if id.name() == child_name {
+                    if let Some(stored) =
+                        working_env.local_module_components_arc(&Path::pident(id.clone()))
+                    {
+                        return Some((runtime_pos, stored));
+                    }
+                    return None;
                 }
                 runtime_pos += 1;
             }
@@ -421,7 +424,7 @@ fn build_child_components_from_signature(
         }
     }
 
-    child_components
+    None
 }
 
 impl QualifiedModuleComponents {
@@ -512,6 +515,11 @@ impl QualifiedModuleComponents {
             }
         }
 
+        let child_components = child_components
+            .into_iter()
+            .map(|(name, component)| (name, Some(component)))
+            .collect();
+
         Self {
             access_path: Arc::new(access_path),
             signature,
@@ -524,9 +532,7 @@ impl QualifiedModuleComponents {
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
-            child_components: Arc::new(RefCell::new(
-                (!child_components.is_empty()).then_some(child_components),
-            )),
+            child_components: Arc::new(RefCell::new(child_components)),
         }
     }
 
@@ -625,16 +631,15 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
-        if self.child_components.borrow().is_none() {
-            let child_components =
-                build_child_components_from_signature(self.access_path(), &self.signature);
-            *self.child_components.borrow_mut() = Some(child_components);
+        if let Some(cached) = self.child_components.borrow().get(name).cloned() {
+            return cached;
         }
+
+        let built = build_child_component_from_signature(self.access_path(), &self.signature, name);
         self.child_components
-            .borrow()
-            .as_ref()?
-            .get(name)
-            .map(|(runtime_pos, stored)| (*runtime_pos, stored.clone()))
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
     }
 
     pub(crate) fn lookup_qualified_module(
