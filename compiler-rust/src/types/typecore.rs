@@ -79,6 +79,30 @@ fn ocaml_hash_final_mix(mut h: u32) -> u32 {
     h
 }
 
+fn generalizable_at_level(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) -> bool {
+    fn check(ctx: &TypeContext<'_>, level: i32, ty: TypeExprRef) -> bool {
+        let ty = ctx.repr(ty);
+        let ty_level = ctx.get_level(ty);
+        if ty_level < crate::types::type_expr::LOWEST_LEVEL {
+            return true;
+        }
+        if ty_level <= level {
+            return false;
+        }
+        crate::types::btype::mark_type_node(ctx, ty);
+        let mut children = Vec::new();
+        crate::types::iter_type_expr(ctx, ty, |child| children.push(child));
+        children.into_iter().all(|child| check(ctx, level, child))
+    }
+
+    // OCaml compiler/ml/typecore.ml:2104-2120 marks visited nodes while
+    // checking whether any reachable type level is at or below `level`, then
+    // always unmarks the original type graph.
+    let result = check(ctx, level, ty);
+    crate::types::btype::unmark_type(ctx, ty);
+    result
+}
+
 fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
     let bytes = s.as_bytes();
     let len = bytes.len();
@@ -14164,42 +14188,84 @@ fn type_coerce(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // Translate the target type
+    let ctx = tctx.type_ctx;
+    // Translate the target type.
     let (to_typed_ctype, to_ty) = transl_type(tctx, env, to_type)?;
 
     // OCaml: rue { ... exp_type = ty'; ... } — unify coercion target with expected
     // Keep original argument order to preserve Tlink direction.
-    let inst_expected = instance_if_generic(tctx.type_ctx, expected_ty);
-    if crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, inst_expected, to_ty).is_err() {
+    let inst_expected = instance_if_generic(ctx, expected_ty);
+    if crate::types::unify(ctx, &mut tctx.unify_state, inst_expected, to_ty).is_err() {
         return Err(TypeCoreError::ExprTypeClash {
             trace: vec![(inst_expected, to_ty)],
             context: None,
         });
     }
 
-    // If there's a from type, translate and check it
-    let (_opt_from_typed, from_ty) = if let Some(from_type) = opt_from_type {
-        let (from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
-        (Some(from_typed_ctype), from_ty)
+    let typed_inner = if let Some(from_type) = opt_from_type {
+        let (_from_typed_ctype, from_ty) = transl_type(tctx, env, from_type)?;
+        type_expect(tctx, env, inner_expr, from_ty, None)?
     } else {
-        // No explicit from type, infer it from the expression
-        let from_ty = tctx.type_ctx.new_var(None);
-        (None, from_ty)
-    };
+        // OCaml compiler/ml/typecore.ml:3295-3339 always separates coercion
+        // argument typing: begin_def(), type_exp, end_def(), then
+        // generalizable/unify_var before the non-generalizable fast coercion
+        // attempt calls compiler/ml/ctype.ml:2797 `Ctype.unify`.
+        ctx.begin_def();
+        let mut typed_inner = type_exp(tctx, env, inner_expr, None)?;
+        ctx.end_def();
 
-    // Type check the inner expression with the from type
-    let typed_inner = type_expect(tctx, env, inner_expr, from_ty, None)?;
+        let scope_var = ctx.new_var(None);
+        let is_generalizable =
+            generalizable_at_level(ctx, ctx.get_level(scope_var), typed_inner.exp_type);
+        crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, scope_var, typed_inner.exp_type)
+            .map_err(|err| TypeCoreError::ExprTypeClash {
+                trace: match err {
+                    TypeError::Unify(trace) => trace,
+                    _ => vec![(scope_var, typed_inner.exp_type)],
+                },
+                context: None,
+            })?;
 
-    // When no explicit from_type and from_ty is still an unresolved Tvar,
-    // unify it with the target type. This matches OCaml's subtype approximation
-    // which resolves unconstrained expression types to the coercion target.
-    // Guard: only when still Tvar to avoid incorrectly replacing private types.
-    if opt_from_type.is_none() {
-        let from_repr = tctx.type_ctx.repr(from_ty);
-        if matches!(&*tctx.type_ctx.get_desc(from_repr), TypeDesc::Tvar(_)) {
-            let _ = crate::types::unify(tctx.type_ctx, &mut tctx.unify_state, from_ty, to_ty);
+        if !is_generalizable {
+            // OCaml compiler/ml/typecore.ml:3317-3330 first tries ordinary
+            // unification for non-generalizable coercions, inside the
+            // snapshot/backtrack at typecore.ml:3321-3329. Besides validating
+            // private abbreviations, this reaches ctype.ml:2338-2344
+            // expand_head_unif and env.ml:865-875 find_module at the lazy
+            // point where OCaml forces persistent signatures such as SectionID.
+            let source_is_var = {
+                let source_desc = ctx.get_desc(ctx.repr(typed_inner.exp_type));
+                matches!(&*source_desc, TypeDesc::Tvar(_))
+            };
+            if source_is_var {
+                // A plain Tvar source follows OCaml's successful fast path:
+                // Ctype.unify mutates the original argument type.
+                let _ =
+                    crate::types::unify(ctx, &mut tctx.unify_state, typed_inner.exp_type, to_ty);
+            } else {
+                // Rust does not yet have OCaml's Btype trail for backtracking
+                // failed Ctype.unify mutations. Run the force-producing attempt
+                // on copied nodes so the lazy env forcing happens at the same
+                // reference point without retaining mutations OCaml would undo.
+                let mut coerce_unify_cache = HashMap::default();
+                let source_for_unify = crate::types::ctype::copy_type_deep(
+                    ctx,
+                    typed_inner.exp_type,
+                    &mut coerce_unify_cache,
+                );
+                let target_for_unify =
+                    crate::types::ctype::copy_type_deep(ctx, to_ty, &mut coerce_unify_cache);
+                let _ = crate::types::unify(
+                    ctx,
+                    &mut tctx.unify_state,
+                    source_for_unify,
+                    target_for_unify,
+                );
+            }
+            typed_inner.exp_type = to_ty;
         }
-    }
+        typed_inner
+    };
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion
