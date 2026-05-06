@@ -18547,6 +18547,80 @@ impl Env {
                     for sig_item in &parent_sig {
                         if let SignatureItem::SigModule(id, sub_md, _) = sig_item {
                             if id.name() == submod_name.as_str() {
+                                let self_alias = matches!(
+                                    &sub_md.md_type,
+                                    crate::types::decl::ModuleType::MtyAlias(_, target)
+                                        if target.same(path)
+                                );
+                                if self_alias
+                                    && let Path::Pident(parent_id) = parent.as_ref()
+                                    && (parent_id.is_persistent() || parent_id.stamp() == 0)
+                                    && let Some(pers) = pers_env.as_mut()
+                                    && let Some(parent_ps) =
+                                        pers.find_pers_struct(parent_id.name(), ctx)
+                                {
+                                    let raw_parent_sig = parent_ps.ps_sig.clone();
+                                    if let Some((raw_id, raw_md)) =
+                                        raw_parent_sig.iter().find_map(|item| match item {
+                                            SignatureItem::SigModule(id, md, _)
+                                                if id.name() == submod_name.as_str() =>
+                                            {
+                                                Some((id.clone(), md.clone()))
+                                            }
+                                            _ => None,
+                                        })
+                                    {
+                                        // OCaml compiler/ml/env.ml:1440-1446
+                                        // `scrape_alias` calls env.ml:865-882
+                                        // `find_module` for aliases. For a
+                                        // persistent selected child whose
+                                        // component signature was already
+                                        // strengthened by compiler/ml/mtype.ml:98-102
+                                        // into a self alias, env.ml:1568's module
+                                        // declaration thunk still starts from the
+                                        // raw parent item and applies
+                                        // compiler/ml/subst.ml:352-400. Do the
+                                        // same before recursing, rather than
+                                        // resolving the strengthened alias to
+                                        // itself.
+                                        let md = if let Some((_, cached_md)) = ctx
+                                            .find_qualified_module_decl(
+                                                parent,
+                                                submod_name.as_str(),
+                                            )
+                                            && !matches!(
+                                                &cached_md.md_type,
+                                                crate::types::decl::ModuleType::MtyAlias(_, target)
+                                                    if target.same(path)
+                                            ) {
+                                            cached_md
+                                        } else {
+                                            let mut md = raw_md;
+                                            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+                                                &mut md,
+                                                &raw_parent_sig,
+                                                parent,
+                                                ctx,
+                                            );
+                                            ctx.register_qualified_module_decl(
+                                                parent,
+                                                submod_name.as_str(),
+                                                raw_id,
+                                                md.clone(),
+                                            );
+                                            md
+                                        };
+                                        let result = resolve_module_type_inner(
+                                            env,
+                                            &md.md_type,
+                                            pers_env,
+                                            ctx,
+                                            visiting,
+                                        );
+                                        visiting.remove(path);
+                                        return result;
+                                    }
+                                }
                                 let result = resolve_module_type_inner(
                                     env,
                                     &sub_md.md_type,
