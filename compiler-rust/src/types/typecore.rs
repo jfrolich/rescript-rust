@@ -18839,6 +18839,50 @@ impl Env {
             result
         }
 
+        fn raw_qualified_child_module_decl(
+            parent: &Path,
+            parent_sig: &crate::types::decl::Signature,
+            child_name: &str,
+            ctx: &crate::types::context::TypeContext,
+        ) -> Option<std::sync::Arc<crate::types::decl::ModuleDeclaration>> {
+            use crate::types::decl::SignatureItem;
+
+            if let Some((_, md)) = ctx.find_qualified_module_decl(parent, child_name) {
+                return Some(md);
+            }
+
+            let (raw_id, raw_md) = parent_sig.iter().find_map(|sig_item| match sig_item {
+                SignatureItem::SigModule(id, md, _) if id.name() == child_name => {
+                    Some((id.clone(), md.clone()))
+                }
+                _ => None,
+            })?;
+            let mut md = raw_md;
+            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+                &mut md, parent_sig, parent, ctx,
+            );
+            let md = std::sync::Arc::new(md);
+            ctx.register_qualified_module_decl(parent, child_name, raw_id, md.clone());
+            Some(md)
+        }
+
+        fn raw_signature_for_persistent_path<'b>(
+            path: &Path,
+            pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+            ctx: &'b crate::types::context::TypeContext,
+        ) -> Option<crate::types::decl::Signature> {
+            if let Path::Pident(id) = path
+                && id.is_persistent()
+            {
+                pers_env
+                    .as_mut()?
+                    .read_raw_sig_shared(id.name(), ctx)
+                    .map(|sig| sig.as_ref().clone())
+            } else {
+                None
+            }
+        }
+
         fn resolve_path<'b>(
             env: &Env,
             path: &Path,
@@ -18852,6 +18896,23 @@ impl Env {
             }
 
             if let Path::Pdot(parent, submod_name, _) = path {
+                if !ctx.preserve_canonical_typedtree()
+                    && matches!(parent.as_ref(), Path::Pident(id) if id.is_persistent())
+                    && let Some(parent_sig) =
+                        raw_signature_for_persistent_path(parent, pers_env, ctx)
+                    && let Some(child_md) = raw_qualified_child_module_decl(
+                        parent,
+                        &parent_sig,
+                        submod_name.as_str(),
+                        ctx,
+                    )
+                {
+                    let result =
+                        resolve_module_type_inner(env, &child_md.md_type, pers_env, ctx, visiting);
+                    visiting.remove(path);
+                    return result;
+                }
+
                 if let Some((_, access_path, sub_md)) =
                     lookup_module_in_resolved_path(parent, submod_name.as_str(), env, pers_env, ctx)
                 {
