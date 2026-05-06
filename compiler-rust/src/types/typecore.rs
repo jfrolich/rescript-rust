@@ -1216,13 +1216,15 @@ fn resolve_type_constructor_path(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             ) {
-                if let Some((resolved_module_path, _, decl)) = lookup_type_in_resolved_path(
-                    &module_path,
-                    type_name,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
+                if let Some((resolved_module_path, _, decl)) =
+                    lookup_type_in_resolved_path_for_source(
+                        &module_path,
+                        type_name,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                {
                     // OCaml typetexp.ml:116-123 dispatches constructors through
                     // Env.lookup_type, whose Ldot case in env.ml:1091-1099 looks
                     // up the type table after resolving module components.
@@ -22257,6 +22259,31 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
+    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx, false)
+}
+
+pub(crate) fn lookup_type_in_resolved_path_for_source<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
+    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx, true)
+}
+
+fn lookup_type_in_resolved_path_impl<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    force_alias_target_lookup: bool,
+) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
+    if force_alias_target_lookup {
+        force_dotted_module_alias_target_for_type_lookup(parent_module_path, env, pers_env, ctx);
+    }
+
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
     }
@@ -22281,6 +22308,29 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
         })
     })
     .flatten()
+}
+
+fn force_dotted_module_alias_target_for_type_lookup<'a>(
+    parent_module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) {
+    let Some(alias_target) = module_alias_target_for_path(parent_module_path, env, pers_env, ctx)
+    else {
+        return;
+    };
+    let Path::Pdot(parent, module_name, _) = alias_target else {
+        return;
+    };
+
+    // OCaml compiler/ml/typetexp.ml:116-123 dispatches source type
+    // constructors to Env.lookup_type. When the selected module component is
+    // an alias, env.ml:1441-1447 `scrape_alias` reaches env.ml:876-882
+    // `find_module` for the dotted alias target before returning the type
+    // declaration. Keep this to source lookups; substitution and constraint
+    // probes use component descriptors without forcing the module thunk.
+    let _ = lookup_module_in_resolved_path(&parent, module_name.as_str(), env, pers_env, ctx);
 }
 
 fn rewrite_alias_pident_child_prefixes<'a>(
