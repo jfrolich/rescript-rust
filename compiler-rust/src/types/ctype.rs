@@ -1057,23 +1057,23 @@ fn find_cmi_file(load_paths: &[std::path::PathBuf], module_name: &str) -> Option
     None
 }
 
-pub(crate) fn resolve_module_signature_through_cmi<'a>(
+pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
     ctx: &'a TypeContext,
     load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
-) -> Option<super::decl::Signature> {
+) -> Option<Arc<super::decl::Signature>> {
     use crate::cmi::{cmi_format, sig_reader::SigReadContext};
     use crate::types::decl::{ModuleType, SignatureItem};
 
     if ctx.persistent_env_is_in_process() {
-        return resolve_module_signature_through_persistent_env(ctx, module_path, visiting);
+        return resolve_module_signature_through_persistent_env_shared(ctx, module_path, visiting);
     }
 
     let cache_key = module_path.name();
     if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
         if cached_path.same(module_path) {
-            return Some(cached_sig.as_ref().clone());
+            return Some(cached_sig);
         }
     }
 
@@ -1102,13 +1102,14 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
             crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, module_path);
             // Also recursively substitute submodule paths.
             crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, module_path, ctx);
-            Some(sig)
+            Some(Arc::new(sig))
         }
         Path::Pdot(parent, module_name, _) => {
-            let parent_sig =
-                resolve_module_signature_through_cmi(ctx, load_paths, parent, visiting)?;
+            let parent_sig = resolve_module_signature_through_cmi_shared(
+                ctx, load_paths, parent, visiting,
+            )?;
             let mut resolved = None;
-            for item in &parent_sig {
+            for item in parent_sig.iter() {
                 if let SignatureItem::SigModule(id, md, _) = item {
                     if id.name() == module_name {
                         resolved = match &md.md_type {
@@ -1117,15 +1118,15 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
                                 // submodules: keep parent substitutions visible.
                                 crate::cmi::persistent_env::substitute_type_paths_in_child_sig(
                                     sig,
-                                    &parent_sig,
+                                    parent_sig.as_ref(),
                                     parent,
                                     ctx,
                                 );
-                                Some(sig.clone())
+                                Some(Arc::new(sig.clone()))
                             }
                             ModuleType::MtyAlias(_, alias_path)
                             | ModuleType::MtyIdent(alias_path) => {
-                                resolve_module_signature_through_cmi(
+                                resolve_module_signature_through_cmi_shared(
                                     ctx, load_paths, alias_path, visiting,
                                 )
                             }
@@ -1141,23 +1142,33 @@ pub(crate) fn resolve_module_signature_through_cmi<'a>(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), Arc::new(sig.clone()));
+        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), sig.clone());
     }
 
     result
 }
 
-fn resolve_module_signature_through_persistent_env<'a>(
+pub(crate) fn resolve_module_signature_through_cmi<'a>(
     ctx: &'a TypeContext,
+    load_paths: &[std::path::PathBuf],
     module_path: &Path,
     visiting: &mut HashSet<Path>,
 ) -> Option<super::decl::Signature> {
+    resolve_module_signature_through_cmi_shared(ctx, load_paths, module_path, visiting)
+        .map(|sig| sig.as_ref().clone())
+}
+
+fn resolve_module_signature_through_persistent_env_shared<'a>(
+    ctx: &'a TypeContext,
+    module_path: &Path,
+    visiting: &mut HashSet<Path>,
+) -> Option<Arc<super::decl::Signature>> {
     use crate::types::decl::{ModuleType, SignatureItem};
 
     let cache_key = module_path.name();
     if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
         if cached_path.same(module_path) {
-            return Some((*cached_sig).clone());
+            return Some(cached_sig);
         }
     }
 
@@ -1179,20 +1190,20 @@ fn resolve_module_signature_through_persistent_env<'a>(
             let mut pers_env = ctx.persistent_env_clone()?;
             let ps = pers_env.find_pers_struct(id.name(), ctx)?;
             ctx.set_persistent_env(pers_env);
-            Some(ps.ps_sig.as_ref().clone())
+            Some(ps.ps_sig.clone())
         }
         Path::Pdot(parent, module_name, _) => {
             let parent_sig =
-                resolve_module_signature_through_persistent_env(ctx, parent, visiting)?;
+                resolve_module_signature_through_persistent_env_shared(ctx, parent, visiting)?;
             let mut resolved = None;
-            for item in &parent_sig {
+            for item in parent_sig.iter() {
                 if let SignatureItem::SigModule(id, md, _) = item {
                     if id.name() == module_name {
                         resolved = match &md.md_type {
-                            ModuleType::MtySignature(sig) => Some(sig.clone()),
+                            ModuleType::MtySignature(sig) => Some(Arc::new(sig.clone())),
                             ModuleType::MtyAlias(_, alias_path)
                             | ModuleType::MtyIdent(alias_path) => {
-                                resolve_module_signature_through_persistent_env(
+                                resolve_module_signature_through_persistent_env_shared(
                                     ctx, alias_path, visiting,
                                 )
                             }
@@ -1208,7 +1219,7 @@ fn resolve_module_signature_through_persistent_env<'a>(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), Arc::new(sig.clone()));
+        ctx.register_resolved_module_sig(&cache_key, module_path.clone(), sig.clone());
     }
 
     result
@@ -1247,7 +1258,7 @@ fn normalize_module_path_through_components<'a>(
     let alias_target = match &normalized_path {
         Path::Pdot(parent, module_name, _) => {
             let mut lookup_visiting = HashSet::new();
-            let parent_sig = resolve_module_signature_through_cmi(
+            let parent_sig = resolve_module_signature_through_cmi_shared(
                 ctx,
                 load_paths,
                 parent,
@@ -1300,7 +1311,7 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     // those declarations for abbreviation expansion. In --in-process, the
     // persistent registry is the component source instead of disk `.cmi` files.
     let current_sig =
-        resolve_module_signature_through_cmi(ctx, &load_paths, module_path, &mut visiting)?;
+        resolve_module_signature_through_cmi_shared(ctx, &load_paths, module_path, &mut visiting)?;
     let type_module_path = normalize_module_path_through_components(
         ctx,
         &load_paths,
@@ -1314,7 +1325,7 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
     // (e.g., type component<'a> = componentLike<'a, element>), and those
     // sibling types need to be available for expansion later.
     let mut result = None;
-    for item in &current_sig {
+    for item in current_sig.iter() {
         if let SignatureItem::SigType(id, decl, _) = item {
             let qualified_decl =
                 qualify_type_decl_for_module_access_path(&type_module_path, id, decl);
