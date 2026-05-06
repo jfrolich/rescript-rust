@@ -12670,6 +12670,20 @@ fn find_record_label_description_by_name(
         .cloned()
 }
 
+fn qualified_record_label_from_info<'a>(
+    info: Option<&RecordLabelDescriptionsInfo>,
+    field_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) -> Option<crate::types::LabelDescription> {
+    info.and_then(|info| info.label_by_name(field_name))
+        .map(|mut label| {
+            qualify_label_description_paths(&mut label, env, pers_env, ctx);
+            label
+        })
+}
+
 fn select_record_type_for_fields<'a>(
     ctx: &'a TypeContext,
     env: &Env,
@@ -12982,33 +12996,44 @@ fn type_record(
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
-        let disambiguated = lookup_label_by_lid(
-            resolved_lid,
-            tctx.arena,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-            Some(disambiguation_ty),
-        )
+        let prefer_known_record_label = !ctx.preserve_canonical_typedtree();
+        let disambiguated = if prefer_known_record_label {
+            qualified_record_label_from_info(
+                disambiguation_label_descriptions.as_ref(),
+                field_name,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
+        } else {
+            None
+        }
         .or_else(|| {
-            disambiguation_label_descriptions
-                .as_ref()
-                .and_then(|info| info.label_by_name(&field_name))
-                .map(|mut label| {
-                    // OCaml compiler/ml/typecore.ml:1163-1198 sends record
-                    // fields through `Label.disambiguate`; its
-                    // compiler/ml/typecore.ml:942-967 `lookup_from_type` observes
-                    // labels after env.ml:1542-1548 `Subst.type_declaration`.
-                    // Labels rebuilt directly from Rust's selected record type need
-                    // the same path qualification before `type_label_exp`
-                    // instantiates them.
-                    qualify_label_description_paths(&mut label, env, &mut tctx.persistent_env, ctx);
-                    label
-                })
+            lookup_label_by_lid(
+                resolved_lid,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                Some(disambiguation_ty),
+            )
+        })
+        .or_else(|| {
+            if prefer_known_record_label {
+                None
+            } else {
+                qualified_record_label_from_info(
+                    disambiguation_label_descriptions.as_ref(),
+                    field_name,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            }
         })
         .or_else(|| {
             disambiguate_label(
-                &field_name,
+                field_name,
                 disambiguation_ty,
                 env,
                 &mut tctx.persistent_env,
