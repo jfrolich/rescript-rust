@@ -31,7 +31,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 - [ ] **2. Keep typecheck/signature work on the critical path.**
   The JS/typecheck split is useful, but cold builds must prioritize signature-producing typecheck work that unlocks downstream modules. JS/codegen should run when no typecheck work is ready or under a separate cap. A previous naive scheduler priority flip regressed Tella, so this needs measured tuning.
-  - [ ] Measure ready typecheck queue depth, ready JS queue depth, and worker idle time.
+  - [x] Measure ready typecheck queue depth, ready JS queue depth, and worker idle time.
   - [ ] Add a scheduler policy that keeps signature-producing work ahead of JS without starving JS.
   - [ ] Benchmark the policy against the retained Tella baseline.
 
@@ -84,6 +84,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   Add counters for signature clones avoided, component scans, env overlays, registry snapshot sizes, Lambda/typedtree node counts, allocation pressure, and queued pre-JS payloads.
   - [x] Add low-overhead, env-gated counters that are disabled on normal builds.
   - [x] Print compact aggregate reports suitable for comparing before/after builds.
+  - [x] Add scheduler queue counters for in-process typecheck/JS ready work and idle slots.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus

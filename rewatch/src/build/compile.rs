@@ -153,6 +153,71 @@ struct InProcessSchedulerHooks {
     compile_universe: Arc<AHashSet<String>>,
 }
 
+#[derive(Default)]
+struct InProcessSchedulerCounters {
+    scheduled_typecheck: usize,
+    scheduled_js: usize,
+    signature_ready: usize,
+    pre_js_ready: usize,
+    completed: usize,
+    max_ready_typecheck: usize,
+    max_ready_js: usize,
+    max_pending_js: usize,
+    max_in_flight: usize,
+    js_scheduled_while_typecheck_ready: usize,
+    blocked_events_with_idle_slots: usize,
+    max_idle_slots: usize,
+    dispatcher_wait: Duration,
+    idle_slot_wait_nanos: u128,
+}
+
+impl InProcessSchedulerCounters {
+    fn observe_queues(
+        &mut self,
+        ready_typecheck: usize,
+        ready_js: usize,
+        pending_js: usize,
+        in_flight: usize,
+    ) {
+        self.max_ready_typecheck = self.max_ready_typecheck.max(ready_typecheck);
+        self.max_ready_js = self.max_ready_js.max(ready_js);
+        self.max_pending_js = self.max_pending_js.max(pending_js);
+        self.max_in_flight = self.max_in_flight.max(in_flight);
+    }
+
+    fn observe_wait(&mut self, wait: Duration, idle_slots: usize) {
+        self.dispatcher_wait = self.dispatcher_wait.saturating_add(wait);
+        if idle_slots > 0 {
+            self.blocked_events_with_idle_slots += 1;
+            self.max_idle_slots = self.max_idle_slots.max(idle_slots);
+            self.idle_slot_wait_nanos = self
+                .idle_slot_wait_nanos
+                .saturating_add(wait.as_nanos().saturating_mul(idle_slots as u128));
+        }
+    }
+
+    fn print_report(&self, capacity: usize) {
+        eprintln!(
+            "[scheduler-counter] capacity={} scheduled_typecheck={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
+            capacity,
+            self.scheduled_typecheck,
+            self.scheduled_js,
+            self.signature_ready,
+            self.pre_js_ready,
+            self.completed,
+            self.js_scheduled_while_typecheck_ready,
+            self.max_ready_typecheck,
+            self.max_ready_js,
+            self.max_pending_js,
+            self.max_in_flight,
+            self.blocked_events_with_idle_slots,
+            self.max_idle_slots,
+            duration_ms(self.dispatcher_wait),
+            self.idle_slot_wait_nanos as f64 / 1_000_000.0,
+        );
+    }
+}
+
 #[derive(Clone)]
 struct PendingRegistryUpdate {
     module_name: String,
@@ -682,17 +747,42 @@ pub fn compile(
     let mut waiting_js_by_dep: AHashMap<String, Vec<String>> = AHashMap::new();
     let mut has_errors = false;
     let mut stalled = false;
+    let mut scheduler_counters = (in_process_mode
+        && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
+    .then(InProcessSchedulerCounters::default);
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
         loop {
+            if let Some(counters) = scheduler_counters.as_mut() {
+                counters.observe_queues(
+                    ready_heap.len(),
+                    ready_js.len(),
+                    pending_js_payloads.len(),
+                    in_flight,
+                );
+            }
             while in_flight < capacity && !has_errors {
                 if let Some(pre_js_msg) = ready_js.pop() {
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.scheduled_js += 1;
+                        if !ready_heap.is_empty() {
+                            counters.js_scheduled_while_typecheck_ready += 1;
+                        }
+                    }
                     let module_name = pre_js_msg.module_name.clone();
                     let tx = tx.clone();
                     let inc_ref = &inc;
                     let parent_span = compile_parent_span.clone();
                     in_flight += 1;
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.observe_queues(
+                            ready_heap.len(),
+                            ready_js.len(),
+                            pending_js_payloads.len(),
+                            in_flight,
+                        );
+                    }
                     scope.spawn(move |_| {
                         let msg = finish_in_process_js(
                             build_state_ref,
@@ -709,12 +799,23 @@ pub fn compile(
                     continue;
                 }
                 let Some(work) = ready_heap.pop() else { break };
+                if let Some(counters) = scheduler_counters.as_mut() {
+                    counters.scheduled_typecheck += 1;
+                }
                 let module_name = work.module_name.clone();
                 let is_dirty = dirty_set.contains(&module_name);
                 let warn_override = warn_error_override.clone();
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
+                if let Some(counters) = scheduler_counters.as_mut() {
+                    counters.observe_queues(
+                        ready_heap.len(),
+                        ready_js.len(),
+                        pending_js_payloads.len(),
+                        in_flight,
+                    );
+                }
                 // Take a per-spawn snapshot of the registry so workers have
                 // a stable view including any deps that published registry
                 // entries before this module was unblocked. Subprocess mode
@@ -764,7 +865,16 @@ pub fn compile(
                 break;
             }
 
+            let idle_slots = if ready_heap.is_empty() && ready_js.is_empty() && in_flight < capacity {
+                capacity - in_flight
+            } else {
+                0
+            };
+            let wait_start = scheduler_counters.as_ref().map(|_| Instant::now());
             let Ok(first_msg) = rx.recv() else { break };
+            if let (Some(counters), Some(wait_start)) = (scheduler_counters.as_mut(), wait_start) {
+                counters.observe_wait(wait_start.elapsed(), idle_slots);
+            }
             let mut worker_messages = vec![first_msg];
             while let Ok(msg) = rx.try_recv() {
                 worker_messages.push(msg);
@@ -773,6 +883,9 @@ pub fn compile(
             for worker_msg in worker_messages {
                 match worker_msg {
                     WorkerMsg::SignatureReady(msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.signature_ready += 1;
+                        }
                         let module_name = msg.module_name.clone();
                         let is_clean = apply_signature_ready(build_command_state_ref, msg);
                         unblock_dependents(
@@ -788,6 +901,9 @@ pub fn compile(
                         );
                     }
                     WorkerMsg::PreJsReady(msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.pre_js_ready += 1;
+                        }
                         in_flight -= 1;
                         let module_name = msg.module_name.clone();
                         let pending_deps_for_js = msg
@@ -810,6 +926,9 @@ pub fn compile(
                         }
                     }
                     WorkerMsg::Completed(mut msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.completed += 1;
+                        }
                         in_flight -= 1;
                         if in_process_mode {
                             apply_pending_registry_updates(
@@ -875,8 +994,19 @@ pub fn compile(
                     }
                 }
             }
+            if let Some(counters) = scheduler_counters.as_mut() {
+                counters.observe_queues(
+                    ready_heap.len(),
+                    ready_js.len(),
+                    pending_js_payloads.len(),
+                    in_flight,
+                );
+            }
         }
     });
+    if let Some(counters) = scheduler_counters.as_ref() {
+        counters.print_report(capacity);
+    }
     // Close our sender handle so any lingering clones in already-spawned
     // workers don't keep the channel open past the scope.
     drop(tx);

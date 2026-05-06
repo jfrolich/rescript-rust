@@ -26,6 +26,24 @@ Tella clean build counter report after adding lazy signature/component counters:
 
 Disabled-counter Tella `hyperfine`: `2.952s +/- 0.015s` over 20 runs, compared with the retained pre-counter baseline of about `2.918s +/- 0.070s`.
 
+## Scheduler Counter Baseline
+
+`RESCRIPT_SCHEDULER_COUNTERS=1` prints the in-process scheduler queue shape at the end of a build. It is disabled by default.
+
+Tella clean build scheduler counter report:
+
+- capacity: `24`
+- scheduled typecheck / JS: `2128 / 2127`
+- signature ready / pre-JS ready / completed: `2127 / 2127 / 2128`
+- JS scheduled while typecheck work was ready: `2104`
+- max ready typecheck / ready JS / pending JS / in-flight: `545 / 18 / 2 / 24`
+- blocked events with idle slots: `56`
+- max idle slots: `23`
+- dispatcher wait: `2453.038ms`
+- idle-slot wait: `202.217ms`
+
+Disabled-counter Tella `hyperfine` after adding scheduler counters: `2.959s +/- 0.019s` over 10 runs. A previous local `3.31s` no-diff run appears to have been transient machine noise, not retained code drift.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`
