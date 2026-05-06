@@ -5573,7 +5573,16 @@ fn force_qualified_value_type_paths<'a>(
             }
             TypeDesc::Tvariant(row) => {
                 let row_more = row.row_more;
-                let fields = row.row_fields.clone();
+                let mut field_args = Vec::new();
+                for (_, field) in &row.row_fields {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => field_args.push(*arg),
+                        RowField::Reither { types: args, .. } => {
+                            field_args.extend(args.iter().copied());
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
                 drop(desc);
                 visit(
                     tctx,
@@ -5587,38 +5596,19 @@ fn force_qualified_value_type_paths<'a>(
                     allow_non_stdlib_implicit_stdlib_inference,
                     seen,
                 );
-                for (_, field) in fields {
-                    match field {
-                        RowField::Rpresent(Some(arg)) => visit(
-                            tctx,
-                            env,
-                            arg,
-                            value_access_root_is_local,
-                            value_access_root,
-                            selected_module_path,
-                            selected_alias_targets,
-                            allow_stdlib_flat_parent_inference,
-                            allow_non_stdlib_implicit_stdlib_inference,
-                            seen,
-                        ),
-                        RowField::Reither { types: args, .. } => {
-                            for arg in args {
-                                visit(
-                                    tctx,
-                                    env,
-                                    arg,
-                                    value_access_root_is_local,
-                                    value_access_root,
-                                    selected_module_path,
-                                    selected_alias_targets,
-                                    allow_stdlib_flat_parent_inference,
-                                    allow_non_stdlib_implicit_stdlib_inference,
-                                    seen,
-                                );
-                            }
-                        }
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
-                    }
+                for arg in field_args {
+                    visit(
+                        tctx,
+                        env,
+                        arg,
+                        value_access_root_is_local,
+                        value_access_root,
+                        selected_module_path,
+                        selected_alias_targets,
+                        allow_stdlib_flat_parent_inference,
+                        allow_non_stdlib_implicit_stdlib_inference,
+                        seen,
+                    );
                 }
             }
             TypeDesc::Tpoly { body, vars } => {
