@@ -26,8 +26,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::Condvar;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -123,6 +121,18 @@ struct CompletionMsg {
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
+struct PreJsMsg {
+    module_name: String,
+    pre_js: rescript_compiler::driver::InProcessPreJsCompileResult,
+    needed_modules: Vec<String>,
+    interface_registry_update: Option<PendingRegistryUpdate>,
+    source_abs: PathBuf,
+    implementation_path: PathBuf,
+    has_interface: bool,
+    is_runtime: bool,
+    is_clean: bool,
+}
+
 struct SignatureReadyMsg {
     module_name: String,
     signature: rescript_compiler::types::Signature,
@@ -133,13 +143,13 @@ struct SignatureReadyMsg {
 
 enum WorkerMsg {
     SignatureReady(SignatureReadyMsg),
+    PreJsReady(PreJsMsg),
     Completed(CompletionMsg),
 }
 
 #[derive(Clone)]
 struct InProcessSchedulerHooks {
     tx: mpsc::Sender<WorkerMsg>,
-    completed_modules: Arc<(Mutex<AHashSet<String>>, Condvar)>,
     compile_universe: Arc<AHashSet<String>>,
 }
 
@@ -345,7 +355,7 @@ fn compile_one(
     dump_typed_sexp: bool,
     parent_span: Span,
     in_process_hooks: Option<InProcessSchedulerHooks>,
-) -> CompletionMsg {
+) -> WorkerMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
@@ -365,14 +375,14 @@ fn compile_one(
     };
 
     if !is_dirty {
-        return CompletionMsg {
+        return WorkerMsg::Completed(CompletionMsg {
             module_name: module_name.to_string(),
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: true,
             is_compiled: false,
             registry_updates: Vec::new(),
-        };
+        });
     }
 
     // In-process mode: bypass the bsc subprocess entirely and run the Rust
@@ -383,7 +393,7 @@ fn compile_one(
     if build_command_state.build_mode().is_in_process() {
         if let SourceType::SourceFile(_) = &module.source_type {
             let interface_generation_before = build_command_state.get_interface_generation(module_name);
-            let result = compile_module_in_process(
+            let result = compile_module_in_process_to_js_boundary(
                 package,
                 module,
                 module_name,
@@ -394,25 +404,26 @@ fn compile_one(
                 in_process_hooks.as_ref(),
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
-            let (result, registry_updates) = match result {
-                Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
-                Err(err) => (Err(err), Vec::new()),
-            };
-            let is_clean_interface = matches!(&result, Ok(None))
-                && interface_generation_before.is_some()
-                && interface_generation_before == interface_generation_after;
-            return CompletionMsg {
-                module_name: module_name.to_string(),
-                result,
-                interface_result: None,
-                is_clean: is_clean_interface,
-                is_compiled: true,
-                registry_updates,
+            return match result {
+                Ok(mut msg) => {
+                    let is_clean_interface = interface_generation_before.is_some()
+                        && interface_generation_before == interface_generation_after;
+                    msg.is_clean = is_clean_interface;
+                    WorkerMsg::PreJsReady(msg)
+                }
+                Err(err) => WorkerMsg::Completed(CompletionMsg {
+                    module_name: module_name.to_string(),
+                    result: Err(err),
+                    interface_result: None,
+                    is_clean: false,
+                    is_compiled: true,
+                    registry_updates: Vec::new(),
+                }),
             };
         }
     }
 
-    match &module.source_type {
+    WorkerMsg::Completed(match &module.source_type {
         SourceType::MlMap(_) => {
             // The mlmap is compiled during AST generation; the entry here just
             // marks it compiled so its namespace members can proceed.
@@ -478,7 +489,7 @@ fn compile_one(
                 registry_updates: Vec::new(),
             }
         }
-    }
+    })
 }
 
 /// Extract sexp output from bsc stderr.
@@ -665,14 +676,38 @@ pub fn compile(
     let mut completed: AHashSet<String> = AHashSet::new();
     let mut signature_ready: AHashSet<String> = AHashSet::new();
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
+    let mut ready_js: Vec<PreJsMsg> = Vec::new();
+    let mut pending_js_payloads: AHashMap<String, PreJsMsg> = AHashMap::new();
+    let mut pending_js_deps: AHashMap<String, usize> = AHashMap::new();
+    let mut waiting_js_by_dep: AHashMap<String, Vec<String>> = AHashMap::new();
     let mut has_errors = false;
     let mut stalled = false;
-    let completed_modules = Arc::new((Mutex::new(AHashSet::new()), Condvar::new()));
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
         loop {
             while in_flight < capacity && !has_errors {
+                if let Some(pre_js_msg) = ready_js.pop() {
+                    let module_name = pre_js_msg.module_name.clone();
+                    let tx = tx.clone();
+                    let inc_ref = &inc;
+                    let parent_span = compile_parent_span.clone();
+                    in_flight += 1;
+                    scope.spawn(move |_| {
+                        let msg = finish_in_process_js(
+                            build_state_ref,
+                            build_command_state_ref,
+                            pre_js_msg,
+                            parent_span,
+                        );
+                        if show_progress {
+                            inc_ref();
+                        }
+                        let _ = tx.send(WorkerMsg::Completed(msg));
+                    });
+                    trace!("scheduled in-process JS finish for {}", module_name);
+                    continue;
+                }
                 let Some(work) = ready_heap.pop() else { break };
                 let module_name = work.module_name.clone();
                 let is_dirty = dirty_set.contains(&module_name);
@@ -693,7 +728,6 @@ pub fn compile(
                 let parent_span = compile_parent_span.clone();
                 let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
                     tx: tx.clone(),
-                    completed_modules: completed_modules.clone(),
                     compile_universe: compile_universe.clone(),
                 });
                 scope.spawn(move |_| {
@@ -710,12 +744,12 @@ pub fn compile(
                         parent_span,
                         in_process_hooks,
                     );
-                    if show_progress {
+                    if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                         inc_ref();
                     }
                     // Receiver lives for the full scope, so send cannot fail
                     // unless the dispatcher has already hung up on purpose.
-                    let _ = tx.send(WorkerMsg::Completed(msg));
+                    let _ = tx.send(msg);
                 });
             }
 
@@ -753,6 +787,28 @@ pub fn compile(
                             is_clean,
                         );
                     }
+                    WorkerMsg::PreJsReady(msg) => {
+                        in_flight -= 1;
+                        let module_name = msg.module_name.clone();
+                        let pending_deps_for_js = msg
+                            .needed_modules
+                            .iter()
+                            .filter(|dep| !completed.contains(*dep))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if pending_deps_for_js.is_empty() {
+                            ready_js.push(msg);
+                        } else {
+                            pending_js_deps.insert(module_name.clone(), pending_deps_for_js.len());
+                            for dep in pending_deps_for_js {
+                                waiting_js_by_dep
+                                    .entry(dep)
+                                    .or_default()
+                                    .push(module_name.clone());
+                            }
+                            pending_js_payloads.insert(module_name, msg);
+                        }
+                    }
                     WorkerMsg::Completed(mut msg) => {
                         in_flight -= 1;
                         if in_process_mode {
@@ -760,9 +816,6 @@ pub fn compile(
                                 build_command_state_ref,
                                 std::mem::take(&mut msg.registry_updates),
                             );
-                            let (completed_lock, completed_cvar) = &*completed_modules;
-                            completed_lock.lock().unwrap().insert(msg.module_name.clone());
-                            completed_cvar.notify_all();
                         }
 
                         if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
@@ -772,6 +825,21 @@ pub fn compile(
                         let is_clean = msg.is_clean;
                         let finished_name = msg.module_name.clone();
                         completed.insert(finished_name.clone());
+
+                        if let Some(waiters) = waiting_js_by_dep.remove(&finished_name) {
+                            for waiter in waiters {
+                                let Some(count) = pending_js_deps.get_mut(&waiter) else {
+                                    continue;
+                                };
+                                *count -= 1;
+                                if *count == 0 {
+                                    pending_js_deps.remove(&waiter);
+                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
+                                        ready_js.push(payload);
+                                    }
+                                }
+                            }
+                        }
 
                         if in_process_mode {
                             let completed_without_signature =
@@ -2407,7 +2475,7 @@ fn runtime_compiler_options(
 /// after the worker returns, before dependents are scheduled. Actual compiler
 /// failures are returned as errors so the DAG scheduler stops dependents, like
 /// the bsc subprocess path does.
-fn compile_module_in_process(
+fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
     module: &Module,
     module_name: &str,
@@ -2416,7 +2484,7 @@ fn compile_module_in_process(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     scheduler_hooks: Option<&InProcessSchedulerHooks>,
-) -> Result<InProcessModuleResult> {
+) -> Result<PreJsMsg> {
     let _span = info_span!(
         "compiler.in_process_module",
         module = %module_name,
@@ -2429,16 +2497,14 @@ fn compile_module_in_process(
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {
-            return Ok(InProcessModuleResult {
-                warning: None,
-                registry_updates: Vec::new(),
-            });
+            return Err(anyhow!(
+                "in-process JS boundary requested for non-source module {module_name}"
+            ));
         } // MlMap handled elsewhere
     };
 
     let implementation_path = &source_file.implementation.path;
     let has_interface = source_file.interface.is_some();
-    let root_config = build_command_state.get_root_config();
 
     // Build compiler options from package config
     let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
@@ -2618,48 +2684,7 @@ fn compile_module_in_process(
             Ok(None)
         };
 
-    let before_js_hooks = scheduler_hooks.cloned();
-    let before_js_module_name = module_name.to_string();
-    let before_js_declared_deps = module.deps.clone();
-    let build_command_state_for_js = build_command_state;
-    let mut before_js_hook = move |possible_required_modules: &ahash::AHashSet<
-        rescript_compiler::js_ir::ModuleId,
-    >|
-          -> Result<Option<ModuleRegistry>> {
-        let Some(hooks) = before_js_hooks.as_ref() else {
-            return Ok(None);
-        };
-        let needed_modules = possible_required_modules
-            .iter()
-            .filter_map(|module| {
-                if !matches!(module.kind, rescript_compiler::js_ir::Kind::Ml) {
-                    return None;
-                }
-                let name = module.id.name();
-                (name != before_js_module_name
-                    && before_js_declared_deps.contains(name)
-                    && hooks.compile_universe.contains(name))
-                .then(|| name.to_string())
-            })
-            .collect::<Vec<_>>();
-        if needed_modules.is_empty() {
-            return Ok(None);
-        }
-
-        let (completed_lock, completed_cvar) = &*hooks.completed_modules;
-        let mut completed = completed_lock.lock().unwrap();
-        while needed_modules
-            .iter()
-            .any(|module_name| !completed.contains(module_name))
-        {
-            completed = completed_cvar.wait(completed).unwrap();
-        }
-        drop(completed);
-
-        Ok(Some(build_command_state_for_js.snapshot_module_registry()))
-    };
-
-    let compile_result = {
+    let pre_js = {
         let _impl_span = info_span!(
             "compiler.in_process_implementation",
             module = %module_name,
@@ -2676,13 +2701,7 @@ fn compile_module_in_process(
                     } else {
                         None
                     };
-                    let before_js_hook: Option<&mut rescript_compiler::driver::InProcessBeforeJsHook<'_>> =
-                        if scheduler_hooks.is_some() {
-                            Some(&mut before_js_hook)
-                        } else {
-                            None
-                        };
-                    rescript_compiler::driver::compile_preprocessed_structure_in_process_with_signature_hook(
+                    rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
                         &stored.arena,
                         &stored.structure,
                         &source_abs.to_string_lossy(),
@@ -2691,7 +2710,6 @@ fn compile_module_in_process(
                         &local_registry,
                         has_interface,
                         signature_hook,
-                        before_js_hook,
                     )
                 }
                 Some(StoredAst::Signature(_)) => panic!(
@@ -2706,7 +2724,7 @@ fn compile_module_in_process(
         }))
     };
 
-    let compile_result = match compile_result {
+    let pre_js = match pre_js {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
@@ -2722,98 +2740,6 @@ fn compile_module_in_process(
             return Err(anyhow!("Compilation panicked for {}: {}", module_name, msg));
         }
     };
-
-    // Update the shared registry. When a .resi exists, the interface remains
-    // the published signature; the implementation only contributes JS metadata.
-    let impl_fingerprint = compile_result
-        .pers_struct
-        .as_ref()
-        .map(|ps| ps.fingerprint)
-        .unwrap_or(0);
-    let is_pure = compile_result.is_pure;
-    let cmj_export_constants = compile_result.cmj_export_constants.clone();
-    let mut registry_updates = Vec::new();
-    let module_info = InMemoryModuleInfo {
-        source_path: source_abs.clone(),
-        is_pure,
-        cmj_export_constants,
-        is_runtime,
-    };
-    if has_interface {
-        // OCaml compiler/ml/typemod.ml:1742-1758 reads the interface `.cmi`
-        // for the inclusion check and does not replace it with the
-        // implementation signature. Alias rewrites from the `.res` body are
-        // therefore private, unlike inferred-signature aliases from the
-        // no-interface branch at typemod.ml:1779-1787.
-        if let Some(mut update) = interface_registry_update {
-            update.module_info = module_info;
-            registry_updates.push(update);
-        } else {
-            registry_updates.push(PendingRegistryUpdate {
-                module_name: module_name.to_string(),
-                pers_struct: None,
-                module_info,
-                alias_rewrites: AHashMap::new(),
-            });
-        }
-    } else if let Some(ps) = compile_result.pers_struct {
-        registry_updates.push(PendingRegistryUpdate {
-            module_name: module_name.to_string(),
-            pers_struct: Some(Arc::new(ps)),
-            module_info,
-            alias_rewrites: compile_result.new_alias_rewrites,
-        });
-    }
-
-    // Register the implementation's inferred signature if no .resi
-    if !has_interface && scheduler_hooks.is_none() {
-        build_command_state.register_in_memory_interface(
-            module_name.to_string(),
-            compile_result.signature,
-            impl_fingerprint,
-            is_pure,
-        );
-    }
-
-    // Step 3: Write only JS output (no compiler assets)
-    {
-        let _write_span = info_span!(
-            "compiler.write_js",
-            module = %module_name,
-            outputs = compile_result.js_outputs.len()
-        )
-        .entered();
-        write_compiled_js_outputs(
-            &compile_result.js_outputs,
-            &compile_result.js_output,
-            package,
-            implementation_path,
-            root_config,
-        )?;
-    }
-
-    // Execute js-post-build command if configured
-    if let Some(js_post_build) = &package.config.js_post_build {
-        for spec in root_config.get_package_specs() {
-            let suffix = root_config.get_suffix(&spec);
-            let js_file = if spec.in_source {
-                helpers::get_source_file_from_rescript_file(
-                    &Path::new(&package.path).join(implementation_path),
-                    &suffix,
-                )
-            } else {
-                let out_dir = spec.get_out_of_source_dir();
-                let js_relative = helpers::get_source_file_from_rescript_file(implementation_path, &suffix);
-                Path::new(&package.path)
-                    .join("lib")
-                    .join(out_dir)
-                    .join(js_relative)
-            };
-            if js_file.exists() {
-                execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
-            }
-        }
-    }
 
     if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
         let timings = guard.snapshot();
@@ -2841,6 +2767,191 @@ fn compile_module_in_process(
             duration_ms(codegen),
             duration_ms(overhead)
         );
+    }
+
+    let needed_modules = scheduler_hooks
+        .map(|hooks| {
+            pre_js
+                .possible_required_modules
+                .iter()
+                .filter_map(|required_module| {
+                    if !matches!(required_module.kind, rescript_compiler::js_ir::Kind::Ml) {
+                        return None;
+                    }
+                    let name = required_module.id.name();
+                    (name != module_name
+                        && module.deps.contains(name)
+                        && hooks.compile_universe.contains(name))
+                    .then(|| name.to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(PreJsMsg {
+        module_name: module_name.to_string(),
+        pre_js,
+        needed_modules,
+        interface_registry_update,
+        source_abs,
+        implementation_path: implementation_path.to_path_buf(),
+        has_interface,
+        is_runtime,
+        is_clean: false,
+    })
+}
+
+fn finish_in_process_js(
+    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
+    pre_js_msg: PreJsMsg,
+    parent_span: Span,
+) -> CompletionMsg {
+    let module_name = pre_js_msg.module_name.clone();
+    let is_clean = pre_js_msg.is_clean;
+    let result = finish_in_process_js_inner(build_state, build_command_state, pre_js_msg, parent_span);
+    let (result, registry_updates) = match result {
+        Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
+        Err(err) => (Err(err), Vec::new()),
+    };
+    CompletionMsg {
+        module_name,
+        result,
+        interface_result: None,
+        is_clean,
+        is_compiled: true,
+        registry_updates,
+    }
+}
+
+fn finish_in_process_js_inner(
+    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
+    pre_js_msg: PreJsMsg,
+    parent_span: Span,
+) -> Result<InProcessModuleResult> {
+    let module = build_state.get_module(&pre_js_msg.module_name).unwrap();
+    let package = build_state
+        .get_package(&module.package_name)
+        .expect("Package not found");
+    let _span = if tracing::enabled!(tracing::Level::INFO) {
+        info_span!(
+            parent: &parent_span,
+            "build.finish_in_process_js",
+            module = %pre_js_msg.module_name,
+            package = %package.name,
+        )
+        .entered()
+    } else {
+        Span::none().entered()
+    };
+    let root_config = build_command_state.get_root_config();
+    let options = build_compiler_options(
+        package,
+        &pre_js_msg.module_name,
+        &pre_js_msg.implementation_path,
+        build_state,
+    )?;
+    let registry_snapshot = build_command_state.snapshot_module_registry();
+    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rescript_compiler::driver::finish_preprocessed_structure_in_process_from_js_boundary(
+            pre_js_msg.pre_js,
+            &options,
+            &registry_snapshot,
+        )
+    }));
+    let compile_result = match compile_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            return Err(anyhow!(
+                "JS compilation failed for {}: {}",
+                pre_js_msg.module_name,
+                e
+            ));
+        }
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            return Err(anyhow!(
+                "JS compilation panicked for {}: {}",
+                pre_js_msg.module_name,
+                msg
+            ));
+        }
+    };
+
+    let is_pure = compile_result.is_pure;
+    let cmj_export_constants = compile_result.cmj_export_constants.clone();
+    let module_info = InMemoryModuleInfo {
+        source_path: pre_js_msg.source_abs.clone(),
+        is_pure,
+        cmj_export_constants,
+        is_runtime: pre_js_msg.is_runtime,
+    };
+    let mut registry_updates = Vec::new();
+    if pre_js_msg.has_interface {
+        if let Some(mut update) = pre_js_msg.interface_registry_update {
+            update.module_info = module_info;
+            registry_updates.push(update);
+        } else {
+            registry_updates.push(PendingRegistryUpdate {
+                module_name: pre_js_msg.module_name.clone(),
+                pers_struct: None,
+                module_info,
+                alias_rewrites: AHashMap::new(),
+            });
+        }
+    } else if let Some(ps) = compile_result.pers_struct {
+        registry_updates.push(PendingRegistryUpdate {
+            module_name: pre_js_msg.module_name.clone(),
+            pers_struct: Some(Arc::new(ps)),
+            module_info,
+            alias_rewrites: compile_result.new_alias_rewrites,
+        });
+    }
+
+    {
+        let _write_span = info_span!(
+            "compiler.write_js",
+            module = %pre_js_msg.module_name,
+            outputs = compile_result.js_outputs.len()
+        )
+        .entered();
+        write_compiled_js_outputs(
+            &compile_result.js_outputs,
+            &compile_result.js_output,
+            package,
+            &pre_js_msg.implementation_path,
+            root_config,
+        )?;
+    }
+
+    if let Some(js_post_build) = &package.config.js_post_build {
+        for spec in root_config.get_package_specs() {
+            let suffix = root_config.get_suffix(&spec);
+            let js_file = if spec.in_source {
+                helpers::get_source_file_from_rescript_file(
+                    &Path::new(&package.path).join(&pre_js_msg.implementation_path),
+                    &suffix,
+                )
+            } else {
+                let out_dir = spec.get_out_of_source_dir();
+                let js_relative =
+                    helpers::get_source_file_from_rescript_file(&pre_js_msg.implementation_path, &suffix);
+                Path::new(&package.path)
+                    .join("lib")
+                    .join(out_dir)
+                    .join(js_relative)
+            };
+            if js_file.exists() {
+                execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
+            }
+        }
     }
 
     Ok(InProcessModuleResult {

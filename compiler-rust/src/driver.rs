@@ -3300,6 +3300,24 @@ pub struct InProcessCompileResult {
     pub lambda_sexp: String,
 }
 
+/// Owned in-process compilation state after typechecking and Lambda lowering,
+/// before JS backend metadata from dependencies is required.
+pub struct InProcessPreJsCompileResult {
+    pub lowered_lambda: crate::lambda::Lambda,
+    pub possible_required_modules: AHashSet<ModuleId>,
+    pub file_directives: Vec<String>,
+    pub debug: bool,
+    pub jsx_preserve: bool,
+    pub signature: crate::types::decl::Signature,
+    pub pers_struct: Option<PortablePersStruct>,
+    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    /// Intermediate-representation sexps, populated when
+    /// `CompilerOptions::capture_intermediates` is true (for the playground).
+    pub typed_tree_sexp: String,
+    pub raw_lambda_sexp: String,
+    pub lambda_sexp: String,
+}
+
 /// Signature payload produced after in-process implementation typechecking but
 /// before Lambda/JS compilation. Rewatch uses this to unblock dependent
 /// typechecking while preserving OCaml's save-before-translation order
@@ -3518,6 +3536,36 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     mut before_js: Option<&mut InProcessBeforeJsHook<'_>>,
 ) -> Result<InProcessCompileResult> {
+    let pre_js = compile_preprocessed_structure_in_process_until_js(
+        arena,
+        structure,
+        filename,
+        module_name,
+        options,
+        registry,
+        has_interface,
+        signature_ready.as_deref_mut(),
+    )?;
+
+    let refreshed_registry = if let Some(hook) = before_js.as_deref_mut() {
+        hook(&pre_js.possible_required_modules)?
+    } else {
+        None
+    };
+    let js_registry = refreshed_registry.as_ref().unwrap_or(registry);
+    finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
+}
+
+pub fn compile_preprocessed_structure_in_process_until_js(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+) -> Result<InProcessPreJsCompileResult> {
     let _span = info_span!(
         "compiler.in_process_compile",
         module = %module_name,
@@ -3711,19 +3759,6 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 raw_lambda_current_stamp,
             )
         });
-    if let Some(hook) = before_js.as_deref_mut()
-        && let Some(refreshed_registry) = hook(&possible_required_modules)?
-    {
-        let mut refreshed_env = PersistentEnv::from_registry(&refreshed_registry);
-        refreshed_env.set_load_path(load_path.clone());
-        refreshed_env.set_open_modules(options.open_modules.clone());
-        refreshed_env.set_jsx_version(options.jsx_version);
-        refreshed_env.set_nopervasives(options.nopervasives);
-        refreshed_env.set_compiling_module(options.module_name.clone());
-        refreshed_env.unregister_in_memory_signature(module_name);
-        tctx.persistent_env = Some(refreshed_env);
-    }
-
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -3750,7 +3785,44 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         String::new()
     };
 
-    let persistent_env_for_js = tctx.persistent_env.clone();
+    Ok(InProcessPreJsCompileResult {
+        lowered_lambda,
+        possible_required_modules,
+        file_directives,
+        debug,
+        jsx_preserve,
+        signature: published_signature,
+        pers_struct,
+        new_alias_rewrites,
+        typed_tree_sexp,
+        raw_lambda_sexp,
+        lambda_sexp,
+    })
+}
+
+pub fn finish_preprocessed_structure_in_process_from_js_boundary(
+    pre_js: InProcessPreJsCompileResult,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<InProcessCompileResult> {
+    let _span = info_span!(
+        "compiler.in_process_js_finish",
+        module = options.module_name.as_deref().unwrap_or(""),
+        skip_js_render = options.skip_js_render,
+        js_targets = options.js_output_targets.len()
+    )
+    .entered();
+    let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
+    let load_path = build_load_path(options);
+    persistent_env_for_js.set_load_path(load_path);
+    persistent_env_for_js.set_open_modules(options.open_modules.clone());
+    persistent_env_for_js.set_jsx_version(options.jsx_version);
+    persistent_env_for_js.set_nopervasives(options.nopervasives);
+    persistent_env_for_js.set_compiling_module(options.module_name.clone());
+    if let Some(module_name) = options.module_name.as_deref() {
+        persistent_env_for_js.unregister_in_memory_signature(module_name);
+    }
+    let persistent_env_for_js = Some(persistent_env_for_js);
     let js_targets = effective_js_output_targets(options);
     let primary_target = js_targets.first();
     let primary_output_path = primary_target
@@ -3760,7 +3832,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         .map(|target| target.module_format)
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
-    let mut lowered_lambda = Some(lowered_lambda);
+    let mut lowered_lambda = Some(pre_js.lowered_lambda);
     let (program, module_path_resolver) = {
         let _phase = info_span!(
             "compiler.js_compile",
@@ -3772,24 +3844,24 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for multiple JS targets"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             )
         } else {
             compile_js_program_for_output_owned(
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             )
         }
     };
@@ -3809,12 +3881,12 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 Some(&target.path),
                 Some(target.module_format),
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             );
             rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
         }
@@ -3835,9 +3907,9 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
             let mut primary_js = print_deps_program_with_directives_and_options(
                 &primary_program,
                 Some(&primary_resolver),
-                &file_directives,
-                debug,
-                jsx_preserve,
+                &pre_js.file_directives,
+                pre_js.debug,
+                pre_js.jsx_preserve,
                 !options.no_version_header,
             );
             let mut js_outputs = Vec::new();
@@ -3860,9 +3932,9 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 let code = print_deps_program_with_directives_and_options(
                     &program,
                     Some(&module_path_resolver),
-                    &file_directives,
-                    debug,
-                    jsx_preserve,
+                    &pre_js.file_directives,
+                    pre_js.debug,
+                    pre_js.jsx_preserve,
                     !options.no_version_header,
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
@@ -3874,14 +3946,14 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     Ok(InProcessCompileResult {
         js_output: js,
         js_outputs,
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
+        signature: pre_js.signature,
+        pers_struct: pre_js.pers_struct,
+        new_alias_rewrites: pre_js.new_alias_rewrites,
         is_pure,
         cmj_export_constants,
-        typed_tree_sexp,
-        raw_lambda_sexp,
-        lambda_sexp,
+        typed_tree_sexp: pre_js.typed_tree_sexp,
+        raw_lambda_sexp: pre_js.raw_lambda_sexp,
+        lambda_sexp: pre_js.lambda_sexp,
     })
 }
 
