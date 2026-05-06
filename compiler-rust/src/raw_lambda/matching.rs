@@ -4694,7 +4694,7 @@ fn matcher_constr_arity1(
                                 None,
                             ),
                             pat_loc: LocIdx::none(),
-                            pat_extra: Vec::new(),
+                            pat_extra: Default::default(),
                             pat_type: a1.pat_type,
                             pat_env: a1.pat_env,
                             pat_attributes: Attributes::new(),

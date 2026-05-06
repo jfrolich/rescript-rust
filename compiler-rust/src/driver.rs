@@ -4174,7 +4174,7 @@ mod tests {
             vb_pat: Pattern {
                 pat_desc: PatternDesc::Tpat_var(binding_id, Located::mknoloc("x".to_string())),
                 pat_loc: LocIdx::none(),
-                pat_extra: Vec::new(),
+                pat_extra: Default::default(),
                 pat_type: TypeExprRef::null(),
                 pat_env: EnvRef(0),
                 pat_attributes: Attributes::new(),
@@ -4182,7 +4182,7 @@ mod tests {
             vb_expr: Expression {
                 exp_desc: ExpressionDesc::Texp_constant(crate::types::typedtree::Constant::Int(1)),
                 exp_loc: LocIdx::none(),
-                exp_extra: Vec::new(),
+                exp_extra: Default::default(),
                 exp_type: TypeExprRef::null(),
                 exp_env: EnvRef(0),
                 exp_attributes: Attributes::new(),
@@ -4204,7 +4204,7 @@ mod tests {
                 },
             ),
             exp_loc: LocIdx::none(),
-            exp_extra: Vec::new(),
+            exp_extra: Default::default(),
             exp_type: TypeExprRef::null(),
             exp_env: EnvRef(0),
             exp_attributes: Attributes::new(),

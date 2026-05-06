@@ -2812,7 +2812,8 @@ fn type_pattern_inner(
                     crate::types::typedtree::PatExtra::Tpat_type(path, *lid),
                     loc,
                     pat.ppat_attributes.clone(),
-                )],
+                )]
+                .into(),
                 ..or_pat
             };
             Ok(result)
@@ -4319,7 +4320,7 @@ fn type_pattern_constraint(
                     name,
                 ),
                 pat_type: constraint_ty,
-                pat_extra: vec![constraint_extra],
+                pat_extra: vec![constraint_extra].into(),
                 ..typed_inner
             }
         }
@@ -4329,7 +4330,7 @@ fn type_pattern_constraint(
             let mut extras = Vec::with_capacity(typed_inner.pat_extra.len() + 1);
             extras.push(constraint_extra);
             extras.extend(typed_inner.pat_extra.into_iter());
-            typed_inner.pat_extra = extras;
+            typed_inner.pat_extra = extras.into();
             typed_inner
         }
     };
@@ -4405,7 +4406,7 @@ fn type_pattern_constraint_poly_var(
                 pat_type: ctype_ty,
                 pat_env: tctx.type_ctx.store_typed_env(env),
                 pat_attributes: Attributes::new(),
-                pat_extra: vec![constraint_extra],
+                pat_extra: vec![constraint_extra].into(),
             })
         }
         _ => {
@@ -14423,7 +14424,7 @@ fn type_constraint(
         attributes.to_vec().into(),
     ));
     extras.extend(result.exp_extra.into_iter());
-    result.exp_extra = extras;
+    result.exp_extra = extras.into();
     Ok(result)
 }
 
@@ -14438,7 +14439,7 @@ fn prepend_exp_extra(
     let mut extras = Vec::with_capacity(expr.exp_extra.len() + 1);
     extras.push((extra, loc, attrs));
     extras.extend(expr.exp_extra.into_iter());
-    expr.exp_extra = extras;
+    expr.exp_extra = extras.into();
     expr
 }
 

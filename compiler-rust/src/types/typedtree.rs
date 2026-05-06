@@ -28,9 +28,111 @@ use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
+use std::ops::Deref;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
+
+/// Sparse storage for typedtree extras.
+///
+/// Most typed expressions and patterns have no extras. Store that common case
+/// as `None` instead of carrying an inline empty Vec on every node; callers
+/// still see slice/iterator semantics so the external typedtree shape is
+/// unchanged.
+#[derive(Debug, Clone)]
+pub struct SparseExtras<T> {
+    items: Option<Box<[T]>>,
+}
+
+impl<T> SparseExtras<T> {
+    /// Create an empty extras list.
+    pub fn new() -> Self {
+        Self { items: None }
+    }
+
+    /// Create extras from a Vec, preserving order.
+    pub fn from_vec(items: Vec<T>) -> Self {
+        if items.is_empty() {
+            Self::new()
+        } else {
+            Self {
+                items: Some(items.into_boxed_slice()),
+            }
+        }
+    }
+
+    /// Append one extra item.
+    pub fn push(&mut self, item: T) {
+        match self.items.take() {
+            None => {
+                self.items = Some(vec![item].into_boxed_slice());
+            }
+            Some(items) => {
+                let mut items = Vec::from(items);
+                items.push(item);
+                self.items = Some(items.into_boxed_slice());
+            }
+        }
+    }
+
+    /// Iterate over extras in typedtree order.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.deref().iter()
+    }
+
+    /// Number of extras.
+    pub fn len(&self) -> usize {
+        self.deref().len()
+    }
+
+    /// True when there are no extras.
+    pub fn is_empty(&self) -> bool {
+        self.deref().is_empty()
+    }
+
+    /// Convert back to a Vec for callers that need ownership.
+    pub fn into_vec(self) -> Vec<T> {
+        self.items.map(Vec::from).unwrap_or_default()
+    }
+}
+
+impl<T> Default for SparseExtras<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> From<Vec<T>> for SparseExtras<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self::from_vec(items)
+    }
+}
+
+impl<T> Deref for SparseExtras<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.items.as_deref().unwrap_or(&[])
+    }
+}
+
+impl<T> IntoIterator for SparseExtras<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SparseExtras<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 // ============================================================================
 // Constants
@@ -76,7 +178,7 @@ pub struct Pattern {
     /// Source location.
     pub pat_loc: LocIdx,
     /// Extra information (constraints, unpacks, etc.).
-    pub pat_extra: Vec<(PatExtra, LocIdx, Attributes)>,
+    pub pat_extra: SparseExtras<(PatExtra, LocIdx, Attributes)>,
     /// Type of the pattern.
     pub pat_type: TypeExprRef,
     /// Environment at this pattern.
@@ -150,7 +252,7 @@ pub struct Expression {
     /// Source location.
     pub exp_loc: LocIdx,
     /// Extra information (constraints, opens, newtypes, etc.).
-    pub exp_extra: Vec<(ExpExtra, LocIdx, Attributes)>,
+    pub exp_extra: SparseExtras<(ExpExtra, LocIdx, Attributes)>,
     /// Type of the expression.
     pub exp_type: TypeExprRef,
     /// Environment at this expression.
@@ -1041,7 +1143,7 @@ impl Pattern {
         Pattern {
             pat_desc: desc,
             pat_loc: loc,
-            pat_extra: Vec::new(),
+            pat_extra: SparseExtras::new(),
             pat_type: ty,
             pat_env: env,
             pat_attributes: attributes,
@@ -1067,7 +1169,7 @@ impl Expression {
         Expression {
             exp_desc: desc,
             exp_loc: loc,
-            exp_extra: Vec::new(),
+            exp_extra: SparseExtras::new(),
             exp_type: ty,
             exp_env: env,
             exp_attributes: attributes,
