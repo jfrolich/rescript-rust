@@ -4,8 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: pending local-root qualified record-label cache commit
+- Commit: `ec5c9803f` (`Cache local-root record label qualification`)
 - Tella `hyperfine`: `2.848s +/- 0.021s` over 20 runs, range `2.817s..2.886s`
+- A later same-commit benchmark during heavy system load reported `3.031s +/- 0.048s`, range `2.853s..3.080s`, while `uptime` showed load averages above 30 from macOS background services. Treat that run as contaminated; the minimum still matched the retained baseline band.
 - Previous retained baseline: `2.941s +/- 0.017s` over 20 runs at `127969d9d`
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
@@ -90,6 +91,28 @@ Conclusion: normal-compile local-root caching removes about 25k repeated label-q
 - `packages/core/webapp/src/frontend/UI__BackgroundPicker.res`
 - `packages/core/webapp/src/frontend/Page__Stories.res`
 
+## Module JS-Finish Timing
+
+`RESCRIPT_MODULE_TIMINGS=1` now also prints `[module-js-timing]` for the JS-finish boundary. This complements the existing `[module-timing]`, which stops at the pre-JS boundary.
+
+Latest Tella aggregate phase timing under the timing env:
+
+- parse: `3096.915ms`
+- typecheck: `26873.041ms`
+- lambda: `6717.244ms`
+- lambda optimization: `2706.099ms`
+- codegen: `2539.902ms`
+
+Top non-Icon JS-finish/codegen files from that run:
+
+- `Css`: codegen `64.058ms`, JS-finish wall `86.389ms`
+- `Editor__Timeline__Layout2`: codegen `59.005ms`, JS-finish wall `61.812ms`
+- `UI__LayoutPickerStructured`: codegen `54.501ms`, JS-finish wall `60.694ms`
+- `CssJs`: codegen `51.715ms`, JS-finish wall `81.670ms`
+- `Css_Legacy_Core`: codegen `44.558ms`, JS-finish wall `110.626ms`
+
+Conclusion: for the current Tella shape, JS finish is visible but not the main bottleneck. Typecheck/signature/env work still dominates aggregate CPU time, with Lambda/lowering second.
+
 ## Retained Ideas
 
 - CSS files contain many polymorphic-variant spreads and row traversals. The retained row-field traversal change avoided cloning full variant-row maps while forcing qualified value type paths.
@@ -109,3 +132,4 @@ Conclusion: normal-compile local-root caching removes about 25k repeated label-q
 - Storing cached qualified module-component views behind one outer `Arc` reduced the number of handle clones on cache hits, but Tella `hyperfine` did not improve (`3.314s +/- 0.856s` over 20 runs, best `3.090s`, with one large outlier). It was reverted because it only reduced cache-hit bookkeeping, not the underlying semantic work.
 - Skipping row-field sorting for already-sorted large polymorphic-variant rows produced a plausible Tella timing (`3.033s +/- 0.032s` over 20 runs, best `2.992s`) but regressed JS output parity to `659/660` by changing `src/js_re_test.res` output. It was reverted; the rebuilt retained binary returned to `660/660`.
 - Borrowed iterators for record-label environment lookup removed temporary `Vec<&LabelDescription>` allocations in hot disambiguation paths and passed JS output parity plus a clean Tella compile, but did not improve Tella `hyperfine` (`2.958s +/- 0.074s` over 20 runs, with outliers) versus the retained same-session baseline (`2.954s +/- 0.019s` over 10 runs). It was reverted because the allocation skip was not on the wall-clock path.
+- Sharing persistent-root qualified record-label cache entries across envs improved the counter shape (`hits=126002`, `misses=49883`, `uncached_local_root=0`) but regressed Tella `hyperfine` to `2.986s +/- 0.062s` over 20 runs, range `2.912s..3.088s`, while the retained local-root-only cache had previously measured `2.848s +/- 0.021s`. It was reverted; the extra shared lookup/branching did not skip enough work to pay for itself.

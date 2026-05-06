@@ -2960,6 +2960,9 @@ fn finish_in_process_js_inner(
     pre_js_msg: PreJsMsg,
     parent_span: Span,
 ) -> Result<InProcessModuleResult> {
+    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_start = module_timing_enabled.then(Instant::now);
+    let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
     let module = build_state.get_module(&pre_js_msg.module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
@@ -3014,6 +3017,7 @@ fn finish_in_process_js_inner(
             ));
         }
     };
+    let js_output_count = compile_result.js_outputs.len();
 
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
@@ -3045,6 +3049,7 @@ fn finish_in_process_js_inner(
         });
     }
 
+    let mut write_duration = Duration::default();
     {
         let _write_span = info_span!(
             "compiler.write_js",
@@ -3052,6 +3057,7 @@ fn finish_in_process_js_inner(
             outputs = compile_result.js_outputs.len()
         )
         .entered();
+        let write_start = module_timing_enabled.then(Instant::now);
         write_compiled_js_outputs(
             &compile_result.js_outputs,
             &compile_result.js_output,
@@ -3059,6 +3065,9 @@ fn finish_in_process_js_inner(
             &pre_js_msg.implementation_path,
             root_config,
         )?;
+        if let Some(write_start) = write_start {
+            write_duration = write_start.elapsed();
+        }
     }
 
     if let Some(js_post_build) = &package.config.js_post_build {
@@ -3082,6 +3091,23 @@ fn finish_in_process_js_inner(
                 execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
             }
         }
+    }
+
+    if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
+        let timings = guard.snapshot();
+        let wall = start.elapsed();
+        let codegen = timings.codegen;
+        let overhead = wall.saturating_sub(codegen.saturating_add(write_duration));
+        eprintln!(
+            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={}",
+            pre_js_msg.module_name,
+            package.name,
+            duration_ms(wall),
+            duration_ms(codegen),
+            duration_ms(write_duration),
+            duration_ms(overhead),
+            js_output_count
+        );
     }
 
     Ok(InProcessModuleResult {

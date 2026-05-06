@@ -46,6 +46,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [ ] **4. Move Lambda/JS IR to indexed arenas before typedtree.**
   Lambda still uses recursive owned trees and gets traversed/transformed repeatedly. Arena/index Lambda is likely a higher-impact local-work target than a full typedtree arena.
   - [ ] Count Lambda nodes, clone/rebuild sites, and pass traversal costs on slow non-Icon files.
+  - [x] Add per-module JS-finish timing so Lambda/codegen/write costs are visible after the typecheck boundary.
   - [ ] Design a Lambda arena/index layer that preserves current output ordering.
   - [ ] Port one high-traffic Lambda pass to arena-backed traversal as a measured slice.
   - [ ] Extend to JS IR or direct/chunked emission only after Lambda wins are retained.
@@ -95,5 +96,5 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [ ] Profile current Tella after excluding Icon analytically from the top-module list.
 - [x] Inspect CSS polymorphic-variant-heavy files for avoidable broad row/signature forcing.
 - [x] Inspect Layout/JSX-heavy files for record/label/signature lookup amplification.
-- [ ] Inspect Lambda conversion and optimization costs in `Layout`, `Css_Legacy_Core`, and JSX-heavy modules.
+- [x] Inspect Lambda conversion, JS finish, and write costs in `Layout`, `Css_Legacy_Core`, and JSX-heavy modules.
 - [ ] Keep `Icon` visible in total build timing, but do not optimize only for Icon-shaped sparse JSX records.
