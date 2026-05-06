@@ -69,6 +69,16 @@ more like OCaml's lazy cached module-components model.
 | [CORPUS_BASELINE.md](./typechecker-performance/CORPUS_BASELINE.md) | Canonical 657-file benchmark baseline, slower-file clusters, and fix directions |
 | [IMPORT_RES_PERFORMANCE_HANDOFF.md](./typechecker-performance/IMPORT_RES_PERFORMANCE_HANDOFF.md) | Link to the detailed investigation and fix guidance |
 
+### [in-process-performance](./in-process-performance/)
+
+Performance engineering for clean in-process builds through `rewatch` and the Rust compiler. Tella is the current benchmark target, with priority on shared immutable signatures, lazy env/component views, critical-path scheduler work, module-registry snapshots, Lambda/JS IR allocation, and non-Icon slow files.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./in-process-performance/PLAN.md) | Scope, success criteria, priority order, and benchmark command |
+| [RALPH_TODO.md](./in-process-performance/RALPH_TODO.md) | Active performance checklist and validation gates |
+| [SCRATCHPAD.md](./in-process-performance/SCRATCHPAD.md) | Current measurements, slow-file notes, retained ideas, and rejected experiments |
+
 ### [raw-lambda-parity](./raw-lambda-parity/)
 
 Achieve full unoptimized lambda parity between the Rust and OCaml compilers. Focuses on building a real OCaml-aligned raw lambda stage, grouped match compilation from `matching.ml`, and module/coercion lowering from `translmod.ml`. Current baseline: 657/657 files, 0 hunks.
