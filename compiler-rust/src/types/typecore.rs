@@ -18404,8 +18404,22 @@ impl Env {
             }
 
             if let Path::Pdot(parent, submod_name, _) = path {
-                if let Some((_, access_path, sub_md)) =
-                    lookup_module_in_resolved_path(parent, submod_name.as_str(), env, pers_env, ctx)
+                // OCaml compiler/ml/env.ml:1573-1578 builds child component
+                // tables from the selected alias path. Rust can additionally
+                // see flattened backing paths such as `Layout__Types.Component`;
+                // when that happens while resolving an alias component, inspect
+                // the parent signature below instead of forcing env.ml:865-882's
+                // `find_module` path for the backing child declaration.
+                let flattened_alias_component_child =
+                    flattened_alias_component_parent(parent, pers_env.as_ref(), ctx);
+                if !flattened_alias_component_child
+                    && let Some((_, access_path, sub_md)) = lookup_module_in_resolved_path(
+                        parent,
+                        submod_name.as_str(),
+                        env,
+                        pers_env,
+                        ctx,
+                    )
                 {
                     let self_alias = matches!(
                         &sub_md.md_type,
@@ -22046,6 +22060,26 @@ fn build_module_components_from_parent_path<'a>(
         }
     })
     .flatten()
+}
+
+fn flattened_alias_component_parent<'a>(
+    parent: &Path,
+    pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext<'a>,
+) -> bool {
+    // OCaml compiler/ml/env.ml:1440-1446 only scrapes explicit aliases.
+    // Namespace-flattened heads are Rust/ReScript backing units, so skip the
+    // eager child lookup above only for known flattened alias components. Other
+    // persistent heads, e.g. `Stdlib_Date`, still need env.ml:865-882 lookup.
+    let head = parent.head();
+    head.is_persistent()
+        && head.name().contains("__")
+        && head.name() != "Stdlib"
+        && head.name() != "Pervasives"
+        && pers_env
+            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
+            .or_else(|| ctx.find_flattened_alias_component_path(head.name()))
+            .is_some()
 }
 
 pub(crate) fn with_resolved_module_components_for_path<'a, R>(
