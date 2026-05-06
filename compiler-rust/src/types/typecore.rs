@@ -34,6 +34,7 @@ use crate::parser::ast::{
     PexpFun, RecFlag,
 };
 use crate::parser::longident::Longident;
+use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, ValueBinding,
 };
@@ -5220,16 +5221,15 @@ fn force_qualified_value_type_paths<'a>(
         selected_alias_targets: &[Path],
         allow_stdlib_flat_parent_inference: bool,
         allow_non_stdlib_implicit_stdlib_inference: bool,
-        seen: &mut Vec<TypeExprRef>,
+        seen: &mut TypeExprRefSet,
     ) {
         let ctx = tctx.type_ctx;
         let ty = ctx.repr(ty);
-        if seen.iter().any(|seen_ty| *seen_ty == ty) {
+        if !seen.insert(ty) {
             return;
         }
-        seen.push(ty);
 
-        let desc = ctx.get_desc(ty);
+        let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tarrow { arg, ret, .. } => {
                 let arg_ty = arg.typ;
@@ -5761,7 +5761,7 @@ fn force_qualified_value_type_paths<'a>(
     } else {
         Vec::new()
     };
-    let mut seen = Vec::new();
+    let mut seen = TypeExprRefSet::new();
     visit(
         tctx,
         env,
