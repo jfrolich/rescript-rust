@@ -361,7 +361,7 @@ pub(crate) struct QualifiedModuleComponents {
     // table. Rust clones component views out of the global cache before
     // running callbacks, so the forced-declaration memo must be shared by
     // those clones to preserve the same lazy identifier-renaming order.
-    qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
+    qualified_modules: Arc<RefCell<HashMap<String, (Ident, Arc<ModuleDeclaration>)>>>,
     qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
     // OCaml keeps `comp_components` lazy (compiler/ml/env.ml:1573-1578).
     // Cache forced child component thunks by name, including misses, so a
@@ -642,11 +642,11 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_qualified_module(
+    pub(crate) fn lookup_qualified_module_shared(
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
-    ) -> Option<(usize, Ident, ModuleDeclaration)> {
+    ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
         let (idx, runtime_pos) = *self.modules.get(name)?;
         if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
             return Some((runtime_pos, id, md));
@@ -679,11 +679,21 @@ impl QualifiedModuleComponents {
             &self.access_path,
             ctx,
         );
+        let md = Arc::new(md);
         self.qualified_modules
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), md.clone()));
         ctx.register_qualified_module_decl(self.access_path.as_ref(), name, id.clone(), md.clone());
         Some((runtime_pos, id, md))
+    }
+
+    pub(crate) fn lookup_qualified_module(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ModuleDeclaration)> {
+        self.lookup_qualified_module_shared(name, ctx)
+            .map(|(runtime_pos, id, md)| (runtime_pos, id, md.as_ref().clone()))
     }
 
     pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {

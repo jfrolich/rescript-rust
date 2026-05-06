@@ -18902,6 +18902,7 @@ impl Env {
                                     parent,
                                     ctx,
                                 );
+                                let md = std::sync::Arc::new(md);
                                 ctx.register_qualified_module_decl(
                                     parent,
                                     submod_name.as_str(),
@@ -22211,7 +22212,7 @@ fn with_resolved_child_module_components<'a, R>(
             // env.ml:1440-1446 when building the child component table. Keep this
             // eager force limited to the implicit Stdlib cases where OCaml reaches
             // the module-declaration thunk through normalize/manifest expansion.
-            let _ = parent_components.lookup_qualified_module(child_name, ctx);
+            let _ = parent_components.lookup_qualified_module_shared(child_name, ctx);
         }
         let access_path = if parent_components.access_path().head().is_persistent()
             || parent_components.access_path().head().stamp() == 0
@@ -23374,7 +23375,7 @@ pub(crate) fn alias_target_for_module_path<'a>(
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
                 components
-                    .lookup_qualified_module(module_name.as_str(), ctx)
+                    .lookup_qualified_module_shared(module_name.as_str(), ctx)
                     .and_then(|(_, _, md)| match &md.md_type {
                         crate::types::decl::ModuleType::MtyAlias(_, target)
                         | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),

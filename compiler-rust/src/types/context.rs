@@ -333,7 +333,10 @@ pub struct TypeContext {
 
     /// Cached forced module declarations from qualified component tables.
     qualified_module_decl_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Ident, super::decl::ModuleDeclaration)>>,
+        ahash::AHashMap<
+            Path,
+            ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
+        >,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
@@ -849,7 +852,7 @@ impl TypeContext {
         parent_path: &Path,
         child_name: &str,
         id: Ident,
-        md: super::decl::ModuleDeclaration,
+        md: Arc<super::decl::ModuleDeclaration>,
     ) {
         self.qualified_module_decl_cache
             .borrow_mut()
@@ -863,7 +866,7 @@ impl TypeContext {
         &self,
         parent_path: &Path,
         child_name: &str,
-    ) -> Option<(Ident, super::decl::ModuleDeclaration)> {
+    ) -> Option<(Ident, Arc<super::decl::ModuleDeclaration>)> {
         self.qualified_module_decl_cache
             .borrow()
             .get(parent_path)

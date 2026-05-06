@@ -3963,7 +3963,7 @@ pub fn lookup_module_type_by_lid<'b>(
                 ctx,
                 |components| {
                     if let Some((_, _, sub_md)) =
-                        components.lookup_qualified_module(submod_name, ctx)
+                        components.lookup_qualified_module_shared(submod_name, ctx)
                     {
                         return Some(sub_md.md_type.clone());
                     }
@@ -4003,7 +4003,7 @@ pub fn lookup_module_type_by_lid<'b>(
                 ctx,
                 |components| {
                     if let Some((_, _, sub_md)) =
-                        components.lookup_qualified_module(submod_name, ctx)
+                        components.lookup_qualified_module_shared(submod_name, ctx)
                     {
                         return Some(sub_md.md_type.clone());
                     }
@@ -6357,7 +6357,7 @@ fn scrape_alias_module_type<'b>(
                             // result as later component lookups instead of
                             // freshening the child signature twice.
                             let (runtime_pos, _, md) =
-                                components.lookup_qualified_module(submod.as_str(), ctx)?;
+                                components.lookup_qualified_module_shared(submod.as_str(), ctx)?;
                             let parent_access_path = components.access_path().clone();
                             let owner_path =
                                 if path_non_apply_root_is_persistent_or_global(&parent_access_path)
@@ -6380,7 +6380,7 @@ fn scrape_alias_module_type<'b>(
                     crate::types::typecore::lookup_module_in_resolved_path(
                         parent, submod, env, pers_env, ctx,
                     )
-                    .map(|(_, owner_path, md)| (owner_path, md))
+                    .map(|(_, owner_path, md)| (owner_path, std::sync::Arc::new(md)))
                 };
 
                 if let Some((owner_path, md)) = resolved_component {
