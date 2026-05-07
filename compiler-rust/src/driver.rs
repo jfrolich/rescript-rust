@@ -3072,7 +3072,6 @@ pub(crate) fn normalize_signature_types(
     use crate::types::ctype::normalize_type;
     use crate::types::decl::SignatureItem;
     use crate::types::typedtree::{ModuleExprDesc, PatternDesc, StructureItemDesc};
-    use ahash::AHashMap;
 
     /// Collect bound variable names from a pattern.
     fn collect_bound_names(pat: &crate::types::typedtree::Pattern, names: &mut Vec<String>) {
@@ -3418,7 +3417,11 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (DepsProgram, ModulePathResolver) {
+) -> (
+    DepsProgram,
+    ModulePathResolver,
+    ahash::AHashMap<String, CmjExportConstant>,
+) {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -3454,8 +3457,9 @@ fn compile_js_program_for_output(
         lowered_lambda,
         possible_required_modules,
     );
+    let cmj_export_constants = compiler.take_cmj_export_constants();
 
-    (program, module_path_resolver)
+    (program, module_path_resolver, cmj_export_constants)
 }
 
 fn compile_js_program_for_output_owned(
@@ -3466,7 +3470,11 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
-) -> (DepsProgram, ModulePathResolver) {
+) -> (
+    DepsProgram,
+    ModulePathResolver,
+    ahash::AHashMap<String, CmjExportConstant>,
+) {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -3502,8 +3510,9 @@ fn compile_js_program_for_output_owned(
         lowered_lambda,
         possible_required_modules,
     );
+    let cmj_export_constants = compiler.take_cmj_export_constants();
 
-    (program, module_path_resolver)
+    (program, module_path_resolver, cmj_export_constants)
 }
 
 pub fn compile_preprocessed_structure_in_process(
@@ -3845,7 +3854,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
     let mut lowered_lambda = Some(pre_js.lowered_lambda);
-    let (program, module_path_resolver) = {
+    let (program, module_path_resolver, cmj_export_constants) = {
         let _phase = info_span!(
             "compiler.js_compile",
             multiple_targets = compile_multiple_js_targets
@@ -3878,7 +3887,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         }
     };
     let is_pure = program.side_effect.is_none();
-    let cmj_export_constants = collect_in_process_cmj_export_constants(&program.program);
     let mut rendered_programs = if options.skip_js_render {
         crate::js_ir::dispose_deps_program_nonrecursive(program);
         Vec::new()
@@ -3889,7 +3897,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
             module_path_resolver,
         )];
         for target in js_targets.iter().skip(1) {
-            let (program, module_path_resolver) = compile_js_program_for_output(
+            let (program, module_path_resolver, _) = compile_js_program_for_output(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
@@ -3967,76 +3975,6 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
     })
-}
-
-fn collect_in_process_cmj_export_constants(
-    program: &crate::js_ir::Program,
-) -> ahash::AHashMap<String, CmjExportConstant> {
-    let mut constants = ahash::AHashMap::new();
-    if program.exports.is_empty() {
-        return constants;
-    }
-
-    let mut export_names = ahash::AHashMap::<_, Vec<String>>::with_capacity(program.exports.len());
-    for export in &program.exports {
-        export_names
-            .entry(export.clone())
-            .or_default()
-            .push(export.name().to_string());
-    }
-    collect_export_binding_constants(
-        &program.block,
-        &export_names,
-        program.exports.len(),
-        &mut constants,
-    );
-    constants
-}
-
-fn collect_export_binding_constants(
-    block: &crate::js_ir::Block,
-    export_names: &ahash::AHashMap<crate::ident::Ident, Vec<String>>,
-    export_count: usize,
-    constants: &mut ahash::AHashMap<String, CmjExportConstant>,
-) {
-    if constants.len() == export_count {
-        return;
-    }
-
-    for statement in block {
-        match &statement.desc {
-            crate::js_ir::StatementDesc::Variable(decl) => {
-                if let Some(export_names) = export_names.get(&decl.ident) {
-                    for export_name in export_names {
-                        if !constants.contains_key(export_name)
-                            && let Some(expr) = &decl.value
-                            && let Some(constant) = cmj_export_constant_from_expr(expr)
-                        {
-                            constants.insert(export_name.clone(), constant);
-                        }
-                    }
-                }
-            }
-            crate::js_ir::StatementDesc::Block(inner) => {
-                collect_export_binding_constants(inner, export_names, export_count, constants);
-            }
-            _ => {}
-        }
-        if constants.len() == export_count {
-            return;
-        }
-    }
-}
-
-fn cmj_export_constant_from_expr(expr: &crate::js_ir::Expression) -> Option<CmjExportConstant> {
-    match &expr.desc {
-        crate::js_ir::ExpressionDesc::Bool(value) => Some(CmjExportConstant::Bool(*value)),
-        crate::js_ir::ExpressionDesc::Null => Some(CmjExportConstant::Null),
-        crate::js_ir::ExpressionDesc::Undefined { is_unit } => {
-            Some(CmjExportConstant::Undefined { is_unit: *is_unit })
-        }
-        _ => None,
-    }
 }
 
 pub fn typecheck_interface_in_process(

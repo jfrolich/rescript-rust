@@ -5,7 +5,7 @@
 //! clarity over aggressive optimization; it is intended as a correct baseline
 //! that can be extended with more advanced codegen passes.
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
 
 use crate::cmi::persistent_env::CmjExportConstant;
@@ -38,7 +38,7 @@ use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
-    LambdaSwitch, SwitchCaseTag, TagInfo,
+    LambdaSwitch, PrimInfo, SwitchCaseTag, TagInfo,
 };
 use crate::location::Location;
 use tracing::info_span;
@@ -271,6 +271,7 @@ pub struct LambdaCompiler {
     pub(crate) cross_module_inline: bool,
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
+    pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -357,6 +358,7 @@ impl LambdaCompiler {
             cross_module_inline: false,
             cmj_constant_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
+            cmj_export_constants: AHashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -396,6 +398,7 @@ impl LambdaCompiler {
             cross_module_inline,
             cmj_constant_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
+            cmj_export_constants: AHashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -488,6 +491,8 @@ impl LambdaCompiler {
                 &mut external_inline,
             )
         });
+        self.cmj_export_constants =
+            collect_cmj_export_constants_from_simplified_lambda(&simplified);
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -567,6 +572,10 @@ impl LambdaCompiler {
             }
             deps
         })
+    }
+
+    pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
+        std::mem::take(&mut self.cmj_export_constants)
     }
 
     fn coerce_toplevel_exports(
@@ -6430,6 +6439,75 @@ fn collect_possible_required_modules(lam: &Lambda) -> AHashSet<ModuleId> {
     let mut seen = AHashSet::new();
     collect_modules_from_lambda(lam, &mut seen);
     seen
+}
+
+fn collect_cmj_export_constants_from_simplified_lambda(
+    lam: &Lambda,
+) -> AHashMap<String, CmjExportConstant> {
+    let mut bindings = Vec::new();
+    let Some((exports, args)) = collect_toplevel_export_bindings(lam, &mut bindings) else {
+        return AHashMap::new();
+    };
+    let mut constants = AHashMap::new();
+    for (export, arg) in exports.iter().zip(args) {
+        let value = match arg {
+            Lambda::Lvar(id) => bindings
+                .iter()
+                .rev()
+                .find_map(|(binding, value)| binding.same(id).then_some(*value))
+                .unwrap_or(arg),
+            _ => arg,
+        };
+        if let Some(constant) = cmj_export_constant_from_lambda(value) {
+            constants.insert(export.name().to_string(), constant);
+        }
+    }
+    constants
+}
+
+fn collect_toplevel_export_bindings<'a>(
+    lam: &'a Lambda,
+    bindings: &mut Vec<(&'a Ident, &'a Lambda)>,
+) -> Option<(&'a [Ident], &'a [Lambda])> {
+    match lam {
+        Lambda::Llet(_, id, value, body) => {
+            bindings.push((id, value));
+            collect_toplevel_export_bindings(body, bindings)
+        }
+        Lambda::Lletrec(items, body) => {
+            for (id, value) in items {
+                bindings.push((id, value));
+            }
+            collect_toplevel_export_bindings(body, bindings)
+        }
+        Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            args,
+            ..
+        }) => Some((exports, args)),
+        _ => None,
+    }
+}
+
+fn cmj_export_constant_from_lambda(lam: &Lambda) -> Option<CmjExportConstant> {
+    // OCaml writes `.cmj` value metadata from `coerced_input.export_map`
+    // (compiler/core/lam_compile_main.ml:290-295), not from the final JS program.
+    // Under the default `cross_module_inline = false`, `values_of_export` keeps
+    // only direct closed constants: null / undefined / true / false
+    // (compiler/core/lam_stats_export.ml:53-61). Do not inspect JS IR here:
+    // `compile_external_field` may inline a dependency constant during JS lowering
+    // (compiler/core/lam_compile.ml:234-244), but OCaml does not record that in
+    // the exporting module's `.cmj`.
+    match lam {
+        Lambda::Lconst(Constant::JsNull) => Some(CmjExportConstant::Null),
+        Lambda::Lconst(Constant::JsUndefined { is_unit }) => {
+            Some(CmjExportConstant::Undefined { is_unit: *is_unit })
+        }
+        Lambda::Lconst(Constant::JsTrue) => Some(CmjExportConstant::Bool(true)),
+        Lambda::Lconst(Constant::JsFalse) => Some(CmjExportConstant::Bool(false)),
+        _ => None,
+    }
 }
 
 fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
