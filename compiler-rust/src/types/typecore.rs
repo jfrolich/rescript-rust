@@ -3636,6 +3636,7 @@ fn build_as_type(
                             env,
                             &mut tctx.persistent_env,
                             ctx,
+                            false,
                         )
                         .unwrap_or(resolved_label);
                         let field_pat = present_fields_by_pos
@@ -4197,7 +4198,16 @@ fn type_pattern_record(
             Some(record_ty),
             None,
         )
-        .or_else(|| disambiguate_label(&field_name, record_ty, env, &mut tctx.persistent_env, ctx));
+        .or_else(|| {
+            disambiguate_label(
+                &field_name,
+                record_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                false,
+            )
+        });
 
         let label = disambiguated.map(|env_label| {
             if has_dict_pattern_attr {
@@ -12395,10 +12405,33 @@ fn type_construct(
     // 2. For unqualified constructors (Lident), use disambiguation considering expected type
     let lid_name = tctx.longident_last_name(&longident);
     let is_qualified = matches!(longident, Longident::Ldot(..));
+    let qualified_opath = if is_qualified {
+        // OCaml compiler/ml/typecore.ml:4244-4253 computes `opath`, gathers
+        // candidates with `Typetexp.find_all_constructors`, then still calls
+        // `Constructor.disambiguate`. For an expected variant path that calls
+        // typecore.ml:982-988 `disambiguate_by_type`, whose
+        // `compare_type_path` reaches typecore.ml:776-787 `expand_path` and
+        // forces Env.normalize_path lazies at compiler/ml/env.ml:903-926.
+        extract_variant_type_path_from_expected_with_persistent_env(
+            expected_ty,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+    } else {
+        None
+    };
     let (_cstr_path, cstr_desc) = if is_qualified {
         if let Some((path, desc)) =
             lookup_predef_option_constructor(&longident, tctx.arena, env, tctx.type_ctx)
         {
+            force_constructor_disambiguate_by_type_compare(
+                qualified_opath.as_ref(),
+                &desc,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            );
             (path, desc)
         } else {
             // Module-qualified: use direct lookup
@@ -12410,7 +12443,16 @@ fn type_construct(
                 tctx.type_ctx,
                 Some(expected_ty),
             ) {
-                Some((path, desc)) => (path, desc),
+                Some((path, desc)) => {
+                    force_constructor_disambiguate_by_type_compare(
+                        qualified_opath.as_ref(),
+                        &desc,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    );
+                    (path, desc)
+                }
                 None => match env.find_constructor(&lid_name) {
                     Ok(desc) => (
                         Path::pident(Ident::create_persistent(lid_name.clone())),
@@ -13158,6 +13200,7 @@ fn type_record(
                 env,
                 &mut tctx.persistent_env,
                 ctx,
+                false,
             )
         });
         explicit_fields.push(ExplicitField {
@@ -13933,7 +13976,14 @@ fn type_record(
         } else {
             // Fallback: find any label for single-instance unification
             let label_for_unify = typed_fields.iter().find_map(|(_, lbl, _, _)| {
-                disambiguate_label(&lbl.lbl_name, record_ty, env, &mut tctx.persistent_env, ctx)
+                disambiguate_label(
+                    &lbl.lbl_name,
+                    record_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    false,
+                )
             });
             if let Some(env_label) = label_for_unify {
                 let (_poly_vars, _ty_arg, ty_res) =
@@ -14298,6 +14348,7 @@ fn type_field(
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
+            true,
         )
     });
     let mut env_label = env_label;
@@ -14427,7 +14478,16 @@ fn type_setfield(
         Some(ty_exp),
         None,
     )
-    .or_else(|| disambiguate_label(&field_name, ty_exp, env, &mut tctx.persistent_env, ctx));
+    .or_else(|| {
+        disambiguate_label(
+            &field_name,
+            ty_exp,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            true,
+        )
+    });
     let mut env_label = env_label;
     if let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
@@ -20064,6 +20124,68 @@ fn label_result_path<'a>(
     }
 }
 
+fn implicit_open_predef_duplicate_type_path(left: &Path, right: &Path) -> bool {
+    fn dotted_implicit_predef_pair(dotted: &Path, ident: &Path) -> bool {
+        let Path::Pdot(parent, type_name, _) = dotted else {
+            return false;
+        };
+        let Path::Pident(id) = ident else {
+            return false;
+        };
+        id.is_persistent()
+            && id.stamp() == 0
+            && id.name() == type_name
+            && matches!(
+                path_root_module(parent),
+                Path::Pident(root) if root.name() == "Pervasives" || root.name() == "Stdlib"
+            )
+    }
+
+    dotted_implicit_predef_pair(left, right) || dotted_implicit_predef_pair(right, left)
+}
+
+fn force_ambiguous_label_type_path_side_effects<'a>(
+    selected_label: &crate::types::LabelDescription,
+    labels_in_scope_order: impl Iterator<Item = &'a crate::types::LabelDescription>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) {
+    let Some(selected_path) = label_result_path(ctx, selected_label) else {
+        return;
+    };
+    let mut unique_paths = vec![selected_path];
+
+    for label in labels_in_scope_order {
+        let Some(label_path) = label_result_path(ctx, label) else {
+            continue;
+        };
+        // OCaml compiler/ml/typecore.ml:973-980 `ambiguous_types`
+        // calls `unique compare_type_path [tpath] others`; `unique`
+        // invokes `compare_type_path` for warning classification even when
+        // the selected label is already known. `compare_type_path` reaches
+        // typecore.ml:776-787 `expand_path`, whose Env.normalize_path fallback
+        // forces ps_sig lazies through compiler/ml/env.ml:903-926 and
+        // env.ml:865-875. Keep that force order for generated record-field
+        // accesses with no expected record path.
+        let already_seen = unique_paths.iter().any(|seen_path| {
+            // OCaml's implicit opens come from compiler/core/res_compmisc.ml:61-62
+            // and compiler/ml/env.ml:1874-1877. A duplicate predef label such as
+            // `Pervasives.ref.contents` versus initial-env `ref.contents` is
+            // already represented by the opened component table; treating it as
+            // the same type avoids a Rust-only full ps_sig force while preserving
+            // the later compare_type_path force for non-predef alternatives.
+            if implicit_open_predef_duplicate_type_path(&label_path, seen_path) {
+                return true;
+            }
+            compare_type_paths_for_label_disambiguation(&label_path, seen_path, env, pers_env, ctx)
+        });
+        if !already_seen {
+            unique_paths.insert(0, label_path);
+        }
+    }
+}
+
 fn should_prefer_expected_record_label<'a>(
     expected_label: &crate::types::LabelDescription,
     env_label: &crate::types::LabelDescription,
@@ -21469,6 +21591,7 @@ fn disambiguate_label<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    force_ambiguous_side_effects: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -21564,6 +21687,19 @@ fn disambiguate_label<'a>(
 
     if selected.is_none() {
         selected = all_labels.last().map(|l| (*l).clone());
+    }
+
+    if force_ambiguous_side_effects
+        && opath.is_none()
+        && let Some(label) = selected.as_ref()
+    {
+        force_ambiguous_label_type_path_side_effects(
+            label,
+            all_labels.iter().rev().skip(1).copied(),
+            env,
+            pers_env,
+            ctx,
+        );
     }
 
     if let Some(override_name) = override_name {
