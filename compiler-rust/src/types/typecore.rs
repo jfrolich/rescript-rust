@@ -19302,10 +19302,18 @@ impl Env {
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut() {
-                        let sig = if ctx.preserve_canonical_typedtree() {
+                        let sig = if ctx.preserve_canonical_typedtree()
+                            && !ctx.suppresses_component_alias_sig_force()
+                        {
                             let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
                             copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
                         } else {
+                            // OCaml compiler/ml/env.ml:800-813 qualified type
+                            // lookup reads component tables without forcing
+                            // env.ml:719-721 `ps_sig` unless the lookup path
+                            // really reaches that lazy. Rust's constraint
+                            // probes suppress alias forcing while only testing
+                            // whether a manifest mentions Primitive_js_extern.
                             pers.read_raw_sig_shared(mod_name, ctx)?.as_ref().clone()
                         };
                         let result = Some((sig, Some(mod_name.to_string())));
@@ -23381,7 +23389,14 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    if let Some(module_key) = module_key {
+    // OCaml compiler/ml/env.ml:800-813 can inspect type components during
+    // typedecl.ml:767-779 constraint checks without forcing env.ml:719-721
+    // `ps_sig`. Those Rust probes must not populate the normal component cache,
+    // otherwise the later real value/module lookup reuses the suppressed view
+    // and misses the OCaml lazy-force point.
+    if let Some(module_key) = module_key
+        && !ctx.suppresses_component_alias_probe_caches()
+    {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
@@ -23507,13 +23522,19 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
                 id.clone(),
                 Arc::new(decl.clone()),
             );
-            ctx.register_resolved_module_type(
-                parent_module_path,
-                type_name,
-                result.0.clone(),
-                result.1.clone(),
-                result.2.clone(),
-            );
+            // OCaml compiler/ml/env.ml:800-813 qualified type lookup may be
+            // reached from typedecl.ml:767-779 constraint probes that suppress
+            // alias-target forcing. Do not let that probe's raw declaration
+            // satisfy the later real lookup, where OCaml would force ps_sig.
+            if !ctx.suppresses_component_alias_probe_caches() {
+                ctx.register_resolved_module_type(
+                    parent_module_path,
+                    type_name,
+                    result.0.clone(),
+                    result.1.clone(),
+                    result.2.clone(),
+                );
+            }
             result
         })
     })
@@ -23534,13 +23555,15 @@ fn lookup_type_decl_in_resolved_path<'a>(
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components.lookup_type(type_name).map(|(id, decl)| {
             let decl = Arc::new(decl.clone());
-            ctx.register_resolved_module_type(
-                parent_module_path,
-                type_name,
-                parent_module_path.clone(),
-                id.clone(),
-                decl.clone(),
-            );
+            if !ctx.suppresses_component_alias_probe_caches() {
+                ctx.register_resolved_module_type(
+                    parent_module_path,
+                    type_name,
+                    parent_module_path.clone(),
+                    id.clone(),
+                    decl.clone(),
+                );
+            }
             decl
         })
     })

@@ -332,6 +332,11 @@ pub struct TypeContext {
     /// force in env_lazy.rs must not run while that inclusion walk is using
     /// component tables that OCaml keeps lazy through compiler/ml/env.ml:800-813.
     component_alias_sig_force_suppression: Cell<u32>,
+    /// Narrower guard for Rust-only typedecl constraint probes. OCaml
+    /// compiler/ml/typedecl.ml:767-779 can inspect alias manifests without
+    /// publishing that raw lookup through env.ml:800-813 component lazies; use
+    /// this to keep those probe views out of normal Rust lookup caches.
+    component_alias_probe_cache_suppression: Cell<u32>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -509,6 +514,7 @@ impl TypeContext {
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
             flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
             component_alias_sig_force_suppression: Cell::new(0),
+            component_alias_probe_cache_suppression: Cell::new(0),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -1012,12 +1018,28 @@ impl TypeContext {
         self.component_alias_sig_force_suppression.get() > 0
     }
 
+    pub(crate) fn suppresses_component_alias_probe_caches(&self) -> bool {
+        self.component_alias_probe_cache_suppression.get() > 0
+    }
+
     pub(crate) fn with_component_alias_sig_force_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
         let previous = self.component_alias_sig_force_suppression.get();
         self.component_alias_sig_force_suppression
             .set(previous.saturating_add(1));
         let result = f();
         self.component_alias_sig_force_suppression.set(previous);
+        result
+    }
+
+    pub(crate) fn with_component_alias_probe_caches_suppressed<R>(
+        &self,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let previous = self.component_alias_probe_cache_suppression.get();
+        self.component_alias_probe_cache_suppression
+            .set(previous.saturating_add(1));
+        let result = self.with_component_alias_sig_force_suppressed(f);
+        self.component_alias_probe_cache_suppression.set(previous);
         result
     }
 

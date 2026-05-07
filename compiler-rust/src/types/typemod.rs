@@ -3149,9 +3149,19 @@ fn touch_type_constraint_path(
             // constructor args/results, and manifests. For Pdot paths this
             // reaches Env.find_type/env.ml:800-807 and can force a persistent
             // signature after all label ids have been created.
-            let resolved = crate::types::typecore::lookup_type_in_resolved_path(
-                parent, type_name, env, pers_env, ctx,
-            );
+            // OCaml compiler/ml/typedecl.ml:767-779 runs
+            // `Ctype.enforce_constraints`/`Ctype.matches` on the current
+            // constructor and then recurses only into its arguments. For a
+            // zero-argument alias like `M.t`, `matches` can return before
+            // env.ml:1440-1446 scrapes and forces the alias target. Keep the
+            // Rust package-side-effect probe from advancing those persistent
+            // signature lazies while it merely asks whether the manifest is a
+            // package.
+            let resolved = ctx.with_component_alias_probe_caches_suppressed(|| {
+                crate::types::typecore::lookup_type_in_resolved_path(
+                    parent, type_name, env, pers_env, ctx,
+                )
+            });
             if let Some((_, _, decl)) = resolved
                 && let Some(manifest) = decl.type_manifest
             {
@@ -3435,25 +3445,29 @@ fn type_path_decl_manifest_mentions_path_root(
         return false;
     }
 
-    let decl = match path {
-        Path::Pdot(parent, type_name, _) => crate::types::typecore::lookup_type_in_resolved_path(
-            parent, type_name, env, pers_env, ctx,
-        )
-        .map(|(_, _, decl)| (*decl).clone()),
-        Path::Pident(_) => env.lookup_type(path).ok().cloned(),
-        Path::Papply(_, _) => None,
-    };
+    ctx.with_component_alias_probe_caches_suppressed(|| {
+        let decl = match path {
+            Path::Pdot(parent, type_name, _) => {
+                crate::types::typecore::lookup_type_in_resolved_path(
+                    parent, type_name, env, pers_env, ctx,
+                )
+                .map(|(_, _, decl)| (*decl).clone())
+            }
+            Path::Pident(_) => env.lookup_type(path).ok().cloned(),
+            Path::Papply(_, _) => None,
+        };
 
-    decl.is_some_and(|decl| {
-        type_decl_manifest_mentions_path_root(
-            ctx,
-            env,
-            pers_env,
-            &decl,
-            root_name,
-            visited_paths,
-            depth + 1,
-        )
+        decl.is_some_and(|decl| {
+            type_decl_manifest_mentions_path_root(
+                ctx,
+                env,
+                pers_env,
+                &decl,
+                root_name,
+                visited_paths,
+                depth + 1,
+            )
+        })
     })
 }
 
@@ -3500,25 +3514,32 @@ fn constraint_path_needs_primitive_js_match_force(
     // equivalent enough to run it for every type declaration constraint.
     if let Path::Pdot(parent, type_name, _) = path {
         let mut visited_paths = HashSet::default();
-        return crate::types::typecore::lookup_type_in_resolved_path(
-            parent, type_name, env, pers_env, ctx,
-        )
-        .is_some_and(|(_, _, decl)| {
-            // OCaml compiler/ml/typedecl.ml:773-781 checks constraints for the
-            // current `Tconstr`, then recurses only into that constructor's type
-            // arguments. It does not inspect record fields inside an imported
-            // declaration while looking for alias-manifest side effects. Limit
-            // this Rust compensation to manifests so fields such as
-            // `Webapi__WebSocket.messageEvent.data: Js.Json.t` stay lazy.
-            type_decl_manifest_mentions_path_root(
-                ctx,
-                env,
-                pers_env,
-                &decl,
-                "Primitive_js_extern",
-                &mut visited_paths,
-                0,
+        // OCaml compiler/ml/typedecl.ml:767-779 only observes alias
+        // expansion here when `Ctype.matches` needs it. This Rust-side
+        // Primitive_js_extern probe is a narrower compensation; do not let the
+        // probe itself force persistent alias-target signatures before
+        // compiler/ml/env.ml:800-813-style type lookup would.
+        return ctx.with_component_alias_probe_caches_suppressed(|| {
+            crate::types::typecore::lookup_type_in_resolved_path(
+                parent, type_name, env, pers_env, ctx,
             )
+            .is_some_and(|(_, _, decl)| {
+                // OCaml compiler/ml/typedecl.ml:773-781 checks constraints for the
+                // current `Tconstr`, then recurses only into that constructor's type
+                // arguments. It does not inspect record fields inside an imported
+                // declaration while looking for alias-manifest side effects. Limit
+                // this Rust compensation to manifests so fields such as
+                // `Webapi__WebSocket.messageEvent.data: Js.Json.t` stay lazy.
+                type_decl_manifest_mentions_path_root(
+                    ctx,
+                    env,
+                    pers_env,
+                    &decl,
+                    "Primitive_js_extern",
+                    &mut visited_paths,
+                    0,
+                )
+            })
         });
     }
 
