@@ -15,6 +15,7 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - Persistent child alias component overlays: Tella clean in-process `hyperfine` `2.600s +/- 0.021s`, range `2.566s..2.633s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Fresh same-branch rebaseline after the user noticed drift: Tella clean in-process `hyperfine` `2.854s +/- 0.053s`, range `2.740s..2.944s`.
 - After rebuilding both release artifacts again and running with counters disabled: Tella clean in-process `hyperfine` `2.722s +/- 0.026s`, range `2.678s..2.765s`. Treat the current retained baseline as roughly the `2.7-2.8s` band; isolated 2.9s runs need system-load/context checks before calling them regressions.
+- Normal-mode shallow top-level values during type-context lazy signature freshening: Tella clean in-process `hyperfine` `2.537s +/- 0.037s`, range `2.500s..2.631s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -153,6 +154,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - Compiler source-read paths now share one Latin-1 decoding helper: ASCII sources reuse the read buffer as a `String`, while non-ASCII keeps the byte-to-char fallback. The in-process rewatch source path already had this fast path; this keeps `bsc`, `res_parser`, disk fallback, and parser benchmarks aligned without changing JS or typedtree output.
 - Signature qualification counters classify the remaining whole-signature copy path by cause. Current Tella data shows `resolved_name` qualification dominates, so future shared-signature work should remove contextual whole-signature rewrites rather than add more eager shared-resolution paths.
 - Signature freshening counters show `type_context_lazy_rename` is the largest remaining freshen bucket. A broad normal-compile skip cut copied signature items sharply but broke Tella typechecking in `API__DeleteAccount`, so the next version needs lazy/shared views that preserve type identity instead of removing the rename.
+- Normal compile mode now keeps type-context lazy renamed signatures but shallow-copies top-level `SigValue` types first, deep-copying only values whose type graph references binders rewritten by the freshening maps. This preserves the semantic renamed-signature cache that Tella needs while skipping cold value type-node copies in large dependency signatures.
 
 ## Rejected Experiments
 

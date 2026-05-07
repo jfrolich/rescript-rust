@@ -2574,8 +2574,22 @@ fn freshen_signature_bound_idents_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    freshen_signature_bound_idents_with_maps_and_value_mode(sig_items, maps, ctx, false);
+}
+
+fn freshen_signature_bound_idents_with_maps_and_value_mode(
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    shallow_values: bool,
+) {
     if !maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
+        if shallow_values {
+            substitute_type_paths_in_sig_with_maps_skip_top_values(sig_items, maps, ctx);
+            substitute_shallow_value_type_paths_with_maps(sig_items, maps, ctx);
+        } else {
+            substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
+        }
         substitute_sig_decl_paths_in_place_with_maps(sig_items, maps);
     }
 
@@ -2603,7 +2617,12 @@ fn freshen_signature_bound_idents_with_maps(
     }
 
     if !local_maps.is_empty() {
-        substitute_type_paths_in_sig_with_maps(sig_items, &local_maps, ctx);
+        if shallow_values {
+            substitute_type_paths_in_sig_with_maps_skip_top_values(sig_items, &local_maps, ctx);
+            substitute_shallow_value_type_paths_with_maps(sig_items, &local_maps, ctx);
+        } else {
+            substitute_type_paths_in_sig_with_maps(sig_items, &local_maps, ctx);
+        }
         substitute_sig_decl_paths_in_place_with_maps(sig_items, &local_maps);
     }
 
@@ -2653,8 +2672,17 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_freshen(kind, sig_items.len());
     }
-    let mut copied = crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx);
-    freshen_copied_signature_bound_idents(&mut copied, ctx);
+    let shallow_values = kind == "type_context_lazy_rename" && !ctx.preserve_canonical_typedtree();
+    let mut copied = if shallow_values {
+        crate::types::typecore::copy_lookup_signature_shallow_values_for_subst(sig_items, ctx)
+    } else {
+        crate::types::typecore::copy_lookup_signature_for_subst(sig_items, ctx)
+    };
+    if shallow_values {
+        freshen_copied_signature_bound_idents_shallow_values(&mut copied, ctx);
+    } else {
+        freshen_copied_signature_bound_idents(&mut copied, ctx);
+    }
     copied
 }
 
@@ -2663,6 +2691,18 @@ pub(crate) fn freshen_copied_signature_bound_idents(
     ctx: &TypeContext,
 ) {
     freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
+}
+
+fn freshen_copied_signature_bound_idents_shallow_values(
+    sig_items: &mut [SignatureItem],
+    ctx: &TypeContext,
+) {
+    freshen_signature_bound_idents_with_maps_and_value_mode(
+        sig_items,
+        &SubstMaps::default(),
+        ctx,
+        true,
+    );
 }
 
 pub(crate) fn freshen_module_type_bound_idents(module_type: &mut ModuleType, ctx: &TypeContext) {
@@ -2850,6 +2890,23 @@ fn substitute_type_paths_in_sig_with_maps(
     maps: &SubstMaps,
     ctx: &TypeContext,
 ) {
+    substitute_type_paths_in_sig_with_maps_mode(sig_items, maps, ctx, false);
+}
+
+fn substitute_type_paths_in_sig_with_maps_skip_top_values(
+    sig_items: &[SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+) {
+    substitute_type_paths_in_sig_with_maps_mode(sig_items, maps, ctx, true);
+}
+
+fn substitute_type_paths_in_sig_with_maps_mode(
+    sig_items: &[SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    skip_top_values: bool,
+) {
     if maps.is_empty() {
         return;
     }
@@ -2859,16 +2916,18 @@ fn substitute_type_paths_in_sig_with_maps(
     for item in sig_items {
         match item {
             SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(
-                    desc.val_type,
-                    &maps.type_stamp_map,
-                    &maps.type_name_map,
-                    &maps.module_stamp_map,
-                    &maps.module_name_map,
-                    maps.protected_module_head.as_ref(),
-                    ctx,
-                    &mut visited,
-                );
+                if !skip_top_values {
+                    substitute_type_expr_path(
+                        desc.val_type,
+                        &maps.type_stamp_map,
+                        &maps.type_name_map,
+                        &maps.module_stamp_map,
+                        &maps.module_name_map,
+                        maps.protected_module_head.as_ref(),
+                        ctx,
+                        &mut visited,
+                    );
+                }
             }
             SignatureItem::SigType(_id, decl, _) => {
                 for &param in &decl.type_params {
@@ -3019,12 +3078,124 @@ fn substitute_type_paths_in_sig_with_maps(
             }
             SignatureItem::SigModule(_id, md, _) => {
                 if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    substitute_type_paths_in_sig_with_maps(sub_sig, maps, ctx);
+                    substitute_type_paths_in_sig_with_maps_mode(sub_sig, maps, ctx, false);
                 }
             }
             _ => {}
         }
     }
+}
+
+fn substitute_shallow_value_type_paths_with_maps(
+    sig_items: &mut [SignatureItem],
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+) {
+    if maps.is_empty() {
+        return;
+    }
+
+    let mut visited = HashSet::new();
+    for item in sig_items {
+        let SignatureItem::SigValue(_, desc) = item else {
+            continue;
+        };
+        let mut needs_copy_visited = HashSet::new();
+        if !type_expr_path_may_change(desc.val_type, maps, ctx, &mut needs_copy_visited) {
+            continue;
+        }
+        *desc = crate::types::typecore::copy_lookup_value_description_for_subst(desc, ctx);
+        substitute_type_expr_path(
+            desc.val_type,
+            &maps.type_stamp_map,
+            &maps.type_name_map,
+            &maps.module_stamp_map,
+            &maps.module_name_map,
+            maps.protected_module_head.as_ref(),
+            ctx,
+            &mut visited,
+        );
+    }
+}
+
+fn type_expr_path_may_change(
+    initial_ty_ref: TypeExprRef,
+    maps: &SubstMaps,
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+) -> bool {
+    let mut work_stack = vec![initial_ty_ref];
+
+    while let Some(ty_ref) = work_stack.pop() {
+        if !visited.insert(ty_ref.index()) {
+            continue;
+        }
+
+        let desc = ctx.get_desc(ctx.repr(ty_ref));
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if type_path_may_change(path, maps) {
+                    return true;
+                }
+                work_stack.extend(args.iter().copied());
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                work_stack.push(arg.typ);
+                work_stack.push(*ret);
+            }
+            TypeDesc::Ttuple(types) => {
+                work_stack.extend(types.iter().copied());
+            }
+            TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => {
+                work_stack.push(*t);
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                work_stack.push(*body);
+                work_stack.extend(vars.iter().copied());
+            }
+            TypeDesc::Tobject { fields, .. } => {
+                work_stack.push(*fields);
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                work_stack.push(*typ);
+                work_stack.push(*rest);
+            }
+            TypeDesc::Tvariant(row) => {
+                work_stack.push(row.row_more);
+                for field in &row.row_fields {
+                    match &field.1 {
+                        crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                            work_stack.push(*t);
+                        }
+                        crate::types::type_expr::RowField::Reither { types, .. } => {
+                            work_stack.extend(types.iter().copied());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeDesc::Tpackage { path, args, .. } => {
+                if type_path_may_change(path, maps) {
+                    return true;
+                }
+                work_stack.extend(args.iter().copied());
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    false
+}
+
+fn type_path_may_change(path: &Path, maps: &SubstMaps) -> bool {
+    substitute_type_path(
+        path,
+        &maps.type_stamp_map,
+        &maps.type_name_map,
+        &maps.module_stamp_map,
+        &maps.module_name_map,
+        maps.protected_module_head.as_ref(),
+    ) != *path
 }
 
 /// Apply parent-scope substitutions to a child signature.
