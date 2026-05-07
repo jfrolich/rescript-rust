@@ -13955,6 +13955,13 @@ fn type_field(
                 );
             }
         }
+        qualify_field_access_arg_alias_paths(
+            tctx.type_ctx,
+            env,
+            &mut tctx.persistent_env,
+            ty_arg,
+            ty_res,
+        );
         (env_label, ty_arg, ty_res)
     } else {
         let record_ty = tctx.type_ctx.new_var(None);
@@ -19645,6 +19652,187 @@ fn type_contains_unresolved_local_path<'a>(
     }
 }
 
+fn type_path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    if path.same(prefix) {
+        return true;
+    }
+    match path {
+        Path::Pdot(parent, _, _) => type_path_has_prefix(parent, prefix),
+        Path::Pident(_) | Path::Papply(_, _) => false,
+    }
+}
+
+fn type_contains_path_prefix<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    ty: TypeExprRef,
+    prefix: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) -> bool {
+    use crate::types::type_expr::RowField;
+
+    let repr = ctx.repr(ty);
+    if !visited.insert(repr) {
+        return false;
+    }
+
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            type_path_has_prefix(path, prefix)
+                || args
+                    .iter()
+                    .any(|arg| type_contains_path_prefix(ctx, *arg, prefix, visited))
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            type_contains_path_prefix(ctx, arg.typ, prefix, visited)
+                || type_contains_path_prefix(ctx, *ret, prefix, visited)
+        }
+        TypeDesc::Ttuple(items) => items
+            .iter()
+            .any(|item| type_contains_path_prefix(ctx, *item, prefix, visited)),
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            type_contains_path_prefix(ctx, *target, prefix, visited)
+        }
+        TypeDesc::Tobject { fields, name } => {
+            if type_contains_path_prefix(ctx, *fields, prefix, visited) {
+                return true;
+            }
+            if let Some((path, args)) = name {
+                return type_path_has_prefix(path, prefix)
+                    || args
+                        .iter()
+                        .any(|arg| type_contains_path_prefix(ctx, *arg, prefix, visited));
+            }
+            false
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            type_contains_path_prefix(ctx, *typ, prefix, visited)
+                || type_contains_path_prefix(ctx, *rest, prefix, visited)
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        if type_contains_path_prefix(ctx, *ty, prefix, visited) {
+                            return true;
+                        }
+                    }
+                    RowField::Reither { types, .. } => {
+                        if types
+                            .iter()
+                            .any(|ty| type_contains_path_prefix(ctx, *ty, prefix, visited))
+                        {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if type_contains_path_prefix(ctx, row.row_more, prefix, visited) {
+                return true;
+            }
+            if let Some((path, args)) = &row.row_name {
+                return type_path_has_prefix(path, prefix)
+                    || args
+                        .iter()
+                        .any(|arg| type_contains_path_prefix(ctx, *arg, prefix, visited));
+            }
+            false
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            if type_contains_path_prefix(ctx, *body, prefix, visited) {
+                return true;
+            }
+            vars.iter()
+                .any(|var| type_contains_path_prefix(ctx, *var, prefix, visited))
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            type_path_has_prefix(path, prefix)
+                || args
+                    .iter()
+                    .any(|arg| type_contains_path_prefix(ctx, *arg, prefix, visited))
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+    }
+}
+
+fn local_abstract_manifest_parent<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+) -> Option<Path> {
+    let Path::Pident(id) = path else {
+        return None;
+    };
+    if id.is_persistent() {
+        return None;
+    }
+
+    let decl = lookup_type_decl_for_path(path, env, pers_env, ctx)?;
+    if !matches!(&decl.type_kind, crate::types::TypeKind::TypeAbstract) {
+        return None;
+    }
+
+    let manifest = ctx.repr(decl.type_manifest?);
+    let desc = ctx.get_desc(manifest);
+    match &*desc {
+        TypeDesc::Tconstr { path, .. } => path.parent(),
+        _ => None,
+    }
+}
+
+fn qualify_field_access_arg_alias_paths<'a>(
+    ctx: &'a crate::types::context::TypeContext<'a>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    field_ty: TypeExprRef,
+    record_ty: TypeExprRef,
+) {
+    let record_repr = ctx.repr(record_ty);
+    let record_desc = ctx.get_desc(record_repr);
+    let TypeDesc::Tconstr {
+        path: record_path, ..
+    } = &*record_desc
+    else {
+        return;
+    };
+    let record_path = record_path.clone();
+    drop(record_desc);
+
+    let Some(alias_parent) = local_abstract_manifest_parent(ctx, env, pers_env, &record_path)
+        .or_else(|| record_path.parent())
+    else {
+        return;
+    };
+
+    env.with_current_local_module_aliases(|aliases| {
+        for (alias_id, alias_target) in aliases {
+            if !type_path_has_prefix(alias_target, &alias_parent) {
+                continue;
+            }
+
+            let mut probe_visited = HashSet::new();
+            if !type_contains_path_prefix(ctx, field_ty, alias_target, &mut probe_visited) {
+                continue;
+            }
+
+            // OCaml compiler/ml/typecore.ml:2993-3005 assigns the `Pexp_field`
+            // expression type from `instance_label`'s `ty_arg`. That label is
+            // selected by compiler/ml/typecore.ml:942-967 `lookup_from_type`;
+            // compiler/ml/env.ml:1542-1548 builds component labels by running
+            // `Subst.type_declaration`, whose compiler/ml/subst.ml:87-95
+            // `type_path` rewrites dotted prefixes through `module_path`.
+            crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix_pub(
+                field_ty,
+                alias_target,
+                &Path::pident(alias_id.clone()),
+                ctx,
+            );
+        }
+    });
+}
+
 fn qualify_label_description_paths<'a>(
     label: &mut crate::types::LabelDescription,
     env: &Env,
@@ -19846,15 +20034,18 @@ fn qualify_label_description_paths<'a>(
     label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
     label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
 
-    let res_repr = ctx.repr(label.lbl_res);
-    let res_desc = ctx.get_desc(res_repr);
-    let TypeDesc::Tconstr { path: res_path, .. } = &*res_desc else {
-        return;
+    let res_path = {
+        let res_repr = ctx.repr(label.lbl_res);
+        let res_desc = ctx.get_desc(res_repr);
+        let TypeDesc::Tconstr { path, .. } = &*res_desc else {
+            return;
+        };
+        path.clone()
     };
     let mut module_access_paths = Vec::new();
     let mut has_unresolved_local_path = false;
 
-    match res_path {
+    match &res_path {
         Path::Pdot(_, _, _) => {
             let mut probe_visited = HashSet::new();
             has_unresolved_local_path = type_contains_unresolved_local_path(
@@ -19895,7 +20086,7 @@ fn qualify_label_description_paths<'a>(
                     ancestor = path.parent();
                 }
             }
-            let root = path_root_module(res_path);
+            let root = path_root_module(&res_path);
             let root_has_alias_target =
                 raw_alias_target_for_module_path(&root, env, pers_env, ctx).is_some();
             let is_top_level_alias_type = res_path
@@ -19912,9 +20103,9 @@ fn qualify_label_description_paths<'a>(
         Path::Papply(_, _) => return,
     }
 
-    if let Path::Pdot(_, _, _) = res_path {
-        let root = path_root_module(res_path);
-        if !root.same(res_path) {
+    if let Path::Pdot(_, _, _) = &res_path {
+        let root = path_root_module(&res_path);
+        if !root.same(&res_path) {
             if let Some(alias_target) = raw_alias_target_for_module_path(&root, env, pers_env, ctx)
             {
                 if path_non_apply_root_is_persistent(&alias_target) && !alias_target.same(&root) {
@@ -19930,7 +20121,6 @@ fn qualify_label_description_paths<'a>(
             }
         }
     }
-    drop(res_desc);
 
     for module_access_path in module_access_paths {
         let mut visited = HashSet::new();
