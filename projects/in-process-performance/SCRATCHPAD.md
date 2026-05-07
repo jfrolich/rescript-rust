@@ -124,6 +124,18 @@ Conclusion: persistent child aliases can share the backing `Arc<Signature>` when
 
 `RESCRIPT_MODULE_TIMINGS=1` now also prints `[module-js-timing]` for the JS-finish boundary. This complements the existing `[module-timing]`, which stops at the pre-JS boundary.
 
+Latest clean Tella non-Icon slow modules after `fea2c7566`:
+
+- `Css_Js_Core`: wall `642.016ms`, typecheck `345.911ms`, lambda `34.802ms`
+- `Css_Legacy_Core`: wall `436.711ms`, typecheck `207.204ms`, lambda `94.695ms`
+- `LayoutDetail`: wall `435.036ms`, typecheck `390.724ms`, lambda `11.434ms`
+- `Layout`: wall `310.645ms`, typecheck `138.719ms`, lambda `160.152ms`
+- `TrimTranscriptEditor`: wall `294.423ms`, typecheck `197.146ms`, lambda `8.844ms`
+- `Page__Stories`: wall `283.163ms`, typecheck `200.085ms`, lambda `55.212ms`
+- `Recording__Layers`: wall `231.703ms`, typecheck `181.281ms`, lambda `8.402ms`
+- `UI__BackgroundPicker`: wall `223.196ms`, typecheck `165.523ms`, lambda `50.461ms`
+- `UI__LayoutPickerStructured`: wall `221.693ms`, typecheck `175.364ms`, lambda `33.413ms`
+
 Latest Tella aggregate phase timing under the timing env:
 
 - parse: `3096.915ms`
@@ -181,3 +193,4 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - Skipping all normal-compile `TypeContext::trigger_module_sig_rename` work cut Tella signature-copy counters from roughly `725k` copied items to `391k`, but failed typechecking in `API__DeleteAccount`. The rename work is partly semantic, not only canonical typedtree stamp preservation.
 - Seeding raw signatures while skipping normal-compile `TypeContext::trigger_module_sig_rename` freshening failed the same `API__DeleteAccount` typecheck. This confirms the current typechecker depends on renamed-signature type identity somewhere, not just raw-signature availability.
 - Sharing raw signatures for value-only type-context lazy renames did not fire on Tella's hot modules and did not change the copy counters, so it was removed rather than retaining an unmeasured correctness risk.
+- Replacing tagged switch action comparison's `make_key` plus `Debug` formatting with the direct structural-key writer compiled Tella but did not improve clean-build `hyperfine` (`2.592s +/- 0.026s`, range `2.557s..2.634s`) versus the retained `2.537s` baseline, so it was reverted.
