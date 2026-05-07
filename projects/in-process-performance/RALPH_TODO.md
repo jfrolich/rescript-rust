@@ -98,6 +98,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Add type-item resolve counters for positive cache hits, missing cache hits, signature scans, scanned items, and found items.
   - [x] Add signature-copy counters with top call-site reporting for retained shared-signature work.
   - [x] Add signature-qualification counters to classify full-copy candidates by root cause.
+  - [x] Add signature-freshening counters by entry point and module name to separate canonical rename work from access-path qualification work.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus

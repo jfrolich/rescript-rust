@@ -4052,7 +4052,13 @@ fn freshened_signature_from_module_type<'a>(
     mty: &crate::types::decl::ModuleType,
 ) -> Option<crate::types::decl::Signature> {
     let sig = resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)?;
-    Some(crate::cmi::persistent_env::freshened_signature_bound_idents_from(&sig, tctx.type_ctx))
+    Some(
+        crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+            "typemod_freshened_module_type",
+            &sig,
+            tctx.type_ctx,
+        ),
+    )
 }
 
 fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], env: &mut Env) {
@@ -14000,7 +14006,8 @@ fn type_structure_item<'a>(
                 tctx.type_ctx,
             );
             let stored_include_sig = final_include_sig.as_ref().map(|sig_items| {
-                crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+                    "typemod_include_stored_sig",
                     sig_items,
                     tctx.type_ctx,
                 )

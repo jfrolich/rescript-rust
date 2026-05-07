@@ -1886,12 +1886,20 @@ impl TypeContext {
                 .borrow_mut()
                 .entry(module_name.to_string())
                 .or_insert_with(|| sig.clone());
+            if self.compiler_counters_enabled() {
+                crate::perf_counters::record_signature_freshen_name(
+                    "type_context_lazy_rename",
+                    module_name,
+                    sig.len(),
+                );
+            }
             // OCaml `Subst.signature` copies and freshens in one traversal
             // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
             // to that single pass instead of copying before calling the
             // freshening helper.
             let renamed = Arc::new(
-                crate::cmi::persistent_env::freshened_signature_bound_idents_from(
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+                    "type_context_lazy_rename",
                     sig.as_ref(),
                     self,
                 ),
