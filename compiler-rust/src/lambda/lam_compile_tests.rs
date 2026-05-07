@@ -9840,6 +9840,100 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
 }
 
 #[test]
+fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
+    let mut compiler = LambdaCompiler::new();
+    let loop_ = Ident::create_local("loop");
+    let tag = Ident::create_local("tag");
+    let next = Ident::create_local("next");
+    let tailcall = Lambda::Lapply(Apply {
+        ap_func: Box::new(Lambda::var(loop_.clone())),
+        ap_args: vec![Lambda::var(next.clone()), Lambda::var(next.clone())],
+        ap_info: ApInfo {
+            loc: Location::none(),
+            inlined: InlineAttribute::Default,
+            status: ApplyStatus::Na,
+        },
+        ap_transformed_jsx: false,
+    });
+    let body = Lambda::LstaticCatch(
+        Box::new(Lambda::Lswitch(
+            Box::new(Lambda::var(tag.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![
+                    (1, Lambda::static_raise(1, Vec::new())),
+                    (2, Lambda::static_raise(1, Vec::new())),
+                ],
+                sw_blocks_full: true,
+                sw_blocks: vec![],
+                sw_failaction: Some(Box::new(Lambda::var(tag.clone()))),
+                sw_names: None,
+            },
+        )),
+        (1, vec![]),
+        Box::new(tailcall),
+    );
+    let lam = Lambda::letrec(
+        vec![(
+            loop_.clone(),
+            Lambda::function_(2, vec![tag, next], body, FunctionAttribute::default()),
+        )],
+        Lambda::unit(),
+    );
+
+    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+
+    assert!(
+        rendered.contains("case 2 :\n        break;\n      default:"),
+        "expected OCaml-style break before the shared tail-loop handler:\n{rendered}"
+    );
+}
+
+#[test]
+fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
+    let mut compiler = LambdaCompiler::new();
+    let strip = Ident::create_local("strip");
+    let ch = Ident::create_local("ch");
+    let next = Ident::create_local("next");
+    let tailcall = Lambda::Lapply(Apply {
+        ap_func: Box::new(Lambda::var(strip.clone())),
+        ap_args: vec![Lambda::var(next.clone()), Lambda::var(next.clone())],
+        ap_info: ApInfo {
+            loc: Location::none(),
+            inlined: InlineAttribute::Default,
+            status: ApplyStatus::Na,
+        },
+        ap_transformed_jsx: false,
+    });
+    let body = Lambda::LstaticCatch(
+        Box::new(Lambda::LstringSwitch(
+            Box::new(Lambda::var(ch.clone())),
+            vec![
+                ("!".to_string(), Lambda::static_raise(1, Vec::new())),
+                ("?".to_string(), Lambda::static_raise(1, Vec::new())),
+            ],
+            Some(Box::new(Lambda::var(ch.clone()))),
+        )),
+        (1, vec![]),
+        Box::new(tailcall),
+    );
+    let lam = Lambda::letrec(
+        vec![(
+            strip.clone(),
+            Lambda::function_(2, vec![ch, next], body, FunctionAttribute::default()),
+        )],
+        Lambda::unit(),
+    );
+
+    let rendered = print_block(&compiler.compile_expr(&lam).prelude);
+
+    assert!(
+        rendered.contains("case \"?\" :\n        break;\n      default:"),
+        "expected OCaml-style break before the shared tail-loop handler:\n{rendered}"
+    );
+}
+
+#[test]
 fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
     let mut compiler = LambdaCompiler::new();
     let loop_ = Ident::create_local("loop");

@@ -2793,10 +2793,13 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_return_block(body);
             let group_falls_through = compiled_body.is_empty();
-            // Mirror OCaml's `lam_compile.ml` pseudo-jmp emission: when a
-            // case body resolved away through a fallthrough static-raise
-            // handler, OCaml still prints an explicit `break;` to exit the
-            // switch so the subsequent appended handler reads cleanly.
+            // Mirror OCaml's `compile_general_cases`: it feeds each last
+            // grouped case through `Js_output.to_break_block`, then gates the
+            // break bit with `Lam_exit_code.has_exit` in return continuation
+            // (compiler/core/lam_compile.ml:613-624;
+            // compiler/core/js_output.ml:88-100). When a case resolves to a
+            // fallthrough static-raise handler, the empty body still needs a
+            // `break;` so the appended handler runs once after the switch.
             let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
@@ -3215,27 +3218,50 @@ impl LambdaCompiler {
 
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
-        let cases: Vec<_> = self
-            .grouped_switch_cases(
-                &switch.sw_consts,
-                switch.sw_failaction.as_deref(),
-                |_, _| true,
-            )
+        let grouped_cases = self.grouped_switch_cases(
+            &switch.sw_consts,
+            switch.sw_failaction.as_deref(),
+            |_, _| true,
+        );
+        let mut cases = Vec::with_capacity(grouped_cases.len());
+        let mut group_start = 0;
+        while group_start < grouped_cases.len() {
+            let mut group_end = group_start;
+            while !grouped_cases[group_end].2 {
+                group_end += 1;
+            }
+
+            let (_, body, _) = &grouped_cases[group_end];
+            let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
+            let group_falls_through = compiled_body.is_empty();
+            // Tail-loop lowering is Rust-specific, but it must preserve OCaml's
+            // `compile_general_cases` break semantics: the last grouped case
+            // uses `Js_output.to_break_block`, then return continuation keeps
+            // that break only when the source lambda has an exit
+            // (compiler/core/lam_compile.ml:613-624;
+            // compiler/core/js_output.ml:88-100).
+            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
+
+            for (tag, _, _) in &grouped_cases[group_start..group_end] {
+                cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
+            }
+            cases.push((
+                grouped_cases[group_end].0,
+                CaseClause {
+                    body: compiled_body,
+                    should_break,
+                    comment: None,
+                },
+                group_falls_through,
+            ));
+
+            group_start = group_end + 1;
+        }
+        let cases =
+            self.reorder_fallthrough_return_clauses(cases, |(_, _, falls_through)| *falls_through);
+        let cases = cases
             .into_iter()
-            .map(|(tag, body, is_last)| {
-                (
-                    tag,
-                    if is_last {
-                        CaseClause {
-                            body: self.compile_tail_loop_return_block(body, tail_loop),
-                            should_break: false,
-                            comment: None,
-                        }
-                    } else {
-                        empty_switch_case_clause()
-                    },
-                )
-            })
+            .map(|(tag, clause, _)| (tag, clause))
             .collect();
 
         let default_block = switch
@@ -3275,22 +3301,17 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
-        let clauses = self
-            .grouped_switch_cases(cases, default, |_, _| true)
-            .into_iter()
-            .map(|(tag, body, is_last)| StringClause {
-                tag_type: SwitchCaseTag::String(tag),
-                clause: if is_last {
-                    CaseClause {
-                        body: self.compile_tail_loop_return_block(body, tail_loop),
-                        should_break: false,
-                        comment: None,
-                    }
-                } else {
-                    empty_switch_case_clause()
-                },
-            })
-            .collect();
+        // Match OCaml's generic string-switch case construction
+        // (compiler/core/lam_compile.ml:792-794) and its shared
+        // `compile_general_cases` break logic
+        // (compiler/core/lam_compile.ml:613-624). Tail-loop lowering still
+        // compiles case bodies with `compile_tail_loop_return_block`, but
+        // fallthrough static-raise cases must keep the same `break;` bit.
+        let clauses = self.grouped_tail_loop_return_string_clauses(
+            self.grouped_switch_cases(cases, default, |_, _| true),
+            SwitchCaseTag::String,
+            tail_loop,
+        );
 
         let default_block = default
             .map(|fallback| self.compile_tail_loop_return_block(fallback, tail_loop))
