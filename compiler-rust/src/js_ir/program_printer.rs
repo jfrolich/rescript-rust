@@ -411,6 +411,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         );
         let rendered = print_deps_program(
@@ -474,6 +475,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         );
         let rendered = print_deps_program(
@@ -533,6 +535,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         );
         let mut printer = JsPrinter::with_module_path_resolver(Some(&resolver));
@@ -588,6 +591,7 @@ mod tests {
         let resolver = ModulePathResolver::from_compile_options(
             None,
             Some(Path::new("/tmp/raw_pure_test.mjs")),
+            None,
             None,
             None,
             None,

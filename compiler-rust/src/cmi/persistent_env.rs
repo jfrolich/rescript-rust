@@ -212,6 +212,43 @@ pub struct InMemoryModuleInfo {
     pub cmj_export_constants: HashMap<String, CmjExportConstant>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
+    /// Package name used by JS import rebasing in `--in-process` builds.
+    pub package_name: Option<String>,
+    /// Package root used to turn a source path into a package-relative JS path.
+    pub package_root: Option<PathBuf>,
+    /// JS suffix for this package's emitted output.
+    pub js_output_suffix: Option<String>,
+}
+
+impl InMemoryModuleInfo {
+    pub fn new(
+        source_path: PathBuf,
+        is_pure: bool,
+        cmj_export_constants: HashMap<String, CmjExportConstant>,
+        is_runtime: bool,
+    ) -> Self {
+        Self {
+            source_path,
+            is_pure,
+            cmj_export_constants,
+            is_runtime,
+            package_name: None,
+            package_root: None,
+            js_output_suffix: None,
+        }
+    }
+
+    pub fn with_package(
+        mut self,
+        package_name: String,
+        package_root: PathBuf,
+        js_output_suffix: Option<String>,
+    ) -> Self {
+        self.package_name = Some(package_name);
+        self.package_root = Some(package_root);
+        self.js_output_suffix = js_output_suffix;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -1011,6 +1048,16 @@ impl PersistentEnv {
                 }
             })
         })
+    }
+
+    /// Return in-memory package metadata for JS import rebasing.
+    pub fn module_js_package_info(&self, name: &str) -> Option<(String, PathBuf, Option<String>)> {
+        let info = self.in_memory_info(name)?;
+        Some((
+            info.package_name?,
+            info.package_root?,
+            info.js_output_suffix,
+        ))
     }
 
     /// Resolve a module name to its companion `.cmj` path when present.

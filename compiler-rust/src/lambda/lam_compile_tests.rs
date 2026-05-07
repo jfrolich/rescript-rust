@@ -379,6 +379,7 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
         Some(std::path::Path::new("/tmp/Effect.mjs")),
         None,
         None,
+        None,
         Some(persistent_env),
         false,
     )
@@ -899,6 +900,7 @@ fn compile_module_primitives_require_primitive_module_runtime_import() {
     let resolver = ModulePathResolver::from_compile_options(
         None,
         Some(std::path::Path::new("/tmp/module_primitive.mjs")),
+        None,
         None,
         None,
         None,
@@ -8782,6 +8784,7 @@ fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block
     let resolver = ModulePathResolver::from_compile_options(
         None,
         Some(std::path::Path::new("/tmp/wrapped.mjs")),
+        None,
         None,
         None,
         None,

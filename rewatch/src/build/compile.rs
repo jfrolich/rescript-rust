@@ -15,7 +15,9 @@ use anyhow::{Context, Result, anyhow};
 use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
-use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::cmi::persistent_env::{
+    CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
+};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
@@ -1697,6 +1699,28 @@ fn js_output_targets_for_source(
         .collect()
 }
 
+fn js_output_suffix_for_registry(root_config: &config::Config) -> Option<String> {
+    root_config
+        .get_package_specs()
+        .first()
+        .map(|spec| root_config.get_suffix(spec))
+}
+
+fn in_memory_module_info_for_package(
+    package: &packages::Package,
+    root_config: &config::Config,
+    source_path: PathBuf,
+    is_pure: bool,
+    cmj_export_constants: AHashMap<String, CmjExportConstant>,
+    is_runtime: bool,
+) -> InMemoryModuleInfo {
+    InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime).with_package(
+        package.name.clone(),
+        package.path.clone(),
+        js_output_suffix_for_registry(root_config),
+    )
+}
+
 /// Write JS output to the correct location(s) based on package specs.
 fn write_file_creating_parent_on_missing(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     match std::fs::write(path, contents.as_ref()) {
@@ -2044,12 +2068,7 @@ fn seed_runtime_registry(build_state: &BuildCommandState, runtime_modules: &[Run
         // before each module's real signature and cmj metadata are compiled.
         registry.insert_module_info(
             module.module_name.clone(),
-            InMemoryModuleInfo {
-                source_path: module.res_path.clone(),
-                is_pure: true,
-                cmj_export_constants: AHashMap::new(),
-                is_runtime: true,
-            },
+            InMemoryModuleInfo::new(module.res_path.clone(), true, AHashMap::new(), true),
         );
     }
 }
@@ -2220,12 +2239,7 @@ fn compile_runtime_module_from_source(
             local_registry.register_module_arc(
                 &module.module_name,
                 pers_struct.clone(),
-                InMemoryModuleInfo {
-                    source_path: module.res_path.clone(),
-                    is_pure: true,
-                    cmj_export_constants: AHashMap::new(),
-                    is_runtime: true,
-                },
+                InMemoryModuleInfo::new(module.res_path.clone(), true, AHashMap::new(), true),
                 interface_alias_rewrites.clone(),
             );
             interface_pers_struct = Some(pers_struct);
@@ -2248,12 +2262,12 @@ fn compile_runtime_module_from_source(
         )
     })?;
 
-    let module_info = InMemoryModuleInfo {
-        source_path: module.res_path.clone(),
-        is_pure: compile_result.is_pure,
-        cmj_export_constants: compile_result.cmj_export_constants,
-        is_runtime: true,
-    };
+    let module_info = InMemoryModuleInfo::new(
+        module.res_path.clone(),
+        compile_result.is_pure,
+        compile_result.cmj_export_constants,
+        true,
+    );
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
@@ -2647,10 +2661,19 @@ fn compile_module_in_process_to_js_boundary(
 
     // Build compiler options from package config
     let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let root_config = build_state.get_root_config();
 
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
     let provisional_is_pure = true;
+    let provisional_module_info = in_memory_module_info_for_package(
+        package,
+        root_config,
+        source_abs.clone(),
+        provisional_is_pure,
+        AHashMap::new(),
+        is_runtime,
+    );
 
     // For .resi + .res, we need the .resi to be in the registry before compiling .res.
     // Build a local registry that includes the .resi result (if any).
@@ -2660,12 +2683,7 @@ fn compile_module_in_process_to_js_boundary(
     // Register this module's metadata in the local registry
     local_registry.insert_module_info(
         module_name.to_string(),
-        rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
-            source_path: source_abs.clone(),
-            is_pure: provisional_is_pure,
-            cmj_export_constants: AHashMap::new(),
-            is_runtime,
-        },
+        provisional_module_info.clone(),
     );
 
     // Step 1: If .resi exists, typecheck the interface first
@@ -2717,12 +2735,7 @@ fn compile_module_in_process_to_js_boundary(
         let intf_alias_rewrites = intf_result.new_alias_rewrites;
         if let Some(ps) = intf_result.pers_struct {
             let ps = Arc::new(ps);
-            let module_info = InMemoryModuleInfo {
-                source_path: source_abs.clone(),
-                is_pure: provisional_is_pure,
-                cmj_export_constants: AHashMap::new(),
-                is_runtime,
-            };
+            let module_info = provisional_module_info.clone();
             local_registry.register_module_arc(
                 module_name,
                 ps.clone(),
@@ -2739,12 +2752,7 @@ fn compile_module_in_process_to_js_boundary(
             interface_registry_update = Some(PendingRegistryUpdate {
                 module_name: module_name.to_string(),
                 pers_struct: None,
-                module_info: InMemoryModuleInfo {
-                    source_path: source_abs.clone(),
-                    is_pure: provisional_is_pure,
-                    cmj_export_constants: AHashMap::new(),
-                    is_runtime,
-                },
+                module_info: provisional_module_info.clone(),
                 alias_rewrites: intf_alias_rewrites,
             });
         }
@@ -2777,19 +2785,14 @@ fn compile_module_in_process_to_js_boundary(
     let publish_implementation_signature = scheduler_hooks.is_some() && !has_interface;
     let signature_hooks = scheduler_hooks.cloned();
     let signature_module_name = module_name.to_string();
-    let signature_source_abs = source_abs.clone();
+    let signature_module_info = provisional_module_info.clone();
     let mut signature_hook =
         move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
             let Some(hooks) = signature_hooks.as_ref() else {
                 return Ok(None);
             };
             let fingerprint = ready.pers_struct.as_ref().map(|ps| ps.fingerprint).unwrap_or(0);
-            let module_info = InMemoryModuleInfo {
-                source_path: signature_source_abs.clone(),
-                is_pure: provisional_is_pure,
-                cmj_export_constants: AHashMap::new(),
-                is_runtime,
-            };
+            let module_info = signature_module_info.clone();
             let registry_updates = if let Some(pers_struct) = ready.pers_struct {
                 vec![PendingRegistryUpdate {
                     module_name: signature_module_name.clone(),
@@ -3030,12 +3033,14 @@ fn finish_in_process_js_inner(
 
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
-    let module_info = InMemoryModuleInfo {
-        source_path: pre_js_msg.source_abs.clone(),
+    let module_info = in_memory_module_info_for_package(
+        package,
+        root_config,
+        pre_js_msg.source_abs.clone(),
         is_pure,
         cmj_export_constants,
-        is_runtime: pre_js_msg.is_runtime,
-    };
+        pre_js_msg.is_runtime,
+    );
     let mut registry_updates = Vec::new();
     if pre_js_msg.has_interface {
         if let Some(mut update) = pre_js_msg.interface_registry_update {

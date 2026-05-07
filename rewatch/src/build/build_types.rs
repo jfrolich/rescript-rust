@@ -465,12 +465,12 @@ impl BuildCommandState {
         is_runtime: bool,
         new_alias_rewrites: ahash::AHashMap<String, rescript_compiler::types::path::Path>,
     ) {
-        let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo {
+        let info = rescript_compiler::cmi::persistent_env::InMemoryModuleInfo::new(
             source_path,
             is_pure,
             cmj_export_constants,
             is_runtime,
-        };
+        );
         self.module_registry.lock().unwrap().register_module_arc(
             module_name,
             pers_struct,

@@ -1921,6 +1921,7 @@ fn resolves_runtime_dynamic_import_to_string_path() {
         Some(source.to_str().expect("utf8 source path")),
         Some(output.as_path()),
         None,
+        None,
         Some(runtime.path()),
         None,
         false,
@@ -1979,6 +1980,7 @@ fn resolves_local_module_paths_from_ast_metadata() {
     let resolver = ModulePathResolver::from_compile_options(
         Some(current_source.to_str().expect("utf8 current source path")),
         Some(source_dir.join("Current.mjs").as_path()),
+        None,
         None,
         None,
         Some(pers),

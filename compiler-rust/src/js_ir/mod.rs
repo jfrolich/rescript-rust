@@ -60,6 +60,7 @@ pub struct ModulePathResolver {
     format: ModuleFormat,
     output_suffix: String,
     current_source_path: Option<PathBuf>,
+    current_package_name: Option<String>,
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
     current_package_is_runtime: bool,
@@ -72,6 +73,7 @@ impl ModulePathResolver {
         source_filename: Option<&str>,
         output_path: Option<&FsPath>,
         output_module_format: Option<ModuleFormat>,
+        package_name: Option<&str>,
         runtime_path: Option<&FsPath>,
         persistent_env: Option<PersistentEnv>,
         current_package_is_runtime: bool,
@@ -82,6 +84,7 @@ impl ModulePathResolver {
             output_suffix: output_suffix_from_path(output_path),
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
+            current_package_name: package_name.map(ToOwned::to_owned),
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
             current_package_is_runtime,
@@ -135,6 +138,10 @@ impl ModulePathResolver {
                         .as_ref()
                         .and_then(|env| env.resolve_module_source_path(module.id.name()))
                         .map(|path| normalize_absolute_path(&path))?;
+                    if let Some(path) = self.package_module_path(module.id.name(), &target_source)
+                    {
+                        return Some(path);
+                    }
                     self.relative_output_path(&target_source)
                 }
             }
@@ -240,6 +247,30 @@ impl ModulePathResolver {
         Some(rendered)
     }
 
+    fn package_module_path(&self, module_name: &str, target_source: &FsPath) -> Option<String> {
+        let current_package_name = self.current_package_name.as_deref()?;
+        let (target_package_name, target_package_root, target_suffix) = self
+            .persistent_env
+            .as_ref()?
+            .module_js_package_info(module_name)?;
+        if target_package_name == current_package_name {
+            return None;
+        }
+
+        // OCaml distinguishes same-package rebasing from dependency-package
+        // paths through Js_packages_info.query_package_infos and
+        // same_package_by_name; see compiler/core/js_name_of_module_id.ml:115-146.
+        let target_package_root = normalize_absolute_path(&target_package_root);
+        let relative_source = target_source.strip_prefix(&target_package_root).ok()?;
+        let suffix = target_suffix.as_deref().unwrap_or(&self.output_suffix);
+        let relative_output = source_path_with_js_suffix(relative_source, suffix)?;
+        Some(format!(
+            "{}/{}",
+            target_package_name,
+            relative_output.to_string_lossy().replace('\\', "/")
+        ))
+    }
+
     fn fallback_local_module_source(&self, module_name: &str) -> Option<PathBuf> {
         let current_source = self.current_source_path.as_ref()?;
         let current_dir = current_source.parent()?;
@@ -296,6 +327,13 @@ fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {
         Some(name) if name.ends_with(".bs.js") => ".bs.js".to_string(),
         _ => ".js".to_string(),
     }
+}
+
+fn source_path_with_js_suffix(source_path: &FsPath, suffix: &str) -> Option<PathBuf> {
+    let stem = source_path.file_stem()?.to_str()?;
+    let mut output = source_path.to_path_buf();
+    output.set_file_name(format!("{stem}{suffix}"));
+    Some(output)
 }
 
 fn normalize_absolute_path(path: &FsPath) -> PathBuf {
@@ -3723,6 +3761,7 @@ mod tests {
         let resolver = ModulePathResolver::from_compile_options(
             Some(current_source.to_str().expect("utf8 current source")),
             Some(source_dir.join("include_side_effect.mjs").as_path()),
+            None,
             None,
             None,
             None,
