@@ -277,6 +277,7 @@ run_build() {
     return 1
 }
 
+touch "$TEMP_DIR/ocaml-build-start.marker"
 if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/ocaml-build.log" bash -c '
     set -e
     cd "$0"
@@ -287,18 +288,21 @@ if ! run_build "Step 3: Building expected outputs with OCaml bsc..." "$TEMP_DIR/
     exit 2
 fi
 
-python3 - "$TEMP_DIR/js-candidates.txt" "$TEMP_DIR/expected" "$TEMP_DIR/expected-manifest.tsv" <<'PY'
+python3 - "$TEMP_DIR/js-candidates.txt" "$TEMP_DIR/expected" "$TEMP_DIR/expected-manifest.tsv" "$TEMP_DIR/ocaml-build-start.marker" <<'PY'
 import hashlib
 import os
 import shutil
 import sys
 
-candidates_path, expected_dir, manifest_path = sys.argv[1:4]
+candidates_path, expected_dir, manifest_path, marker_path = sys.argv[1:5]
+marker_mtime = os.path.getmtime(marker_path)
 os.makedirs(expected_dir, exist_ok=True)
 with open(candidates_path, encoding="utf-8") as candidates, open(manifest_path, "w", encoding="utf-8") as manifest:
     for raw in candidates:
         path = raw.rstrip("\n")
         if not path or not os.path.isfile(path):
+            continue
+        if os.path.getmtime(path) < marker_mtime:
             continue
         key = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16] + "_" + os.path.basename(path)
         expected = os.path.join(expected_dir, key)
