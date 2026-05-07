@@ -22794,7 +22794,7 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
-    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx, false)
+    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx)
 }
 
 pub(crate) fn lookup_type_in_resolved_path_for_source<'a>(
@@ -22804,7 +22804,12 @@ pub(crate) fn lookup_type_in_resolved_path_for_source<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
-    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx, true)
+    // OCaml compiler/ml/typetexp.ml:116-122 resolves source type
+    // constructors through Env.lookup_type and then Env.find_type. Both
+    // env.ml:1091-1100 and env.ml:800-813 read the parent module's component
+    // table directly; they do not force the dotted alias target before
+    // selecting the type entry.
+    lookup_type_in_resolved_path_impl(parent_module_path, type_name, env, pers_env, ctx)
 }
 
 fn lookup_type_in_resolved_path_impl<'a>(
@@ -22813,12 +22818,7 @@ fn lookup_type_in_resolved_path_impl<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext<'a>,
-    force_alias_target_lookup: bool,
 ) -> Option<(Path, Ident, crate::types::decl::TypeDeclaration)> {
-    if force_alias_target_lookup {
-        force_dotted_module_alias_target_for_type_lookup(parent_module_path, env, pers_env, ctx);
-    }
-
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
     }
@@ -22843,29 +22843,6 @@ fn lookup_type_in_resolved_path_impl<'a>(
         })
     })
     .flatten()
-}
-
-fn force_dotted_module_alias_target_for_type_lookup<'a>(
-    parent_module_path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext<'a>,
-) {
-    let Some(alias_target) = module_alias_target_for_path(parent_module_path, env, pers_env, ctx)
-    else {
-        return;
-    };
-    let Path::Pdot(parent, module_name, _) = alias_target else {
-        return;
-    };
-
-    // OCaml compiler/ml/typetexp.ml:116-123 dispatches source type
-    // constructors to Env.lookup_type. When the selected module component is
-    // an alias, env.ml:1441-1447 `scrape_alias` reaches env.ml:876-882
-    // `find_module` for the dotted alias target before returning the type
-    // declaration. Keep this to source lookups; substitution and constraint
-    // probes use component descriptors without forcing the module thunk.
-    let _ = lookup_module_in_resolved_path(&parent, module_name.as_str(), env, pers_env, ctx);
 }
 
 fn rewrite_alias_pident_child_prefixes<'a>(
