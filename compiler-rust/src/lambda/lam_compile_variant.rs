@@ -1965,22 +1965,42 @@ impl LambdaCompiler {
         {
             let body = self.compile_return_block(cases[0].1);
             if !body.is_empty() {
-                // OCaml's two-case Complete arm (lam_compile.ml:558) emits
-                // `S.if_ (test === id1) then else`. When every case is
+                // OCaml's two-case Complete arm (lam_compile.ml:560-568)
+                // emits `S.if_ (test === id1) then else`. When every case is
                 // `Lstaticraise X` and Rust's `compile_return_block` resolved
                 // it via `with_static_handler` -> `resolve_static_raise`
                 // inline, the inlined handler body fills both branches.
-                // OCaml instead leaves the raises as fallthrough -> empty
-                // and emits the staticcatch handler body once after the
-                // dispatch, so `S.if_ test [] []` collapses to `S.exp test`
-                // (js_stmt_make.ml:242 + 45-53) and the bare comparison
-                // (`tmp === null;`) survives in front of the handler.
-                // Prepend `S.exp (test === id1)` here to recover that
-                // shape when the dispatched cases are all `Lstaticraise`.
+                // OCaml's pseudo-jump staticcatch path leaves those raises as
+                // fallthrough -> empty and emits the handler body once after
+                // the dispatch (lam_compile.ml:980-1008), so `S.if_ test []
+                // []` collapses to `S.exp test` (js_stmt_make.ml:242) and the
+                // bare comparison (`tmp === null;`) survives in front of the
+                // handler. Do not do this for the explicit-jump path:
+                // `compile_staticraise` assigns `exit_id = order_id`
+                // (lam_compile.ml:936-950), and `compile_staticcatch` emits
+                // that path for `Assign _` / non-pseudo continuations
+                // (lam_compile.ml:1010-1063). In that case both branches are
+                // real assignments, not empty fallthrough branches.
                 if cases.len() >= 2
                     && cases
                         .iter()
                         .all(|(_, body)| matches!(body, Lambda::LstaticRaise(_, _)))
+                    && cases.iter().all(|(_, body)| match body {
+                        Lambda::LstaticRaise(label, args) => {
+                            self.static_handlers.iter().any(|handler| {
+                                handler.label == *label && handler.bindings.len() == args.len()
+                            })
+                        }
+                        _ => false,
+                    })
+                    && cases.iter().all(|(_, body)| match body {
+                        Lambda::LstaticRaise(label, args) => {
+                            !self.static_jump_handlers.iter().any(|handler| {
+                                handler.label == *label && handler.bindings.len() == args.len()
+                            })
+                        }
+                        _ => false,
+                    })
                 {
                     let test_expr = self.switch_case_test(test, &cases[0].0);
                     let mut prefix = vec![];
