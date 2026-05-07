@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-06
-**Status:** Tella clean in-process builds are around 2.65-2.8s best-case on the current branch after the latest retained persistent signature sharing and type lookup cache optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** Tella clean in-process builds are around 2.65-2.9s on the current branch after the latest retained persistent signature sharing and type lookup cache optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
 
 ## Goal
 
@@ -96,6 +96,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Add qualified record-label cache counters, including local-root labels that currently bypass caching.
   - [x] Add type-item resolve counters for positive cache hits, missing cache hits, signature scans, scanned items, and found items.
   - [x] Add signature-copy counters with top call-site reporting for retained shared-signature work.
+  - [x] Add signature-qualification counters to classify full-copy candidates by root cause.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus

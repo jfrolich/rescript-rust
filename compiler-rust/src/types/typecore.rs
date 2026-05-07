@@ -22879,22 +22879,44 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
     let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
         direct_sig_type_family_rebind_options(mty, access_path);
     let access_path_has_local_root = matches!(path_root_module(access_path), Path::Pident(id) if !id.is_persistent() && id.stamp() != 0);
+    let access_path_has_persistent_root =
+        matches!(path_root_module(access_path), Path::Pident(id) if id.is_persistent());
+    let resolved_sig_has_package_self_manifests =
+        Env::signature_has_package_self_manifests(resolved_sig, ctx);
     let qualification_is_identity = resolved_name.is_none()
         && access_path_has_local_root
         && !matches!(mty, crate::types::decl::ModuleType::MtyAlias(..))
         && !should_rebind_direct_type_family
-        && !Env::signature_has_package_self_manifests(resolved_sig, ctx)
+        && !resolved_sig_has_package_self_manifests
         && resolved_sig
             .iter()
             .all(|item| matches!(item, crate::types::decl::SignatureItem::SigValue(_, _)));
+    if ctx.compiler_counters_enabled() {
+        let kind = if qualification_is_identity {
+            "identity_values"
+        } else if resolved_name.is_some() {
+            "resolved_name"
+        } else if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
+            "alias"
+        } else if should_rebind_direct_type_family {
+            "direct_type_family_rebind"
+        } else if resolved_sig_has_package_self_manifests {
+            "package_self_manifest"
+        } else if access_path_has_persistent_root {
+            "persistent_root"
+        } else if access_path_has_local_root {
+            "local_root"
+        } else {
+            "other"
+        };
+        crate::perf_counters::record_signature_qualification(kind, resolved_sig.len());
+    }
     if qualification_is_identity {
         return resolved_sig.clone();
     }
 
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
-    let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
-    let access_path_has_persistent_root =
-        matches!(path_root_module(access_path), Path::Pident(id) if id.is_persistent());
+    let skip_self_manifest_subst = resolved_sig_has_package_self_manifests;
     let alias_requires_exact_persistent_prefix = matches!(
         (mty, access_path),
         (
