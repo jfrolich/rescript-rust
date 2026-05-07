@@ -4243,48 +4243,57 @@ fn type_pattern_record(
     let mut typed_fields = Vec::new();
     for field in pending_fields {
         let field_lid_for_error = tctx.arena.get_longident(field.lid.txt).clone();
-        let (label_desc, field_ty, poly_vars, force_label_arg_paths) =
-            if let Some(env_label) = field.label {
-                // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
-                // creates `(vars, ty_arg, ty_res) = instance_label false label`,
-                // unifies `ty_res` with the record type, then types the field
-                // pattern directly against `ty_arg`. Do not insert an extra fresh
-                // field variable here; that changes both sharing and lazy forcing.
-                ctx.begin_def();
-                let (vars, ty_arg, ty_res) =
-                    crate::types::ctype::instance_label(ctx, false, &env_label);
-                if vars.is_empty() {
+        let (label_desc, field_ty, poly_vars, force_label_arg_paths) = if let Some(env_label) =
+            field.label
+        {
+            // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
+            // creates `(vars, ty_arg, ty_res) = instance_label false label`,
+            // unifies `ty_res` with the record type, then types the field
+            // pattern directly against `ty_arg`. Do not insert an extra fresh
+            // field variable here; that changes both sharing and lazy forcing.
+            // The label already carries its `lbl_all` array there; populate
+            // Rust's exact-path raw-lambda cache before `instance_label`, so
+            // compiler/ml/matching.ml:1417-1476 can expand sparse record
+            // patterns through the same full label set instead of falling
+            // back by short name.
+            if !has_dict_pattern_attr {
+                let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, env_label.lbl_res);
+            }
+            ctx.begin_def();
+            let (vars, ty_arg, ty_res) =
+                crate::types::ctype::instance_label(ctx, false, &env_label);
+            if vars.is_empty() {
+                ctx.end_def();
+            }
+            if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
+                if !vars.is_empty() {
                     ctx.end_def();
                 }
-                if let Err(err) = unify_pattern_types(tctx, loc, ty_res, record_ty) {
-                    if !vars.is_empty() {
-                        ctx.end_def();
+                return Err(match err {
+                    TypeCoreError::PatternTypeClash(trace) => {
+                        TypeCoreError::LabelMismatch(field_lid_for_error, trace)
                     }
-                    return Err(match err {
-                        TypeCoreError::PatternTypeClash(trace) => {
-                            TypeCoreError::LabelMismatch(field_lid_for_error, trace)
-                        }
-                        err => err,
-                    });
-                }
-                (env_label, ty_arg, vars, true)
-            } else {
-                let field_ty = ctx.new_var(None);
-                let label_desc = crate::types::LabelDescription {
-                    lbl_name: field.field_name,
-                    lbl_res: record_ty,
-                    lbl_arg: field_ty,
-                    lbl_mut: crate::types::MutableFlag::Immutable,
-                    lbl_optional: field.opt,
-                    lbl_pos: field.source_pos,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                    lbl_private: crate::types::PrivateFlag::Public,
-                    lbl_loc: tctx.arena.to_location(field.lid.loc),
-                    lbl_attributes: vec![],
-                };
-                (label_desc, field_ty, Vec::new(), false)
+                    err => err,
+                });
+            }
+            (env_label, ty_arg, vars, true)
+        } else {
+            let field_ty = ctx.new_var(None);
+            let label_desc = crate::types::LabelDescription {
+                lbl_name: field.field_name,
+                lbl_res: record_ty,
+                lbl_arg: field_ty,
+                lbl_mut: crate::types::MutableFlag::Immutable,
+                lbl_optional: field.opt,
+                lbl_pos: field.source_pos,
+                lbl_all: crate::types::LabelArrayRef(0),
+                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                lbl_private: crate::types::PrivateFlag::Public,
+                lbl_loc: tctx.arena.to_location(field.lid.loc),
+                lbl_attributes: vec![],
             };
+            (label_desc, field_ty, Vec::new(), false)
+        };
 
         // process_optional_label: if the label is optional and the user did NOT write '?',
         // wrap the pattern in Some(...) before type checking.

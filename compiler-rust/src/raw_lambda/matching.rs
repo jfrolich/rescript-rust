@@ -796,10 +796,16 @@ fn all_record_args(
     let first_lbl = &lbls[0].1;
     let first_opt = lbls[0].3;
 
-    // Try to resolve all labels from the type
+    // OCaml expands through the typed label's own `lbl_all` array, not by
+    // guessing another record declaration with compatible positions. See
+    // compiler/ml/matching.ml:218-224 and 540-563.
     let all_labels = ctx_ref.and_then(|ctx| {
         resolve_labels_from_type(ctx, first_lbl.lbl_res, pat_env)
-            .or_else(|| resolve_labels_from_type(ctx, pat_type, pat_env))
+            .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
+            .or_else(|| {
+                resolve_labels_from_type(ctx, pat_type, pat_env)
+                    .filter(|labels| record_labels_cover_pattern_fields(labels, lbls))
+            })
             .or_else(|| {
                 let cached = ctx.get_dict_pattern_labels();
                 if cached.is_empty() {
@@ -8682,18 +8688,68 @@ fn resolve_all_record_labels(
 
     let first_lbl = &fields[0].1;
 
-    // Try to resolve via the record type (lbl_res)
-    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, first_lbl.lbl_res, pat.pat_env) {
+    // OCaml passes `lbl.lbl_all` from the typed pattern directly to
+    // `divide_record` (compiler/ml/matching.ml:2564-2568). Rust reconstructs
+    // that array, so reject loose lookups that do not include the labels from
+    // the already-typed pattern.
+    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, first_lbl.lbl_res, pat.pat_env)
+        .filter(|labels| record_labels_cover_pattern_fields(labels, fields))
+    {
         return all_labels;
     }
 
     // Try via pat_type
-    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, pat.pat_type, pat.pat_env) {
+    if let Some(all_labels) = resolve_labels_from_type(ctx_ref, pat.pat_type, pat.pat_env)
+        .filter(|labels| record_labels_cover_pattern_fields(labels, fields))
+    {
         return all_labels;
     }
 
     // Fallback: return only mentioned fields (old behavior)
     get_all_labels_from_record_fields(fields)
+}
+
+fn record_labels_cover_pattern_fields(
+    all_labels: &[LabelDescription],
+    fields: &[(
+        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
+        LabelDescription,
+        Pattern,
+        bool,
+    )],
+) -> bool {
+    fields.iter().all(|(_, field_label, _, _)| {
+        all_labels.iter().any(|label| {
+            label.lbl_pos == field_label.lbl_pos && label.lbl_name == field_label.lbl_name
+        })
+    })
+}
+
+fn label_descriptions_from_cached_entries(
+    cached: Vec<(
+        String,
+        i32,
+        MutableFlag,
+        RecordRepresentation,
+        Vec<crate::types::decl::Attribute>,
+    )>,
+) -> Vec<LabelDescription> {
+    cached
+        .into_iter()
+        .map(|(name, pos, mutflag, repr, attrs)| LabelDescription {
+            lbl_name: name,
+            lbl_res: TypeExprRef(0),
+            lbl_arg: TypeExprRef(0),
+            lbl_mut: mutflag,
+            lbl_optional: true,
+            lbl_pos: pos,
+            lbl_all: crate::types::decl::LabelArrayRef(0),
+            lbl_repres: repr,
+            lbl_private: crate::types::asttypes::PrivateFlag::Public,
+            lbl_loc: crate::location::Location::none(),
+            lbl_attributes: attrs,
+        })
+        .collect()
 }
 
 /// Look up all LabelDescription entries for a record type.
@@ -8736,6 +8792,19 @@ fn resolve_labels_from_type(
         }
     }
 
+    if let Some(labels) = ctx_ref.get_record_label_descriptions(&path) {
+        return Some(labels.as_ref().clone());
+    }
+
+    // Match OCaml `lbl.lbl_all` use in compiler/ml/matching.ml:1417-1476.
+    // Typecore registers this lightweight cache while reconstructing record
+    // labels for raw lambda conversion, using the exact type path including
+    // stamps. Prefer it before any declaration-name fallback.
+    let cache_key = format!("{:?}", path);
+    if let Some(labels) = ctx_ref.get_record_labels(&cache_key) {
+        return Some(label_descriptions_from_cached_entries(labels));
+    }
+
     // Try env lookup first
     let env = ctx_ref.get_typed_env(env_ref)?;
     if let Ok(decl) = env.lookup_type(&path) {
@@ -8744,19 +8813,6 @@ fn resolve_labels_from_type(
         }
     }
 
-    // Try type_ctx stores
-    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-    if let Some(decl) = ctx_ref.find_type_decl(&path.last()) {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
-            return Some(build_label_descriptions(labels, repr, decl.type_private));
-        }
-    }
-
-    // Try stamp-based lookup
     if let crate::types::Path::Pident(ref id) = path {
         if id.stamp() != 0 {
             if let Some(decl) = ctx_ref.find_type_decl_by_stamp(id.stamp()) {
@@ -8764,6 +8820,22 @@ fn resolve_labels_from_type(
                     return Some(build_label_descriptions(labels, repr, decl.type_private));
                 }
             }
+        }
+    }
+
+    // Try exact type_ctx stores. OCaml's `lbl_all` is already exact
+    // (compiler/ml/typecore.ml:2802); avoid falling back from `A.B.t` to any
+    // same-last-name `t`, which can attach another record's debug labels.
+    if let Some(decl) = ctx_ref.find_type_decl_by_path(&path.name()) {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+            return Some(build_label_descriptions(labels, repr, decl.type_private));
+        }
+    }
+    if matches!(path, crate::types::Path::Pident(_))
+        && let Some(decl) = ctx_ref.find_type_decl(path.last())
+    {
+        if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind {
+            return Some(build_label_descriptions(labels, repr, decl.type_private));
         }
     }
 
