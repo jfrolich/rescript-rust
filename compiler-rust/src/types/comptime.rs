@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::context::TypeContext;
 use super::ctype;
-use super::decl::{ConstructorArguments, TypeKind};
+use super::decl::{ConstructorArguments, ConstructorDescription, ConstructorTag, TypeKind};
 use super::env::Env;
 use super::path::Path;
 use super::predef;
@@ -534,10 +534,85 @@ fn build_type_info_from_constr<'a>(
 }
 // ── TypeInfo → Typed Tree Expression ─────────────────────────────────────────
 
+fn type_info_constructor_description<'a>(
+    ctor_name: &str,
+    ctx: &'a TypeContext<'a>,
+    env: &Env,
+) -> Option<ConstructorDescription> {
+    // `typeInfo` is a Rust-only compiler-internal predef. It is intentionally
+    // not registered in the source-visible constructor table; build the same
+    // description shape as compiler/ml/env.ml:1655-1680 `store_type` would
+    // expose for normal variants without making these constructors visible to
+    // compiler/ml/typecore.ml:990-1010 disambiguation.
+    let type_info_ident = predef::ident_type_info();
+    let decl = env.find_type_by_ident(&type_info_ident).ok()?;
+    let TypeKind::TypeVariant(constrs) = &decl.type_kind else {
+        return None;
+    };
+
+    let num_consts = constrs
+        .iter()
+        .filter(
+            |c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()),
+        )
+        .count() as i32;
+    let num_nonconsts = constrs.len() as i32 - num_consts;
+    let mut const_idx = 0i32;
+    let mut nonconst_idx = 0i32;
+
+    for cd in constrs {
+        let is_constant =
+            matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
+        let cstr_tag = if decl.type_unboxed.unboxed {
+            ConstructorTag::CstrUnboxed
+        } else if is_constant {
+            let tag = ConstructorTag::CstrConstant(const_idx);
+            const_idx += 1;
+            tag
+        } else {
+            let tag = ConstructorTag::CstrBlock(nonconst_idx);
+            nonconst_idx += 1;
+            tag
+        };
+
+        if cd.cd_id.name() != ctor_name {
+            continue;
+        }
+
+        let (cstr_args, cstr_arity) = match &cd.cd_args {
+            ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
+            ConstructorArguments::CstrRecord(labels) => {
+                let args: Vec<TypeExprRef> = labels.iter().map(|l| l.ld_type).collect();
+                (args.clone(), args.len() as i32)
+            }
+        };
+        let cstr_res = cd.cd_res.unwrap_or_else(|| {
+            ctx.new_generic_constr(predef::path_type_info(), decl.type_params.clone())
+        });
+        let cstr_existentials = super::env::constructor_existentials(ctx, &cstr_args, cd.cd_res);
+
+        return Some(ConstructorDescription {
+            cstr_name: cd.cd_id.name().to_string(),
+            cstr_res,
+            cstr_existentials,
+            cstr_args,
+            cstr_arity,
+            cstr_tag,
+            cstr_consts: num_consts,
+            cstr_nonconsts: num_nonconsts,
+            cstr_generalized: cd.cd_res.is_some(),
+            cstr_private: decl.type_private,
+            cstr_loc: cd.cd_loc,
+            cstr_attributes: super::decl::constructor_description_attrs_for_variant(constrs, cd),
+            cstr_inlined: None,
+        });
+    }
+
+    None
+}
+
 /// Construct a typed tree Expression representing a `typeInfo` literal value.
 /// This is called when `@typeInfo(expr)` is encountered during type checking.
-/// It looks up the typeInfo constructors in the environment and builds
-/// the appropriate Texp_construct nodes.
 pub fn type_info_to_typed_expr<'a>(
     info: &TypeInfo,
     ctx: &'a TypeContext<'a>,
@@ -567,8 +642,7 @@ pub fn type_info_to_typed_expr<'a>(
         TypeInfo::Unknown { .. } => "TiUnknown",
     };
 
-    // Look up the constructor in the environment
-    let cstr_desc = env.find_constructor(ctor_name).ok()?.clone();
+    let cstr_desc = type_info_constructor_description(ctor_name, ctx, env)?;
 
     // For simple constructors (no args), just construct the value
     let lid_loc = crate::parse_arena::Located {

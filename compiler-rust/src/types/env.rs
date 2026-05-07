@@ -1809,14 +1809,20 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
         all_ctors.push(external_ctor);
         all_ctors.push(opaque_ctor);
 
-        add_type_with_constrs(
+        // OCaml compiler/ml/predef.ml:388-405 only installs source-visible
+        // language predefs into the initial environment. Keeping Rust's
+        // comptime-only `typeInfo` constructors out of TycompTbl mirrors
+        // compiler/ml/env.ml:1103-1114: `Typetexp.find_all_constructors` must
+        // not see internal constructors like `String`, otherwise
+        // compiler/ml/typecore.ml:990-1010 takes the wrong disambiguation path
+        // before the expected-type `lookup_from_type` fallback.
+        add_internal_type_only(
             &mut env,
             predef::ident_type_info(),
             TypeDeclaration {
                 type_kind: TypeKind::TypeVariant(all_ctors),
                 ..decl_abstr(0, false)
             },
-            ctx,
         );
 
         // fieldInfo record type: { name: string, typ: typeInfo, optional: bool, mutable_: bool }

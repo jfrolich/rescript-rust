@@ -20518,23 +20518,17 @@ fn force_type_path_for_lookup_from_type<'a>(
     path: &Path,
 ) {
     if let Path::Pdot(parent, type_name, _) = path {
-        // OCaml compiler/ml/env.ml:1542-1548 builds record component labels
-        // from `Datarepr.labels_of_type`, and later typecore.ml:1623-1632
-        // instantiates the selected field type. For a type path like `M.N.t`,
-        // the reference path reaches the owning module component and its
-        // `comp_types` entry, not a broad `Env.normalize_path` over every
-        // sibling component.
-        let found_component_type =
+        // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type` reaches
+        // compiler/ml/env.ml:786-817 `find_type_descrs`/`find_type`, which
+        // navigates persistent `ps_comps` built at env.ml:669-678. It does not
+        // call `Env.normalize_path` or force `ps_sig`, so this side-effect pass
+        // must stay at the component-table level instead of freshening every
+        // sibling in the owning persistent signature.
+        let _ =
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                let found = components.lookup_type(type_name.as_str()).is_some();
-                found
-            })
-            .unwrap_or(false);
-        if found_component_type {
-            return;
-        }
+                components.lookup_type(type_name.as_str()).is_some()
+            });
     }
-    let _ = crate::types::ctype::normalize_path_full(ctx, env, path);
 }
 
 fn materialize_dict_pattern_label(
@@ -21178,11 +21172,10 @@ fn lookup_constructor_from_type_descrs<'b>(
 
     // OCaml compiler/ml/typecore.ml:942-959 implements
     // `NameChoice.lookup_from_type` by calling `Env.find_type_descrs`.
-    // For dotted paths, compiler/ml/env.ml:804-813 reaches the parent module
-    // component table before selecting constructors for exactly this type; the
-    // dotted prefix can also observe env.ml:865-882's `find_module` side effect
-    // through the same alias-scraping path described by ctype.ml:1367-1372.
-    force_find_module_path_for_lookup(parent, env, pers_env, ctx);
+    // For dotted paths, compiler/ml/env.ml:804-817 reaches the parent module
+    // component table (`ps_comps`) before selecting constructors for exactly
+    // this type; it does not call env.ml:865-882 `find_module` and therefore
+    // does not force the persistent `ps_sig` binder-renaming thunk here.
     let desc = with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
         let (_, _) = components.lookup_type(type_name.as_str())?;
         let component_type_path = Path::pdot(components.access_path().clone(), type_name.as_str());

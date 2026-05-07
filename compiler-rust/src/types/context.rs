@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, RowDesc,
-    RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef, GENERIC_LEVEL,
+    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
+    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -1553,7 +1553,12 @@ impl<'a> TypeContext<'a> {
 
     /// Get the current ident stamp value (equivalent of OCaml's `Ident.current_time()`).
     pub fn current_stamp(&self) -> i32 {
-        std::cmp::max(self.id_gen.current_stamp(), Ident::current_local_stamp())
+        // OCaml compiler/ext/ident.ml:57-58 reads the single active
+        // `Ident.create` stamp counter. Rust's `Ident::create_local` counter is
+        // for helper-created paths and test fixtures; letting it feed
+        // Ctype.init_def shifts later typedtree binders after unrelated helper
+        // path construction.
+        self.id_gen.current_stamp()
     }
 
     /// Set the ident stamp counter to at least `t`.
