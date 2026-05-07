@@ -611,6 +611,9 @@ pub struct PatternState {
     allow_modules: bool,
     /// Module variables collected.
     module_variables: Vec<(crate::parse_arena::Located<String>, Location)>,
+    /// Label argument paths whose component-table side effects must run after
+    /// the whole pattern has allocated binders.
+    deferred_label_arg_path_forces: Vec<TypeExprRef>,
 }
 
 /// A pattern variable with its binding information.
@@ -639,6 +642,7 @@ impl PatternState {
             pattern_variables: Vec::new(),
             allow_modules: false,
             module_variables: Vec::new(),
+            deferred_label_arg_path_forces: Vec::new(),
         }
     }
 
@@ -702,6 +706,15 @@ impl PatternState {
         self.pattern_variables.clear();
         self.allow_modules = allow_modules;
         self.module_variables.clear();
+        self.deferred_label_arg_path_forces.clear();
+    }
+
+    fn defer_label_arg_path_force(&mut self, ty: TypeExprRef) {
+        self.deferred_label_arg_path_forces.push(ty);
+    }
+
+    fn take_deferred_label_arg_path_forces(&mut self) -> Vec<TypeExprRef> {
+        std::mem::take(&mut self.deferred_label_arg_path_forces)
     }
 }
 
@@ -2464,6 +2477,23 @@ pub fn type_pattern(
     let old_newtype_level = tctx.newtype_level;
     tctx.newtype_level = Some(tctx.type_ctx.current_level());
     let result = type_pattern_inner(tctx, env, pat, expected_ty, mode, state, 0);
+    if result.is_ok() {
+        for field_ty in state.take_deferred_label_arg_path_forces() {
+            // OCaml compiler/ml/typecore.ml:1192-1198 resolves and sorts record
+            // fields before typing subpatterns, and compiler/ml/typecore.ml:1623-1644's
+            // `type_label_pat` allocates pattern binders before any later lazy
+            // field-argument module force. Keep this at the full-pattern
+            // boundary so tuple siblings such as `Some(x)` get their binders
+            // before nested record field paths are forced.
+            force_type_paths_for_lookup_from_type(
+                tctx.type_ctx,
+                env,
+                &mut tctx.persistent_env,
+                field_ty,
+                &mut HashSet::new(),
+            );
+        }
+    }
     tctx.newtype_level = old_newtype_level;
     result
 }
@@ -4205,7 +4235,6 @@ fn type_pattern_record(
     });
 
     let mut typed_fields = Vec::new();
-    let mut deferred_label_arg_path_forces = Vec::new();
     for field in pending_fields {
         let field_lid_for_error = tctx.arena.get_longident(field.lid.txt).clone();
         let (label_desc, field_ty, poly_vars, force_label_arg_paths) =
@@ -4277,7 +4306,12 @@ fn type_pattern_record(
             type_pattern_inner(tctx, env, parsed_pat, field_ty, mode, state, 0)?
         };
         if force_label_arg_paths {
-            deferred_label_arg_path_forces.push(field_ty);
+            // OCaml compiler/ml/typecore.ml:1192-1198 and
+            // compiler/ml/typecore.ml:1623-1644 allocate all binders in the
+            // surrounding pattern before nested label argument paths force
+            // additional module signatures. The top-level `type_pattern` drains
+            // this queue after tuple/constructor siblings have been typed.
+            state.defer_label_arg_path_force(field_ty);
         }
         if !poly_vars.is_empty() {
             ctx.end_def();
@@ -4297,23 +4331,6 @@ fn type_pattern_record(
             }
         }
         typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
-    }
-
-    for field_ty in deferred_label_arg_path_forces {
-        // OCaml compiler/ml/typecore.ml:1192-1198 resolves and sorts all record
-        // fields before `map_fold_cont type_lbl_a` types their subpatterns, and
-        // typecore.ml:1623-1644's `type_label_pat` does not force nested label
-        // argument paths per field. Rust still needs this direct-label
-        // compensation for component tables built at compiler/ml/env.ml:1542-1559,
-        // but it must run only after every field binder has been allocated so
-        // later lazy module-signature forces keep OCaml's stamp order.
-        force_type_paths_for_lookup_from_type(
-            ctx,
-            env,
-            &mut tctx.persistent_env,
-            field_ty,
-            &mut HashSet::new(),
-        );
     }
 
     // OCaml unifies the inferred record type with the pattern expected type.
@@ -20613,19 +20630,12 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
             };
-            // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
-            // reaches compiler/ml/env.ml:862-863 `find_type_descrs`; component
-            // construction at env.ml:1542-1548 runs `Subst.type_declaration`
-            // over record labels before returning the label descriptor. Mirror
-            // that traversal side effect for Rust's direct expected-type
-            // fallback so nested field type paths force at the same point.
-            force_type_paths_for_lookup_from_type(
-                ctx,
-                env,
-                pers_env,
-                selected.lbl_arg,
-                &mut HashSet::new(),
-            );
+            // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type` only
+            // asks compiler/ml/env.ml:862-863 for descriptors of the expected
+            // record type. It does not force nested field argument paths here;
+            // compiler/ml/typecore.ml:1192-1198 and compiler/ml/typecore.ml:1623-1644
+            // allocate record pattern binders first, and Rust's caller mirrors that with a deferred
+            // `force_type_paths_for_lookup_from_type` pass.
             qualify_label_description_paths(&mut selected, env, pers_env, ctx);
             return Some(selected);
         }
@@ -21104,23 +21114,75 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             };
 
             if let Some(alias_target) = alias_target {
-                let normalized_alias_target = env.normalize_path(&alias_target);
-                rewritten_path = rewrite_path_prefix(&path, &alias_target, module_access_path);
-                if rewritten_path.is_none() {
-                    rewritten_path = rewrite_with_flattened_heads(
-                        &path,
-                        &alias_target,
-                        module_access_path,
-                        pers_env,
-                    );
+                let direct_alias_target_parent = if let Path::Pdot(parent, _, _) = &path {
+                    Some(parent)
+                } else {
+                    None
+                };
+                let mut normalized_alias_target = None;
+                let mut direct_alias_target_type =
+                    direct_alias_target_parent.is_some_and(|parent| parent.same(&alias_target));
+                if !direct_alias_target_type {
+                    let normalized = env.normalize_path(&alias_target);
+                    direct_alias_target_type =
+                        direct_alias_target_parent.is_some_and(|parent| parent.same(&normalized));
+                    normalized_alias_target = Some(normalized);
                 }
-                if rewritten_path.is_none() && !normalized_alias_target.same(&alias_target) {
-                    rewritten_path = rewrite_with_flattened_heads(
-                        &path,
-                        &normalized_alias_target,
-                        module_access_path,
-                        pers_env,
-                    );
+                let direct_alias_target_reexported_by_parent = if direct_alias_target_type {
+                    match (module_access_path, &path) {
+                        (Path::Pdot(selected_parent, _, _), Path::Pdot(_, type_name, _)) => env
+                            .find_type_with_origin(type_name)
+                            .ok()
+                            .is_some_and(|(_, decl, is_local)| {
+                                !is_local
+                                    && decl.type_path.as_ref().is_some_and(|type_path| {
+                                        type_path
+                                            .parent()
+                                            .is_some_and(|parent| parent.same(selected_parent))
+                                    })
+                            }),
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                if !direct_alias_target_type || !direct_alias_target_reexported_by_parent {
+                    // OCaml compiler/ml/env.ml:1517 scrapes aliases before
+                    // compiler/ml/env.ml:1530-1538 applies the component
+                    // substitution. compiler/ml/mtype.ml:41-49 leaves value
+                    // descriptions unchanged while strengthening aliases, and
+                    // compiler/ml/subst.ml:87-95 only rewrites the module
+                    // prefix of dotted paths through explicit substitution maps.
+                    // If the current environment already exposes the same
+                    // opened type through compiler/ml/env.ml:1834-1881
+                    // include/open handling, a direct target reference such as
+                    // WasmBindings__Types.mouseEvent belongs to the included
+                    // backing signature and stays on that backing unit. Read the
+                    // existing opened binding only; forcing the parent component
+                    // table here would create identifiers earlier than
+                    // compiler/ml/env.ml:1568's lazy component thunk. Direct
+                    // binders that are not re-exported by the parent, such as
+                    // WasmBindings__Functions.err, are the selected module's
+                    // own component and are rebased below.
+                    let normalized_alias_target = normalized_alias_target
+                        .unwrap_or_else(|| env.normalize_path(&alias_target));
+                    rewritten_path = rewrite_path_prefix(&path, &alias_target, module_access_path);
+                    if rewritten_path.is_none() {
+                        rewritten_path = rewrite_with_flattened_heads(
+                            &path,
+                            &alias_target,
+                            module_access_path,
+                            pers_env,
+                        );
+                    }
+                    if rewritten_path.is_none() && !normalized_alias_target.same(&alias_target) {
+                        rewritten_path = rewrite_with_flattened_heads(
+                            &path,
+                            &normalized_alias_target,
+                            module_access_path,
+                            pers_env,
+                        );
+                    }
                 }
             }
 
