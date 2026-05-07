@@ -12,6 +12,7 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - Fresh current-source check after rebuilding release artifacts at `ab4d71481`: Tella clean in-process `hyperfine` `2.755s +/- 0.060s`, range `2.673s..2.877s`; this did not reproduce a real regression back to 2.9s.
 - ASCII source-read helper candidate/no-regression run: Tella clean in-process `hyperfine` `2.750s +/- 0.056s`, range `2.673s..2.847s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Post-rebuild check after rejecting the shared-resolution helper: Tella clean in-process `hyperfine` `2.830s +/- 0.029s`, range `2.794s..2.896s`. The observed 2.9s is currently the upper edge of the retained distribution, not a retained regression.
+- Persistent child alias component overlays: Tella clean in-process `hyperfine` `2.600s +/- 0.021s`, range `2.566s..2.633s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -87,14 +88,14 @@ Conclusion: normal-compile local-root caching removes about 25k repeated label-q
 
 `RESCRIPT_COMPILER_COUNTERS=1` now includes `signature_qualification`, which classifies the full-signature copy path inside access-path qualification before it materializes a rewritten signature.
 
-Latest Tella clean build report after rejecting the shared-resolution helper:
+Latest Tella clean build report after persistent child alias component overlays:
 
-- signature_copies: `calls=31810 items=967596 max_items=559`
-- resolved_name qualification: `calls=8188 items=441983 max_items=449`
-- persistent_root qualification: `calls=6722 items=64369 max_items=117`
-- alias qualification: `calls=1928 items=20093 max_items=117`
+- signature_copies: `calls=25353 items=725667 max_items=559`
+- resolved_name_pdot qualification: `calls=1502 items=157930 max_items=449`
+- persistent_root qualification: `calls=8028 items=77353 max_items=117`
+- alias qualification: `calls=502 items=4705 max_items=38`
 
-Conclusion: the biggest remaining measured full-signature copy bucket is `resolved_name` qualification. Future shared-signature work should target lazy contextual overlays for reexports/aliases instead of sharing a raw signature and then forcing the same whole-signature rewrite.
+Conclusion: persistent child aliases can share the backing `Arc<Signature>` when normal compile mode is active, as long as forced values carry a lazy source-prefix overlay. This removes most dotted reexport full-signature rewrites while preserving JS output parity.
 
 ## Slow Non-Icon Files To Watch
 
@@ -140,6 +141,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - Persistent-root `resolve_type_item_through_modules` now also caches missing full paths. Counter baseline before the missing cache was `cache_hits=4`, `scans=16796`, `scanned_items=303959`, `type_items=37106`, `found=14`. After the missing cache it reported `positive_cache_hits=4`, `missing_cache_hits=15013`, `scans=1787`, `scanned_items=30488`, `type_items=4074`, `found=18`. Validation: Tella clean in-process compile `Compiled 2127 modules`; JS output parity `660/660`; canonical typedtree parity `660/660`; `hyperfine` `2.841s +/- 0.060s`, range `2.784s..2.954s`.
 - Qualified value lookup now builds a value-name index only for signatures with at least 32 items after two distinct value names have already been cached. This keeps one-off lazy lookups cheap but skips repeated full-signature scans for large dependency modules. Counter shape changed from `value hits=0 misses=39128 scans=39128 scanned_items=1565337 result_items=39128` to `hits=5356 misses=33772 scans=33772 scanned_items=1172597 result_items=176483`. Validation: Tella clean in-process compile via `hyperfine` `2.802s +/- 0.018s`, range `2.766s..2.828s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Normal in-process persistent-root component views now share the already-internalized `Arc<Signature>` when canonical typedtree mode is disabled and no flattened alias prefix rewrite is required. Signature-copy counters showed Tella dropping from `53916` full signature copies / `1612664` copied signature items to `31822` copies / `967700` items; the former top persistent-root copy site disappeared. Validation: Tella clean in-process compile `Compiled 2127 modules`; JS output parity `660/660`; canonical typedtree parity `660/660`; `hyperfine` `2.677s +/- 0.014s`, range `2.659s..2.700s`.
+- Normal in-process persistent child aliases now build component views directly over the backing persistent module's shared `Arc<Signature>`. A source-prefix overlay rewrites only forced value descriptions, avoiding a whole-signature copy for dotted reexports such as runtime child modules. Validation: Tella signature-copy counters dropped from `31810 / 967596` to `25353 / 725667`; JS output parity `660/660`; canonical typedtree parity `660/660`; `hyperfine` `2.600s +/- 0.021s`, range `2.566s..2.633s`.
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
 - Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.

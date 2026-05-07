@@ -17643,6 +17643,20 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     copy_lookup_type_decl(decl, ctx, &mut cache)
 }
 
+pub(crate) fn copy_lookup_value_description_for_subst(
+    desc: &crate::types::decl::ValueDescription,
+    ctx: &TypeContext,
+) -> crate::types::decl::ValueDescription {
+    let mut cache = TypeExprRefMap::new();
+    crate::types::decl::ValueDescription {
+        val_type: copy_lookup_type_expr(ctx, desc.val_type, &mut cache),
+        val_kind: desc.val_kind.clone(),
+        val_loc: desc.val_loc.clone(),
+        val_attributes: desc.val_attributes.clone(),
+        val_path: desc.val_path.clone(),
+    }
+}
+
 fn copy_lookup_extension_constructor(
     ext: &crate::types::decl::ExtensionConstructor,
     ctx: &TypeContext,
@@ -17994,17 +18008,20 @@ impl Env {
                         {
                             return Some(cached);
                         }
-                        components.lookup_value(value_name).map(|(pos, _, vd)| {
-                            let path = Path::pdot_pos(module_path.clone(), value_name, pos as i32);
-                            let result = (path, vd.clone());
-                            ctx.register_resolved_module_value(
-                                &module_path,
-                                value_name,
-                                result.0.clone(),
-                                result.1.clone(),
-                            );
-                            result
-                        })
+                        components
+                            .lookup_value_for_access(value_name, ctx)
+                            .map(|(pos, _, vd)| {
+                                let path =
+                                    Path::pdot_pos(module_path.clone(), value_name, pos as i32);
+                                let result = (path, vd);
+                                ctx.register_resolved_module_value(
+                                    &module_path,
+                                    value_name,
+                                    result.0.clone(),
+                                    result.1.clone(),
+                                );
+                                result
+                            })
                     },
                 ) {
                     return Ok(result);
@@ -18022,9 +18039,9 @@ impl Env {
                             pers_env,
                             ctx,
                             |components| {
-                                components.lookup_value(value_name).map(|(pos, _, vd)| {
-                                    (components.access_path().clone(), pos, vd.clone())
-                                })
+                                components
+                                    .lookup_value_for_access(value_name, ctx)
+                                    .map(|(pos, _, vd)| (components.access_path().clone(), pos, vd))
                             },
                         )
                     {
@@ -22525,6 +22542,44 @@ fn build_module_components_from_parent_path<'a>(
         return None;
     };
 
+    if !ctx.preserve_canonical_typedtree()
+        && ctx.persistent_env_is_in_process()
+        && let Some(Some((runtime_pos, alias_target, parent_access_path))) =
+            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                components
+                    .lookup_module(module_name.as_str())
+                    .and_then(|(runtime_pos, _, md)| match &md.md_type {
+                        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+                        | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+                            if alias_id.is_persistent() =>
+                        {
+                            Some((
+                                runtime_pos,
+                                alias_id.name().to_string(),
+                                components.access_path().clone(),
+                            ))
+                        }
+                        _ => None,
+                    })
+            })
+    {
+        let pers = pers_env.as_mut()?;
+        if let Some(ps) = pers.find_pers_struct(&alias_target, ctx) {
+            let source_prefix = Path::pident(Ident::create_persistent(&alias_target));
+            let access_path =
+                Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
+            return Some(
+                crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                    access_path,
+                    ps.ps_sig.clone(),
+                    HashMap::new(),
+                    Some(source_prefix),
+                    ctx,
+                ),
+            );
+        }
+    }
+
     if let Some(Some((_, stored))) =
         with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
             components.lookup_child_components(module_name.as_str())
@@ -22894,8 +22949,13 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
     if ctx.compiler_counters_enabled() {
         let kind = if qualification_is_identity {
             "identity_values"
-        } else if resolved_name.is_some() {
-            "resolved_name"
+        } else if let Some(old_name) = resolved_name {
+            match access_path {
+                Path::Pident(id) if id.name() == old_name => "resolved_name_exact_pident",
+                Path::Pident(_) => "resolved_name_alias_pident",
+                Path::Pdot(..) => "resolved_name_pdot",
+                Path::Papply(_, _) => "resolved_name_papply",
+            }
         } else if matches!(mty, crate::types::decl::ModuleType::MtyAlias(..)) {
             "alias"
         } else if should_rebind_direct_type_family {

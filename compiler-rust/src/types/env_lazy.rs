@@ -372,6 +372,7 @@ pub(crate) struct QualifiedModuleComponents {
     // lookup for one child does not materialize every sibling in the parent
     // signature.
     child_components: Arc<RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>>,
+    value_source_prefix: Option<Arc<Path>>,
 }
 
 fn build_child_component_from_signature(
@@ -455,6 +456,22 @@ impl QualifiedModuleComponents {
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        Self::new_with_child_components_arc_and_value_source_prefix(
+            access_path,
+            signature,
+            child_components,
+            None,
+            ctx,
+        )
+    }
+
+    pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
+        access_path: Path,
+        signature: Arc<Signature>,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        value_source_prefix: Option<Path>,
+        ctx: &super::context::TypeContext,
+    ) -> Self {
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
@@ -527,6 +544,7 @@ impl QualifiedModuleComponents {
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
             child_components: Arc::new(RefCell::new(child_components)),
+            value_source_prefix: value_source_prefix.map(Arc::new),
         }
     }
 
@@ -721,6 +739,36 @@ impl QualifiedModuleComponents {
             SignatureItem::SigValue(id, desc) => Some((runtime_pos, id, desc)),
             _ => None,
         }
+    }
+
+    pub(crate) fn lookup_value_for_access(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ValueDescription)> {
+        let (runtime_pos, id, desc) = self.lookup_value(name)?;
+        let desc = if let Some(source_prefix) = self.value_source_prefix.as_ref() {
+            let desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
+            let mut item = vec![SignatureItem::SigValue(id.clone(), desc)];
+            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                &item,
+                source_prefix,
+                self.access_path(),
+                ctx,
+            );
+            crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                &mut item,
+                source_prefix,
+                self.access_path(),
+            );
+            match item.pop().expect("single value item") {
+                SignatureItem::SigValue(_, desc) => desc,
+                _ => unreachable!("single value item changed kind"),
+            }
+        } else {
+            desc.clone()
+        };
+        Some((runtime_pos, id.clone(), desc))
     }
 
     pub(crate) fn lookup_constructors(
