@@ -1616,8 +1616,16 @@ fn build_compiler_options(
     // Runtime path
     let runtime_path = get_runtime_path(&package.config, project_context).ok();
 
-    // Source filename for interface constraint resolution
-    let source_filename = Some(source_file_path.to_string_lossy().to_string());
+    // Source filename for interface constraint and JS import resolution. OCaml
+    // computes output_dir from the package output prefix before rebasing module
+    // imports; see compiler/core/js_dump_program.ml:128 and
+    // compiler/core/js_name_of_module_id.ml:135-139.
+    let source_filename = Some(
+        Path::new(&package.path)
+            .join(source_file_path)
+            .to_string_lossy()
+            .to_string(),
+    );
 
     // Output path and module format for JS import resolution.
     let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
