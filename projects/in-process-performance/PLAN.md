@@ -30,6 +30,11 @@ The highest-leverage work is removing whole classes of repeated work, not polish
 9. Adaptive indexing for large signatures.
 10. Built-in counters for clone/scan/allocation/queue behavior.
 
+The package signature store design is tracked separately in
+`projects/in-process-performance/PACKAGE_SIGNATURE_STORE.md`. It is the
+preferred path for reusing stable package signatures across clean in-process
+builds, starting with `@rescript/runtime`.
+
 ## Top 10 Improvements
 
 1. **Finish shared immutable signatures and lazy env/component views.**

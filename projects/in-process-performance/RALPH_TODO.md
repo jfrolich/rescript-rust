@@ -82,6 +82,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Measure snapshot counts and copied map sizes during a Tella clean build.
   - [ ] Split immutable registry data from compile-local delta state.
   - [ ] Ensure worker-local overlays do not leak incomplete signatures across tasks.
+  - [ ] Implement package-level signature stores as described in `projects/in-process-performance/PACKAGE_SIGNATURE_STORE.md`, starting with reusable `@rescript/runtime` signatures for clean builds.
 
 - [ ] **9. Add adaptive lazy indexing for large signatures.**
   Lazy lookup should scan initially, then build a compact per-kind index after repeated distinct lookups into the same large signature. Add counters for scans, hits, misses, and forced item counts before picking thresholds.
