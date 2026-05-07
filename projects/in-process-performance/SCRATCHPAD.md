@@ -5,7 +5,8 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 ## Current Retained Baseline
 
 - Latest retained change: share stored persistent alias component views in normal in-process mode.
-- Tella `hyperfine`: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`
+- Tella `hyperfine`: `2.488s +/- 0.014s` over 12 runs, range `2.457s..2.510s` after rebuilding both release artifacts from current HEAD (`2ffafbcd0`)
+- Previous same-change retained measurement: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`
 - Previous retained baseline at `fea2c7566` (`Shallow-copy cold signature values`): `2.537s +/- 0.037s` over 10 runs, range `2.500s..2.631s`
 - A follow-up persistent-root shallow-value experiment compiled Tella but measured `2.588s +/- 0.024s`, range `2.552s..2.637s`, so it was dropped as no improvement.
 - Treat 2.9s readings in the notes below as historical/noisy baselines from before the retained signature-sharing and shallow-value freshening work, or as contaminated runs called out explicitly.
