@@ -5404,15 +5404,24 @@ fn force_qualified_value_type_paths<'a>(
                             root.is_persistent()
                                 && (root.name() == "Stdlib" || root.name() == "Pervasives")
                         });
-                    let resolved = if nested_inside_selected_module
-                        && !selected_module_is_implicit_stdlib_path
+                    let type_parent_is_implicit_stdlib_for_non_stdlib_value =
+                        type_parent_root_is_implicit_stdlib
+                            && selected_non_stdlib_persistent_module(
+                                selected_module_path,
+                                value_access_root_is_local,
+                            );
+                    let resolved = if (nested_inside_selected_module
+                        && !selected_module_is_implicit_stdlib_path)
+                        || type_parent_is_implicit_stdlib_for_non_stdlib_value
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
                         // reads the selected value description from
                         // compiler/ml/env.ml:1091-1100's component value
                         // table. It does not force env.ml:1568 child module
                         // declarations for nested type paths in that value
-                        // type; compiler/ml/ctype.ml:666-695 reaches those
+                        // type, nor unrelated implicit Stdlib/Pervasives
+                        // component roots mentioned by a non-Stdlib value
+                        // scheme; compiler/ml/ctype.ml:666-695 reaches those
                         // later through `get_level` while lowering arguments.
                         None
                     } else {
