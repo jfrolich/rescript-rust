@@ -4893,6 +4893,20 @@ fn force_qualified_value_type_paths<'a>(
             .as_ref()
             .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_root.name()))
             .or_else(|| ctx.find_flattened_alias_component_path(flat_root.name()))?;
+        // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
+        // compiler/ml/env.ml:1530-1538 builds the selected component table, and
+        // compiler/ml/mtype.ml:41-49 leaves value descriptions unchanged while
+        // strengthening alias targets. compiler/ml/subst.ml:303-309 therefore
+        // rewrites a flattened alias root only when the selected value path is
+        // at or below that alias root, not when it merely selected an enclosing
+        // module that contains the alias.
+        if let Some(selected_module_path) = selected_module_path
+            && path_descendant_depth(&qualified_root, selected_module_path)
+                .is_some_and(|depth| depth > 0)
+            && path_descendant_depth(selected_module_path, &qualified_root).is_none()
+        {
+            return None;
+        }
         let candidate = path_with_rewritten_root(path, &qualified_root)?;
         if candidate.same(path) {
             return None;
@@ -5151,26 +5165,31 @@ fn force_qualified_value_type_paths<'a>(
             // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
             // exactly the selected component table, and compiler/ml/subst.ml:303-309
             // applies that substitution to value descriptions. Keep that
-            // selected-module restriction for ordinary aliases, but allow the
-            // argument-side implicit Stdlib component path from env.ml:1491-1505:
-            // Rust in-process signatures can still carry the flattened backing
-            // unit (`Stdlib_JSON.t`) where OCaml's selected value description
-            // has already gone through the visible `Stdlib.JSON.t` component.
-            // If the selected value is itself under `Stdlib`, keep the exact
-            // selected-table restriction. OCaml compiler/ml/env.ml:1517 scrapes
-            // aliases before env.ml:1530-1538 prefixes component values, while
-            // compiler/ml/mtype.ml:41-50 leaves value descriptions untouched
-            // when strengthening an alias target. Therefore a selected value
-            // like `Stdlib.JSON.Encode.null` still exposes the scraped
-            // `Stdlib_JSON.t` value scheme, and sibling paths such as
-            // `Stdlib_RegExp.t` stay flattened too.
+            // selected-module restriction for ordinary aliases. OCaml
+            // compiler/ml/env.ml:1517 scrapes aliases before the component
+            // substitution, while compiler/ml/mtype.ml:41-50 leaves value
+            // descriptions untouched when strengthening an alias target; a
+            // selected value that only mentions an unrelated `Stdlib_*` scheme
+            // keeps that flattened path until compiler/ml/ctype.ml:666-695
+            // reaches it through `get_level`.
             if let Some(selected_module_path) = selected_module_path {
                 let selected_module_root_is_stdlib = path_root_ident(selected_module_path)
                     .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+                // OCaml compiler/ml/env.ml:1530-1538 prefixes exactly the
+                // selected component table, and compiler/ml/subst.ml:303-309
+                // applies that substitution to value descriptions. Keep
+                // implicit Stdlib rewrites to the enclosing component table of
+                // the selected value; unrelated non-Stdlib value schemes keep
+                // scraped `Stdlib_*` paths until compiler/ml/ctype.ml:666-695
+                // reaches them through `get_level`.
+                let implicit_stdlib_component_selected_parent = selected_module_path
+                    .parent()
+                    .is_some_and(|parent| candidate_parent.same(&parent));
                 let implicit_stdlib_component = infer_stdlib_root_from_flat_parent
                     && !selected_module_root_is_stdlib
                     && path_root_ident(&candidate_parent)
-                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
+                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+                    && implicit_stdlib_component_selected_parent;
                 if !candidate_parent.same(selected_module_path) && !implicit_stdlib_component {
                     continue;
                 }
