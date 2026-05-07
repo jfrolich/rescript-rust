@@ -2647,8 +2647,13 @@ impl LambdaCompiler {
                 {
                     true
                 }
-                _ if self.return_unit_stack.last().copied() == Some(true)
-                    && !inside_enclosing_staticcatch_chain
+                // OCaml takes the pseudo-jmp/fallthrough arm for any
+                // tail-return staticcatch with a single handler whose handler
+                // has no static raise (compiler/core/lam_compile.ml:983-1008).
+                // It is not gated on function `return_unit`; switches reach the
+                // same `compile_staticcatch` arm through
+                // compiler/core/lam_compile.ml:1907-1911.
+                _ if !inside_enclosing_staticcatch_chain
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {
@@ -2686,8 +2691,13 @@ impl LambdaCompiler {
                 {
                     true
                 }
-                _ if self.return_unit_stack.last().copied() == Some(true)
-                    && !inside_enclosing_staticcatch_chain
+                // OCaml takes the pseudo-jmp/fallthrough arm for any
+                // tail-return staticcatch with a single handler whose handler
+                // has no static raise (compiler/core/lam_compile.ml:983-1008).
+                // It is not gated on function `return_unit`; string switches
+                // reach the same `compile_staticcatch` arm through
+                // compiler/core/lam_compile.ml:1907-1911.
+                _ if !inside_enclosing_staticcatch_chain
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
                 {

@@ -3297,6 +3297,14 @@ fn try_function_body_guard_return_fallthrough_else_merge(stmts: &[Statement]) ->
     if !else_.is_empty() || single_wrapped_return_expr(then_).is_none() {
         return None;
     }
+    // OCaml's generic `S.if_` terminal-then rule keeps guard-return
+    // fallthroughs as sibling statements (compiler/core/js_stmt_make.ml:249-250).
+    // This printer-only reconstruction is only compensating for earlier Rust
+    // lowering paths that lost an explicit type-refinement else shape; do not
+    // wrap ordinary value guards like `json === false`.
+    if !expression_contains_typeof(test) {
+        return None;
+    }
     if conjunction_is_all_zero_equality_guard(test) {
         return None;
     }
@@ -3312,6 +3320,123 @@ fn try_function_body_guard_return_fallthrough_else_merge(stmts: &[Statement]) ->
         desc: StatementDesc::If(test.clone(), then_.clone(), vec![success_stmt.clone()]),
         comment: guard_stmt.comment.clone(),
     })
+}
+
+fn expression_contains_typeof(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Typeof(_) => true,
+        ExpressionDesc::Length(inner, _)
+        | ExpressionDesc::IsNullOrUndefined(inner)
+        | ExpressionDesc::JsNot(inner)
+        | ExpressionDesc::JsBnot(inner)
+        | ExpressionDesc::StaticIndex(inner, _, _)
+        | ExpressionDesc::CamlBlockTag(inner, _)
+        | ExpressionDesc::Await(inner)
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::OptionalBlock(inner, _) => expression_contains_typeof(inner),
+        ExpressionDesc::StringAppend(left, right)
+        | ExpressionDesc::In(left, right)
+        | ExpressionDesc::Seq(left, right)
+        | ExpressionDesc::Bin(_, left, right)
+        | ExpressionDesc::FlatCall(left, right)
+        | ExpressionDesc::StringIndex(left, right)
+        | ExpressionDesc::ArrayIndex(left, right) => {
+            expression_contains_typeof(left) || expression_contains_typeof(right)
+        }
+        ExpressionDesc::Cond(test, then_, else_) => {
+            expression_contains_typeof(test)
+                || expression_contains_typeof(then_)
+                || expression_contains_typeof(else_)
+        }
+        ExpressionDesc::Call(callee, args, _) => {
+            expression_contains_typeof(callee) || args.iter().any(expression_contains_typeof)
+        }
+        ExpressionDesc::TaggedTemplate(callee, cooked, raw) => {
+            expression_contains_typeof(callee)
+                || cooked.iter().any(expression_contains_typeof)
+                || raw.iter().any(expression_contains_typeof)
+        }
+        ExpressionDesc::New(callee, args) => {
+            expression_contains_typeof(callee)
+                || args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(expression_contains_typeof))
+        }
+        ExpressionDesc::Array(items, _) => items.iter().any(expression_contains_typeof),
+        ExpressionDesc::Object(base, fields) => {
+            base.as_ref()
+                .is_some_and(|base| expression_contains_typeof(base))
+                || fields
+                    .iter()
+                    .any(|(_, value)| expression_contains_typeof(value))
+        }
+        ExpressionDesc::Fun { body, .. } => block_contains_typeof(body),
+        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+            items.iter().any(expression_contains_typeof) || expression_contains_typeof(tag)
+        }
+        _ => false,
+    }
+}
+
+fn statement_contains_typeof(stmt: &Statement) -> bool {
+    match &stmt.desc {
+        StatementDesc::Exp(expr) | StatementDesc::Return(expr) | StatementDesc::Throw(expr) => {
+            expression_contains_typeof(expr)
+        }
+        StatementDesc::If(cond, then_, else_) => {
+            expression_contains_typeof(cond)
+                || block_contains_typeof(then_)
+                || block_contains_typeof(else_)
+        }
+        StatementDesc::Block(block) => block_contains_typeof(block),
+        StatementDesc::Variable(decl) => {
+            decl.value.as_ref().is_some_and(expression_contains_typeof)
+        }
+        StatementDesc::While(_, cond, body) => {
+            expression_contains_typeof(cond) || block_contains_typeof(body)
+        }
+        StatementDesc::ForRange(_, start, finish, _, _, body) => {
+            start.as_ref().is_some_and(expression_contains_typeof)
+                || expression_contains_typeof(finish)
+                || block_contains_typeof(body)
+        }
+        StatementDesc::ForOf(_, _, iterable, body)
+        | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
+            expression_contains_typeof(iterable) || block_contains_typeof(body)
+        }
+        StatementDesc::IntSwitch(test, clauses, default) => {
+            expression_contains_typeof(test)
+                || clauses
+                    .iter()
+                    .any(|(_, clause)| block_contains_typeof(&clause.body))
+                || default
+                    .as_ref()
+                    .is_some_and(|body| block_contains_typeof(body))
+        }
+        StatementDesc::StringSwitch(test, clauses, default) => {
+            expression_contains_typeof(test)
+                || clauses
+                    .iter()
+                    .any(|clause| block_contains_typeof(&clause.clause.body))
+                || default
+                    .as_ref()
+                    .is_some_and(|body| block_contains_typeof(body))
+        }
+        StatementDesc::Try(body, catch, finally) => {
+            block_contains_typeof(body)
+                || catch
+                    .as_ref()
+                    .is_some_and(|(_, body)| block_contains_typeof(body))
+                || finally
+                    .as_ref()
+                    .is_some_and(|body| block_contains_typeof(body))
+        }
+        StatementDesc::Debugger | StatementDesc::Break(_) | StatementDesc::Continue(_) => false,
+    }
+}
+
+fn block_contains_typeof(block: &Block) -> bool {
+    block.iter().any(statement_contains_typeof)
 }
 
 fn try_function_body_guard_return_fallthrough_else_suffix_rewrite(stmts: &Block) -> Option<Block> {

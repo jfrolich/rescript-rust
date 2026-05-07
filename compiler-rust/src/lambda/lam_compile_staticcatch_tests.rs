@@ -1379,6 +1379,48 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
 }
 
 #[test]
+fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_through_to_handler() {
+    let mut compiler = LambdaCompiler::new();
+    let action = Ident::create_local("action");
+    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+        Box::new(Lambda::Lswitch(
+            Box::new(Lambda::var(action.clone())),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                sw_blocks_full: true,
+                sw_blocks: vec![],
+                sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
+                sw_names: Some(SwitchNames {
+                    consts: vec![crate::lambda::SwitchTag::named("One")],
+                    blocks: vec![],
+                }),
+            },
+        )),
+        (7, vec![]),
+        Box::new(Lambda::const_(Constant::int(2))),
+    ));
+
+    let rendered = print_block(&block);
+    assert!(
+        rendered.contains("if (action === \"One\") {"),
+        "expected the single-case switch to stay as a positive guard:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("return 1;"),
+        "expected the matching branch to return directly:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("return 2;"),
+        "expected the handler return to fall through after the guard:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("} else {"),
+        "unexpected explicit else around the fallthrough handler:\n{rendered}"
+    );
+}
+
+#[test]
 fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like_variant_pattern_matching_spreads()
  {
     let mut compiler = LambdaCompiler::new();
