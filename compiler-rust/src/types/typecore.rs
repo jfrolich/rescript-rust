@@ -13273,16 +13273,39 @@ fn type_record(
     let mut all_label_descriptions = if has_dotdotdot_field {
         None
     } else {
-        build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
-            || {
+        // OCaml compiler/ml/typecore.ml:2800-2842 fills omitted fields from the
+        // first typed label's shared `lbl_all` array, not by rebuilding from
+        // `ty_record`. Rust reconstructs that family, so replay the component
+        // substitution that env.ml:1542-1548 already applied to the selected
+        // label descriptors before synthesized optional `None` fields read
+        // `lbl_arg`.
+        first_disambiguated_label
+            .as_ref()
+            .and_then(|label| {
+                build_record_label_descriptions(label.lbl_res, env, &mut tctx.persistent_env, ctx)
+                    .map(|mut labels| {
+                        for label in &mut labels {
+                            qualify_label_description_paths(
+                                label,
+                                env,
+                                &mut tctx.persistent_env,
+                                ctx,
+                            );
+                        }
+                        labels
+                    })
+            })
+            .or_else(|| {
+                build_record_label_descriptions(record_ty, env, &mut tctx.persistent_env, ctx)
+            })
+            .or_else(|| {
                 build_record_label_descriptions(
                     disambiguation_ty,
                     env,
                     &mut tctx.persistent_env,
                     ctx,
                 )
-            },
-        )
+            })
     };
     if all_label_descriptions.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
