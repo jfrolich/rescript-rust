@@ -4,6 +4,7 @@
 //! process-global so the in-process build can report aggregate behavior across
 //! all worker threads.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -76,6 +77,14 @@ static SIGNATURE_FRESHEN_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCo
     OnceLock::new();
 static SIGNATURE_FRESHEN_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
     OnceLock::new();
+static MODULE_SIGNATURE_COPIES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+static MODULE_SIGNATURE_FRESHENS: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+
+thread_local! {
+    static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -117,6 +126,43 @@ struct SignatureCopySite {
     calls: u64,
     items: u64,
     max_items: u64,
+}
+
+/// Thread-local module attribution guard for compiler counters.
+///
+/// Normal builds pay no cost because the guard is inactive unless
+/// `RESCRIPT_COMPILER_COUNTERS` is set.
+pub struct ModuleCounterGuard {
+    active: bool,
+    previous: Option<String>,
+}
+
+impl ModuleCounterGuard {
+    /// Attribute subsequent counters on the current worker thread to `module`.
+    pub fn start(module: &str) -> Self {
+        if !enabled() {
+            return Self {
+                active: false,
+                previous: None,
+            };
+        }
+
+        let previous = CURRENT_MODULE.with(|current| current.replace(Some(module.to_string())));
+        Self {
+            active: true,
+            previous,
+        }
+    }
+}
+
+impl Drop for ModuleCounterGuard {
+    fn drop(&mut self) {
+        if self.active {
+            CURRENT_MODULE.with(|current| {
+                *current.borrow_mut() = self.previous.take();
+            });
+        }
+    }
 }
 
 impl LazyLookupKind {
@@ -274,6 +320,12 @@ pub fn reset() {
     if let Some(names) = SIGNATURE_FRESHEN_NAMES.get() {
         names.lock().unwrap().clear();
     }
+    if let Some(modules) = MODULE_SIGNATURE_COPIES.get() {
+        modules.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() {
+        modules.lock().unwrap().clear();
+    }
 }
 
 /// Record a cached lazy-signature lookup.
@@ -412,6 +464,7 @@ pub(crate) fn record_signature_copy(
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
+    record_current_module_signature_copy(item_count);
 }
 
 /// Record a signature qualification before the current full-copy path.
@@ -453,6 +506,7 @@ pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
+    record_current_module_signature_freshen(item_count);
 }
 
 /// Record a named signature freshening entry.
@@ -466,6 +520,40 @@ pub(crate) fn record_signature_freshen_name(kind: &'static str, name: &str, item
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
+}
+
+fn record_current_module_signature_copy(item_count: usize) {
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_SIGNATURE_COPIES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut modules = modules.lock().unwrap();
+        let entry = modules
+            .entry(module.clone())
+            .or_insert_with(SignatureCopySite::default);
+        entry.calls += 1;
+        entry.items += item_count as u64;
+        entry.max_items = entry.max_items.max(item_count as u64);
+    });
+}
+
+fn record_current_module_signature_freshen(item_count: usize) {
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_SIGNATURE_FRESHENS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut modules = modules.lock().unwrap();
+        let entry = modules
+            .entry(module.clone())
+            .or_insert_with(SignatureCopySite::default);
+        entry.calls += 1;
+        entry.items += item_count as u64;
+        entry.max_items = entry.max_items.max(item_count as u64);
+    });
 }
 
 /// Record a per-worker in-process module-registry snapshot.
@@ -538,6 +626,8 @@ pub fn print_report() {
     print_signature_qualification_names();
     print_signature_freshen_kinds();
     print_signature_freshen_names();
+    print_module_signature_copies();
+    print_module_signature_freshens();
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
@@ -550,6 +640,56 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_module_signature_copies() {
+    let Some(modules) = MODULE_SIGNATURE_COPIES.get() else {
+        return;
+    };
+
+    let mut modules = modules
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(module, site)| (module.clone(), *site))
+        .collect::<Vec<_>>();
+    modules.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (module, site) in modules.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] module_signature_copies module={} calls={} items={} max_items={}",
+            module, site.calls, site.items, site.max_items
+        );
+    }
+}
+
+fn print_module_signature_freshens() {
+    let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() else {
+        return;
+    };
+
+    let mut modules = modules
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(module, site)| (module.clone(), *site))
+        .collect::<Vec<_>>();
+    modules.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (module, site) in modules.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] module_signature_freshens module={} calls={} items={} max_items={}",
+            module, site.calls, site.items, site.max_items
+        );
+    }
 }
 
 fn print_signature_qualification_names() {

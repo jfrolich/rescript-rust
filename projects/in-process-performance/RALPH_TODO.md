@@ -14,8 +14,8 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 ## Benchmark Discipline
 
-- [ ] Use `hyperfine` for accepted before/after wall-clock comparisons.
-- [ ] Keep a Tella module-timing run for every serious candidate to identify the slow non-Icon files.
+- [x] Use `hyperfine` for accepted before/after wall-clock comparisons.
+- [x] Keep a Tella module-timing run for every serious candidate to identify the slow non-Icon files.
 - [ ] Validate retained compiler changes with JS output parity and canonical typedtree parity.
 - [ ] Commit each retained improvement atomically with the benchmark and parity result in the commit message.
 - [ ] Revert candidates that regress the 660-file parity gates or Tella `hyperfine` baseline.
@@ -101,11 +101,12 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Add signature-copy counters with top call-site reporting for retained shared-signature work.
   - [x] Add signature-qualification counters to classify full-copy candidates by root cause.
   - [x] Add signature-freshening counters by entry point and module name to separate canonical rename work from access-path qualification work.
+  - [x] Attribute signature copies and freshens back to the compiling module so slow non-Icon files can be tied to global signature buckets.
   - [x] Keep measurement code committed when it guides future retained optimizations.
 
 ## Active Non-Icon File Focus
 
-- [ ] Profile current Tella after excluding Icon analytically from the top-module list.
+- [x] Profile current Tella after excluding Icon analytically from the top-module list.
 - [x] Inspect CSS polymorphic-variant-heavy files for avoidable broad row/signature forcing.
 - [x] Inspect Layout/JSX-heavy files for record/label/signature lookup amplification.
 - [x] Inspect Lambda conversion, JS finish, and write costs in `Layout`, `Css_Legacy_Core`, and JSX-heavy modules.

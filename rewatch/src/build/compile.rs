@@ -2624,6 +2624,7 @@ fn compile_module_in_process_to_js_boundary(
     let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let module_timing_start = module_timing_enabled.then(Instant::now);
     let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
+    let _counter_guard = rescript_compiler::perf_counters::ModuleCounterGuard::start(module_name);
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {

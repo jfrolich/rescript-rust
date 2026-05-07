@@ -13,6 +13,7 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
+- Latest measurement-infra no-regression check: module-attributed signature counters keep normal Tella `hyperfine` in-band at `2.478s +/- 0.024s` over 10 runs, range `2.452s..2.528s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 
 ## Historical Baseline Notes
 
@@ -129,6 +130,16 @@ After sharing stored persistent alias component views in normal in-process mode:
 
 Conclusion: stored child-component thunks were still resolving persistent aliases by cloning and qualifying the whole target signature. Reusing the immutable target `Arc<Signature>` with a lazy value source-prefix overlay removes nearly all DOM `resolved_name_pdot` full-signature copies.
 
+After adding module-attributed signature counters:
+
+- Tella clean in-process compile: `Compiled 2127 modules`
+- signature copies: `calls=23688 items=564764 max_items=559`
+- signature freshening: `type_context_lazy_rename calls=9730 items=327885 max_items=559`
+- top modules by signature-copy items: `Page__Story__View__New__Tabs 2918`, `Editor__Timeline__Zoom 2878`, `Http-NodeJs 2770`, `Overview__Search 2756`, `Editor__Timeline__Trimming 2676`, `UI__BackgroundPicker 2595`, `TrimTranscriptEditor 2495`, `Recording__Layers 2204`, `LayoutDetail 2011`
+- top modules by signature-freshen items: `Editor__Timeline__Zoom 1606`, `Recording__Layers 1552`, `TrimTranscriptEditor 1551`, `Timeline__Scenes 1506`, `Page__Story__View__New__Tabs 1473`, `Overview__Search 1447`, `UI__BackgroundPicker 1408`, `CssJs 1371`, `Css 1369`, `Page__Stories 1161`
+
+Conclusion: the remaining signature work is spread across JSX/layout-like modules, not concentrated in a single source file. The dependency names being freshened are still dominated by `Dom`, `Icon`, `React`, `Pervasives`, `Css_Legacy_Core`, and `Stdlib_JSON`.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`
@@ -145,25 +156,26 @@ Conclusion: stored child-component thunks were still resolving persistent aliase
 
 `RESCRIPT_MODULE_TIMINGS=1` now also prints `[module-js-timing]` for the JS-finish boundary. This complements the existing `[module-timing]`, which stops at the pre-JS boundary.
 
-Latest clean Tella non-Icon slow modules after `fea2c7566`:
+Latest clean Tella non-Icon slow modules after current retained signature sharing:
 
-- `Css_Js_Core`: wall `642.016ms`, typecheck `345.911ms`, lambda `34.802ms`
-- `Css_Legacy_Core`: wall `436.711ms`, typecheck `207.204ms`, lambda `94.695ms`
-- `LayoutDetail`: wall `435.036ms`, typecheck `390.724ms`, lambda `11.434ms`
-- `Layout`: wall `310.645ms`, typecheck `138.719ms`, lambda `160.152ms`
-- `TrimTranscriptEditor`: wall `294.423ms`, typecheck `197.146ms`, lambda `8.844ms`
-- `Page__Stories`: wall `283.163ms`, typecheck `200.085ms`, lambda `55.212ms`
-- `Recording__Layers`: wall `231.703ms`, typecheck `181.281ms`, lambda `8.402ms`
-- `UI__BackgroundPicker`: wall `223.196ms`, typecheck `165.523ms`, lambda `50.461ms`
-- `UI__LayoutPickerStructured`: wall `221.693ms`, typecheck `175.364ms`, lambda `33.413ms`
+- `Css_Js_Core`: wall `510.207ms`, typecheck `253.710ms`, lambda `59.608ms`
+- `Css_Legacy_Core`: wall `506.869ms`, typecheck `290.056ms`, lambda `25.534ms`
+- `LayoutDetail`: wall `442.772ms`, typecheck `397.033ms`, lambda `11.550ms`
+- `TrimTranscriptEditor`: wall `284.956ms`, typecheck `189.266ms`, lambda `70.423ms`
+- `Page__Stories`: wall `270.960ms`, typecheck `194.155ms`, lambda `50.291ms`
+- `Recording__Layers`: wall `270.661ms`, typecheck `221.983ms`, lambda `40.744ms`
+- `Layout__Types`: wall `223.655ms`, typecheck `198.647ms`, lambda `13.356ms`
+- `Page__Story__View__New__Tabs`: wall `220.939ms`, typecheck `177.623ms`, lambda `8.436ms`
+- `UI__BackgroundPicker`: wall `220.636ms`, typecheck `158.574ms`, lambda `50.069ms`
+- `Layout`: wall `172.578ms`, typecheck `16.178ms`, lambda `153.388ms`
 
 Latest Tella aggregate phase timing under the timing env:
 
-- parse: `3096.915ms`
-- typecheck: `26873.041ms`
-- lambda: `6717.244ms`
-- lambda optimization: `2706.099ms`
-- codegen: `2539.902ms`
+- parse: `2323.108ms`
+- typecheck: `23834.272ms`
+- lambda: `6046.517ms`
+- lambda optimization: `2798.666ms`
+- codegen: `2868.199ms`
 
 Top non-Icon JS-finish/codegen files from that run:
 
