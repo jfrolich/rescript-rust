@@ -3655,12 +3655,21 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         crate::types::includemod::simplify_signature(&typed_structure.str_type)
     };
 
-    // OCaml saves the inferred `.cmi` before Lambda translation mutates any
-    // shared type nodes (compiler/ml/typemod.ml:1779-1788; translmod.ml:267).
-    // In-process builds keep the same ordering by serializing the signature
-    // before raw-lambda conversion, then removing the current module from this
-    // worker env so raw/JS probes only resolve already-published dependencies.
-    let (pers_struct, new_alias_rewrites, persistent_env_after_signature) = {
+    // OCaml saves the inferred `.cmi` only in the no-interface branch before
+    // Lambda translation mutates any shared type nodes
+    // (compiler/ml/typemod.ml:1768-1788; translmod.ml:267). With a `.resi`,
+    // the already-published interface remains the target signature for
+    // `Translmod.transl_implementation`; do not replace it with the
+    // implementation signature or the export coercion becomes identity.
+    let (pers_struct, new_alias_rewrites, persistent_env_after_signature) = if has_interface {
+        (
+            None,
+            Default::default(),
+            tctx.persistent_env
+                .take()
+                .unwrap_or_else(PersistentEnv::new),
+        )
+    } else {
         let _phase = info_span!("compiler.signature_extract").entered();
         let mut internal_env = tctx
             .persistent_env
@@ -3699,7 +3708,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         internal_env.unregister_in_memory_signature(module_name);
         (pers_struct, new_alias_rewrites, internal_env)
     };
-    if let Some(hook) = signature_ready.as_deref_mut() {
+    if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
         let _ = hook(InProcessSignatureReady {
             signature: published_signature.clone(),
             pers_struct: pers_struct.clone(),
