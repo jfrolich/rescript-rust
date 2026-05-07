@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-07
-**Status:** Tella clean in-process builds are around 2.56-2.63s on the current branch after the latest retained persistent signature sharing and type lookup cache optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** Tella clean in-process builds are around 2.7-2.8s on the current branch after the latest retained persistent signature sharing and type lookup cache optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
 
 ## Goal
 
