@@ -333,6 +333,10 @@ pub fn incremental_build(
     if phase_timing_enabled {
         rescript_compiler::timing::reset();
     }
+    let compiler_counters_enabled = rescript_compiler::perf_counters::enabled();
+    if compiler_counters_enabled {
+        rescript_compiler::perf_counters::reset();
+    }
     let build_folder = build_state.root_folder.to_string_lossy().to_string();
 
     let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
@@ -398,9 +402,7 @@ pub fn incremental_build(
 
             eprintln!("{}", &err);
             let _lock = drop_lock(LockKind::Build, &build_folder);
-            if phase_timing_enabled {
-                rescript_compiler::timing::print_report();
-            }
+            print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
             return Err(IncrementalBuildError {
                 kind: IncrementalBuildErrorKind::SourceFileParseError,
@@ -470,9 +472,7 @@ pub fn incremental_build(
     .map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
         let _lock = drop_lock(LockKind::Build, &build_folder);
-        if phase_timing_enabled {
-            rescript_compiler::timing::print_report();
-        }
+        print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
         IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(Some(e.to_string())),
@@ -513,9 +513,7 @@ pub fn incremental_build(
         }
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
-        if phase_timing_enabled {
-            rescript_compiler::timing::print_report();
-        }
+        print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
         Err(IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(None),
@@ -556,10 +554,17 @@ pub fn incremental_build(
         write_compiler_info(build_state);
 
         let _lock = drop_lock(LockKind::Build, &build_folder);
-        if phase_timing_enabled {
-            rescript_compiler::timing::print_report();
-        }
+        print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         Ok(outcome)
+    }
+}
+
+fn print_compiler_reports(phase_timing_enabled: bool, compiler_counters_enabled: bool) {
+    if phase_timing_enabled {
+        rescript_compiler::timing::print_report();
+    }
+    if compiler_counters_enabled {
+        rescript_compiler::perf_counters::print_report();
     }
 }
 

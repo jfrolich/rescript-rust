@@ -1,9 +1,11 @@
 //! Optional aggregate compiler phase timings.
 //!
-//! Timings are disabled unless `RESCRIPT_PHASE_TIMINGS` is present in the
-//! environment. The counters are process-global so rewatch can aggregate
-//! timings across all modules compiled during one build.
+//! Timings are disabled unless one of the compiler timing environment flags is
+//! present. The aggregate counters are process-global so rewatch can report
+//! total work across all modules, while optional thread-local counters let one
+//! worker report timings for a single module without parallel-worker pollution.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -63,6 +65,88 @@ static LAMBDA_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_OPT_NS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_NS: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static THREAD_TIMINGS: RefCell<Option<ThreadPhaseCounters>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ThreadPhaseCounters {
+    parse_ns: u64,
+    typecheck_ns: u64,
+    lambda_ns: u64,
+    lambda_optimization_ns: u64,
+    codegen_ns: u64,
+}
+
+impl ThreadPhaseCounters {
+    fn record(&mut self, phase: Phase, nanos: u64) {
+        match phase {
+            Phase::Parse => self.parse_ns = self.parse_ns.saturating_add(nanos),
+            Phase::Typecheck => self.typecheck_ns = self.typecheck_ns.saturating_add(nanos),
+            Phase::Lambda => self.lambda_ns = self.lambda_ns.saturating_add(nanos),
+            Phase::LambdaOptimization => {
+                self.lambda_optimization_ns = self.lambda_optimization_ns.saturating_add(nanos);
+            }
+            Phase::Codegen => self.codegen_ns = self.codegen_ns.saturating_add(nanos),
+        }
+    }
+
+    fn snapshot(self) -> PhaseTimingSnapshot {
+        PhaseTimingSnapshot {
+            total: Duration::default(),
+            parse: Duration::from_nanos(self.parse_ns),
+            typecheck: Duration::from_nanos(self.typecheck_ns),
+            lambda: Duration::from_nanos(self.lambda_ns),
+            lambda_optimization: Duration::from_nanos(self.lambda_optimization_ns),
+            codegen: Duration::from_nanos(self.codegen_ns),
+        }
+    }
+}
+
+/// Thread-local timing scope for one worker-owned compilation unit.
+pub struct ThreadTimingGuard {
+    active: bool,
+}
+
+impl ThreadTimingGuard {
+    /// Start collecting thread-local phase timings for the current thread.
+    pub fn start() -> Self {
+        let active = enabled();
+        if active {
+            THREAD_TIMINGS.with(|timings| {
+                *timings.borrow_mut() = Some(ThreadPhaseCounters::default());
+            });
+        }
+        Self { active }
+    }
+
+    /// Return the phase timings recorded on this thread since the guard started.
+    pub fn snapshot(&self) -> PhaseTimingSnapshot {
+        if !self.active {
+            return PhaseTimingSnapshot::default();
+        }
+
+        THREAD_TIMINGS.with(|timings| {
+            timings
+                .borrow()
+                .as_ref()
+                .copied()
+                .map(ThreadPhaseCounters::snapshot)
+                .unwrap_or_default()
+        })
+    }
+}
+
+impl Drop for ThreadTimingGuard {
+    fn drop(&mut self) {
+        if self.active {
+            THREAD_TIMINGS.with(|timings| {
+                *timings.borrow_mut() = None;
+            });
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod clock {
     use std::sync::Mutex;
@@ -96,7 +180,11 @@ pub fn enabled() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_PHASE_TIMINGS").is_some())
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("RESCRIPT_PHASE_TIMINGS").is_some()
+                || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some()
+                || std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
+        })
     }
 }
 
@@ -131,6 +219,11 @@ pub fn record(phase: Phase, duration: Duration) {
         Phase::LambdaOptimization => LAMBDA_OPT_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Codegen => CODEGEN_NS.fetch_add(nanos, Ordering::Relaxed),
     };
+    THREAD_TIMINGS.with(|timings| {
+        if let Some(thread_timings) = timings.borrow_mut().as_mut() {
+            thread_timings.record(phase, nanos);
+        }
+    });
 }
 
 /// Measure a closure and add its elapsed time to the selected phase.

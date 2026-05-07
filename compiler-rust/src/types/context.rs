@@ -32,21 +32,24 @@ use crate::intern::StrIdx;
 use crate::parse_arena::LidentIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
-/// Append-only type arena using UnsafeCell for zero-copy access.
+/// Append-only type arena using chunked allocation for zero-copy access.
 ///
 /// Safe because:
-/// - `Box<TypeExpr>` gives stable heap addresses
-/// - The Vec only grows (push), never shrinks or reorders
+/// - `typed_arena::Arena<TypeExpr>` gives stable addresses for allocated nodes
+/// - The pointer Vec only grows (push), never shrinks or reorders
 /// - Individual TypeExpr.desc RefCells are independent
 struct TypeArena {
-    types: std::cell::UnsafeCell<Vec<Box<TypeExpr>>>,
+    arena: typed_arena::Arena<TypeExpr>,
+    types: std::cell::UnsafeCell<Vec<NonNull<TypeExpr>>>,
 }
 
 impl TypeArena {
     fn new() -> Self {
         TypeArena {
+            arena: typed_arena::Arena::new(),
             types: std::cell::UnsafeCell::new(Vec::new()),
         }
     }
@@ -55,16 +58,17 @@ impl TypeArena {
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
         unsafe {
             let types = &*self.types.get();
-            types[r.0].as_ref()
+            types[r.index()].as_ref()
         }
     }
 
     fn push(&self, ty: TypeExpr) -> TypeExprRef {
+        let ptr = NonNull::from(self.arena.alloc(ty));
         unsafe {
             let types = &mut *self.types.get();
             let idx = types.len();
-            types.push(Box::new(ty));
-            TypeExprRef(idx)
+            types.push(ptr);
+            TypeExprRef::from_usize(idx)
         }
     }
 
@@ -102,6 +106,78 @@ impl QualifiedModuleComponentsCacheKey {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct QualifiedRecordLabelCacheKey {
+    path: Path,
+    env_id: u64,
+    lbl_pos: i32,
+}
+
+impl QualifiedRecordLabelCacheKey {
+    fn new(path: Path, env_id: u64, lbl_pos: i32) -> Self {
+        Self {
+            path: normalize_component_cache_path(path),
+            env_id,
+            lbl_pos,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordLabelDescriptionSummary {
+    label_positions: Arc<ahash::AHashMap<String, usize>>,
+    pub(crate) mandatory_count: usize,
+    pub(crate) has_optional: bool,
+    pub(crate) has_dotdotdot: bool,
+    pub(crate) all_regular: bool,
+}
+
+impl RecordLabelDescriptionSummary {
+    pub(crate) fn from_labels(labels: &[super::decl::LabelDescription]) -> Self {
+        let mut label_positions = ahash::AHashMap::with_capacity(labels.len());
+        let mut mandatory_count = 0;
+        let mut has_optional = false;
+        let mut has_dotdotdot = false;
+        let mut all_regular = true;
+
+        for (idx, label) in labels.iter().enumerate() {
+            label_positions.insert(label.lbl_name.clone(), idx);
+            if label.lbl_optional {
+                has_optional = true;
+            } else {
+                mandatory_count += 1;
+            }
+            if label.lbl_name == "..." {
+                has_dotdotdot = true;
+            }
+            if !matches!(
+                label.lbl_repres,
+                super::decl::RecordRepresentation::RecordRegular
+            ) {
+                all_regular = false;
+            }
+        }
+
+        Self {
+            label_positions: Arc::new(label_positions),
+            mandatory_count,
+            has_optional,
+            has_dotdotdot,
+            all_regular,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn label_index(&self, name: &str) -> Option<usize> {
+        self.label_positions.get(name).copied()
+    }
+
+    #[inline]
+    pub(crate) fn contains_label(&self, name: &str) -> bool {
+        self.label_positions.contains_key(name)
+    }
+}
+
 fn normalize_component_cache_path(path: Path) -> Path {
     match path {
         Path::Pident(_) => path,
@@ -110,11 +186,14 @@ fn normalize_component_cache_path(path: Path) -> Path {
             // `Path.same`; component lookup in env.ml:781-793 keys module
             // identity by that path equality while still carrying positions in
             // the selected access path. Mirror that only for Rust's cache key.
-            Path::pdot(normalize_component_cache_path(*parent), name)
+            Path::pdot(
+                normalize_component_cache_path(parent.as_ref().clone()),
+                name,
+            )
         }
         Path::Papply(functor, arg) => Path::papply(
-            normalize_component_cache_path(*functor),
-            normalize_component_cache_path(*arg),
+            normalize_component_cache_path(functor.as_ref().clone()),
+            normalize_component_cache_path(arg.as_ref().clone()),
         ),
     }
 }
@@ -132,7 +211,7 @@ fn normalize_component_cache_path(path: Path) -> Path {
 /// use rescript_compiler::context::IdGenerator;
 ///
 /// let id_gen = IdGenerator::new();
-/// let mut ctx = TypeContext::new(&id_gen);
+/// let mut ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 ///
 /// // Create a type variable
 /// let tvar = ctx.new_var(None);
@@ -141,9 +220,11 @@ fn normalize_component_cache_path(path: Path) -> Path {
 /// let int_type = ctx.new_constr(path_int, vec![]);
 /// let func_type = ctx.new_arrow(tvar, int_type);
 /// ```
-pub struct TypeContext<'a> {
-    /// ID generator for type IDs
-    id_gen: &'a IdGenerator,
+pub struct TypeContext {
+    /// ID generator for type IDs.
+    /// Owned by `Arc` so the context can outlive its caller and live in
+    /// thread-local worker storage (where a borrow can't be expressed).
+    id_gen: Arc<IdGenerator>,
 
     /// Current generalization level
     current_level: Cell<i32>,
@@ -178,6 +259,15 @@ pub struct TypeContext<'a> {
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
 
+    /// Preserve canonical typedtree side effects for debug/parity output.
+    ///
+    /// Normal JS compilation can skip eager signature-renaming work that exists
+    /// only to keep typedtree identity and traversal order stable for dumps.
+    preserve_canonical_typedtree: Cell<bool>,
+
+    /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
+    compiler_counters_enabled: bool,
+
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
     /// Refs that have been written via memorize_abbrev_expansion since the
@@ -206,17 +296,21 @@ pub struct TypeContext<'a> {
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
     type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
+    missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
 
     /// Cache for type declarations resolved through module signatures (Pdot paths).
     /// Separate from type_decl_by_path to avoid conflicts with expand_head_once
     /// entries which have unqualified paths. This approximates OCaml's
     /// components_of_module_maker lazy caching.
-    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    resolved_pdot_type_cache: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
-    /// Prevents repeated calls to resolve_module_signature_for_path from
-    /// creating fresh type copies via copy_lookup_signature_for_subst.
-    resolved_module_sig_cache: RefCell<ahash::AHashMap<String, (Path, super::decl::Signature)>>,
+    /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
+    /// components behind lazy cells; cache hits share the already-substituted
+    /// signature snapshot instead of cloning every `SignatureItem`.
+    resolved_module_sig_cache:
+        RefCell<ahash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
@@ -240,19 +334,28 @@ pub struct TypeContext<'a> {
     component_alias_sig_force_suppression: Cell<u32>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
-    resolved_module_value_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Path, super::decl::ValueDescription)>>,
+    resolved_module_value_cache: RefCell<
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
+    >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
-    resolved_module_type_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Path, Ident, super::decl::TypeDeclaration)>>,
+    resolved_module_type_cache: RefCell<
+        ahash::AHashMap<
+            Path,
+            ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
+        >,
+    >,
 
     /// Cached child-module access paths keyed by resolved parent access path.
-    resolved_child_module_path_cache: RefCell<ahash::AHashMap<(Path, String), Path>>,
+    resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
 
     /// Cached forced module declarations from qualified component tables.
-    qualified_module_decl_cache:
-        RefCell<ahash::AHashMap<(Path, String), (Ident, super::decl::ModuleDeclaration)>>,
+    qualified_module_decl_cache: RefCell<
+        ahash::AHashMap<
+            Path,
+            ahash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
+        >,
+    >,
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
@@ -271,12 +374,12 @@ pub struct TypeContext<'a> {
     /// Cache of renamed module signatures.
     /// Matches OCaml's lazy ps_sig = Subst.signature Subst.identity sign.
     /// Populated by PersistentEnv::get_renamed_sig, consumed by normalize_path.
-    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, super::decl::Signature>>,
+    pub(crate) renamed_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
-    raw_module_sigs: RefCell<ahash::AHashMap<String, super::decl::Signature>>,
+    raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
@@ -328,10 +431,21 @@ pub struct TypeContext<'a> {
     /// OCaml installs one shared `lbl_all` array for a record declaration and
     /// reuses it from record typing (`compiler/ml/typecore.ml:2802,2833-2842`).
     /// Rust reconstructs fallback label descriptions from declarations, so cache
-    /// that reconstructed array per TypeContext instead of rebuilding large
-    /// records such as `JsxDOM.domProps` for every JSX literal.
+    /// that reconstructed array per TypeContext and share it across record
+    /// literals instead of rebuilding or cloning large records such as
+    /// `JsxDOM.domProps` for every JSX literal.
     record_label_descriptions_cache:
-        RefCell<ahash::AHashMap<String, Vec<super::decl::LabelDescription>>>,
+        RefCell<ahash::AHashMap<super::path::Path, Arc<Vec<super::decl::LabelDescription>>>>,
+    record_label_description_summaries_cache:
+        RefCell<ahash::AHashMap<super::path::Path, Arc<RecordLabelDescriptionSummary>>>,
+
+    /// Qualified persistent record labels keyed by environment and label slot.
+    /// OCaml caches module components with already-substituted `lbl_all`
+    /// descriptors (compiler/ml/env.ml:1513-1514,1542-1548); this avoids
+    /// repeatedly copying the same persistent JSX prop label skeleton before
+    /// each `instance_label` call.
+    qualified_record_label_cache:
+        RefCell<ahash::AHashMap<QualifiedRecordLabelCacheKey, super::decl::LabelDescription>>,
 
     /// Synthetic dict-pattern labels created by type-directed label lookup.
     /// OCaml mutates `lbl_all` on the predefined dict magic field as each dict
@@ -358,9 +472,9 @@ pub struct TypeContext<'a> {
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
-impl<'a> TypeContext<'a> {
+impl TypeContext {
     /// Create a new type context.
-    pub fn new(id_gen: &'a IdGenerator) -> Self {
+    pub fn new(id_gen: Arc<IdGenerator>) -> Self {
         TypeContext {
             id_gen,
             current_level: Cell::new(0),
@@ -373,6 +487,8 @@ impl<'a> TypeContext<'a> {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
+            preserve_canonical_typedtree: Cell::new(false),
+            compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -386,6 +502,8 @@ impl<'a> TypeContext<'a> {
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            type_item_by_path: RefCell::new(ahash::AHashMap::new()),
+            missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
@@ -415,6 +533,8 @@ impl<'a> TypeContext<'a> {
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
+            record_label_description_summaries_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_record_label_cache: RefCell::new(ahash::AHashMap::new()),
             dict_pattern_labels_cache: RefCell::new(Vec::new()),
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
@@ -430,7 +550,7 @@ impl<'a> TypeContext<'a> {
 
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
-            let env_ref = EnvRef(typed_envs.len());
+            let env_ref = EnvRef::from_usize(typed_envs.len());
             typed_envs.push(Arc::new(env.clone_preserve_id()));
             env_ref
         };
@@ -440,7 +560,20 @@ impl<'a> TypeContext<'a> {
 
     /// Resolve a typedtree environment reference.
     pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
-        self.typed_envs.borrow().get(env_ref.0).cloned()
+        self.typed_envs.borrow().get(env_ref.index()).cloned()
+    }
+
+    pub(crate) fn set_preserve_canonical_typedtree(&self, preserve: bool) {
+        self.preserve_canonical_typedtree.set(preserve);
+    }
+
+    pub(crate) fn preserve_canonical_typedtree(&self) -> bool {
+        self.preserve_canonical_typedtree.get()
+    }
+
+    #[inline]
+    pub(crate) fn compiler_counters_enabled(&self) -> bool {
+        self.compiler_counters_enabled
     }
 
     /// Intern a CMI longident component and return a synthetic StrIdx.
@@ -544,15 +677,43 @@ impl<'a> TypeContext<'a> {
             .insert(path.to_string(), decl);
     }
 
+    pub(crate) fn register_type_item_by_path(
+        &self,
+        path: &str,
+        id: Ident,
+        decl: super::decl::TypeDeclaration,
+    ) {
+        self.type_item_by_path
+            .borrow_mut()
+            .insert(path.to_string(), (id, decl));
+    }
+
+    pub(crate) fn find_type_item_by_path(
+        &self,
+        path: &str,
+    ) -> Option<(Ident, super::decl::TypeDeclaration)> {
+        self.type_item_by_path.borrow().get(path).cloned()
+    }
+
+    pub(crate) fn register_missing_type_item_by_path(&self, path: &str) {
+        self.missing_type_item_by_path
+            .borrow_mut()
+            .insert(path.to_string());
+    }
+
+    pub(crate) fn is_missing_type_item_by_path(&self, path: &str) -> bool {
+        self.missing_type_item_by_path.borrow().contains(path)
+    }
+
     /// Cache a type declaration resolved through module signatures (Pdot paths).
-    pub fn register_resolved_pdot_type(&self, path: &str, decl: super::decl::TypeDeclaration) {
+    pub fn register_resolved_pdot_type(&self, path: &str, decl: Arc<super::decl::TypeDeclaration>) {
         self.resolved_pdot_type_cache
             .borrow_mut()
             .insert(path.to_string(), decl);
     }
 
     /// Look up a cached resolved Pdot type declaration.
-    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<super::decl::TypeDeclaration> {
+    pub fn find_resolved_pdot_type(&self, path: &str) -> Option<Arc<super::decl::TypeDeclaration>> {
         self.resolved_pdot_type_cache.borrow().get(path).cloned()
     }
 
@@ -561,7 +722,7 @@ impl<'a> TypeContext<'a> {
         &self,
         path: &str,
         access_path: Path,
-        sig: super::decl::Signature,
+        sig: Arc<super::decl::Signature>,
     ) {
         self.resolved_module_sig_cache
             .borrow_mut()
@@ -569,7 +730,10 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Look up a cached resolved module signature.
-    pub fn find_resolved_module_sig(&self, path: &str) -> Option<(Path, super::decl::Signature)> {
+    pub fn find_resolved_module_sig(
+        &self,
+        path: &str,
+    ) -> Option<(Path, Arc<super::decl::Signature>)> {
         self.resolved_module_sig_cache.borrow().get(path).cloned()
     }
 
@@ -579,6 +743,9 @@ impl<'a> TypeContext<'a> {
         key: QualifiedModuleComponentsCacheKey,
         components: super::env_lazy::QualifiedModuleComponents,
     ) {
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_qualified_component_registered();
+        }
         self.qualified_module_components_cache
             .borrow_mut()
             .insert(key, components);
@@ -597,7 +764,16 @@ impl<'a> TypeContext<'a> {
     ) -> Option<R> {
         let components = {
             let cache = self.qualified_module_components_cache.borrow();
-            cache.get(key)?.clone()
+            let Some(components) = cache.get(key) else {
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::record_qualified_component_miss();
+                }
+                return None;
+            };
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_qualified_component_hit();
+            }
+            components.clone()
         };
         Some(f(&components))
     }
@@ -672,7 +848,9 @@ impl<'a> TypeContext<'a> {
     ) {
         self.resolved_module_value_cache
             .borrow_mut()
-            .insert((module_path.clone(), value_name.to_string()), (path, desc));
+            .entry(module_path.clone())
+            .or_default()
+            .insert(value_name.to_string(), (path, desc));
     }
 
     /// Look up a cached dotted value lookup for a resolved module access path.
@@ -683,7 +861,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<(Path, super::decl::ValueDescription)> {
         self.resolved_module_value_cache
             .borrow()
-            .get(&(module_path.clone(), value_name.to_string()))
+            .get(module_path)
+            .and_then(|values| values.get(value_name))
             .cloned()
     }
 
@@ -694,12 +873,13 @@ impl<'a> TypeContext<'a> {
         type_name: &str,
         access_path: Path,
         id: Ident,
-        decl: super::decl::TypeDeclaration,
+        decl: Arc<super::decl::TypeDeclaration>,
     ) {
-        self.resolved_module_type_cache.borrow_mut().insert(
-            (module_path.clone(), type_name.to_string()),
-            (access_path, id, decl),
-        );
+        self.resolved_module_type_cache
+            .borrow_mut()
+            .entry(module_path.clone())
+            .or_default()
+            .insert(type_name.to_string(), (access_path, id, decl));
     }
 
     /// Look up a cached dotted type lookup for a resolved module access path.
@@ -707,10 +887,11 @@ impl<'a> TypeContext<'a> {
         &self,
         module_path: &Path,
         type_name: &str,
-    ) -> Option<(Path, Ident, super::decl::TypeDeclaration)> {
+    ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_module_type_cache
             .borrow()
-            .get(&(module_path.clone(), type_name.to_string()))
+            .get(module_path)
+            .and_then(|types| types.get(type_name))
             .cloned()
     }
 
@@ -723,7 +904,9 @@ impl<'a> TypeContext<'a> {
     ) {
         self.resolved_child_module_path_cache
             .borrow_mut()
-            .insert((parent_path.clone(), child_name.to_string()), child_path);
+            .entry(parent_path.clone())
+            .or_default()
+            .insert(child_name.to_string(), child_path);
     }
 
     /// Look up a cached resolved child-module access path.
@@ -734,7 +917,8 @@ impl<'a> TypeContext<'a> {
     ) -> Option<Path> {
         self.resolved_child_module_path_cache
             .borrow()
-            .get(&(parent_path.clone(), child_name.to_string()))
+            .get(parent_path)
+            .and_then(|children| children.get(child_name))
             .cloned()
     }
 
@@ -744,11 +928,13 @@ impl<'a> TypeContext<'a> {
         parent_path: &Path,
         child_name: &str,
         id: Ident,
-        md: super::decl::ModuleDeclaration,
+        md: Arc<super::decl::ModuleDeclaration>,
     ) {
         self.qualified_module_decl_cache
             .borrow_mut()
-            .insert((parent_path.clone(), child_name.to_string()), (id, md));
+            .entry(parent_path.clone())
+            .or_default()
+            .insert(child_name.to_string(), (id, md));
     }
 
     /// Look up a forced qualified module declaration.
@@ -756,10 +942,11 @@ impl<'a> TypeContext<'a> {
         &self,
         parent_path: &Path,
         child_name: &str,
-    ) -> Option<(Ident, super::decl::ModuleDeclaration)> {
+    ) -> Option<(Ident, Arc<super::decl::ModuleDeclaration>)> {
         self.qualified_module_decl_cache
             .borrow()
-            .get(&(parent_path.clone(), child_name.to_string()))
+            .get(parent_path)
+            .and_then(|modules| modules.get(child_name))
             .cloned()
     }
 
@@ -803,6 +990,15 @@ impl<'a> TypeContext<'a> {
 
     pub(crate) fn persistent_env_clone(&self) -> Option<crate::cmi::persistent_env::PersistentEnv> {
         self.persistent_env.borrow().clone()
+    }
+
+    /// Drop the per-compile `PersistentEnv` reference held inside this
+    /// `TypeContext` before the context is parked in worker thread-local
+    /// storage. The shared `PersStruct` cache lives behind an `Arc` and
+    /// outlives this drop; only the compile-scoped wrapper struct is
+    /// released so the next compile can install its own.
+    pub(crate) fn clear_persistent_env_for_park(&self) {
+        *self.persistent_env.borrow_mut() = None;
     }
 
     pub(crate) fn persistent_env_is_in_process(&self) -> bool {
@@ -1117,23 +1313,66 @@ impl<'a> TypeContext<'a> {
     /// Cache reconstructed record label descriptions for a type path.
     pub fn register_record_label_descriptions(
         &self,
-        type_path_name: &str,
-        labels: Vec<super::decl::LabelDescription>,
+        type_path: &Path,
+        labels: Arc<Vec<super::decl::LabelDescription>>,
     ) {
+        let summary = Arc::new(RecordLabelDescriptionSummary::from_labels(&labels));
         self.record_label_descriptions_cache
             .borrow_mut()
-            .insert(type_path_name.to_string(), labels);
+            .insert(type_path.clone(), labels);
+        self.record_label_description_summaries_cache
+            .borrow_mut()
+            .insert(type_path.clone(), summary);
     }
 
     /// Look up reconstructed record label descriptions for a type path.
     pub fn get_record_label_descriptions(
         &self,
-        type_path_name: &str,
-    ) -> Option<Vec<super::decl::LabelDescription>> {
+        type_path: &Path,
+    ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
         self.record_label_descriptions_cache
             .borrow()
-            .get(type_path_name)
+            .get(type_path)
             .cloned()
+    }
+
+    pub(crate) fn get_record_label_description_summary(
+        &self,
+        type_path: &Path,
+    ) -> Option<Arc<RecordLabelDescriptionSummary>> {
+        self.record_label_description_summaries_cache
+            .borrow()
+            .get(type_path)
+            .cloned()
+    }
+
+    pub(crate) fn get_qualified_record_label(
+        &self,
+        env_id: u64,
+        type_path: &Path,
+        lbl_pos: i32,
+    ) -> Option<super::decl::LabelDescription> {
+        self.qualified_record_label_cache
+            .borrow()
+            .get(&QualifiedRecordLabelCacheKey::new(
+                type_path.clone(),
+                env_id,
+                lbl_pos,
+            ))
+            .cloned()
+    }
+
+    pub(crate) fn cache_qualified_record_label(
+        &self,
+        env_id: u64,
+        type_path: &Path,
+        lbl_pos: i32,
+        label: super::decl::LabelDescription,
+    ) {
+        self.qualified_record_label_cache.borrow_mut().insert(
+            QualifiedRecordLabelCacheKey::new(type_path.clone(), env_id, lbl_pos),
+            label,
+        );
     }
 
     /// Return a cached synthesized record-field lident by label name.
@@ -1228,7 +1467,7 @@ impl<'a> TypeContext<'a> {
         let refs = self.memoized_abbrev_refs.borrow().clone();
         let abbrevs = self.abbrevs.borrow();
         for memo in refs {
-            if let Some(cell) = abbrevs.get(memo.0) {
+            if let Some(cell) = abbrevs.get(memo.index()) {
                 *cell.borrow_mut() = AbbrevMemo::Mnil;
             }
         }
@@ -1258,7 +1497,7 @@ impl<'a> TypeContext<'a> {
             let node = {
                 let abbrevs = self.abbrevs.borrow();
                 abbrevs
-                    .get(current.0)
+                    .get(current.index())
                     .map(|cell| cell.borrow().clone())
                     .unwrap_or(AbbrevMemo::Mnil)
             };
@@ -1293,7 +1532,7 @@ impl<'a> TypeContext<'a> {
             let node = {
                 let abbrevs = self.abbrevs.borrow();
                 abbrevs
-                    .get(current.0)
+                    .get(current.index())
                     .map(|cell| cell.borrow().clone())
                     .unwrap_or(AbbrevMemo::Mnil)
             };
@@ -1325,7 +1564,7 @@ impl<'a> TypeContext<'a> {
     pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
         let abbrevs = self.abbrevs.borrow();
         abbrevs
-            .get(memo.0)
+            .get(memo.index())
             .map(|cell| cell.borrow().clone())
             .unwrap_or(AbbrevMemo::Mnil)
     }
@@ -1385,7 +1624,7 @@ impl<'a> TypeContext<'a> {
             return;
         }
         let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.0) {
+        if let Some(cell) = abbrevs.get(memo.index()) {
             *cell.borrow_mut() = AbbrevMemo::Mnil;
         }
     }
@@ -1396,7 +1635,7 @@ impl<'a> TypeContext<'a> {
             return;
         }
         let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.0) {
+        if let Some(cell) = abbrevs.get(memo.index()) {
             *cell.borrow_mut() = value;
         }
     }
@@ -1417,20 +1656,21 @@ impl<'a> TypeContext<'a> {
 
         {
             let mut abbrevs = self.abbrevs.borrow_mut();
-            if memo.0 >= abbrevs.len() {
+            let memo_idx = memo.index();
+            if memo_idx >= abbrevs.len() {
                 return;
             }
 
-            let previous = abbrevs[memo.0].borrow().clone();
+            let previous = abbrevs[memo_idx].borrow().clone();
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
                 let idx = abbrevs.len();
                 abbrevs.push(RefCell::new(previous));
-                AbbrevMemoRef(idx)
+                AbbrevMemoRef::from_usize(idx)
             };
 
-            *abbrevs[memo.0].borrow_mut() = AbbrevMemo::Mcons {
+            *abbrevs[memo_idx].borrow_mut() = AbbrevMemo::Mcons {
                 private_flag,
                 path,
                 abbrev,
@@ -1455,7 +1695,7 @@ impl<'a> TypeContext<'a> {
         let mut abbrevs = self.abbrevs.borrow_mut();
         let idx = abbrevs.len();
         abbrevs.push(RefCell::new(memo));
-        AbbrevMemoRef(idx)
+        AbbrevMemoRef::from_usize(idx)
     }
 
     // ========================================================================
@@ -1467,7 +1707,7 @@ impl<'a> TypeContext<'a> {
         let mut row_fields = self.row_fields.borrow_mut();
         let idx = row_fields.len();
         row_fields.push(RefCell::new(field));
-        RowFieldRef(idx)
+        RowFieldRef::from_usize(idx)
     }
 
     /// Get the value stored in a row field reference.
@@ -1476,7 +1716,9 @@ impl<'a> TypeContext<'a> {
             return None;
         }
         let row_fields = self.row_fields.borrow();
-        row_fields.get(rf.0).and_then(|cell| cell.borrow().clone())
+        row_fields
+            .get(rf.index())
+            .and_then(|cell| cell.borrow().clone())
     }
 
     /// Set the value of a row field reference (like OCaml's set_row_field).
@@ -1485,7 +1727,7 @@ impl<'a> TypeContext<'a> {
             return;
         }
         let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.0) {
+        if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = Some(field);
         }
     }
@@ -1496,7 +1738,7 @@ impl<'a> TypeContext<'a> {
             return;
         }
         let row_fields = self.row_fields.borrow();
-        if let Some(cell) = row_fields.get(rf.0) {
+        if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = None;
         }
     }
@@ -1506,11 +1748,11 @@ impl<'a> TypeContext<'a> {
     // ========================================================================
 
     /// Allocate a commutable reference.
-    fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
+    pub(crate) fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
         let mut commutables = self.commutables.borrow_mut();
         let idx = commutables.len();
         commutables.push(RefCell::new(c));
-        CommutableRef(idx)
+        CommutableRef::from_usize(idx)
     }
 
     // ========================================================================
@@ -1522,7 +1764,7 @@ impl<'a> TypeContext<'a> {
         let mut field_kinds = self.field_kinds.borrow_mut();
         let idx = field_kinds.len();
         field_kinds.push(RefCell::new(kind));
-        FieldKindRef(idx)
+        FieldKindRef::from_usize(idx)
     }
 
     // ========================================================================
@@ -1604,7 +1846,7 @@ impl<'a> TypeContext<'a> {
 
     /// Register a raw module signature for lazy renaming.
     /// Called during load_pervasives to store sigs for normalize_path.
-    pub fn register_raw_module_sig(&self, name: &str, sig: super::decl::Signature) {
+    pub fn register_raw_module_sig(&self, name: &str, sig: Arc<super::decl::Signature>) {
         self.raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
@@ -1615,7 +1857,20 @@ impl<'a> TypeContext<'a> {
     }
 
     pub(crate) fn find_raw_module_sig(&self, name: &str) -> Option<super::decl::Signature> {
-        self.raw_module_sigs.borrow().get(name).cloned()
+        self.raw_module_sigs
+            .borrow()
+            .get(name)
+            .cloned()
+            .map(|sig| (*sig).clone())
+    }
+
+    pub(crate) fn with_raw_module_sig<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&super::decl::Signature) -> T,
+    ) -> Option<T> {
+        let raw = self.raw_module_sigs.borrow();
+        raw.get(name).map(|sig| f(sig.as_ref()))
     }
 
     /// Trigger module signature renaming for a persistent module.
@@ -1657,8 +1912,24 @@ impl<'a> TypeContext<'a> {
                 .borrow_mut()
                 .entry(module_name.to_string())
                 .or_insert_with(|| sig.clone());
-            let mut renamed = crate::types::typecore::copy_lookup_signature_for_subst(&sig, self);
-            crate::cmi::persistent_env::freshen_signature_bound_idents(&mut renamed, self);
+            if self.compiler_counters_enabled() {
+                crate::perf_counters::record_signature_freshen_name(
+                    "type_context_lazy_rename",
+                    module_name,
+                    sig.len(),
+                );
+            }
+            // OCaml `Subst.signature` copies and freshens in one traversal
+            // sequence (compiler/ml/subst.ml:358-364). Keep this lazy rename
+            // to that single pass instead of copying before calling the
+            // freshening helper.
+            let renamed = Arc::new(
+                crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
+                    "type_context_lazy_rename",
+                    sig.as_ref(),
+                    self,
+                ),
+            );
             self.renamed_module_sigs
                 .borrow_mut()
                 .insert(module_name.to_string(), renamed);
@@ -1668,7 +1939,20 @@ impl<'a> TypeContext<'a> {
     fn load_lazy_raw_module_sig_for_rename(
         &self,
         module_name: &str,
-    ) -> Option<super::decl::Signature> {
+    ) -> Option<Arc<super::decl::Signature>> {
+        if self.persistent_env_is_in_process() {
+            let mut pers_env = self.persistent_env_clone().unwrap_or_else(|| {
+                panic!(
+                    "in-process invariant violated: missing PersistentEnv while forcing raw signature for {module_name}"
+                )
+            });
+            return Some(pers_env.read_raw_sig_shared(module_name, self).unwrap_or_else(|| {
+                panic!(
+                    "in-process invariant violated: raw signature for {module_name} was not in the module registry"
+                )
+            }));
+        }
+
         let cmi_path = {
             let load_paths = self.load_paths.borrow();
             let cmi_filename = format!("{module_name}.cmi");
@@ -1700,7 +1984,7 @@ impl<'a> TypeContext<'a> {
         crate::cmi::persistent_env::substitute_type_paths_in_sig(&sig, &module_path, self);
         crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(&mut sig, &module_path);
         crate::cmi::persistent_env::substitute_submodule_paths_pub(&sig, &module_path, self);
-        Some(sig)
+        Some(Arc::new(sig))
     }
 
     /// Create a new identifier using the typing context's shared stamp source.
@@ -1715,7 +1999,7 @@ impl<'a> TypeContext<'a> {
     /// Rename an identifier using the typing context's shared stamp source.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
-        id.rename(self.id_gen)
+        id.rename(&self.id_gen)
     }
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
@@ -1877,7 +2161,7 @@ mod tests {
     #[test]
     fn test_new_var() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let v1 = ctx.new_var(Some("a".to_string()));
         let v2 = ctx.new_var(None);
@@ -1888,7 +2172,7 @@ mod tests {
     #[test]
     fn test_new_arrow() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);
@@ -1901,7 +2185,7 @@ mod tests {
     #[test]
     fn test_level_management() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         assert_eq!(ctx.current_level(), 0);
 
@@ -1921,7 +2205,7 @@ mod tests {
     #[test]
     fn test_repr() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_link(t1);
@@ -1936,7 +2220,7 @@ mod tests {
     #[test]
     fn test_repr_path_compression() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_link(t1);
@@ -1956,7 +2240,7 @@ mod tests {
     #[test]
     fn test_tuple() {
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
 
         let t1 = ctx.new_var(None);
         let t2 = ctx.new_var(None);

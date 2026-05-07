@@ -28,6 +28,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use tracing::{Span, info_span};
 
@@ -119,6 +121,104 @@ struct CompletionMsg {
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
+struct PreJsMsg {
+    module_name: String,
+    pre_js: rescript_compiler::driver::InProcessPreJsCompileResult,
+    needed_modules: Vec<String>,
+    interface_registry_update: Option<PendingRegistryUpdate>,
+    source_abs: PathBuf,
+    implementation_path: PathBuf,
+    has_interface: bool,
+    is_runtime: bool,
+    is_clean: bool,
+}
+
+struct SignatureReadyMsg {
+    module_name: String,
+    signature: rescript_compiler::types::Signature,
+    fingerprint: u64,
+    is_pure: bool,
+    registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+enum WorkerMsg {
+    SignatureReady(SignatureReadyMsg),
+    PreJsReady(PreJsMsg),
+    Completed(CompletionMsg),
+}
+
+#[derive(Clone)]
+struct InProcessSchedulerHooks {
+    tx: mpsc::Sender<WorkerMsg>,
+    compile_universe: Arc<AHashSet<String>>,
+}
+
+#[derive(Default)]
+struct InProcessSchedulerCounters {
+    scheduled_typecheck: usize,
+    scheduled_js: usize,
+    signature_ready: usize,
+    pre_js_ready: usize,
+    completed: usize,
+    max_ready_typecheck: usize,
+    max_ready_js: usize,
+    max_pending_js: usize,
+    max_in_flight: usize,
+    js_scheduled_while_typecheck_ready: usize,
+    blocked_events_with_idle_slots: usize,
+    max_idle_slots: usize,
+    dispatcher_wait: Duration,
+    idle_slot_wait_nanos: u128,
+}
+
+impl InProcessSchedulerCounters {
+    fn observe_queues(
+        &mut self,
+        ready_typecheck: usize,
+        ready_js: usize,
+        pending_js: usize,
+        in_flight: usize,
+    ) {
+        self.max_ready_typecheck = self.max_ready_typecheck.max(ready_typecheck);
+        self.max_ready_js = self.max_ready_js.max(ready_js);
+        self.max_pending_js = self.max_pending_js.max(pending_js);
+        self.max_in_flight = self.max_in_flight.max(in_flight);
+    }
+
+    fn observe_wait(&mut self, wait: Duration, idle_slots: usize) {
+        self.dispatcher_wait = self.dispatcher_wait.saturating_add(wait);
+        if idle_slots > 0 {
+            self.blocked_events_with_idle_slots += 1;
+            self.max_idle_slots = self.max_idle_slots.max(idle_slots);
+            self.idle_slot_wait_nanos = self
+                .idle_slot_wait_nanos
+                .saturating_add(wait.as_nanos().saturating_mul(idle_slots as u128));
+        }
+    }
+
+    fn print_report(&self, capacity: usize) {
+        eprintln!(
+            "[scheduler-counter] capacity={} scheduled_typecheck={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
+            capacity,
+            self.scheduled_typecheck,
+            self.scheduled_js,
+            self.signature_ready,
+            self.pre_js_ready,
+            self.completed,
+            self.js_scheduled_while_typecheck_ready,
+            self.max_ready_typecheck,
+            self.max_ready_js,
+            self.max_pending_js,
+            self.max_in_flight,
+            self.blocked_events_with_idle_slots,
+            self.max_idle_slots,
+            duration_ms(self.dispatcher_wait),
+            self.idle_slot_wait_nanos as f64 / 1_000_000.0,
+        );
+    }
+}
+
+#[derive(Clone)]
 struct PendingRegistryUpdate {
     module_name: String,
     pers_struct: Option<Arc<PortablePersStruct>>,
@@ -129,6 +229,14 @@ struct PendingRegistryUpdate {
 struct InProcessModuleResult {
     warning: Option<String>,
     registry_updates: Vec<PendingRegistryUpdate>,
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn duration_delta(after: Duration, before: Duration) -> Duration {
+    after.saturating_sub(before)
 }
 
 fn apply_pending_registry_updates(
@@ -155,14 +263,100 @@ fn apply_pending_registry_updates(
     }
 }
 
-/// Compute the critical-path priority of every module in the universe:
-/// `priority(m) = 1 + max(priority(d) for d in in-universe dependents of m)`.
+fn apply_signature_ready(build_command_state: &BuildCommandState, msg: SignatureReadyMsg) -> bool {
+    apply_pending_registry_updates(build_command_state, msg.registry_updates);
+    let generation_before = build_command_state.get_interface_generation(&msg.module_name);
+    let generation_after = build_command_state.register_in_memory_interface(
+        msg.module_name,
+        msg.signature,
+        msg.fingerprint,
+        msg.is_pure,
+    );
+    generation_before.is_some() && generation_before == Some(generation_after)
+}
+
+fn unblock_dependents(
+    build_state: &BuildState,
+    compile_universe: &AHashSet<String>,
+    priorities: &AHashMap<String, i64>,
+    pending_deps: &mut AHashMap<String, usize>,
+    dirty_set: &mut AHashSet<String>,
+    signature_ready: &mut AHashSet<String>,
+    ready_heap: &mut BinaryHeap<WorkUnit>,
+    module_name: &str,
+    is_clean: bool,
+) {
+    if !signature_ready.insert(module_name.to_string()) {
+        return;
+    }
+
+    let Some(module) = build_state.get_module(module_name) else {
+        return;
+    };
+    for dep in &module.dependents {
+        if !compile_universe.contains(dep) {
+            continue;
+        }
+        if !is_clean {
+            dirty_set.insert(dep.clone());
+        }
+        let count = pending_deps.get_mut(dep).unwrap();
+        *count -= 1;
+        if *count == 0 && !signature_ready.contains(dep) {
+            ready_heap.push(WorkUnit {
+                priority: priorities[dep],
+                module_name: dep.clone(),
+            });
+        }
+    }
+}
+
+/// Estimate module cost from parse-phase source buffers that are already held
+/// in memory for `--in-process`. This keeps the scheduler from doing extra
+/// filesystem reads while still prioritizing large ready modules over tiny
+/// leaf work.
+fn compute_module_costs(
+    build_state: &BuildCommandState,
+    universe: &AHashSet<String>,
+    stored_asts_snapshot: Option<&AHashMap<String, StoredAst>>,
+) -> AHashMap<String, i64> {
+    fn compute_from_asts(
+        universe: &AHashSet<String>,
+        stored_asts: &AHashMap<String, StoredAst>,
+    ) -> AHashMap<String, i64> {
+        let mut costs = AHashMap::with_capacity(universe.len());
+        for name in universe {
+            let impl_key = format!("{name}:impl");
+            let intf_key = format!("{name}:intf");
+            let mut source_len = 0usize;
+            if let Some(StoredAst::Structure(stored)) = stored_asts.get(&impl_key) {
+                source_len = source_len.saturating_add(stored.source_len);
+            }
+            if let Some(StoredAst::Signature(stored)) = stored_asts.get(&intf_key) {
+                source_len = source_len.saturating_add(stored.source_len);
+            }
+            costs.insert(name.clone(), source_len.max(1) as i64);
+        }
+        costs
+    }
+
+    if let Some(stored_asts) = stored_asts_snapshot {
+        return compute_from_asts(universe, stored_asts);
+    }
+
+    let stored_asts = build_state.stored_asts.lock().unwrap();
+    compute_from_asts(universe, &stored_asts)
+}
+
+/// Compute the weighted critical-path priority of every module in the universe:
+/// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
 fn compute_critical_path_priorities(
     universe: &AHashSet<String>,
     build_state: &BuildState,
+    costs: &AHashMap<String, i64>,
 ) -> AHashMap<String, i64> {
     let mut priorities: AHashMap<String, i64> = AHashMap::with_capacity(universe.len());
     let mut remaining_dependents: AHashMap<String, usize> = AHashMap::with_capacity(universe.len());
@@ -186,7 +380,10 @@ fn compute_critical_path_priorities(
             .filter_map(|d| priorities.get(d).copied())
             .max()
             .unwrap_or(0);
-        priorities.insert(name.clone(), max_dep_priority + 1);
+        priorities.insert(
+            name.clone(),
+            max_dep_priority + costs.get(&name).copied().unwrap_or(1),
+        );
 
         for dep in &module.deps {
             if !universe.contains(dep) {
@@ -215,13 +412,15 @@ fn compile_one(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     registry_snapshot: &ModuleRegistry,
+    stored_asts: Option<&AHashMap<String, StoredAst>>,
     module_name: &str,
     is_dirty: bool,
     warn_error_override: Option<String>,
     subprocess: bool,
     dump_typed_sexp: bool,
     parent_span: Span,
-) -> CompletionMsg {
+    in_process_hooks: Option<InProcessSchedulerHooks>,
+) -> WorkerMsg {
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
@@ -241,14 +440,14 @@ fn compile_one(
     };
 
     if !is_dirty {
-        return CompletionMsg {
+        return WorkerMsg::Completed(CompletionMsg {
             module_name: module_name.to_string(),
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: true,
             is_compiled: false,
             registry_updates: Vec::new(),
-        };
+        });
     }
 
     // In-process mode: bypass the bsc subprocess entirely and run the Rust
@@ -259,34 +458,37 @@ fn compile_one(
     if build_command_state.build_mode().is_in_process() {
         if let SourceType::SourceFile(_) = &module.source_type {
             let interface_generation_before = build_command_state.get_interface_generation(module_name);
-            let result = compile_module_in_process(
+            let result = compile_module_in_process_to_js_boundary(
                 package,
                 module,
                 module_name,
                 registry_snapshot,
+                stored_asts.expect("in-process compile requires stored AST snapshot"),
                 build_state,
                 build_command_state,
+                in_process_hooks.as_ref(),
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
-            let (result, registry_updates) = match result {
-                Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
-                Err(err) => (Err(err), Vec::new()),
-            };
-            let is_clean_interface = matches!(&result, Ok(None))
-                && interface_generation_before.is_some()
-                && interface_generation_before == interface_generation_after;
-            return CompletionMsg {
-                module_name: module_name.to_string(),
-                result,
-                interface_result: None,
-                is_clean: is_clean_interface,
-                is_compiled: true,
-                registry_updates,
+            return match result {
+                Ok(mut msg) => {
+                    let is_clean_interface = interface_generation_before.is_some()
+                        && interface_generation_before == interface_generation_after;
+                    msg.is_clean = is_clean_interface;
+                    WorkerMsg::PreJsReady(msg)
+                }
+                Err(err) => WorkerMsg::Completed(CompletionMsg {
+                    module_name: module_name.to_string(),
+                    result: Err(err),
+                    interface_result: None,
+                    is_clean: false,
+                    is_compiled: true,
+                    registry_updates: Vec::new(),
+                }),
             };
         }
     }
 
-    match &module.source_type {
+    WorkerMsg::Completed(match &module.source_type {
         SourceType::MlMap(_) => {
             // The mlmap is compiled during AST generation; the entry here just
             // marks it compiled so its namespace members can proceed.
@@ -352,7 +554,7 @@ fn compile_one(
                 registry_updates: Vec::new(),
             }
         }
-    }
+    })
 }
 
 /// Extract sexp output from bsc stderr.
@@ -421,39 +623,38 @@ pub fn compile(
         register_namespace_signatures(build_state);
         register_source_fallback_paths(build_state);
 
-        if build_includes_runtime_package(build_state) {
-            debug!("Skipping runtime pre-compilation because @rescript/runtime is in the build graph");
-        } else {
-            // Pre-compile all @rescript/runtime modules into the registry.
-            // In in-process mode, the registry is the sole source of truth —
-            // no CMI fallback. Every dependency must be in the registry.
-            let parent_span = compile_parent_span.clone();
-            let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-                let handle = std::thread::Builder::new()
-                    .name("rewatch-runtime-precompile".to_string())
-                    .stack_size(256 * 1024 * 1024)
-                    .spawn_scoped(scope, || {
-                        let _parent = parent_span.enter();
-                        pre_compile_runtime_modules(build_state)
-                    })
-                    .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
+        // Pre-compile all @rescript/runtime modules into the registry.
+        // In in-process mode, the registry is the sole source of truth —
+        // no CMI fallback. Every dependency must be in the registry before
+        // project modules start compiling, even when @rescript/runtime is
+        // also present in the package graph (otherwise implicit Stdlib opens
+        // can require modules that the main build graph hasn't reached yet).
+        let parent_span = compile_parent_span.clone();
+        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("rewatch-runtime-precompile".to_string())
+                .stack_size(256 * 1024 * 1024)
+                .spawn_scoped(scope, || {
+                    let _parent = parent_span.enter();
+                    pre_compile_runtime_modules(build_state)
+                })
+                .map_err(|err| anyhow!("failed to spawn runtime pre-compilation thread: {err}"))?;
 
-                match handle.join() {
-                    Ok(result) => result,
-                    Err(panic) => {
-                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "unknown".to_string()
-                        };
-                        Err(anyhow!("runtime pre-compilation panicked: {msg}"))
-                    }
+            match handle.join() {
+                Ok(result) => result,
+                Err(panic) => {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+                    Err(anyhow!("runtime pre-compilation panicked: {msg}"))
                 }
-            });
-            pre_compile_result?;
-        }
+            }
+        });
+        pre_compile_result?;
 
         // Clear source-fallback paths after pre-compilation.
         build_state
@@ -485,7 +686,12 @@ pub fn compile(
     let compile_universe_count = compile_universe.len();
     set_length(compile_universe_count as u64);
 
-    let priorities = compute_critical_path_priorities(&compile_universe, &build_state.build_state);
+    let in_process_mode = build_state.build_mode().is_in_process();
+    let stored_asts_snapshot = in_process_mode.then(|| build_state.snapshot_stored_asts());
+    let compile_universe = Arc::new(compile_universe);
+    let module_costs = compute_module_costs(build_state, &compile_universe, stored_asts_snapshot.as_ref());
+    let priorities =
+        compute_critical_path_priorities(&compile_universe, &build_state.build_state, &module_costs);
 
     // Count of not-yet-completed in-universe dependencies for each module.
     // Only touched on the main thread.
@@ -527,29 +733,89 @@ pub fn compile(
     // registrations have already been published to the shared registry —
     // but workers need a lock-free view, so each worker gets a snapshot taken
     // at spawn time. (Taking one per spawn is cheap vs. type-checking.)
-    let in_process_mode = build_state.build_mode().is_in_process();
-
-    let (tx, rx) = mpsc::channel::<CompletionMsg>();
+    let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
     // orders work — dumping everything into rayon's deque would defeat #2.
     let capacity = rayon::current_num_threads().max(1);
 
     let mut completed: AHashSet<String> = AHashSet::new();
+    let mut signature_ready: AHashSet<String> = AHashSet::new();
     let mut results_buffer: Vec<CompletionMsg> = Vec::with_capacity(compile_universe_count);
+    let mut ready_js: Vec<PreJsMsg> = Vec::new();
+    let mut pending_js_payloads: AHashMap<String, PreJsMsg> = AHashMap::new();
+    let mut pending_js_deps: AHashMap<String, usize> = AHashMap::new();
+    let mut waiting_js_by_dep: AHashMap<String, Vec<String>> = AHashMap::new();
     let mut has_errors = false;
     let mut stalled = false;
+    let mut scheduler_counters = (in_process_mode
+        && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
+    .then(InProcessSchedulerCounters::default);
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
         loop {
+            if let Some(counters) = scheduler_counters.as_mut() {
+                counters.observe_queues(
+                    ready_heap.len(),
+                    ready_js.len(),
+                    pending_js_payloads.len(),
+                    in_flight,
+                );
+            }
             while in_flight < capacity && !has_errors {
+                if let Some(pre_js_msg) = ready_js.pop() {
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.scheduled_js += 1;
+                        if !ready_heap.is_empty() {
+                            counters.js_scheduled_while_typecheck_ready += 1;
+                        }
+                    }
+                    let module_name = pre_js_msg.module_name.clone();
+                    let tx = tx.clone();
+                    let inc_ref = &inc;
+                    let parent_span = compile_parent_span.clone();
+                    in_flight += 1;
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.observe_queues(
+                            ready_heap.len(),
+                            ready_js.len(),
+                            pending_js_payloads.len(),
+                            in_flight,
+                        );
+                    }
+                    scope.spawn(move |_| {
+                        let msg = finish_in_process_js(
+                            build_state_ref,
+                            build_command_state_ref,
+                            pre_js_msg,
+                            parent_span,
+                        );
+                        if show_progress {
+                            inc_ref();
+                        }
+                        let _ = tx.send(WorkerMsg::Completed(msg));
+                    });
+                    trace!("scheduled in-process JS finish for {}", module_name);
+                    continue;
+                }
                 let Some(work) = ready_heap.pop() else { break };
+                if let Some(counters) = scheduler_counters.as_mut() {
+                    counters.scheduled_typecheck += 1;
+                }
                 let module_name = work.module_name.clone();
                 let is_dirty = dirty_set.contains(&module_name);
                 let warn_override = warn_error_override.clone();
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
+                if let Some(counters) = scheduler_counters.as_mut() {
+                    counters.observe_queues(
+                        ready_heap.len(),
+                        ready_js.len(),
+                        pending_js_payloads.len(),
+                        in_flight,
+                    );
+                }
                 // Take a per-spawn snapshot of the registry so workers have
                 // a stable view including any deps that published registry
                 // entries before this module was unblocked. Subprocess mode
@@ -559,20 +825,27 @@ pub fn compile(
                 } else {
                     ModuleRegistry::new()
                 };
+                let stored_asts = stored_asts_snapshot.as_ref();
                 let parent_span = compile_parent_span.clone();
+                let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
+                    tx: tx.clone(),
+                    compile_universe: compile_universe.clone(),
+                });
                 scope.spawn(move |_| {
                     let msg = compile_one(
                         build_state_ref,
                         build_command_state_ref,
                         &registry_snapshot,
+                        stored_asts,
                         &module_name,
                         is_dirty,
                         warn_override,
                         subprocess,
                         dump_typed_sexp,
                         parent_span,
+                        in_process_hooks,
                     );
-                    if show_progress {
+                    if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                         inc_ref();
                     }
                     // Receiver lives for the full scope, so send cannot fail
@@ -592,60 +865,148 @@ pub fn compile(
                 break;
             }
 
+            let idle_slots = if ready_heap.is_empty() && ready_js.is_empty() && in_flight < capacity {
+                capacity - in_flight
+            } else {
+                0
+            };
+            let wait_start = scheduler_counters.as_ref().map(|_| Instant::now());
             let Ok(first_msg) = rx.recv() else { break };
-            let mut completed_messages = Vec::with_capacity(in_flight);
-            completed_messages.push(first_msg);
-            while completed_messages.len() < in_flight {
-                match rx.try_recv() {
-                    Ok(msg) => completed_messages.push(msg),
-                    Err(_) => break,
-                }
+            if let (Some(counters), Some(wait_start)) = (scheduler_counters.as_mut(), wait_start) {
+                counters.observe_wait(wait_start.elapsed(), idle_slots);
             }
-            in_flight -= completed_messages.len();
-
-            if in_process_mode {
-                let mut batched_updates = Vec::new();
-                for msg in &mut completed_messages {
-                    batched_updates.extend(std::mem::take(&mut msg.registry_updates));
-                }
-                apply_pending_registry_updates(build_command_state_ref, batched_updates);
+            let mut worker_messages = vec![first_msg];
+            while let Ok(msg) = rx.try_recv() {
+                worker_messages.push(msg);
             }
 
-            for msg in completed_messages {
-                if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
-                    has_errors = true;
+            for worker_msg in worker_messages {
+                match worker_msg {
+                    WorkerMsg::SignatureReady(msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.signature_ready += 1;
+                        }
+                        let module_name = msg.module_name.clone();
+                        let is_clean = apply_signature_ready(build_command_state_ref, msg);
+                        unblock_dependents(
+                            build_state_ref,
+                            &compile_universe,
+                            &priorities,
+                            &mut pending_deps,
+                            &mut dirty_set,
+                            &mut signature_ready,
+                            &mut ready_heap,
+                            &module_name,
+                            is_clean,
+                        );
+                    }
+                    WorkerMsg::PreJsReady(msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.pre_js_ready += 1;
+                        }
+                        in_flight -= 1;
+                        let module_name = msg.module_name.clone();
+                        let pending_deps_for_js = msg
+                            .needed_modules
+                            .iter()
+                            .filter(|dep| !completed.contains(*dep))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if pending_deps_for_js.is_empty() {
+                            ready_js.push(msg);
+                        } else {
+                            pending_js_deps.insert(module_name.clone(), pending_deps_for_js.len());
+                            for dep in pending_deps_for_js {
+                                waiting_js_by_dep
+                                    .entry(dep)
+                                    .or_default()
+                                    .push(module_name.clone());
+                            }
+                            pending_js_payloads.insert(module_name, msg);
+                        }
+                    }
+                    WorkerMsg::Completed(mut msg) => {
+                        if let Some(counters) = scheduler_counters.as_mut() {
+                            counters.completed += 1;
+                        }
+                        in_flight -= 1;
+                        if in_process_mode {
+                            apply_pending_registry_updates(
+                                build_command_state_ref,
+                                std::mem::take(&mut msg.registry_updates),
+                            );
+                        }
+
+                        if msg.result.is_err() || msg.interface_result.as_ref().is_some_and(|r| r.is_err()) {
+                            has_errors = true;
+                        }
+
+                        let is_clean = msg.is_clean;
+                        let finished_name = msg.module_name.clone();
+                        completed.insert(finished_name.clone());
+
+                        if let Some(waiters) = waiting_js_by_dep.remove(&finished_name) {
+                            for waiter in waiters {
+                                let Some(count) = pending_js_deps.get_mut(&waiter) else {
+                                    continue;
+                                };
+                                *count -= 1;
+                                if *count == 0 {
+                                    pending_js_deps.remove(&waiter);
+                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
+                                        ready_js.push(payload);
+                                    }
+                                }
+                            }
+                        }
+
+                        if in_process_mode {
+                            let completed_without_signature =
+                                !signature_ready.contains(&finished_name) && !has_errors;
+                            if completed_without_signature {
+                                unblock_dependents(
+                                    build_state_ref,
+                                    &compile_universe,
+                                    &priorities,
+                                    &mut pending_deps,
+                                    &mut dirty_set,
+                                    &mut signature_ready,
+                                    &mut ready_heap,
+                                    &finished_name,
+                                    is_clean,
+                                );
+                            }
+                        } else {
+                            unblock_dependents(
+                                build_state_ref,
+                                &compile_universe,
+                                &priorities,
+                                &mut pending_deps,
+                                &mut dirty_set,
+                                &mut signature_ready,
+                                &mut ready_heap,
+                                &finished_name,
+                                is_clean,
+                            );
+                        }
+
+                        results_buffer.push(msg);
+                    }
                 }
-
-                let is_clean = msg.is_clean;
-                let finished_name = msg.module_name.clone();
-                completed.insert(finished_name.clone());
-
-                // Look up dependents from the node the scheduler scheduled under —
-                // for mlmap, compile_one returns the namespace suffix, which is the
-                // key modules use to refer to the namespace entry.
-                let dependents = build_state.get_module(&finished_name).unwrap().dependents.clone();
-
-                results_buffer.push(msg);
-
-                for dep in &dependents {
-                    if !compile_universe.contains(dep) {
-                        continue;
-                    }
-                    if !is_clean {
-                        dirty_set.insert(dep.clone());
-                    }
-                    let count = pending_deps.get_mut(dep).unwrap();
-                    *count -= 1;
-                    if *count == 0 && !completed.contains(dep) {
-                        ready_heap.push(WorkUnit {
-                            priority: priorities[dep],
-                            module_name: dep.clone(),
-                        });
-                    }
-                }
+            }
+            if let Some(counters) = scheduler_counters.as_mut() {
+                counters.observe_queues(
+                    ready_heap.len(),
+                    ready_js.len(),
+                    pending_js_payloads.len(),
+                    in_flight,
+                );
             }
         }
     });
+    if let Some(counters) = scheduler_counters.as_ref() {
+        counters.print_report(capacity);
+    }
     // Close our sender handle so any lingering clones in already-spawned
     // workers don't keep the channel open past the scope.
     drop(tx);
@@ -848,13 +1209,6 @@ pub fn compile(
     }
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
-}
-
-fn build_includes_runtime_package(build_state: &BuildCommandState) -> bool {
-    build_state
-        .packages
-        .values()
-        .any(|package| package.name == "@rescript/runtime")
 }
 
 static RUNTIME_PATH_MEMO: OnceLock<PathBuf> = OnceLock::new();
@@ -1336,6 +1690,20 @@ fn js_output_targets_for_source(
 }
 
 /// Write JS output to the correct location(s) based on package specs.
+fn write_file_creating_parent_on_missing(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    match std::fs::write(path, contents.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, contents.as_ref())?;
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn write_js_output(
     js_output: &str,
     package: &packages::Package,
@@ -1358,10 +1726,7 @@ fn write_js_output(
                 .join(js_relative)
         };
 
-        if let Some(parent) = js_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&js_path, js_output)?;
+        write_file_creating_parent_on_missing(&js_path, js_output)?;
     }
     Ok(())
 }
@@ -1378,10 +1743,7 @@ fn write_compiled_js_outputs(
     }
 
     for output in js_outputs {
-        if let Some(parent) = output.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&output.path, &output.code)?;
+        write_file_creating_parent_on_missing(&output.path, &output.code)?;
     }
     Ok(())
 }
@@ -1576,6 +1938,10 @@ struct RuntimeCompletionMsg {
 /// source-fallback chains during the pre-compilation itself.
 fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
+    let runtime_timing_enabled = std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
+        || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
+    let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
     let runtime_root = &build_state.build_state.compiler_info.runtime_path;
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
@@ -1607,9 +1973,7 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
     let runtime_compile_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(runtime_compile_threads)
         .thread_name(|idx| format!("rewatch-runtime-in-process-{idx}"))
-        // See rewatch/src/main.rs:157-161; runtime precompilation also runs
-        // the Rust compiler pipeline inside Rayon workers.
-        .stack_size(384 * 1024 * 1024)
+        .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
     runtime_compile_pool.install(|| {
@@ -1621,6 +1985,33 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
             &runtime_modules,
         )
     })?;
+
+    if let (Some(start), Some(before)) = (runtime_timing_start, runtime_timing_before) {
+        let after = rescript_compiler::timing::snapshot();
+        let wall = start.elapsed();
+        let parse = duration_delta(after.parse, before.parse);
+        let typecheck = duration_delta(after.typecheck, before.typecheck);
+        let lambda = duration_delta(after.lambda, before.lambda);
+        let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
+        let codegen = duration_delta(after.codegen, before.codegen);
+        let recorded = parse
+            .saturating_add(typecheck)
+            .saturating_add(lambda)
+            .saturating_add(lambda_optimization)
+            .saturating_add(codegen);
+        let overhead = wall.saturating_sub(recorded);
+        eprintln!(
+            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            runtime_modules.len(),
+            duration_ms(wall),
+            duration_ms(parse),
+            duration_ms(typecheck),
+            duration_ms(lambda),
+            duration_ms(lambda_optimization),
+            duration_ms(codegen),
+            duration_ms(overhead)
+        );
+    }
 
     debug!(
         "Compiled {} runtime modules from source into registry",
@@ -2214,36 +2605,40 @@ fn runtime_compiler_options(
 /// after the worker returns, before dependents are scheduled. Actual compiler
 /// failures are returned as errors so the DAG scheduler stops dependents, like
 /// the bsc subprocess path does.
-fn compile_module_in_process(
+fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
     module: &Module,
     module_name: &str,
     registry: &ModuleRegistry,
+    stored_asts: &AHashMap<String, StoredAst>,
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
-) -> Result<InProcessModuleResult> {
+    scheduler_hooks: Option<&InProcessSchedulerHooks>,
+) -> Result<PreJsMsg> {
     let _span = info_span!(
         "compiler.in_process_module",
         module = %module_name,
         package = %package.name
     )
     .entered();
+    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_start = module_timing_enabled.then(Instant::now);
+    let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
+    let _counter_guard = rescript_compiler::perf_counters::ModuleCounterGuard::start(module_name);
     let source_file = match &module.source_type {
         SourceType::SourceFile(sf) => sf,
         _ => {
-            return Ok(InProcessModuleResult {
-                warning: None,
-                registry_updates: Vec::new(),
-            });
+            return Err(anyhow!(
+                "in-process JS boundary requested for non-source module {module_name}"
+            ));
         } // MlMap handled elsewhere
     };
 
     let implementation_path = &source_file.implementation.path;
     let has_interface = source_file.interface.is_some();
-    let root_config = build_command_state.get_root_config();
 
     // Build compiler options from package config
-    let options = build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
 
     let source_abs = Path::new(&package.path).join(implementation_path);
     let is_runtime = package.name == "@rescript/runtime";
@@ -2275,7 +2670,7 @@ fn compile_module_in_process(
         .entered();
         let intf_source_abs = Path::new(&package.path).join(&interface.path);
         let intf_key = format!("{module_name}:intf");
-        let intf_result = match build_command_state.get_stored_ast(&intf_key) {
+        let intf_result = match stored_asts.get(&intf_key) {
             Some(StoredAst::Signature(stored)) => {
                 rescript_compiler::driver::typecheck_preprocessed_signature_in_process(
                     &stored.arena,
@@ -2346,18 +2741,81 @@ fn compile_module_in_process(
             });
         }
 
-        // Register the interface signature in rewatch's in-memory registry
-        build_command_state.register_in_memory_interface(
-            module_name.to_string(),
-            intf_result.signature,
-            intf_fingerprint,
-            provisional_is_pure,
-        );
+        if let Some(hooks) = scheduler_hooks {
+            hooks
+                .tx
+                .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
+                    module_name: module_name.to_string(),
+                    signature: intf_result.signature,
+                    fingerprint: intf_fingerprint,
+                    is_pure: provisional_is_pure,
+                    registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
+                }))
+                .map_err(|err| anyhow!("failed to publish interface signature for {module_name}: {err}"))?;
+        } else {
+            // Register the interface signature in rewatch's in-memory registry.
+            build_command_state.register_in_memory_interface(
+                module_name.to_string(),
+                intf_result.signature,
+                intf_fingerprint,
+                provisional_is_pure,
+            );
+        }
     }
 
     // Step 2: Compile the implementation
     let impl_key = format!("{module_name}:impl");
-    let compile_result = {
+    options.publish_in_process_signature = !has_interface;
+    let publish_implementation_signature = scheduler_hooks.is_some() && !has_interface;
+    let signature_hooks = scheduler_hooks.cloned();
+    let signature_module_name = module_name.to_string();
+    let signature_source_abs = source_abs.clone();
+    let mut signature_hook =
+        move |ready: rescript_compiler::driver::InProcessSignatureReady| -> Result<Option<ModuleRegistry>> {
+            let Some(hooks) = signature_hooks.as_ref() else {
+                return Ok(None);
+            };
+            let fingerprint = ready.pers_struct.as_ref().map(|ps| ps.fingerprint).unwrap_or(0);
+            let module_info = InMemoryModuleInfo {
+                source_path: signature_source_abs.clone(),
+                is_pure: provisional_is_pure,
+                cmj_export_constants: AHashMap::new(),
+                is_runtime,
+            };
+            let registry_updates = if let Some(pers_struct) = ready.pers_struct {
+                vec![PendingRegistryUpdate {
+                    module_name: signature_module_name.clone(),
+                    pers_struct: Some(Arc::new(pers_struct)),
+                    module_info,
+                    alias_rewrites: ready.new_alias_rewrites,
+                }]
+            } else {
+                vec![PendingRegistryUpdate {
+                    module_name: signature_module_name.clone(),
+                    pers_struct: None,
+                    module_info,
+                    alias_rewrites: ready.new_alias_rewrites,
+                }]
+            };
+            hooks
+                .tx
+                .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
+                    module_name: signature_module_name.clone(),
+                    signature: ready.signature,
+                    fingerprint,
+                    is_pure: provisional_is_pure,
+                    registry_updates,
+                }))
+                .map_err(|err| {
+                    anyhow!(
+                        "failed to publish implementation signature for {}: {err}",
+                        signature_module_name
+                    )
+                })?;
+            Ok(None)
+        };
+
+    let pre_js = {
         let _impl_span = info_span!(
             "compiler.in_process_implementation",
             module = %module_name,
@@ -2365,9 +2823,16 @@ fn compile_module_in_process(
         )
         .entered();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match build_command_state.get_stored_ast(&impl_key) {
+            match stored_asts.get(&impl_key) {
                 Some(StoredAst::Structure(stored)) => {
-                    rescript_compiler::driver::compile_preprocessed_structure_in_process(
+                    let signature_hook: Option<
+                        &mut rescript_compiler::driver::InProcessSignatureReadyHook<'_>,
+                    > = if publish_implementation_signature {
+                        Some(&mut signature_hook)
+                    } else {
+                        None
+                    };
+                    rescript_compiler::driver::compile_preprocessed_structure_in_process_until_js(
                         &stored.arena,
                         &stored.structure,
                         &source_abs.to_string_lossy(),
@@ -2375,6 +2840,7 @@ fn compile_module_in_process(
                         &options,
                         &local_registry,
                         has_interface,
+                        signature_hook,
                     )
                 }
                 Some(StoredAst::Signature(_)) => panic!(
@@ -2389,7 +2855,7 @@ fn compile_module_in_process(
         }))
     };
 
-    let compile_result = match compile_result {
+    let pre_js = match pre_js {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             return Err(anyhow!("Compilation failed for {}: {}", module_name, e));
@@ -2406,34 +2872,170 @@ fn compile_module_in_process(
         }
     };
 
-    // Update the shared registry. When a .resi exists, the interface remains
-    // the published signature; the implementation only contributes JS metadata.
-    let impl_fingerprint = compile_result
-        .pers_struct
-        .as_ref()
-        .map(|ps| ps.fingerprint)
-        .unwrap_or(0);
+    if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
+        let timings = guard.snapshot();
+        let wall = start.elapsed();
+        let parse = timings.parse;
+        let typecheck = timings.typecheck;
+        let lambda = timings.lambda;
+        let lambda_optimization = timings.lambda_optimization;
+        let codegen = timings.codegen;
+        let recorded = parse
+            .saturating_add(typecheck)
+            .saturating_add(lambda)
+            .saturating_add(lambda_optimization)
+            .saturating_add(codegen);
+        let overhead = wall.saturating_sub(recorded);
+        eprintln!(
+            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            module_name,
+            package.name,
+            duration_ms(wall),
+            duration_ms(parse),
+            duration_ms(typecheck),
+            duration_ms(lambda),
+            duration_ms(lambda_optimization),
+            duration_ms(codegen),
+            duration_ms(overhead)
+        );
+    }
+
+    let needed_modules = scheduler_hooks
+        .map(|hooks| {
+            pre_js
+                .possible_required_modules
+                .iter()
+                .filter_map(|required_module| {
+                    if !matches!(required_module.kind, rescript_compiler::js_ir::Kind::Ml) {
+                        return None;
+                    }
+                    let name = required_module.id.name();
+                    (name != module_name
+                        && module.deps.contains(name)
+                        && hooks.compile_universe.contains(name))
+                    .then(|| name.to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(PreJsMsg {
+        module_name: module_name.to_string(),
+        pre_js,
+        needed_modules,
+        interface_registry_update,
+        source_abs,
+        implementation_path: implementation_path.to_path_buf(),
+        has_interface,
+        is_runtime,
+        is_clean: false,
+    })
+}
+
+fn finish_in_process_js(
+    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
+    pre_js_msg: PreJsMsg,
+    parent_span: Span,
+) -> CompletionMsg {
+    let module_name = pre_js_msg.module_name.clone();
+    let is_clean = pre_js_msg.is_clean;
+    let result = finish_in_process_js_inner(build_state, build_command_state, pre_js_msg, parent_span);
+    let (result, registry_updates) = match result {
+        Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
+        Err(err) => (Err(err), Vec::new()),
+    };
+    CompletionMsg {
+        module_name,
+        result,
+        interface_result: None,
+        is_clean,
+        is_compiled: true,
+        registry_updates,
+    }
+}
+
+fn finish_in_process_js_inner(
+    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
+    pre_js_msg: PreJsMsg,
+    parent_span: Span,
+) -> Result<InProcessModuleResult> {
+    let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
+    let module_timing_start = module_timing_enabled.then(Instant::now);
+    let module_timing_guard = module_timing_enabled.then(rescript_compiler::timing::ThreadTimingGuard::start);
+    let module = build_state.get_module(&pre_js_msg.module_name).unwrap();
+    let package = build_state
+        .get_package(&module.package_name)
+        .expect("Package not found");
+    let _span = if tracing::enabled!(tracing::Level::INFO) {
+        info_span!(
+            parent: &parent_span,
+            "build.finish_in_process_js",
+            module = %pre_js_msg.module_name,
+            package = %package.name,
+        )
+        .entered()
+    } else {
+        Span::none().entered()
+    };
+    let root_config = build_command_state.get_root_config();
+    let options = build_compiler_options(
+        package,
+        &pre_js_msg.module_name,
+        &pre_js_msg.implementation_path,
+        build_state,
+    )?;
+    let registry_snapshot = build_command_state.snapshot_module_registry();
+    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rescript_compiler::driver::finish_preprocessed_structure_in_process_from_js_boundary(
+            pre_js_msg.pre_js,
+            &options,
+            &registry_snapshot,
+        )
+    }));
+    let compile_result = match compile_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            return Err(anyhow!(
+                "JS compilation failed for {}: {}",
+                pre_js_msg.module_name,
+                e
+            ));
+        }
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            return Err(anyhow!(
+                "JS compilation panicked for {}: {}",
+                pre_js_msg.module_name,
+                msg
+            ));
+        }
+    };
+    let js_output_count = compile_result.js_outputs.len();
+
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
-    let mut registry_updates = Vec::new();
     let module_info = InMemoryModuleInfo {
-        source_path: source_abs.clone(),
+        source_path: pre_js_msg.source_abs.clone(),
         is_pure,
         cmj_export_constants,
-        is_runtime,
+        is_runtime: pre_js_msg.is_runtime,
     };
-    if has_interface {
-        // OCaml compiler/ml/typemod.ml:1742-1758 reads the interface `.cmi`
-        // for the inclusion check and does not replace it with the
-        // implementation signature. Alias rewrites from the `.res` body are
-        // therefore private, unlike inferred-signature aliases from the
-        // no-interface branch at typemod.ml:1779-1787.
-        if let Some(mut update) = interface_registry_update {
+    let mut registry_updates = Vec::new();
+    if pre_js_msg.has_interface {
+        if let Some(mut update) = pre_js_msg.interface_registry_update {
             update.module_info = module_info;
             registry_updates.push(update);
         } else {
             registry_updates.push(PendingRegistryUpdate {
-                module_name: module_name.to_string(),
+                module_name: pre_js_msg.module_name.clone(),
                 pers_struct: None,
                 module_info,
                 alias_rewrites: AHashMap::new(),
@@ -2441,52 +3043,46 @@ fn compile_module_in_process(
         }
     } else if let Some(ps) = compile_result.pers_struct {
         registry_updates.push(PendingRegistryUpdate {
-            module_name: module_name.to_string(),
+            module_name: pre_js_msg.module_name.clone(),
             pers_struct: Some(Arc::new(ps)),
             module_info,
             alias_rewrites: compile_result.new_alias_rewrites,
         });
     }
 
-    // Register the implementation's inferred signature if no .resi
-    if !has_interface {
-        build_command_state.register_in_memory_interface(
-            module_name.to_string(),
-            compile_result.signature,
-            impl_fingerprint,
-            is_pure,
-        );
-    }
-
-    // Step 3: Write only JS output (no compiler assets)
+    let mut write_duration = Duration::default();
     {
         let _write_span = info_span!(
             "compiler.write_js",
-            module = %module_name,
+            module = %pre_js_msg.module_name,
             outputs = compile_result.js_outputs.len()
         )
         .entered();
+        let write_start = module_timing_enabled.then(Instant::now);
         write_compiled_js_outputs(
             &compile_result.js_outputs,
             &compile_result.js_output,
             package,
-            implementation_path,
+            &pre_js_msg.implementation_path,
             root_config,
         )?;
+        if let Some(write_start) = write_start {
+            write_duration = write_start.elapsed();
+        }
     }
 
-    // Execute js-post-build command if configured
     if let Some(js_post_build) = &package.config.js_post_build {
         for spec in root_config.get_package_specs() {
             let suffix = root_config.get_suffix(&spec);
             let js_file = if spec.in_source {
                 helpers::get_source_file_from_rescript_file(
-                    &Path::new(&package.path).join(implementation_path),
+                    &Path::new(&package.path).join(&pre_js_msg.implementation_path),
                     &suffix,
                 )
             } else {
                 let out_dir = spec.get_out_of_source_dir();
-                let js_relative = helpers::get_source_file_from_rescript_file(implementation_path, &suffix);
+                let js_relative =
+                    helpers::get_source_file_from_rescript_file(&pre_js_msg.implementation_path, &suffix);
                 Path::new(&package.path)
                     .join("lib")
                     .join(out_dir)
@@ -2496,6 +3092,23 @@ fn compile_module_in_process(
                 execute_post_build_command(&js_post_build.cmd, &js_file, &package.path)?;
             }
         }
+    }
+
+    if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
+        let timings = guard.snapshot();
+        let wall = start.elapsed();
+        let codegen = timings.codegen;
+        let overhead = wall.saturating_sub(codegen.saturating_add(write_duration));
+        eprintln!(
+            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={}",
+            pre_js_msg.module_name,
+            package.name,
+            duration_ms(wall),
+            duration_ms(codegen),
+            duration_ms(write_duration),
+            duration_ms(overhead),
+            js_output_count
+        );
     }
 
     Ok(InProcessModuleResult {

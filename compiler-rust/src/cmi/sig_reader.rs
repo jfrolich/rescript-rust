@@ -32,14 +32,14 @@ use std::collections::{HashMap, HashSet};
 /// resolving shared type_expr references.
 pub struct SigReadContext<'a> {
     /// The type context for allocating type expressions.
-    pub ctx: &'a TypeContext<'a>,
+    pub ctx: &'a TypeContext,
     /// Map from OCaml type_expr id to TypeExprRef, for shared type references.
     type_expr_cache: HashMap<i64, TypeExprRef>,
 }
 
 impl<'a> SigReadContext<'a> {
     /// Create a new signature reading context.
-    pub fn new(ctx: &'a TypeContext<'a>) -> Self {
+    pub fn new(ctx: &'a TypeContext) -> Self {
         SigReadContext {
             ctx,
             type_expr_cache: HashMap::new(),
@@ -893,9 +893,9 @@ fn debug_raw_type_expr_ids(value: &OcamlValue) -> String {
     out.join(", ")
 }
 
-fn debug_loaded_type_refs(ctx: &TypeContext<'_>, ty: TypeExprRef) -> String {
+fn debug_loaded_type_refs(ctx: &TypeContext, ty: TypeExprRef) -> String {
     fn walk(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         ty: TypeExprRef,
         out: &mut Vec<String>,
         seen: &mut HashSet<TypeExprRef>,
@@ -1070,12 +1070,12 @@ fn read_path(value: &OcamlValue) -> Path {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::Pdot(Box::new(prefix), name, pos)
+            Path::Pdot(std::sync::Arc::new(prefix), name, pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);
             let a = read_path(&fields[1]);
-            Path::Papply(Box::new(f), Box::new(a))
+            Path::Papply(std::sync::Arc::new(f), std::sync::Arc::new(a))
         }
         _ => Path::Pident(Ident::create_persistent("?")), // fallback
     }

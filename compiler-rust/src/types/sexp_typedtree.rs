@@ -2,7 +2,7 @@
 
 use crate::ident::Ident;
 use crate::location::Location;
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload,
     PrivateFlag, RecFlag,
@@ -20,11 +20,11 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, FunctionParamPattern, ModuleBinding, ModuleExpr, ModuleExprDesc,
-    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordLabelDefinition,
-    Structure, StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
-    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
-    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
+    FunctionParam, FunctionParamPattern, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
+    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordField,
+    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TypeExtension,
+    TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
+    TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -171,7 +171,7 @@ fn sexp_path(p: &Path) -> Sexp {
 // Longident Printer
 // ============================================================================
 
-fn sexp_longident(arena: &ParseArena, ctx: &TypeContext<'_>, li: &Longident) -> Sexp {
+fn sexp_longident(arena: &ParseArena, ctx: &TypeContext, li: &Longident) -> Sexp {
     match li {
         Longident::Lident(s_idx) => {
             let s = ctx.resolve_longident_component(arena, *s_idx);
@@ -195,10 +195,14 @@ fn sexp_longident(arena: &ParseArena, ctx: &TypeContext<'_>, li: &Longident) -> 
 
 fn sexp_longident_idx(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     idx: crate::parse_arena::LidentIdx,
 ) -> Sexp {
     sexp_longident(arena, ctx, arena.get_longident(idx))
+}
+
+fn sexp_lident_name(name: &str) -> Sexp {
+    Sexp::list(vec![Sexp::atom("Lident"), string(name)])
 }
 
 // ============================================================================
@@ -471,7 +475,7 @@ impl TypeSexpState {
 
 fn sexp_type_expr_inline(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     te: TypeExprRef,
 ) -> Sexp {
@@ -511,7 +515,7 @@ fn sexp_type_expr_inline(
 
 fn sexp_type_expr_body_inline(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     te: TypeExprRef,
 ) -> Sexp {
@@ -615,7 +619,7 @@ fn sexp_type_expr_body_inline(
 
 fn sexp_type_expr(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     _dedup: &mut TypeDedupTable,
     te: TypeExprRef,
 ) -> Sexp {
@@ -625,7 +629,7 @@ fn sexp_type_expr(
 
 fn sexp_row_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     row: &RowDesc,
 ) -> Sexp {
@@ -641,7 +645,7 @@ fn sexp_row_desc(
         })
     }
 
-    fn raw_row_blocks(ctx: &TypeContext<'_>, row: &RowDesc) -> Vec<Vec<String>> {
+    fn raw_row_blocks(ctx: &TypeContext, row: &RowDesc) -> Vec<Vec<String>> {
         let mut blocks = vec![
             row.row_fields
                 .iter()
@@ -688,7 +692,7 @@ fn sexp_row_desc(
 
 fn sexp_row_field(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     state: &mut TypeSexpState,
     rf: &RowField,
 ) -> Sexp {
@@ -722,7 +726,7 @@ fn sexp_row_field(
 
 fn sexp_pattern(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     p: &Pattern,
@@ -767,7 +771,7 @@ fn sexp_pattern(
 
 fn sexp_pat_extra(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     extra: &crate::types::typedtree::PatExtra,
@@ -816,7 +820,7 @@ fn sexp_pat_extra(
 
 fn sexp_pattern_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &PatternDesc,
@@ -896,7 +900,7 @@ fn sexp_pattern_desc(
 
 fn sexp_expression(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     e: &Expression,
@@ -948,7 +952,7 @@ fn sexp_expression(
             arena, ctx, with_locs, dedup, extra, *loc, attrs,
         ));
     }
-    let desc = sexp_expression_desc(arena, ctx, with_locs, dedup, &e.exp_desc);
+    let desc = sexp_expression_desc(arena, ctx, with_locs, dedup, &e.exp_desc, e.exp_type);
     let ty = sexp_type_expr(arena, ctx, dedup, e.exp_type);
     let attrs = sexp_attributes(arena, with_locs, &e.exp_attributes);
 
@@ -961,9 +965,48 @@ fn sexp_expression(
     Sexp::list(items)
 }
 
+fn sexp_omitted_optional_none_expression(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    li: &Loc<LidentIdx>,
+    option_ty: TypeExprRef,
+) -> Sexp {
+    sexp_omitted_optional_none_expression_at_loc(arena, ctx, with_locs, dedup, li.loc, option_ty)
+}
+
+fn sexp_omitted_optional_none_expression_at_loc(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    loc: LocIdx,
+    option_ty: TypeExprRef,
+) -> Sexp {
+    let loc_sexp = if with_locs {
+        vec![location_idx(arena, with_locs, loc)]
+    } else {
+        vec![]
+    };
+    let desc = Sexp::list(vec![
+        Sexp::atom("Texp_construct"),
+        sexp_longident_idx(arena, ctx, arena.none_lid()),
+        Sexp::list(Vec::new()),
+    ]);
+    let ty = sexp_type_expr(arena, ctx, dedup, option_ty);
+
+    let mut items = vec![Sexp::atom("expression")];
+    items.extend(loc_sexp);
+    items.push(desc);
+    items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
+    items.push(Sexp::list(vec![Sexp::atom("attributes")]));
+    Sexp::list(items)
+}
+
 fn sexp_exp_extra(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     extra: &crate::types::typedtree::ExpExtra,
@@ -1015,12 +1058,91 @@ fn sexp_exp_extra(
     }
 }
 
+fn sexp_record_definition(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    def: &RecordLabelDefinition,
+) -> Sexp {
+    match def {
+        RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
+            Sexp::atom("Kept"),
+            sexp_type_expr(arena, ctx, dedup, *ty),
+        ]),
+        RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
+            Sexp::atom("Overridden"),
+            sexp_longident_idx(arena, ctx, li.txt),
+            sexp_expression(arena, ctx, with_locs, dedup, e),
+        ]),
+        RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
+            Sexp::atom("Overridden"),
+            sexp_longident_idx(arena, ctx, li.txt),
+            sexp_omitted_optional_none_expression(arena, ctx, with_locs, dedup, li, *option_ty),
+        ]),
+    }
+}
+
+fn sexp_record_field(
+    arena: &ParseArena,
+    ctx: &TypeContext,
+    with_locs: bool,
+    dedup: &mut TypeDedupTable,
+    field_name: &str,
+    def: &RecordLabelDefinition,
+    opt_flag: bool,
+) -> Sexp {
+    Sexp::list(vec![
+        string(field_name),
+        sexp_record_definition(arena, ctx, with_locs, dedup, def),
+        Sexp::atom(if opt_flag { "optional" } else { "required" }),
+    ])
+}
+
+fn sparse_record_labels_from_type(
+    ctx: &TypeContext,
+    exp_type: TypeExprRef,
+    fields: &[RecordField],
+) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    // OCaml compiler/ml/typecore.ml:2833-2842 expands omitted optionals from
+    // the record family's `lbl_all` array. Sparse Rust records keep only the
+    // expression type and explicit fields; reconstruct the shared label array
+    // here only for canonical typedtree output.
+    record_labels_for_type(ctx, exp_type).or_else(|| {
+        fields
+            .iter()
+            .find_map(|(_, label, _, _)| record_labels_for_type(ctx, label.lbl_res))
+    })
+}
+
+fn record_labels_for_type(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
+    let mut current = ctx.repr(ty);
+    for _ in 0..32 {
+        let next = {
+            let desc = ctx.borrow_desc(current);
+            match &*desc {
+                TypeDesc::Tconstr { path, .. } => {
+                    return ctx.get_record_label_descriptions(path);
+                }
+                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
+                _ => return None,
+            }
+        };
+        current = ctx.repr(next?);
+    }
+    None
+}
+
 fn sexp_expression_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &ExpressionDesc,
+    exp_type: TypeExprRef,
 ) -> Sexp {
     match desc {
         ExpressionDesc::Texp_ident(p, li, _) => Sexp::list(vec![
@@ -1187,22 +1309,98 @@ fn sexp_expression_desc(
         } => {
             let mut field_items = Vec::new();
             for (_li, ld, def, opt_flag) in fields.iter() {
-                let def_sexp = match def {
-                    RecordLabelDefinition::Kept(ty) => Sexp::list(vec![
-                        Sexp::atom("Kept"),
-                        sexp_type_expr(arena, ctx, dedup, *ty),
-                    ]),
-                    RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
-                        Sexp::atom("Overridden"),
-                        sexp_longident_idx(arena, ctx, li.txt),
-                        sexp_expression(arena, ctx, with_locs, dedup, e),
-                    ]),
-                };
-                field_items.push(Sexp::list(vec![
-                    string(&ld.lbl_name),
-                    def_sexp,
-                    Sexp::atom(if *opt_flag { "optional" } else { "required" }),
-                ]));
+                field_items.push(sexp_record_field(
+                    arena,
+                    ctx,
+                    with_locs,
+                    dedup,
+                    &ld.lbl_name,
+                    def,
+                    *opt_flag,
+                ));
+            }
+            let ext_sexp = match extended_expression {
+                None => Sexp::atom("None"),
+                Some(e) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_expression(arena, ctx, with_locs, dedup, e),
+                ]),
+            };
+            Sexp::list(vec![
+                Sexp::atom("Texp_record"),
+                Sexp::list(field_items),
+                ext_sexp,
+            ])
+        }
+        ExpressionDesc::Texp_record_sparse {
+            fields,
+            omitted_loc,
+            extended_expression,
+        } => {
+            let mut explicit_by_pos: HashMap<usize, &RecordField> =
+                HashMap::with_capacity(fields.len());
+            for field in fields.iter() {
+                let pos = field.1.lbl_pos;
+                if pos >= 0 {
+                    explicit_by_pos.insert(pos as usize, field);
+                }
+            }
+
+            let all_labels = sparse_record_labels_from_type(ctx, exp_type, fields);
+            let mut field_items = Vec::with_capacity(
+                all_labels
+                    .as_ref()
+                    .map_or(fields.len(), |labels| labels.len()),
+            );
+            if let Some(all_labels) = all_labels {
+                for (idx, label) in all_labels.iter().enumerate() {
+                    let pos = if label.lbl_pos >= 0 {
+                        label.lbl_pos as usize
+                    } else {
+                        idx
+                    };
+                    if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
+                        field_items.push(sexp_record_field(
+                            arena,
+                            ctx,
+                            with_locs,
+                            dedup,
+                            &ld.lbl_name,
+                            def,
+                            *opt_flag,
+                        ));
+                    } else if label.lbl_optional {
+                        let def = Sexp::list(vec![
+                            Sexp::atom("Overridden"),
+                            sexp_lident_name(&label.lbl_name),
+                            sexp_omitted_optional_none_expression_at_loc(
+                                arena,
+                                ctx,
+                                with_locs,
+                                dedup,
+                                *omitted_loc,
+                                label.lbl_arg,
+                            ),
+                        ]);
+                        field_items.push(Sexp::list(vec![
+                            string(&label.lbl_name),
+                            def,
+                            Sexp::atom("required"),
+                        ]));
+                    }
+                }
+            } else {
+                for (_li, ld, def, opt_flag) in fields.iter() {
+                    field_items.push(sexp_record_field(
+                        arena,
+                        ctx,
+                        with_locs,
+                        dedup,
+                        &ld.lbl_name,
+                        def,
+                        *opt_flag,
+                    ));
+                }
             }
             let ext_sexp = match extended_expression {
                 None => Sexp::atom("None"),
@@ -1320,7 +1518,7 @@ fn sexp_expression_desc(
 
 fn sexp_case(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     c: &Case,
@@ -1340,7 +1538,7 @@ fn sexp_case(
 
 fn sexp_value_binding(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     vb: &ValueBinding,
@@ -1364,7 +1562,7 @@ fn sexp_value_binding(
 
 fn sexp_core_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ct: &TypedCoreType,
@@ -1388,7 +1586,7 @@ fn sexp_core_type(
 
 fn sexp_core_type_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &TypedCoreTypeDesc,
@@ -1479,7 +1677,7 @@ fn sexp_core_type_desc(
 
 fn sexp_object_field(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     field: &crate::types::typedtree::ObjectField,
@@ -1501,7 +1699,7 @@ fn sexp_object_field(
 
 fn sexp_row_field_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     field: &crate::types::typedtree::RowFieldType,
@@ -1563,7 +1761,7 @@ fn sexp_attributes(arena: &ParseArena, with_locs: bool, attrs: &[Attribute]) -> 
 
 fn sexp_module_expr(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     me: &ModuleExpr,
@@ -1585,7 +1783,7 @@ fn sexp_module_expr(
 
 fn sexp_module_expr_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &ModuleExprDesc,
@@ -1648,7 +1846,7 @@ fn sexp_module_expr_desc(
 
 fn sexp_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     td: &TypeDeclaration,
@@ -1693,7 +1891,7 @@ fn sexp_type_declaration(
 
 fn sexp_type_kind(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     kind: &TypeKind,
@@ -1720,7 +1918,7 @@ fn sexp_type_kind(
 
 fn sexp_constructor_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     cd: &ConstructorDeclaration,
@@ -1757,7 +1955,7 @@ fn sexp_constructor_decl(
 
 fn sexp_constructor_args(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     args: &ConstructorArguments,
@@ -1782,7 +1980,7 @@ fn sexp_constructor_args(
 
 fn sexp_label_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &LabelDeclaration,
@@ -1815,7 +2013,7 @@ fn sexp_label_decl(
 
 fn sexp_typed_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     td: &TypedTypeDeclaration,
@@ -1875,7 +2073,7 @@ fn sexp_typed_type_declaration(
 
 fn sexp_typed_type_kind(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     kind: &TypedTypeKind,
@@ -1904,7 +2102,7 @@ fn sexp_typed_type_kind(
 
 fn sexp_typed_constructor_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     cd: &TypedConstructorDeclaration,
@@ -1941,7 +2139,7 @@ fn sexp_typed_constructor_decl(
 
 fn sexp_typed_constructor_args(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     args: &TypedConstructorArguments,
@@ -1966,7 +2164,7 @@ fn sexp_typed_constructor_args(
 
 fn sexp_typed_label_decl(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &TypedLabelDeclaration,
@@ -1995,7 +2193,7 @@ fn sexp_typed_label_decl(
 
 fn sexp_type_extension(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     te: &TypeExtension,
@@ -2041,7 +2239,7 @@ fn sexp_type_extension(
 
 fn sexp_extension_constructor(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ec: &ExtensionConstructor,
@@ -2081,7 +2279,7 @@ fn sexp_extension_constructor(
 
 fn sexp_constructor_argument(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     arg: &crate::types::typedtree::ConstructorArgument,
@@ -2107,7 +2305,7 @@ fn sexp_constructor_argument(
 
 fn sexp_label_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     ld: &crate::types::typedtree::LabelDeclaration,
@@ -2140,7 +2338,7 @@ fn sexp_label_declaration(
 
 fn sexp_structure(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     str: &Structure,
@@ -2154,7 +2352,7 @@ fn sexp_structure(
 
 fn sexp_structure_item(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     si: &StructureItem,
@@ -2173,7 +2371,7 @@ fn sexp_structure_item(
 
 fn sexp_structure_item_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &StructureItemDesc,
@@ -2252,7 +2450,7 @@ fn sexp_structure_item_desc(
 
 fn sexp_module_binding(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mb: &ModuleBinding,
@@ -2275,7 +2473,7 @@ fn sexp_module_binding(
 
 fn sexp_open_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
@@ -2302,7 +2500,7 @@ fn sexp_open_declaration(
 
 fn sexp_module_type(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mt: &crate::types::typedtree::ModuleType,
@@ -2323,7 +2521,7 @@ fn sexp_module_type(
 
 fn sexp_module_type_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &crate::types::typedtree::ModuleTypeDesc,
@@ -2382,7 +2580,7 @@ fn sexp_module_type_desc(
 
 fn sexp_with_constraint(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     wc: &crate::types::typedtree::WithConstraint,
@@ -2412,7 +2610,7 @@ fn sexp_with_constraint(
 
 fn sexp_typed_signature(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     sig: &crate::types::typedtree::TypedSignature,
@@ -2426,7 +2624,7 @@ fn sexp_typed_signature(
 
 fn sexp_typed_signature_item(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     si: &crate::types::typedtree::TypedSignatureItem,
@@ -2445,7 +2643,7 @@ fn sexp_typed_signature_item(
 
 fn sexp_typed_signature_item_desc(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &crate::types::typedtree::TypedSignatureItemDesc,
@@ -2511,7 +2709,7 @@ fn sexp_typed_signature_item_desc(
 
 fn sexp_typed_module_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     md: &crate::types::typedtree::TypedModuleDeclaration,
@@ -2534,7 +2732,7 @@ fn sexp_typed_module_declaration(
 
 fn sexp_include_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     incl: &crate::types::typedtree::IncludeDescription,
@@ -2559,7 +2757,7 @@ fn sexp_include_description(
 
 fn sexp_module_type_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     mtd: &crate::types::typedtree::ModuleTypeDeclaration,
@@ -2589,7 +2787,7 @@ fn sexp_module_type_declaration(
 
 fn sexp_value_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     vd: &crate::types::typedtree::TypedValueDescription,
@@ -2617,7 +2815,7 @@ fn sexp_value_description(
 
 fn sexp_include_declaration(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     incl: &crate::types::typedtree::IncludeDeclaration,
@@ -2642,7 +2840,7 @@ fn sexp_include_declaration(
 
 fn sexp_open_description(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
@@ -2670,7 +2868,7 @@ fn sexp_open_description(
 /// Print a typed structure as sexp (without locations)
 pub fn print_typed_structure<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     str: &Structure,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2682,7 +2880,7 @@ pub fn print_typed_structure<W: Write>(
 /// Print a typed structure as sexp (with locations)
 pub fn print_typed_structure_with_locs<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     str: &Structure,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2694,7 +2892,7 @@ pub fn print_typed_structure_with_locs<W: Write>(
 /// Print a typed signature as sexp (without locations)
 pub fn print_typed_signature<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     sig: &crate::types::typedtree::TypedSignature,
     out: &mut W,
 ) -> std::io::Result<()> {
@@ -2706,7 +2904,7 @@ pub fn print_typed_signature<W: Write>(
 /// Print a typed signature as sexp (with locations)
 pub fn print_typed_signature_with_locs<W: Write>(
     arena: &ParseArena,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     sig: &crate::types::typedtree::TypedSignature,
     out: &mut W,
 ) -> std::io::Result<()> {

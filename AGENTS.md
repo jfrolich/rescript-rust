@@ -571,7 +571,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 
 #### Measurement
 
-- **Always benchmark** — Every performance change must have before/after numbers. "Should be faster" is not evidence. Use minimum time over multiple iterations (OS scheduling noise only adds time, never removes it).
+- **Always benchmark with `hyperfine`** — Every performance change must have before/after numbers. "Should be faster" is not evidence. Use `hyperfine` with multiple runs and a representative `--prepare` step for clean-build measurements, then report the mean, standard deviation, and min/max range.
 
 - **Profile before optimizing** — Use flamegraphs (`cargo flamegraph`), `perf stat` (cache misses, branch misses), or DHAT (heap profiling) to find actual bottlenecks. Don't guess.
 

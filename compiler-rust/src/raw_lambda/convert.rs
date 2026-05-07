@@ -3,6 +3,7 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
+use ahash::AHashSet;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
@@ -92,6 +93,26 @@ fn raw_constructor_constant(cstr: &crate::types::ConstructorDescription, tag: i3
             runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
         })),
     }
+}
+
+fn raw_optional_none_constant() -> Constant {
+    Constant::Int {
+        i: 0,
+        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+            name: "None".to_string(),
+            const_: 1,
+            non_const: 1,
+            runtime_tag: None,
+        })),
+    }
+}
+
+fn raw_optional_none() -> RawLambda {
+    RawLambda::const_(raw_optional_none_constant())
+}
+
+fn lambda_optional_none() -> Lambda {
+    Lambda::const_(Constant::Pointer("0a".to_string()))
 }
 
 fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
@@ -209,141 +230,140 @@ fn raw_free_variables(lam: &RawLambda) -> HashSet<Ident> {
     fv
 }
 
-fn raw_subst_lambda(subst: &HashMap<Ident, RawLambda>, lam: &RawLambda) -> RawLambda {
+fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawLambda {
     if subst.is_empty() {
-        return lam.clone();
+        return lam;
     }
 
     match lam {
-        RawLambda::Lvar(id) => subst.get(id).cloned().unwrap_or_else(|| lam.clone()),
-        RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => lam.clone(),
+        RawLambda::Lvar(id) => subst
+            .get(&id)
+            .cloned()
+            .map(RawLambda::Lvar)
+            .unwrap_or(RawLambda::Lvar(id)),
+        RawLambda::LglobalModule(_, _) | RawLambda::Lconst(_) => lam,
         RawLambda::Lapply(apply) => RawLambda::Lapply(crate::raw_lambda::RawApply {
-            ap_func: Box::new(raw_subst_lambda(subst, &apply.ap_func)),
+            ap_func: Box::new(raw_subst_idents_owned(subst, *apply.ap_func)),
             ap_args: apply
                 .ap_args
-                .iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+                .into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
-            ap_info: apply.ap_info.clone(),
+            ap_info: apply.ap_info,
             ap_transformed_jsx: apply.ap_transformed_jsx,
         }),
         RawLambda::Lfunction(func) => RawLambda::Lfunction(crate::raw_lambda::RawLFunction {
             arity: func.arity,
-            params: func.params.clone(),
-            body: Box::new(raw_subst_lambda(subst, &func.body)),
-            attr: func.attr.clone(),
+            params: func.params,
+            body: Box::new(raw_subst_idents_owned(subst, *func.body)),
+            attr: func.attr,
         }),
         RawLambda::Llet(kind, id, arg, body) => RawLambda::Llet(
-            *kind,
-            id.clone(),
-            Box::new(raw_subst_lambda(subst, arg)),
-            Box::new(raw_subst_lambda(subst, body)),
+            kind,
+            id,
+            Box::new(raw_subst_idents_owned(subst, *arg)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lletrec(bindings, body) => RawLambda::Lletrec(
             bindings
-                .iter()
-                .map(|(id, expr)| (id.clone(), raw_subst_lambda(subst, expr)))
+                .into_iter()
+                .map(|(id, expr)| (id, raw_subst_idents_owned(subst, expr)))
                 .collect(),
-            Box::new(raw_subst_lambda(subst, body)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lprim(info) => RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
-            primitive: info.primitive.clone(),
+            primitive: info.primitive,
             args: info
                 .args
-                .iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+                .into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
-            loc: info.loc.clone(),
+            loc: info.loc,
         }),
         RawLambda::Lswitch(arg, sw, loc) => RawLambda::Lswitch(
-            Box::new(raw_subst_lambda(subst, arg)),
+            Box::new(raw_subst_idents_owned(subst, *arg)),
             crate::raw_lambda::RawLambdaSwitch {
                 sw_numconsts: sw.sw_numconsts,
                 sw_consts_full: sw.sw_consts_full,
                 sw_consts: sw
                     .sw_consts
-                    .iter()
-                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, raw_subst_idents_owned(subst, lam)))
                     .collect(),
                 sw_numblocks: sw.sw_numblocks,
                 sw_blocks_full: sw.sw_blocks_full,
                 sw_blocks: sw
                     .sw_blocks
-                    .iter()
-                    .map(|(tag, lam)| (*tag, raw_subst_lambda(subst, lam)))
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, raw_subst_idents_owned(subst, lam)))
                     .collect(),
                 sw_failaction: sw
                     .sw_failaction
-                    .as_ref()
-                    .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
-                sw_names: sw.sw_names.clone(),
+                    .map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
+                sw_names: sw.sw_names,
             },
-            loc.clone(),
+            loc,
         ),
         RawLambda::LstringSwitch(arg, cases, default) => RawLambda::LstringSwitch(
-            Box::new(raw_subst_lambda(subst, arg)),
+            Box::new(raw_subst_idents_owned(subst, *arg)),
             cases
-                .iter()
-                .map(|(name, lam)| (name.clone(), raw_subst_lambda(subst, lam)))
+                .into_iter()
+                .map(|(name, lam)| (name, raw_subst_idents_owned(subst, lam)))
                 .collect(),
-            default
-                .as_ref()
-                .map(|lam| Box::new(raw_subst_lambda(subst, lam))),
+            default.map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
         ),
         RawLambda::LstaticRaise(i, args) => RawLambda::LstaticRaise(
-            *i,
-            args.iter()
-                .map(|arg| raw_subst_lambda(subst, arg))
+            i,
+            args.into_iter()
+                .map(|arg| raw_subst_idents_owned(subst, arg))
                 .collect(),
         ),
         RawLambda::LstaticCatch(body, handler, on_raise) => RawLambda::LstaticCatch(
-            Box::new(raw_subst_lambda(subst, body)),
-            handler.clone(),
-            Box::new(raw_subst_lambda(subst, on_raise)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
+            handler,
+            Box::new(raw_subst_idents_owned(subst, *on_raise)),
         ),
         RawLambda::LtryWith(body, exn, handler) => RawLambda::LtryWith(
-            Box::new(raw_subst_lambda(subst, body)),
-            exn.clone(),
-            Box::new(raw_subst_lambda(subst, handler)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
+            exn,
+            Box::new(raw_subst_idents_owned(subst, *handler)),
         ),
         RawLambda::LifThenElse(cond, ifso, ifnot) => RawLambda::LifThenElse(
-            Box::new(raw_subst_lambda(subst, cond)),
-            Box::new(raw_subst_lambda(subst, ifso)),
-            Box::new(raw_subst_lambda(subst, ifnot)),
+            Box::new(raw_subst_idents_owned(subst, *cond)),
+            Box::new(raw_subst_idents_owned(subst, *ifso)),
+            Box::new(raw_subst_idents_owned(subst, *ifnot)),
         ),
         RawLambda::Lsequence(first, second) => RawLambda::Lsequence(
-            Box::new(raw_subst_lambda(subst, first)),
-            Box::new(raw_subst_lambda(subst, second)),
+            Box::new(raw_subst_idents_owned(subst, *first)),
+            Box::new(raw_subst_idents_owned(subst, *second)),
         ),
         RawLambda::Lwhile(cond, body) => RawLambda::Lwhile(
-            Box::new(raw_subst_lambda(subst, cond)),
-            Box::new(raw_subst_lambda(subst, body)),
+            Box::new(raw_subst_idents_owned(subst, *cond)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor(var, lo, hi, dir, body) => RawLambda::Lfor(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, lo)),
-            Box::new(raw_subst_lambda(subst, hi)),
-            *dir,
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *lo)),
+            Box::new(raw_subst_idents_owned(subst, *hi)),
+            dir,
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor_of(var, iterable, body) => RawLambda::Lfor_of(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, iterable)),
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *iterable)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lfor_await_of(var, iterable, body) => RawLambda::Lfor_await_of(
-            var.clone(),
-            Box::new(raw_subst_lambda(subst, iterable)),
-            Box::new(raw_subst_lambda(subst, body)),
+            var,
+            Box::new(raw_subst_idents_owned(subst, *iterable)),
+            Box::new(raw_subst_idents_owned(subst, *body)),
         ),
         RawLambda::Lassign(id, expr) => {
-            RawLambda::Lassign(id.clone(), Box::new(raw_subst_lambda(subst, expr)))
+            RawLambda::Lassign(id, Box::new(raw_subst_idents_owned(subst, *expr)))
         }
-        RawLambda::Lsend(name, obj, loc) => RawLambda::Lsend(
-            name.clone(),
-            Box::new(raw_subst_lambda(subst, obj)),
-            loc.clone(),
-        ),
+        RawLambda::Lsend(name, obj, loc) => {
+            RawLambda::Lsend(name, Box::new(raw_subst_idents_owned(subst, *obj)), loc)
+        }
         RawLambda::Lbreak => RawLambda::Lbreak,
         RawLambda::Lcontinue => RawLambda::Lcontinue,
     }
@@ -615,6 +635,25 @@ fn raw_record_mutable_flag(
         .unwrap_or(ParserMutableFlag::Immutable)
 }
 
+fn record_field_is_static_optional_none(
+    lbl: &LabelDescription,
+    def: &RecordLabelDefinition,
+) -> bool {
+    if !lbl.lbl_optional {
+        return false;
+    }
+
+    match def {
+        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
+        RecordLabelDefinition::Overridden(_, expr) => matches!(
+            &expr.exp_desc,
+            ExpressionDesc::Texp_construct(_, cstr, args)
+                if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
+        ),
+        RecordLabelDefinition::Kept(_) => false,
+    }
+}
+
 fn inlined_record_representation(
     cstr: &crate::types::ConstructorDescription,
 ) -> Option<RecordRepresentation> {
@@ -626,7 +665,7 @@ fn inlined_record_representation(
 }
 
 fn trace_raw_fallback(kind: &'static str) {
-    if std::env::var_os("RUST_RAW_FALLBACK_TRACE").is_none() {
+    if !crate::debug_flags::raw_fallback_trace() {
         return;
     }
 
@@ -639,7 +678,7 @@ fn trace_raw_fallback(kind: &'static str) {
 }
 
 fn trace_raw_match_fallback(loc: &Location, scrut: &Expression, cases: &[Case]) {
-    if std::env::var_os("RUST_RAW_FALLBACK_TRACE").is_none() {
+    if !crate::debug_flags::raw_fallback_trace() {
         return;
     }
 
@@ -805,10 +844,10 @@ struct ComparisonSpecialization {
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
-    type_ctx: &'a TypeContext<'a>,
+    type_ctx: &'a TypeContext,
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
-    possible_required_modules: std::collections::HashSet<ModuleId>,
+    possible_required_modules: AHashSet<ModuleId>,
     id_gen: IdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
@@ -821,7 +860,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter.
     pub fn new(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
     ) -> Self {
         Self {
@@ -829,7 +868,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -842,7 +881,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter with stamps continuing from an existing phase.
     pub fn with_start_stamp(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
         start_stamp: i32,
     ) -> Self {
@@ -851,7 +890,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -864,7 +903,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Create a new raw-lambda converter with the current compilation unit name.
     pub fn with_start_stamp_and_unit_name(
         arena: &'a ParseArena,
-        type_ctx: &'a TypeContext<'a>,
+        type_ctx: &'a TypeContext,
         env: &'a crate::types::env::Env,
         start_stamp: i32,
         unit_name: String,
@@ -874,7 +913,7 @@ impl<'a> RawLambdaConverter<'a> {
             type_ctx,
             env,
             persistent_env: None,
-            possible_required_modules: std::collections::HashSet::new(),
+            possible_required_modules: AHashSet::new(),
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
@@ -901,7 +940,7 @@ impl<'a> RawLambdaConverter<'a> {
             .max(self.lowered.current_stamp())
     }
 
-    pub fn take_possible_required_modules(&mut self) -> std::collections::HashSet<ModuleId> {
+    pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
     }
 
@@ -1746,10 +1785,20 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     let eid = self.next_raise_count();
                     exit_map.insert(key.clone(), eid);
-                    handlers.push((eid, action.clone()));
+                    // OCaml `share_actions_sw` stores the selected action once
+                    // and rewrites switch arms through that store
+                    // (compiler/ml/matching.ml:1761-1790). Rust owns the arm
+                    // slot here, so move the first shared action into the
+                    // handler instead of cloning the whole raw-lambda subtree.
+                    let original =
+                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
+                    handlers.push((eid, original));
                     eid
                 };
-                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
+                {
+                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                }
             }
         }
 
@@ -1766,10 +1815,17 @@ impl<'a> RawLambdaConverter<'a> {
                 } else {
                     let eid = self.next_raise_count();
                     exit_map.insert(key.clone(), eid);
-                    handlers.push((eid, action.clone()));
+                    // See the const-arm comment above and OCaml
+                    // `matching.ml:1761-1790`.
+                    let original =
+                        std::mem::replace(action, RawLambda::LstaticRaise(eid, Vec::new()));
+                    handlers.push((eid, original));
                     eid
                 };
-                *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                if !matches!(action, RawLambda::LstaticRaise(i, args) if *i == exit_id && args.is_empty())
+                {
+                    *action = RawLambda::LstaticRaise(exit_id, Vec::new());
+                }
             }
         }
 
@@ -3146,6 +3202,12 @@ impl<'a> RawLambdaConverter<'a> {
                         extended_expression.as_deref(),
                         inlined_record_representation(cstr),
                     ),
+                    ExpressionDesc::Texp_record_sparse { fields, .. } => self.convert_record_raw(
+                        self.loc(arg.exp_loc),
+                        fields,
+                        None,
+                        inlined_record_representation(cstr),
+                    ),
                     _ => self.convert_expr_raw(arg),
                 },
                 [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
@@ -3209,9 +3271,13 @@ impl<'a> RawLambdaConverter<'a> {
         // - all fields are overridden (no Kept), OR
         // - size < 20 AND no optional fields (OCaml's transl_record line 1130)
         let build_direct = base.is_none()
-            || fields
-                .iter()
-                .all(|(_, _, def, _)| matches!(def, RecordLabelDefinition::Overridden(_, _)))
+            || fields.iter().all(|(_, _, def, _)| {
+                matches!(
+                    def,
+                    RecordLabelDefinition::Overridden(_, _)
+                        | RecordLabelDefinition::OmittedOptionalNone(_, _)
+                )
+            })
             || (fields.len() < 20 && !has_optional);
 
         if build_direct {
@@ -3220,13 +3286,30 @@ impl<'a> RawLambdaConverter<'a> {
             let init_id = base_lam.as_ref().map(|_| self.fresh_ident("init"));
             let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
 
+            let can_skip_static_optional_none_fields = base.is_none()
+                && fields.len() >= 20
+                && matches!(repres, RecordRepresentation::RecordRegular);
             let mut elems = Vec::with_capacity(fields.len());
+            let mut fields_info = Vec::with_capacity(fields.len());
             for (lid, lbl, def, _) in fields {
+                // OCaml typecore.ml:2833-2842 materializes omitted optional
+                // fields as `option_none`; the Rust typedtree still does that.
+                // The JS backend already omits optional `undefined` fields
+                // when printing record blocks (compiler-rust/src/js_ir/printer.rs:1943-1945),
+                // so skip lowering statically-None regular fields here.
+                if can_skip_static_optional_none_fields
+                    && record_field_is_static_optional_none(lbl, def)
+                {
+                    continue;
+                }
+
                 let value = match def {
                     RecordLabelDefinition::Overridden(_, expr) => self.convert_expr_raw(expr),
+                    RecordLabelDefinition::OmittedOptionalNone(_, _) => raw_optional_none(),
                     RecordLabelDefinition::Kept(_) => {
                         let Some(base_var) = &init_var else {
                             elems.push(RawLambda::unit());
+                            fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
                             continue;
                         };
                         if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -3243,12 +3326,8 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 elems.push(value);
+                fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
             }
-
-            let fields_info = fields
-                .iter()
-                .map(|(_, lbl, _, _)| (label_runtime_name(lbl), lbl.lbl_optional))
-                .collect::<Vec<_>>();
 
             let result = match repres {
                 RecordRepresentation::RecordRegular => {
@@ -3377,8 +3456,12 @@ impl<'a> RawLambdaConverter<'a> {
         // Each Lsequence(upd, cont) wraps the update around the continuation,
         // so the LAST field ends up outermost in the sequence chain.
         for (_, lbl, def, _) in fields.iter() {
-            let RecordLabelDefinition::Overridden(_, expr) = def else {
-                continue;
+            let expr = match def {
+                RecordLabelDefinition::Overridden(_, expr) => expr,
+                RecordLabelDefinition::Kept(_)
+                | RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                    continue;
+                }
             };
             let Some((pos, info)) = raw_record_setfield_access(lbl) else {
                 continue;
@@ -3532,6 +3615,43 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> Option<i32> {
         use crate::types::decl::{ModuleType, SignatureItem, ValueKind};
 
+        fn runtime_field_position(sig: &[SignatureItem], field_name: &str) -> Option<i32> {
+            let mut runtime_pos = 0i32;
+            for item in sig {
+                match item {
+                    SignatureItem::SigValue(id, desc)
+                        if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
+                    {
+                        if id.name() == field_name {
+                            return Some(runtime_pos);
+                        }
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigModule(id, _, _) | SignatureItem::SigTypext(id, _, _) => {
+                        if id.name() == field_name {
+                            return Some(runtime_pos);
+                        }
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigValue(_, _) => {}
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        if let Some(pos) = crate::types::typecore::with_resolved_module_components_for_path(
+            module_path,
+            env,
+            &mut self.persistent_env,
+            self.type_ctx,
+            |components| runtime_field_position(components.signature(), field_name),
+        )
+        .flatten()
+        {
+            return Some(pos);
+        }
+
         fn module_type_for_path(
             this: &mut RawLambdaConverter<'_>,
             env: &crate::types::env::Env,
@@ -3614,36 +3734,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
 
             match mty {
-                ModuleType::MtySignature(sig) => {
-                    // OCaml compiler/ml/lambda.ml:635-643 preserves the
-                    // normalized Pdot runtime position. When Rust receives a
-                    // synthetic -1 from alias normalization, count runtime
-                    // signature items in the same order used by
-                    // compiler/ml/translmod.ml:307/343 to build module blocks.
-                    let mut runtime_pos = 0i32;
-                    for item in sig {
-                        match item {
-                            SignatureItem::SigValue(id, desc)
-                                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
-                            {
-                                if id.name() == field_name {
-                                    return Some(runtime_pos);
-                                }
-                                runtime_pos += 1;
-                            }
-                            SignatureItem::SigModule(id, _, _)
-                            | SignatureItem::SigTypext(id, _, _) => {
-                                if id.name() == field_name {
-                                    return Some(runtime_pos);
-                                }
-                                runtime_pos += 1;
-                            }
-                            SignatureItem::SigValue(_, _) => {}
-                            _ => {}
-                        }
-                    }
-                    None
-                }
+                ModuleType::MtySignature(sig) => runtime_field_position(&sig, field_name),
                 ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
                     if alias_path.same(module_path) {
                         return None;
@@ -3702,13 +3793,13 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_module_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                Box::new(self.normalize_module_path_in_env(env, left)),
-                Box::new(self.normalize_module_path_in_env(env, right)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, left)),
+                std::sync::Arc::new(self.normalize_module_path_in_env(env, right)),
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
@@ -3755,13 +3846,13 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         let path = match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
             crate::types::Path::Papply(left, right) => crate::types::Path::Papply(
-                Box::new(self.normalize_value_prefix_path_in_env(env, left)),
-                Box::new(self.normalize_value_prefix_path_in_env(env, right)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, left)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, right)),
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
@@ -3809,7 +3900,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> crate::types::Path {
         match path {
             crate::types::Path::Pdot(prefix, name, pos) => crate::types::Path::Pdot(
-                Box::new(self.normalize_value_prefix_path_in_env(env, prefix)),
+                std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, prefix)),
                 name.clone(),
                 *pos,
             ),
@@ -4060,14 +4151,19 @@ impl<'a> RawLambdaConverter<'a> {
                 let field = get_field(self, id.name(), *pos);
                 let value = self.apply_coercion_raw(loc.clone(), LetKind::Alias, coercion, field);
                 lam = RawLambda::let_(LetKind::Alias, rebound.clone(), value, lam);
-                subst.insert(id.clone(), RawLambda::var(rebound));
+                subst.insert(id.clone(), rebound);
             }
         }
 
         if subst.is_empty() {
             lam
         } else {
-            raw_subst_lambda(&subst, &lam)
+            // OCaml `wrap_id_pos_list` builds a substitution containing only
+            // `id' -> Lvar id''` before calling `Lambda.subst_lambda`
+            // (compiler/ml/translmod.ml:112-127). Keep that substitution
+            // specialized in Rust and consume `lam` instead of cloning the
+            // whole module body.
+            raw_subst_idents_owned(&subst, lam)
         }
     }
 
@@ -4227,11 +4323,11 @@ impl<'a> RawLambdaConverter<'a> {
                 // only the final binding. Since Rust doesn't compute that coercion,
                 // we achieve the same result by deduplicating here.
                 let deduped_fields = {
-                    let mut seen = HashSet::new();
+                    let mut seen = AHashSet::with_capacity(fields.len());
                     let mut indices = Vec::new();
                     // Walk from the end to find which indices to keep
                     for i in (0..fields.len()).rev() {
-                        if seen.insert(fields[i].name().to_string()) {
+                        if seen.insert(fields[i].name()) {
                             indices.push(i);
                         }
                     }
@@ -5466,6 +5562,9 @@ impl<'a> RawLambdaConverter<'a> {
                 extended_expression.as_deref(),
                 None,
             ),
+            ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                self.convert_record_raw(self.loc(expr.exp_loc), fields, None, None)
+            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                     self.convert_expr_raw(record)
@@ -5662,6 +5761,9 @@ impl<'a> RawLambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
             ),
+            ExpressionDesc::Texp_record_sparse { fields, .. } => {
+                self.convert_record(self.loc(expr.exp_loc), fields, None)
+            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
                 let primitive = Primitive::Pfield(
@@ -5758,6 +5860,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_construct(_, _, _) => "Texp_construct",
             ExpressionDesc::Texp_variant(_, _) => "Texp_variant",
             ExpressionDesc::Texp_record { .. } => "Texp_record",
+            ExpressionDesc::Texp_record_sparse { .. } => "Texp_record_sparse",
             ExpressionDesc::Texp_field(_, _, _) => "Texp_field",
             ExpressionDesc::Texp_setfield(_, _, _, _) => "Texp_setfield",
             ExpressionDesc::Texp_array(_) => "Texp_array",
@@ -6186,7 +6289,7 @@ impl<'a> RawLambdaConverter<'a> {
         // individual arguments and use for_multiple_match, which can flatten
         // the tuple pattern matching without allocating a tuple.
         // (See OCaml's translcore.ml lines 1259-1260)
-        if std::env::var_os("RUST_SKIP_FOR_MULTIPLE_MATCH").is_none()
+        if !crate::debug_flags::skip_for_multiple_match()
             && let ExpressionDesc::Texp_tuple(argl) = &scrut.exp_desc
         {
             let paraml: Vec<RawLambda> = argl.iter().map(|a| self.convert_expr_raw(a)).collect();
@@ -9291,6 +9394,7 @@ impl<'a> RawLambdaConverter<'a> {
         for (idx, (lid, lbl, def, _opt)) in fields.iter().enumerate() {
             let value = match def {
                 RecordLabelDefinition::Overridden(_, expr) => self.convert_expr(expr),
+                RecordLabelDefinition::OmittedOptionalNone(_, _) => lambda_optional_none(),
                 RecordLabelDefinition::Kept(_) => {
                     if let Some(base_expr) = &base_lam {
                         let field_pos = match lbl.lbl_repres {
@@ -11025,7 +11129,7 @@ mod tests {
     fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
 
@@ -11065,7 +11169,7 @@ mod tests {
     fn empty_inlined_record_constructor_keeps_inlined_record_metadata() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
 
@@ -11236,7 +11340,7 @@ mod tests {
     fn function_expression_preserves_directive_attribute() {
         let mut arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
 
         let directive_expr = crate::parser::ast::Expression {
@@ -11304,7 +11408,7 @@ mod tests {
     fn simple_trywith_extension_handler_assigns_exit_ids_in_source_order() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         converter.next_static_raise = 1;
@@ -11353,7 +11457,7 @@ mod tests {
     fn sync_matching_stamps_advances_raw_converter_after_matching_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
 
@@ -11380,7 +11484,7 @@ mod tests {
     fn fresh_ident_advances_past_lowered_converter_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
 
@@ -11411,7 +11515,7 @@ mod tests {
         );
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_expr_raw(&sequence);
@@ -11446,7 +11550,7 @@ mod tests {
         };
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_structure(&structure);
@@ -11479,7 +11583,7 @@ mod tests {
         ];
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lam = converter.convert_let_with_body_raw(
@@ -11505,7 +11609,7 @@ mod tests {
     fn ffi_spec_reads_null_to_opt_return_wrapper() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11531,7 +11635,7 @@ mod tests {
     fn ffi_spec_preserves_marshaled_js_var_shape() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11565,7 +11669,7 @@ mod tests {
     fn ffi_spec_preserves_marshaled_import_attributes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11633,7 +11737,7 @@ external myJson: Js.Json.t = "default"
         let encoded = parser.arena().get_string(encoded.pval_prim[1]).to_string();
 
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(parser.arena(), &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11669,7 +11773,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_preserves_marshaled_js_new_shape() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11705,7 +11809,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_object_create_kind() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11724,7 +11828,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_inline_string_constant() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11752,7 +11856,7 @@ external myJson: Js.Json.t = "default"
     fn ffi_spec_reads_marshaled_inline_int_constant() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let prim = crate::types::PrimitiveDescription {
@@ -11808,7 +11912,7 @@ external myJson: Js.Json.t = "default"
     fn primitive_value_compare_specializes_through_alias_env() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
         let int_ty = ctx.predef_int();
         let compare_ty = ctx.new_arrow_simple(int_ty, ctx.new_arrow_simple(int_ty, int_ty));
@@ -11839,7 +11943,7 @@ external myJson: Js.Json.t = "default"
     fn coercion_alias_keeps_original_path_instead_of_normalizing_through_module_alias() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let original_module = Ident::create_local("M'");
@@ -11868,9 +11972,9 @@ external myJson: Js.Json.t = "default"
             },
         );
 
-        let alias_path = crate::types::Path::Pdot(
-            Box::new(crate::types::Path::Pident(original_module.clone())),
-            "N".to_string(),
+        let alias_path = crate::types::Path::pdot_pos(
+            crate::types::Path::Pident(original_module.clone()),
+            "N",
             0,
         );
         let coercion = ModuleCoercion::Tcoerce_alias(
@@ -11904,7 +12008,7 @@ external myJson: Js.Json.t = "default"
     fn primitive_value_equality_specializes_through_alias_env() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
         let string_ty = ctx.predef_string();
         let bool_ty = ctx.predef_bool();
@@ -11939,7 +12043,7 @@ external myJson: Js.Json.t = "default"
     fn translate_module_path_raw_follows_mty_ident_flattened_submodule_aliases() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let pkg = Ident::create_persistent("Pkg");
@@ -11992,7 +12096,7 @@ external myJson: Js.Json.t = "default"
     fn translate_module_path_raw_leaves_possible_required_modules_to_later_passes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
 
@@ -12014,7 +12118,7 @@ external myJson: Js.Json.t = "default"
     fn empty_include_records_possible_required_modules() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12047,7 +12151,7 @@ external myJson: Js.Json.t = "default"
     fn plain_module_aliases_do_not_record_possible_required_modules() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12076,7 +12180,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_marks_global_modules_as_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
 
@@ -12105,7 +12209,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_alias_lets_mark_global_modules_as_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let module_id = Ident::create_persistent("ModuleWithAlias");
 
@@ -12139,7 +12243,7 @@ external myJson: Js.Json.t = "default"
     fn dynamic_import_pack_idents_record_only_dynamic_possible_requirements() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let side_effect = Ident::create_persistent("Side_effect");
         let module_expr = crate::types::typedtree::ModuleExpr {
@@ -12182,7 +12286,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_keeps_local_unpack_prefixes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let modtype_x = Ident::create_local("X");
@@ -12223,7 +12327,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_follows_persistent_mty_ident_flattened_submodule_aliases() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let pkg = Ident::create_persistent("Pkg");
@@ -12298,7 +12402,7 @@ external myJson: Js.Json.t = "default"
     fn translate_value_path_raw_keeps_constrained_persistent_submodule_prefixes() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut env = initial_env(&ctx);
 
         let inner_define = Ident::create_persistent("Inner_define");
@@ -12374,13 +12478,13 @@ external myJson: Js.Json.t = "default"
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
         let lowered = converter.translate_value_path_raw_in_env(
             &env,
-            &crate::types::Path::Pdot(
-                Box::new(crate::types::Path::Pdot(
-                    Box::new(crate::types::Path::Pident(inner_define.clone())),
-                    "N0".to_string(),
+            &crate::types::Path::pdot_pos(
+                crate::types::Path::pdot_pos(
+                    crate::types::Path::Pident(inner_define.clone()),
+                    "N0",
                     1,
-                )),
-                "f1".to_string(),
+                ),
+                "f1",
                 0,
             ),
             Location::none(),
@@ -12410,7 +12514,7 @@ external myJson: Js.Json.t = "default"
     fn recmodule_function_init_shape_keeps_function_constructor_metadata() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(&id_gen);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let converter = RawLambdaConverter::new(&arena, &ctx, &env);
 

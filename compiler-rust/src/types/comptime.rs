@@ -288,7 +288,7 @@ pub struct ConstructorInfo {
 /// Convert a TypeInfo back to a TypeExprRef.
 /// Looks up user-defined types by name in the environment.
 pub fn type_info_to_type_expr<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ti: &TypeInfo,
 ) -> Option<TypeExprRef> {
@@ -329,7 +329,7 @@ pub fn type_info_to_type_expr<'a>(
 /// Resolves aliases, identifies primitives, and inspects user-defined types
 /// (records, variants) through their declarations in the type context.
 pub fn build_type_info<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     ty: TypeExprRef,
     visited: &mut Vec<TypeExprRef>,
@@ -411,7 +411,7 @@ pub fn build_type_info<'a>(
 
 /// Build TypeInfo from a Tconstr (type constructor application).
 fn build_type_info_from_constr<'a>(
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     path: &Path,
     args: &[TypeExprRef],
@@ -536,7 +536,7 @@ fn build_type_info_from_constr<'a>(
 
 fn type_info_constructor_description<'a>(
     ctor_name: &str,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
 ) -> Option<ConstructorDescription> {
     // `typeInfo` is a Rust-only compiler-internal predef. It is intentionally
@@ -615,7 +615,7 @@ fn type_info_constructor_description<'a>(
 /// This is called when `@typeInfo(expr)` is encountered during type checking.
 pub fn type_info_to_typed_expr<'a>(
     info: &TypeInfo,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> Option<typedtree::Expression> {
@@ -732,7 +732,7 @@ pub fn type_info_to_typed_expr<'a>(
 /// Build a typed expression for a fieldInfo record value.
 fn build_field_info_expr<'a>(
     field: &FieldInfo,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -761,7 +761,7 @@ fn build_field_info_expr<'a>(
 /// Make a typed string constant expression.
 pub fn make_string_expr<'a>(
     s: &str,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -777,7 +777,7 @@ pub fn make_string_expr<'a>(
 /// Make a typed boolean expression.
 pub fn make_bool_expr<'a>(
     b: bool,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     env: &Env,
     loc: crate::parse_arena::LocIdx,
 ) -> typedtree::Expression {
@@ -980,7 +980,7 @@ impl SpecEnv {
 pub fn specialize_expression(
     expr: &typedtree::Expression,
     env: &mut SpecEnv,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     type_env: &Env,
 ) -> Result<typedtree::Expression, String> {
     env.step()?;
@@ -1144,6 +1144,7 @@ pub fn specialize_expression(
                 .map(|(lid, desc, def, opt)| {
                     let spec_def = match def {
                         typedtree::RecordLabelDefinition::Kept(_) => def.clone(),
+                        typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => def.clone(),
                         typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
                             match specialize_expression(field_expr, env, ctx, type_env) {
                                 Ok(spec) => {
@@ -1162,6 +1163,41 @@ pub fn specialize_expression(
                 .transpose()?;
             typedtree::ExpressionDesc::Texp_record {
                 fields: spec_fields,
+                extended_expression: spec_ext.map(Box::new),
+            }
+        }
+        typedtree::ExpressionDesc::Texp_record_sparse {
+            fields,
+            omitted_loc,
+            extended_expression,
+        } => {
+            let spec_fields: Vec<_> = fields
+                .iter()
+                .map(|(lid, desc, def, opt)| {
+                    let spec_def = match def {
+                        typedtree::RecordLabelDefinition::Kept(_)
+                        | typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                            def.clone()
+                        }
+                        typedtree::RecordLabelDefinition::Overridden(lid2, field_expr) => {
+                            match specialize_expression(field_expr, env, ctx, type_env) {
+                                Ok(spec) => {
+                                    typedtree::RecordLabelDefinition::Overridden(lid2.clone(), spec)
+                                }
+                                Err(_) => def.clone(),
+                            }
+                        }
+                    };
+                    (lid.clone(), desc.clone(), spec_def, *opt)
+                })
+                .collect();
+            let spec_ext = extended_expression
+                .as_ref()
+                .map(|e| specialize_expression(e, env, ctx, type_env))
+                .transpose()?;
+            typedtree::ExpressionDesc::Texp_record_sparse {
+                fields: spec_fields,
+                omitted_loc: *omitted_loc,
                 extended_expression: spec_ext.map(Box::new),
             }
         }

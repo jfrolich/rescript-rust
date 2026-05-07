@@ -1,0 +1,831 @@
+//! Optional compiler performance counters.
+//!
+//! Counters are disabled unless `RESCRIPT_COMPILER_COUNTERS` is set. They are
+//! process-global so the in-process build can report aggregate behavior across
+//! all worker threads.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+static ENABLED: OnceLock<bool> = OnceLock::new();
+
+static VALUE_HITS: AtomicU64 = AtomicU64::new(0);
+static VALUE_MISSES: AtomicU64 = AtomicU64::new(0);
+static VALUE_SCANS: AtomicU64 = AtomicU64::new(0);
+static VALUE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static VALUE_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static TYPE_HITS: AtomicU64 = AtomicU64::new(0);
+static TYPE_MISSES: AtomicU64 = AtomicU64::new(0);
+static TYPE_SCANS: AtomicU64 = AtomicU64::new(0);
+static TYPE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static TYPE_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static MODULE_HITS: AtomicU64 = AtomicU64::new(0);
+static MODULE_MISSES: AtomicU64 = AtomicU64::new(0);
+static MODULE_SCANS: AtomicU64 = AtomicU64::new(0);
+static MODULE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static MODULE_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static CONSTRUCTOR_HITS: AtomicU64 = AtomicU64::new(0);
+static CONSTRUCTOR_MISSES: AtomicU64 = AtomicU64::new(0);
+static CONSTRUCTOR_SCANS: AtomicU64 = AtomicU64::new(0);
+static CONSTRUCTOR_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static CONSTRUCTOR_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static LABEL_HITS: AtomicU64 = AtomicU64::new(0);
+static LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
+static LABEL_SCANS: AtomicU64 = AtomicU64::new(0);
+static LABEL_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static LABEL_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static CHILD_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
+static CHILD_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
+static CHILD_COMPONENT_SCANS: AtomicU64 = AtomicU64::new(0);
+static CHILD_COMPONENT_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static CHILD_COMPONENT_RESULTS: AtomicU64 = AtomicU64::new(0);
+
+static QUALIFIED_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
+
+static QUALIFIED_RECORD_LABEL_HITS: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_REGISTERED: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT: AtomicU64 = AtomicU64::new(0);
+static QUALIFIED_RECORD_LABEL_UNCACHED_OTHER: AtomicU64 = AtomicU64::new(0);
+
+static TYPE_ITEM_RESOLVE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_SCANS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
+static TYPE_ITEM_RESOLVE_FOUND: AtomicU64 = AtomicU64::new(0);
+
+static SIGNATURE_COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_ITEMS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_MAX_ITEMS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_SITES: OnceLock<Mutex<HashMap<(&'static str, u32), SignatureCopySite>>> =
+    OnceLock::new();
+static SIGNATURE_QUALIFICATION_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
+    OnceLock::new();
+static SIGNATURE_QUALIFICATION_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+static SIGNATURE_FRESHEN_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
+    OnceLock::new();
+static SIGNATURE_FRESHEN_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+static MODULE_SIGNATURE_COPIES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+static MODULE_SIGNATURE_FRESHENS: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
+
+thread_local! {
+    static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_MAX_SHARED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_MAX_LOCAL_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_MODULES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_INFO_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_ALIASES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_LOCAL_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
+#[derive(Clone, Copy)]
+pub(crate) enum LazyLookupKind {
+    /// Qualified value lookup inside a shared signature.
+    Value,
+    /// Qualified type lookup inside a shared signature.
+    Type,
+    /// Qualified child module lookup inside a shared signature.
+    Module,
+    /// Constructor bucket lookup derived from a shared signature.
+    Constructor,
+    /// Record label bucket lookup derived from a shared signature.
+    Label,
+    /// Lazy child component lookup derived from a shared signature.
+    ChildComponent,
+}
+
+struct LazyCounters {
+    hits: &'static AtomicU64,
+    misses: &'static AtomicU64,
+    scans: &'static AtomicU64,
+    scanned_items: &'static AtomicU64,
+    results: &'static AtomicU64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SignatureCopySite {
+    calls: u64,
+    items: u64,
+    max_items: u64,
+}
+
+/// Thread-local module attribution guard for compiler counters.
+///
+/// Normal builds pay no cost because the guard is inactive unless
+/// `RESCRIPT_COMPILER_COUNTERS` is set.
+pub struct ModuleCounterGuard {
+    active: bool,
+    previous: Option<String>,
+}
+
+impl ModuleCounterGuard {
+    /// Attribute subsequent counters on the current worker thread to `module`.
+    pub fn start(module: &str) -> Self {
+        if !enabled() {
+            return Self {
+                active: false,
+                previous: None,
+            };
+        }
+
+        let previous = CURRENT_MODULE.with(|current| current.replace(Some(module.to_string())));
+        Self {
+            active: true,
+            previous,
+        }
+    }
+}
+
+impl Drop for ModuleCounterGuard {
+    fn drop(&mut self) {
+        if self.active {
+            CURRENT_MODULE.with(|current| {
+                *current.borrow_mut() = self.previous.take();
+            });
+        }
+    }
+}
+
+impl LazyLookupKind {
+    fn name(self) -> &'static str {
+        match self {
+            LazyLookupKind::Value => "value",
+            LazyLookupKind::Type => "type",
+            LazyLookupKind::Module => "module",
+            LazyLookupKind::Constructor => "constructor",
+            LazyLookupKind::Label => "label",
+            LazyLookupKind::ChildComponent => "child_component",
+        }
+    }
+
+    fn counters(self) -> LazyCounters {
+        match self {
+            LazyLookupKind::Value => LazyCounters {
+                hits: &VALUE_HITS,
+                misses: &VALUE_MISSES,
+                scans: &VALUE_SCANS,
+                scanned_items: &VALUE_SCANNED_ITEMS,
+                results: &VALUE_RESULTS,
+            },
+            LazyLookupKind::Type => LazyCounters {
+                hits: &TYPE_HITS,
+                misses: &TYPE_MISSES,
+                scans: &TYPE_SCANS,
+                scanned_items: &TYPE_SCANNED_ITEMS,
+                results: &TYPE_RESULTS,
+            },
+            LazyLookupKind::Module => LazyCounters {
+                hits: &MODULE_HITS,
+                misses: &MODULE_MISSES,
+                scans: &MODULE_SCANS,
+                scanned_items: &MODULE_SCANNED_ITEMS,
+                results: &MODULE_RESULTS,
+            },
+            LazyLookupKind::Constructor => LazyCounters {
+                hits: &CONSTRUCTOR_HITS,
+                misses: &CONSTRUCTOR_MISSES,
+                scans: &CONSTRUCTOR_SCANS,
+                scanned_items: &CONSTRUCTOR_SCANNED_ITEMS,
+                results: &CONSTRUCTOR_RESULTS,
+            },
+            LazyLookupKind::Label => LazyCounters {
+                hits: &LABEL_HITS,
+                misses: &LABEL_MISSES,
+                scans: &LABEL_SCANS,
+                scanned_items: &LABEL_SCANNED_ITEMS,
+                results: &LABEL_RESULTS,
+            },
+            LazyLookupKind::ChildComponent => LazyCounters {
+                hits: &CHILD_COMPONENT_HITS,
+                misses: &CHILD_COMPONENT_MISSES,
+                scans: &CHILD_COMPONENT_SCANS,
+                scanned_items: &CHILD_COMPONENT_SCANNED_ITEMS,
+                results: &CHILD_COMPONENT_RESULTS,
+            },
+        }
+    }
+}
+
+/// Returns whether compiler counters are enabled.
+#[inline]
+pub fn enabled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_COMPILER_COUNTERS").is_some())
+    }
+}
+
+/// Reset all compiler performance counters.
+pub fn reset() {
+    if !enabled() {
+        return;
+    }
+
+    for counter in [
+        &VALUE_HITS,
+        &VALUE_MISSES,
+        &VALUE_SCANS,
+        &VALUE_SCANNED_ITEMS,
+        &VALUE_RESULTS,
+        &TYPE_HITS,
+        &TYPE_MISSES,
+        &TYPE_SCANS,
+        &TYPE_SCANNED_ITEMS,
+        &TYPE_RESULTS,
+        &MODULE_HITS,
+        &MODULE_MISSES,
+        &MODULE_SCANS,
+        &MODULE_SCANNED_ITEMS,
+        &MODULE_RESULTS,
+        &CONSTRUCTOR_HITS,
+        &CONSTRUCTOR_MISSES,
+        &CONSTRUCTOR_SCANS,
+        &CONSTRUCTOR_SCANNED_ITEMS,
+        &CONSTRUCTOR_RESULTS,
+        &LABEL_HITS,
+        &LABEL_MISSES,
+        &LABEL_SCANS,
+        &LABEL_SCANNED_ITEMS,
+        &LABEL_RESULTS,
+        &CHILD_COMPONENT_HITS,
+        &CHILD_COMPONENT_MISSES,
+        &CHILD_COMPONENT_SCANS,
+        &CHILD_COMPONENT_SCANNED_ITEMS,
+        &CHILD_COMPONENT_RESULTS,
+        &QUALIFIED_COMPONENT_HITS,
+        &QUALIFIED_COMPONENT_MISSES,
+        &QUALIFIED_COMPONENT_REGISTERED,
+        &QUALIFIED_RECORD_LABEL_HITS,
+        &QUALIFIED_RECORD_LABEL_MISSES,
+        &QUALIFIED_RECORD_LABEL_REGISTERED,
+        &QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT,
+        &QUALIFIED_RECORD_LABEL_UNCACHED_OTHER,
+        &TYPE_ITEM_RESOLVE_CACHE_HITS,
+        &TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS,
+        &TYPE_ITEM_RESOLVE_SCANS,
+        &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
+        &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
+        &TYPE_ITEM_RESOLVE_FOUND,
+        &SIGNATURE_COPY_CALLS,
+        &SIGNATURE_COPY_ITEMS,
+        &SIGNATURE_COPY_MAX_ITEMS,
+        &REGISTRY_SNAPSHOTS,
+        &REGISTRY_SHARED_ENTRIES_TOTAL,
+        &REGISTRY_LOCAL_ENTRIES_TOTAL,
+        &REGISTRY_MAX_SHARED_ENTRIES,
+        &REGISTRY_MAX_LOCAL_ENTRIES,
+        &REGISTRY_LOCAL_MODULES_TOTAL,
+        &REGISTRY_LOCAL_INFO_TOTAL,
+        &REGISTRY_LOCAL_ALIASES_TOTAL,
+        &REGISTRY_LOCAL_FALLBACKS_TOTAL,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+
+    if let Some(sites) = SIGNATURE_COPY_SITES.get() {
+        sites.lock().unwrap().clear();
+    }
+    if let Some(kinds) = SIGNATURE_QUALIFICATION_KINDS.get() {
+        kinds.lock().unwrap().clear();
+    }
+    if let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() {
+        names.lock().unwrap().clear();
+    }
+    if let Some(kinds) = SIGNATURE_FRESHEN_KINDS.get() {
+        kinds.lock().unwrap().clear();
+    }
+    if let Some(names) = SIGNATURE_FRESHEN_NAMES.get() {
+        names.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_SIGNATURE_COPIES.get() {
+        modules.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() {
+        modules.lock().unwrap().clear();
+    }
+}
+
+/// Record a cached lazy-signature lookup.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_lazy_hit(kind: LazyLookupKind) {
+    kind.counters().hits.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a lazy-signature scan after a cache miss.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_lazy_scan(kind: LazyLookupKind, scanned_items: usize, result_items: usize) {
+    let counters = kind.counters();
+    counters.misses.fetch_add(1, Ordering::Relaxed);
+    counters.scans.fetch_add(1, Ordering::Relaxed);
+    counters
+        .scanned_items
+        .fetch_add(scanned_items as u64, Ordering::Relaxed);
+    counters
+        .results
+        .fetch_add(result_items as u64, Ordering::Relaxed);
+}
+
+/// Record a qualified component-view cache hit.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_component_hit() {
+    QUALIFIED_COMPONENT_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a qualified component-view cache miss.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_component_miss() {
+    QUALIFIED_COMPONENT_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a newly cached qualified component view.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_component_registered() {
+    QUALIFIED_COMPONENT_REGISTERED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a qualified record-label cache hit.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_hit() {
+    QUALIFIED_RECORD_LABEL_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a qualified record-label cache miss.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_miss() {
+    QUALIFIED_RECORD_LABEL_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a newly cached qualified record label.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_registered() {
+    QUALIFIED_RECORD_LABEL_REGISTERED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a local-root record label that is currently not cacheable.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_uncached_local_root() {
+    QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a record label that is not eligible for the qualified-label cache.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_qualified_record_label_uncached_other() {
+    QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a cached type-item path lookup.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_cache_hit() {
+    TYPE_ITEM_RESOLVE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a cached missing type-item path lookup.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_missing_cache_hit() {
+    TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a type-item signature scan.
+///
+/// Caller must check [`enabled`] before calling this hot-path helper.
+#[inline]
+pub(crate) fn record_type_item_resolve_scan(scanned_items: usize, type_items: usize, found: bool) {
+    TYPE_ITEM_RESOLVE_SCANS.fetch_add(1, Ordering::Relaxed);
+    TYPE_ITEM_RESOLVE_SCANNED_ITEMS.fetch_add(scanned_items as u64, Ordering::Relaxed);
+    TYPE_ITEM_RESOLVE_TYPE_ITEMS.fetch_add(type_items as u64, Ordering::Relaxed);
+    if found {
+        TYPE_ITEM_RESOLVE_FOUND.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Record a full signature copy, grouped by call site.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_copy(
+    location: &'static std::panic::Location<'static>,
+    item_count: usize,
+) {
+    SIGNATURE_COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    SIGNATURE_COPY_ITEMS.fetch_add(item_count as u64, Ordering::Relaxed);
+    SIGNATURE_COPY_MAX_ITEMS.fetch_max(item_count as u64, Ordering::Relaxed);
+
+    let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut sites = sites.lock().unwrap();
+    let entry = sites
+        .entry((location.file(), location.line()))
+        .or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+    record_current_module_signature_copy(item_count);
+}
+
+/// Record a signature qualification before the current full-copy path.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_qualification(kind: &'static str, item_count: usize) {
+    let kinds = SIGNATURE_QUALIFICATION_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut kinds = kinds.lock().unwrap();
+    let entry = kinds.entry(kind).or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+}
+
+/// Record a named signature qualification entry.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_qualification_name(
+    kind: &'static str,
+    name: &str,
+    item_count: usize,
+) {
+    let names = SIGNATURE_QUALIFICATION_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut names = names.lock().unwrap();
+    let key = format!("{kind}:{name}");
+    let entry = names.entry(key).or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+}
+
+/// Record a signature freshening entry point before it performs full-copy work.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
+    let kinds = SIGNATURE_FRESHEN_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut kinds = kinds.lock().unwrap();
+    let entry = kinds.entry(kind).or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+    record_current_module_signature_freshen(item_count);
+}
+
+/// Record a named signature freshening entry.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_freshen_name(kind: &'static str, name: &str, item_count: usize) {
+    let names = SIGNATURE_FRESHEN_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut names = names.lock().unwrap();
+    let key = format!("{kind}:{name}");
+    let entry = names.entry(key).or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+}
+
+fn record_current_module_signature_copy(item_count: usize) {
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_SIGNATURE_COPIES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut modules = modules.lock().unwrap();
+        let entry = modules
+            .entry(module.clone())
+            .or_insert_with(SignatureCopySite::default);
+        entry.calls += 1;
+        entry.items += item_count as u64;
+        entry.max_items = entry.max_items.max(item_count as u64);
+    });
+}
+
+fn record_current_module_signature_freshen(item_count: usize) {
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_SIGNATURE_FRESHENS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut modules = modules.lock().unwrap();
+        let entry = modules
+            .entry(module.clone())
+            .or_insert_with(SignatureCopySite::default);
+        entry.calls += 1;
+        entry.items += item_count as u64;
+        entry.max_items = entry.max_items.max(item_count as u64);
+    });
+}
+
+/// Record a per-worker in-process module-registry snapshot.
+pub(crate) fn record_module_registry_snapshot(
+    shared_entries: usize,
+    local_modules: usize,
+    local_info: usize,
+    local_aliases: usize,
+    local_fallbacks: usize,
+) {
+    let local_entries = local_modules + local_info + local_aliases + local_fallbacks;
+    REGISTRY_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+    REGISTRY_SHARED_ENTRIES_TOTAL.fetch_add(shared_entries as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_ENTRIES_TOTAL.fetch_add(local_entries as u64, Ordering::Relaxed);
+    REGISTRY_MAX_SHARED_ENTRIES.fetch_max(shared_entries as u64, Ordering::Relaxed);
+    REGISTRY_MAX_LOCAL_ENTRIES.fetch_max(local_entries as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_MODULES_TOTAL.fetch_add(local_modules as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_INFO_TOTAL.fetch_add(local_info as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_ALIASES_TOTAL.fetch_add(local_aliases as u64, Ordering::Relaxed);
+    REGISTRY_LOCAL_FALLBACKS_TOTAL.fetch_add(local_fallbacks as u64, Ordering::Relaxed);
+}
+
+/// Print compiler performance counters to stderr.
+pub fn print_report() {
+    if !enabled() {
+        return;
+    }
+
+    for kind in [
+        LazyLookupKind::Value,
+        LazyLookupKind::Type,
+        LazyLookupKind::Module,
+        LazyLookupKind::Constructor,
+        LazyLookupKind::Label,
+        LazyLookupKind::ChildComponent,
+    ] {
+        print_lazy(kind);
+    }
+    eprintln!(
+        "[compiler-counter] qualified_components hits={} misses={} registered={}",
+        QUALIFIED_COMPONENT_HITS.load(Ordering::Relaxed),
+        QUALIFIED_COMPONENT_MISSES.load(Ordering::Relaxed),
+        QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] qualified_record_labels hits={} misses={} registered={} uncached_local_root={} uncached_other={}",
+        QUALIFIED_RECORD_LABEL_HITS.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_MISSES.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_REGISTERED.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_UNCACHED_LOCAL_ROOT.load(Ordering::Relaxed),
+        QUALIFIED_RECORD_LABEL_UNCACHED_OTHER.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] type_item_resolve positive_cache_hits={} missing_cache_hits={} scans={} scanned_items={} type_items={} found={}",
+        TYPE_ITEM_RESOLVE_CACHE_HITS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_MISSING_CACHE_HITS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_SCANS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_SCANNED_ITEMS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_TYPE_ITEMS.load(Ordering::Relaxed),
+        TYPE_ITEM_RESOLVE_FOUND.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] signature_copies calls={} items={} max_items={}",
+        SIGNATURE_COPY_CALLS.load(Ordering::Relaxed),
+        SIGNATURE_COPY_ITEMS.load(Ordering::Relaxed),
+        SIGNATURE_COPY_MAX_ITEMS.load(Ordering::Relaxed),
+    );
+    print_signature_copy_sites();
+    print_signature_qualification_kinds();
+    print_signature_qualification_names();
+    print_signature_freshen_kinds();
+    print_signature_freshen_names();
+    print_module_signature_copies();
+    print_module_signature_freshens();
+    eprintln!(
+        "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
+        REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
+        REGISTRY_SHARED_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_MAX_SHARED_ENTRIES.load(Ordering::Relaxed),
+        REGISTRY_MAX_LOCAL_ENTRIES.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_MODULES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_INFO_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
+        REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
+    );
+}
+
+fn print_module_signature_copies() {
+    let Some(modules) = MODULE_SIGNATURE_COPIES.get() else {
+        return;
+    };
+
+    let mut modules = modules
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(module, site)| (module.clone(), *site))
+        .collect::<Vec<_>>();
+    modules.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (module, site) in modules.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] module_signature_copies module={} calls={} items={} max_items={}",
+            module, site.calls, site.items, site.max_items
+        );
+    }
+}
+
+fn print_module_signature_freshens() {
+    let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() else {
+        return;
+    };
+
+    let mut modules = modules
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(module, site)| (module.clone(), *site))
+        .collect::<Vec<_>>();
+    modules.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (module, site) in modules.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] module_signature_freshens module={} calls={} items={} max_items={}",
+            module, site.calls, site.items, site.max_items
+        );
+    }
+}
+
+fn print_signature_qualification_names() {
+    let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() else {
+        return;
+    };
+
+    let mut names = names
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, counters)| (name.clone(), *counters))
+        .collect::<Vec<_>>();
+    names.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (name, counters) in names.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_qualification_name name={} calls={} items={} max_items={}",
+            name, counters.calls, counters.items, counters.max_items,
+        );
+    }
+}
+
+fn print_signature_freshen_names() {
+    let Some(names) = SIGNATURE_FRESHEN_NAMES.get() else {
+        return;
+    };
+
+    let mut names = names
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, counters)| (name.clone(), *counters))
+        .collect::<Vec<_>>();
+    names.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (name, counters) in names.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_freshen_name name={} calls={} items={} max_items={}",
+            name, counters.calls, counters.items, counters.max_items,
+        );
+    }
+}
+
+fn print_signature_freshen_kinds() {
+    let Some(kinds) = SIGNATURE_FRESHEN_KINDS.get() else {
+        return;
+    };
+
+    let mut kinds = kinds
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, counters)| (*kind, *counters))
+        .collect::<Vec<_>>();
+    kinds.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (kind, counters) in kinds.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_freshen kind={} calls={} items={} max_items={}",
+            kind, counters.calls, counters.items, counters.max_items,
+        );
+    }
+}
+
+fn print_signature_qualification_kinds() {
+    let Some(kinds) = SIGNATURE_QUALIFICATION_KINDS.get() else {
+        return;
+    };
+
+    let mut kinds = kinds
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, counters)| (*kind, *counters))
+        .collect::<Vec<_>>();
+    kinds.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (kind, counters) in kinds.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_qualification kind={} calls={} items={} max_items={}",
+            kind, counters.calls, counters.items, counters.max_items,
+        );
+    }
+}
+
+fn print_signature_copy_sites() {
+    let Some(sites) = SIGNATURE_COPY_SITES.get() else {
+        return;
+    };
+
+    let mut sites = sites
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|((file, line), counters)| (*file, *line, *counters))
+        .collect::<Vec<_>>();
+    sites.sort_by(|a, b| {
+        b.2.items
+            .cmp(&a.2.items)
+            .then_with(|| b.2.calls.cmp(&a.2.calls))
+    });
+
+    for (file, line, counters) in sites.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
+            file, line, counters.calls, counters.items, counters.max_items,
+        );
+    }
+}
+
+fn print_lazy(kind: LazyLookupKind) {
+    let counters = kind.counters();
+    eprintln!(
+        "[compiler-counter] lazy_lookup kind={} hits={} misses={} scans={} scanned_items={} result_items={}",
+        kind.name(),
+        counters.hits.load(Ordering::Relaxed),
+        counters.misses.load(Ordering::Relaxed),
+        counters.scans.load(Ordering::Relaxed),
+        counters.scanned_items.load(Ordering::Relaxed),
+        counters.results.load(Ordering::Relaxed),
+    );
+}

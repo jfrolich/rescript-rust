@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
-fn free_vars(ctx: &TypeContext<'_>, ty: TypeExprRef) -> HashSet<TypeExprRef> {
+fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
     let mut result = HashSet::new();
     let mut visited = HashSet::new();
     free_vars_rec(ctx, ty, &mut result, &mut visited);
@@ -62,7 +62,7 @@ fn predef_exception_ident(name: &str) -> Option<Ident> {
 }
 
 fn free_vars_rec(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: TypeExprRef,
     result: &mut HashSet<TypeExprRef>,
     visited: &mut HashSet<TypeExprRef>,
@@ -89,7 +89,7 @@ fn free_vars_rec(
 /// Existentials are type variables that appear in the args but not in the result type.
 /// Matches OCaml's Datarepr.constructor_existentials.
 pub fn constructor_existentials(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     cstr_args: &[TypeExprRef],
     cd_res: Option<TypeExprRef>,
 ) -> Vec<TypeExprRef> {
@@ -427,14 +427,12 @@ impl Clone for Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(
-                self.local_module_aliases_cache.borrow().clone(),
-            ),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache
-                    .borrow()
-                    .clone(),
-            ),
+            // These are Rust-only memo tables derived from the binding tables.
+            // Do not duplicate them when snapshotting environments for unifier
+            // state; OCaml Env snapshots carry semantic bindings, not copied
+            // memoized lookup results.
+            local_module_aliases_cache: RefCell::new(None),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -491,14 +489,12 @@ impl Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
-            local_module_aliases_cache: RefCell::new(
-                self.local_module_aliases_cache.borrow().clone(),
-            ),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(
-                self.module_path_requires_env_scoped_cache_cache
-                    .borrow()
-                    .clone(),
-            ),
+            // These are Rust-only memo tables derived from the binding tables.
+            // Do not duplicate them when snapshotting environments for unifier
+            // state; OCaml Env snapshots carry semantic bindings, not copied
+            // memoized lookup results.
+            local_module_aliases_cache: RefCell::new(None),
+            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -989,6 +985,17 @@ impl Env {
         self.modules.find_by_ident(id).is_some()
     }
 
+    pub(crate) fn lookup_module_ident_exact(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
+        // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
+        // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
+        // own name fallback in env.ml:1000-1007; exact paths must not resolve to
+        // a local/opened same-name module.
+        self.modules
+            .find_by_ident(id)
+            .map(|m| m.as_ref())
+            .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
+    }
+
     pub(crate) fn find_module_same(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
         // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
         // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
@@ -1011,6 +1018,20 @@ impl Env {
         };
         let components = self.module_components.find_by_ident(id)?;
         Some(f(components.as_ref()))
+    }
+
+    pub(crate) fn local_module_components_arc(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<super::env_lazy::StoredModuleComponents>> {
+        let Path::Pident(id) = path else {
+            return None;
+        };
+        // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
+        // component table and shares the forced lazy value. Return the stored
+        // Arc directly so child component maps keep the same thunk instead of
+        // deep-cloning its captured seed environment.
+        self.module_components.find_by_ident(id).cloned()
     }
 
     /// Find a module by path.
@@ -1089,7 +1110,7 @@ impl Env {
                 if normalized_prefix == **prefix {
                     path.clone()
                 } else {
-                    Path::Pdot(Box::new(normalized_prefix), name.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(normalized_prefix), name.clone(), *pos)
                 }
             }
             Path::Pident(_) => path.clone(),
@@ -1108,7 +1129,7 @@ impl Env {
                 if p_norm == **p {
                     path.clone()
                 } else {
-                    Path::Pdot(Box::new(p_norm), s.clone(), *pos)
+                    Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
                 }
             }
             _ => path.clone(),
@@ -1270,7 +1291,7 @@ impl Default for Env {
 /// - Defines abstract types (int, float, string, char, bigint, etc.)
 /// - Defines variant types with constructors (bool, unit, option, list, result)
 /// - Registers constructors in the environment so they can be looked up
-pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
+pub fn initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
     // Helper: create an abstract type declaration
@@ -1304,7 +1325,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
     let add_type_with_constrs = |env: &mut Env,
                                  id: Ident,
                                  decl: TypeDeclaration,
-                                 ctx: &TypeContext<'_>| {
+                                 ctx: &TypeContext| {
         let type_path = Path::pident(id.clone());
 
         // Extract constructors/labels from predef declarations so they are
@@ -2183,7 +2204,7 @@ pub fn initial_env(ctx: &TypeContext<'_>) -> Env {
 /// Helper to add a binary primitive operator.
 fn add_binary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     arg1_ty: TypeExprRef,
@@ -2217,7 +2238,7 @@ fn add_binary_primitive(
 /// Helper to add a unary primitive operator
 fn add_unary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     arg_ty: TypeExprRef,
@@ -2266,7 +2287,7 @@ fn add_constant_value(env: &mut Env, name: &str, ty: TypeExprRef) {
 /// occurrence is a separate physical node.
 fn add_mono_binary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ty_path: &Path,
@@ -2281,7 +2302,7 @@ fn add_mono_binary_primitive(
 /// nullary type constructor. Creates distinct type nodes for each position.
 fn add_mono_unary_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ty_path: &Path,
@@ -2294,7 +2315,7 @@ fn add_mono_unary_primitive(
 /// Helper to add a polymorphic binary operator: ('a, 'a) => 'a
 /// Creates a single shared Tvar for all three positions, matching OCaml behavior
 /// where Pervasives declares e.g. `external "+": ('a, 'a) => 'a = "%add"`
-fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
+fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
     // Create a SINGLE Tvar shared across all three positions
     let alpha = ctx.new_generic_var(None);
     add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, alpha);
@@ -2304,7 +2325,7 @@ fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, p
 /// Creates a single shared Tvar for the two arg positions
 fn add_poly_cmp_primitive(
     env: &mut Env,
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     name: &str,
     prim_name: &str,
     ret_ty: TypeExprRef,
@@ -2314,7 +2335,7 @@ fn add_poly_cmp_primitive(
 }
 
 /// Helper to add a polymorphic unary operator: 'a => 'a
-fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext<'_>, name: &str, prim_name: &str) {
+fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
     let alpha = ctx.new_generic_var(None);
     add_unary_primitive(env, ctx, name, prim_name, alpha, alpha);
 }

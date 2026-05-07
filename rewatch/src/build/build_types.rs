@@ -145,12 +145,14 @@ impl Display for SourceType {
 pub struct StoredStructureAst {
     pub arena: ParseArena,
     pub structure: Structure,
+    pub source_len: usize,
 }
 
 #[derive(Debug)]
 pub struct StoredSignatureAst {
     pub arena: ParseArena,
     pub signature: Signature,
+    pub source_len: usize,
 }
 
 #[derive(Clone)]
@@ -497,8 +499,20 @@ impl BuildCommandState {
         self.in_memory_deps.lock().unwrap().get(key).cloned()
     }
 
-    pub fn get_stored_ast(&self, key: &str) -> Option<StoredAst> {
-        self.stored_asts.lock().unwrap().get(key).cloned()
+    /// Clone the complete parse-phase dependency table once for a dependency
+    /// resolution pass. In-process builds resolve all module deps after parsing,
+    /// so the table is stable and parallel workers should not contend on the
+    /// mutex for every module lookup.
+    pub fn snapshot_in_memory_deps(&self) -> AHashMap<String, Dependencies> {
+        self.in_memory_deps.lock().unwrap().clone()
+    }
+
+    /// Clone the parse-phase AST table once for an in-process compile wave.
+    /// Stored AST payloads are already behind `Arc`, so this keeps worker
+    /// lookups immutable and avoids a contended mutex plus per-lookup Arc
+    /// cloning while modules compile in parallel.
+    pub fn snapshot_stored_asts(&self) -> AHashMap<String, StoredAst> {
+        self.stored_asts.lock().unwrap().clone()
     }
 
     pub fn module_name_package_pairs(&self) -> Vec<(String, String)> {

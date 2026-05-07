@@ -22,7 +22,7 @@ path = "src/bin/bsc.rs"
 
 [dependencies]
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 
 # Error handling

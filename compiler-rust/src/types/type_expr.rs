@@ -243,14 +243,138 @@ pub enum TypeDesc {
 /// A reference to a type expression.
 ///
 /// In the arena-based design, this is an index or pointer.
-/// For now, we use a simple newtype wrapper.
+/// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
+/// reduces typedtree and type descriptor memory traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeExprRef(pub usize);
+pub struct TypeExprRef(pub u32);
 
 impl TypeExprRef {
     /// Create a null reference (for placeholder purposes).
     pub fn null() -> Self {
         TypeExprRef(0)
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("type arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Scratch map keyed by dense `TypeExprRef` arena indices.
+///
+/// This preserves physical-identity semantics: the key is still the exact
+/// `TypeExprRef`, matching the OCaml compiler's type-node identity model. The
+/// storage avoids hashing for short-lived copy/substitution caches.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeExprRefMap<T> {
+    offset: u32,
+    values: Vec<Option<T>>,
+}
+
+impl<T> TypeExprRefMap<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            offset: 0,
+            values: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, key: TypeExprRef) -> Option<&T> {
+        let idx = key.0.checked_sub(self.offset)? as usize;
+        self.values.get(idx)?.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, key: TypeExprRef, value: T) -> Option<T> {
+        if self.values.is_empty() {
+            self.offset = key.0;
+            self.values.push(Some(value));
+            return None;
+        }
+
+        if key.0 < self.offset {
+            let prepend = (self.offset - key.0) as usize;
+            let mut values = Vec::with_capacity(self.values.len() + prepend);
+            values.resize_with(prepend, || None);
+            values.append(&mut self.values);
+            self.values = values;
+            self.offset = key.0;
+        }
+
+        let idx = (key.0 - self.offset) as usize;
+        if idx >= self.values.len() {
+            self.values.resize_with(idx + 1, || None);
+        }
+        self.values[idx].replace(value)
+    }
+}
+
+impl<T> Default for TypeExprRefMap<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Scratch set keyed by dense `TypeExprRef` arena indices.
+///
+/// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
+/// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
+/// type traversals without changing OCaml physical-sharing semantics.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeExprRefSet {
+    offset: u32,
+    values: Vec<u8>,
+}
+
+impl TypeExprRefSet {
+    pub(crate) fn new() -> Self {
+        Self {
+            offset: 0,
+            values: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
+        if self.values.is_empty() {
+            self.offset = key.0;
+            self.values.push(1);
+            return true;
+        }
+
+        if key.0 < self.offset {
+            let prepend = (self.offset - key.0) as usize;
+            let mut values = Vec::with_capacity(self.values.len() + prepend);
+            values.resize(prepend, 0);
+            values.append(&mut self.values);
+            self.values = values;
+            self.offset = key.0;
+        }
+
+        let idx = (key.0 - self.offset) as usize;
+        if idx >= self.values.len() {
+            self.values.resize(idx + 1, 0);
+        }
+
+        let slot = &mut self.values[idx];
+        if *slot == 0 {
+            *slot = 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for TypeExprRefSet {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -293,7 +417,14 @@ pub enum Commutable {
 
 /// Reference to a commutable flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CommutableRef(pub usize);
+pub struct CommutableRef(pub u32);
+
+impl CommutableRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("commutable arena index exceeds u32::MAX"))
+    }
+}
 
 /// Abbreviation memo for type expansion caching.
 #[derive(Debug, Clone)]
@@ -314,12 +445,22 @@ pub enum AbbrevMemo {
 
 /// Reference to an abbreviation memo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AbbrevMemoRef(pub usize);
+pub struct AbbrevMemoRef(pub u32);
 
 impl AbbrevMemoRef {
     /// Create a nil memo reference.
     pub fn nil() -> Self {
         AbbrevMemoRef(0)
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -328,7 +469,7 @@ pub type ObjectName = Option<(Path, Vec<TypeExprRef>)>;
 
 /// Object name reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectNameRef(pub usize);
+pub struct ObjectNameRef(pub u32);
 
 /// Field kind for object fields.
 #[derive(Debug, Clone)]
@@ -343,7 +484,14 @@ pub enum FieldKind {
 
 /// Reference to a field kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldKindRef(pub usize);
+pub struct FieldKindRef(pub u32);
+
+impl FieldKindRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("field kind arena index exceeds u32::MAX"))
+    }
+}
 
 /// Row description for polymorphic variants.
 #[derive(Debug, Clone)]
@@ -382,17 +530,27 @@ pub enum RowField {
 
 /// Reference to a row field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowFieldRef(pub usize);
+pub struct RowFieldRef(pub u32);
 
 impl RowFieldRef {
     /// Create a null reference.
     pub fn null() -> Self {
-        RowFieldRef(usize::MAX)
+        RowFieldRef(u32::MAX)
     }
 
     /// Check if this is a null reference.
     pub fn is_null(&self) -> bool {
-        self.0 == usize::MAX
+        self.0 == u32::MAX
+    }
+
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        Self(u32::try_from(idx).expect("row field arena index exceeds u32::MAX"))
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
     }
 }
 

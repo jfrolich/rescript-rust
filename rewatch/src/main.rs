@@ -92,9 +92,16 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             });
             match build_result {
                 Err(e) => Err(e),
-                Ok(_) => {
+                Ok(build_state) => {
                     if let Some(args_after_build) = (*build_args.after_build).clone() {
-                        cmd::run(args_after_build)
+                        drop(build_state);
+                        cmd::run(args_after_build);
+                    } else {
+                        // `rescript build` is a one-shot command and `main` exits
+                        // immediately after this match. Dropping the full build graph
+                        // walks every package/module/AST and shows up in clean-build
+                        // wall time; let the OS reclaim it at process exit instead.
+                        std::mem::forget(build_state);
                     }
                     Ok(())
                 }
@@ -146,7 +153,11 @@ fn run_main(otel_enabled: bool) -> Result<()> {
 
 fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::BuildMode) {
     if build_mode.is_in_process() {
-        rayon::ThreadPoolBuilder::new()
+        let mut builder = rayon::ThreadPoolBuilder::new();
+        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            builder = builder.num_threads(default_in_process_threads());
+        }
+        builder
             .thread_name(|index| format!("rewatch-in-process-worker-{index}"))
             .stack_size(IN_PROCESS_STACK_SIZE)
             .build_global()
@@ -154,11 +165,19 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
     }
 }
 
-// compiler-rust/src/bin/bsc.rs:119 uses a 512 MB subprocess stack for one
-// compiler invocation. In-process builds run the same pipeline in several
-// workers, so keep more headroom than the old 256 MB worker stack without
-// multiplying subprocess-sized stacks across the whole build.
-const IN_PROCESS_STACK_SIZE: usize = 384 * 1024 * 1024;
+fn default_in_process_threads() -> usize {
+    let logical = num_cpus::get().max(1);
+    let target = logical.saturating_mul(3);
+    // In-process compilation publishes signatures before JS is emitted so
+    // dependents can type-check early. Those workers can later block before JS
+    // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
+    // runnable modules stranded behind parked workers. A 24-worker cap kept
+    // the Tella clean build faster than the previous 64-worker cap while
+    // reducing scheduler pressure and worker stack reservations.
+    target.min(24).max(logical)
+}
+
+const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn run_with_in_process_stack<T, F>(build_mode: rescript::build::build_types::BuildMode, f: F) -> T
 where

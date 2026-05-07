@@ -44,6 +44,8 @@ pub mod cache;
 pub mod cmi;
 pub mod config;
 pub mod context;
+/// Cached debug environment flags.
+pub mod debug_flags;
 pub mod diagnostics;
 pub mod driver;
 pub mod ident;
@@ -53,7 +55,11 @@ pub mod lambda;
 pub mod location;
 pub mod parse_arena;
 pub mod parser;
+/// Optional aggregate compiler performance counters.
+pub mod perf_counters;
 pub mod raw_lambda;
+/// Source text decoding helpers.
+pub mod source_text;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

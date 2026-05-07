@@ -7,7 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use ahash::AHashMap as HashMap;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -17,6 +17,9 @@ use super::decl::{
     ModuleDeclaration, Signature, SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
 };
 use super::path::Path;
+
+const ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS: usize = 32;
+const ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES: usize = 2;
 
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
@@ -30,12 +33,13 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
-fn add_type_constructors(
-    constructors: &mut HashMap<String, Vec<ConstructorDescription>>,
+fn build_matching_type_constructors(
+    out: &mut Vec<ConstructorDescription>,
     access_path: &Path,
     type_name: &str,
     decl: &TypeDeclaration,
-    ctx: &super::context::TypeContext<'_>,
+    constructor_name: &str,
+    ctx: &super::context::TypeContext,
 ) {
     let super::decl::TypeKind::TypeVariant(cstrs) = &decl.type_kind else {
         return;
@@ -67,6 +71,15 @@ fn add_type_constructors(
         } else {
             ConstructorTag::CstrBlock(block_idx)
         };
+
+        if cd.cd_id.name() != constructor_name {
+            if is_constant {
+                const_idx += 1;
+            } else {
+                block_idx += 1;
+            }
+            continue;
+        }
 
         let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
             super::decl::ConstructorArguments::CstrTuple(args) => {
@@ -148,29 +161,24 @@ fn add_type_constructors(
         } else {
             ctx.new_generic_constr(type_path.clone(), decl.type_params.clone())
         };
-        constructors
-            .entry(cd.cd_id.name().to_string())
-            .or_insert_with(Vec::new)
-            .insert(
-                0,
-                ConstructorDescription {
-                    cstr_name: cd.cd_id.name().to_string(),
-                    cstr_res,
-                    cstr_existentials: vec![],
-                    cstr_args,
-                    cstr_arity,
-                    cstr_tag: tag,
-                    cstr_consts: num_consts,
-                    cstr_nonconsts: num_nonconsts,
-                    cstr_generalized: cd.cd_res.is_some(),
-                    cstr_private: decl.type_private,
-                    cstr_loc: cd.cd_loc,
-                    cstr_attributes: super::decl::constructor_description_attrs_for_variant(
-                        cstrs, cd,
-                    ),
-                    cstr_inlined,
-                },
-            );
+        out.insert(
+            0,
+            ConstructorDescription {
+                cstr_name: cd.cd_id.name().to_string(),
+                cstr_res,
+                cstr_existentials: vec![],
+                cstr_args,
+                cstr_arity,
+                cstr_tag: tag,
+                cstr_consts: num_consts,
+                cstr_nonconsts: num_nonconsts,
+                cstr_generalized: cd.cd_res.is_some(),
+                cstr_private: decl.type_private,
+                cstr_loc: cd.cd_loc,
+                cstr_attributes: super::decl::constructor_description_attrs_for_variant(cstrs, cd),
+                cstr_inlined,
+            },
+        );
         if is_constant {
             const_idx += 1;
         } else {
@@ -179,20 +187,27 @@ fn add_type_constructors(
     }
 }
 
-fn add_type_labels(
-    labels_by_name: &mut HashMap<String, Vec<LabelDescription>>,
+fn build_matching_type_labels(
+    out: &mut Vec<LabelDescription>,
     access_path: &Path,
     type_name: &str,
     decl: &TypeDeclaration,
-    ctx: &super::context::TypeContext<'_>,
+    label_name: &str,
+    ctx: &super::context::TypeContext,
 ) {
     let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
         return;
     };
 
-    let type_path = Path::pdot(access_path.clone(), type_name);
-    let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
+    let mut res_ty = None;
     for (pos, ld) in labels.iter().enumerate() {
+        if ld.ld_id.name() != label_name {
+            continue;
+        }
+        let res_ty = *res_ty.get_or_insert_with(|| {
+            let type_path = Path::pdot(access_path.clone(), type_name);
+            ctx.new_generic_constr(type_path, decl.type_params.clone())
+        });
         let label_desc = LabelDescription {
             lbl_name: ld.ld_id.name().to_string(),
             lbl_res: res_ty,
@@ -206,23 +221,143 @@ fn add_type_labels(
             lbl_loc: ld.ld_loc,
             lbl_attributes: ld.ld_attributes.clone(),
         };
-        labels_by_name
-            .entry(ld.ld_id.name().to_string())
-            .or_insert_with(Vec::new)
-            .insert(0, label_desc);
+        out.insert(0, label_desc);
     }
+}
+
+fn build_constructors_for_name(
+    access_path: &Path,
+    signature: &[SignatureItem],
+    constructor_name: &str,
+    ctx: &super::context::TypeContext,
+) -> Vec<ConstructorDescription> {
+    let mut constructors = Vec::new();
+    let mut runtime_pos = 0i32;
+
+    for item in signature {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigType(id, decl, _) => {
+                build_matching_type_constructors(
+                    &mut constructors,
+                    access_path,
+                    id.name(),
+                    decl,
+                    constructor_name,
+                    ctx,
+                );
+            }
+            SignatureItem::SigTypext(id, ext, _) => {
+                let ext_slot = runtime_pos;
+                runtime_pos += 1;
+                if id.name() != constructor_name {
+                    continue;
+                }
+                let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
+                let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
+                    super::decl::ConstructorArguments::CstrTuple(args) => {
+                        (args.clone(), args.len() as i32, None)
+                    }
+                    super::decl::ConstructorArguments::CstrRecord(labels) => {
+                        let inline_params = super::typecore::inline_record_type_params(
+                            ctx,
+                            &ext.ext_type_params,
+                            labels,
+                        );
+                        let inline_path = ext_path.clone();
+                        let inline_constr =
+                            ctx.new_generic_constr(inline_path.clone(), inline_params.clone());
+                        let inline_decl = TypeDeclaration {
+                            type_params: inline_params.clone(),
+                            type_arity: inline_params.len() as i32,
+                            type_kind: super::decl::TypeKind::TypeRecord(
+                                labels.clone(),
+                                super::decl::RecordRepresentation::RecordExtension,
+                            ),
+                            type_private: ext.ext_private,
+                            type_manifest: None,
+                            type_variance: inline_params
+                                .iter()
+                                .map(|_| super::variance::Variance::full())
+                                .collect(),
+                            type_newtype_level: None,
+                            type_loc: ext.ext_loc,
+                            type_attributes: vec![],
+                            type_immediate: false,
+                            type_unboxed: super::decl::UnboxedStatus::default(),
+                            type_inlined_types: vec![],
+                            type_path: None,
+                        };
+                        (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+                    }
+                };
+                let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
+                    &ext.ext_type_path,
+                    signature,
+                    access_path,
+                );
+                let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
+                constructors.insert(
+                    0,
+                    ConstructorDescription {
+                        cstr_name: id.name().to_string(),
+                        cstr_res,
+                        cstr_existentials: vec![],
+                        cstr_args,
+                        cstr_arity,
+                        cstr_tag: ConstructorTag::CstrExtension(ext_path),
+                        cstr_consts: -1,
+                        cstr_nonconsts: -1,
+                        cstr_generalized: ext.ext_ret_type.is_some(),
+                        cstr_private: ext.ext_private,
+                        cstr_loc: ext.ext_loc,
+                        cstr_attributes: ext.ext_attributes.clone(),
+                        cstr_inlined,
+                    },
+                );
+            }
+            SignatureItem::SigModule(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
+        }
+    }
+
+    constructors
+}
+
+fn build_labels_for_name(
+    access_path: &Path,
+    signature: &[SignatureItem],
+    label_name: &str,
+    ctx: &super::context::TypeContext,
+) -> Vec<LabelDescription> {
+    let mut labels = Vec::new();
+
+    for item in signature {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            build_matching_type_labels(&mut labels, access_path, id.name(), decl, label_name, ctx);
+        }
+    }
+
+    labels
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
-    values: Arc<HashMap<String, (usize, usize)>>,
-    constructors: Arc<HashMap<String, Vec<ConstructorDescription>>>,
-    labels: Arc<HashMap<String, Vec<LabelDescription>>>,
-    types: Arc<HashMap<String, usize>>,
-    modules: Arc<HashMap<String, (usize, usize)>>,
-    modtypes: Arc<HashMap<String, usize>>,
+    values: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    values_indexed: Arc<Cell<bool>>,
+    constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
+    labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
+    types: Arc<RefCell<HashMap<String, Option<usize>>>>,
+    modules: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    compiler_counters_enabled: bool,
     component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
@@ -230,18 +365,22 @@ pub(crate) struct QualifiedModuleComponents {
     // table. Rust clones component views out of the global cache before
     // running callbacks, so the forced-declaration memo must be shared by
     // those clones to preserve the same lazy identifier-renaming order.
-    qualified_modules: Arc<RefCell<HashMap<String, (Ident, ModuleDeclaration)>>>,
+    qualified_modules: Arc<RefCell<HashMap<String, (Ident, Arc<ModuleDeclaration>)>>>,
     qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
-    child_components: Arc<HashMap<String, (usize, Arc<StoredModuleComponents>)>>,
+    // OCaml keeps `comp_components` lazy (compiler/ml/env.ml:1573-1578).
+    // Cache forced child component thunks by name, including misses, so a
+    // lookup for one child does not materialize every sibling in the parent
+    // signature.
+    child_components: Arc<RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>>,
+    value_source_prefix: Option<Arc<Path>>,
 }
 
-fn build_child_components_from_signature(
+fn build_child_component_from_signature(
     access_path: &Path,
-    signature: &Signature,
-) -> HashMap<String, (usize, Arc<StoredModuleComponents>)> {
-    let mut child_components = HashMap::new();
+    signature: &Arc<Signature>,
+    child_name: &str,
+) -> Option<(usize, Arc<StoredModuleComponents>)> {
     let mut working_env = super::env::Env::empty();
-    let parent_sig = Arc::new(signature.clone());
     let mut runtime_pos = 0usize;
 
     // OCaml compiler/ml/env.ml:1530-1578 computes component paths once,
@@ -250,7 +389,7 @@ fn build_child_components_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    for item in signature {
+    for item in signature.iter() {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
@@ -271,14 +410,15 @@ fn build_child_components_from_signature(
                     md.clone(),
                     md.clone(),
                     child_access_path,
-                    Some((access_path.clone(), parent_sig.clone())),
+                    Some((access_path.clone(), signature.clone())),
                 );
-                if let Some(stored) = working_env
-                    .with_local_module_components(&Path::pident(id.clone()), |stored| {
-                        Arc::new(stored.clone())
-                    })
-                {
-                    child_components.insert(id.name().to_string(), (runtime_pos, stored));
+                if id.name() == child_name {
+                    if let Some(stored) =
+                        working_env.local_module_components_arc(&Path::pident(id.clone()))
+                    {
+                        return Some((runtime_pos, stored));
+                    }
+                    return None;
                 }
                 runtime_pos += 1;
             }
@@ -289,54 +429,64 @@ fn build_child_components_from_signature(
         }
     }
 
-    child_components
+    None
 }
 
 impl QualifiedModuleComponents {
     pub(crate) fn new(
         access_path: Path,
         signature: Signature,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Self {
-        Self::new_with_child_components(access_path, signature, HashMap::new(), ctx)
+        Self::new_with_child_components_arc(access_path, Arc::new(signature), HashMap::new(), ctx)
     }
 
     pub(crate) fn new_with_child_components(
         access_path: Path,
         signature: Signature,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        ctx: &super::context::TypeContext<'_>,
+        ctx: &super::context::TypeContext,
     ) -> Self {
-        let child_components = if child_components.is_empty() {
-            build_child_components_from_signature(&access_path, &signature)
-        } else {
-            child_components
-        };
-        let mut values = HashMap::new();
-        let mut constructors = HashMap::new();
-        let mut labels = HashMap::new();
-        let mut types = HashMap::new();
-        let mut modules = HashMap::new();
-        let mut modtypes = HashMap::new();
+        Self::new_with_child_components_arc(access_path, Arc::new(signature), child_components, ctx)
+    }
+
+    pub(crate) fn new_with_child_components_arc(
+        access_path: Path,
+        signature: Arc<Signature>,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        ctx: &super::context::TypeContext,
+    ) -> Self {
+        Self::new_with_child_components_arc_and_value_source_prefix(
+            access_path,
+            signature,
+            child_components,
+            None,
+            ctx,
+        )
+    }
+
+    pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
+        access_path: Path,
+        signature: Arc<Signature>,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        value_source_prefix: Option<Path>,
+        ctx: &super::context::TypeContext,
+    ) -> Self {
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
-        for (idx, item) in signature.iter().enumerate() {
+        for item in signature.iter() {
             match item {
-                SignatureItem::SigValue(id, desc) => {
-                    values.insert(id.name().to_string(), (idx, runtime_pos));
+                SignatureItem::SigValue(_, desc) => {
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                         runtime_pos += 1;
                     }
                 }
-                SignatureItem::SigType(id, _, _) => {
-                    types.insert(id.name().to_string(), idx);
-                }
+                SignatureItem::SigType(_, _, _) => {}
                 SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModule(id, _, _) => {
-                    modules.insert(id.name().to_string(), (idx, runtime_pos));
                     if let SignatureItem::SigModule(_, md, _) = item {
                         if let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
                         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
@@ -358,14 +508,11 @@ impl QualifiedModuleComponents {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(id, mtd) => {
-                    modtypes.insert(id.name().to_string(), idx);
                     let mut component_mtd = mtd.clone();
                     // OCaml compiler/ml/env.ml:1530 and 1581-1585 apply the
-                    // `prefix_idents` substitution to component modtypes while
-                    // keeping the original declaration in the evolving env.
-                    // Keep that split so forced components consume the same
-                    // fresh identifiers without changing the raw signature used
-                    // by package/include checks.
+                    // `prefix_idents` substitution while building component
+                    // modtypes. Keep this eager side effect because it consumes
+                    // fresh identifiers in canonical typedtree order.
                     crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
                         &mut component_mtd,
                         &signature,
@@ -378,114 +525,26 @@ impl QualifiedModuleComponents {
             }
         }
 
-        // OCaml compiler/ml/env.ml:1542-1556 builds `comp_constrs`
-        // while forcing module components, using the selected component
-        // path from env.ml:1530-1538. Later env.ml:1132-1137 reads this
-        // table directly for qualified constructor lookup.
-        let mut runtime_pos = 0i32;
-        for item in &signature {
-            match item {
-                SignatureItem::SigValue(_, desc) => {
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                        runtime_pos += 1;
-                    }
-                }
-                SignatureItem::SigType(id, decl, _) => {
-                    add_type_constructors(&mut constructors, &access_path, id.name(), decl, ctx);
-                    add_type_labels(&mut labels, &access_path, id.name(), decl, ctx);
-                }
-                SignatureItem::SigTypext(id, ext, _) => {
-                    let ext_slot = runtime_pos;
-                    runtime_pos += 1;
-                    let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
-                    let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
-                        super::decl::ConstructorArguments::CstrTuple(args) => {
-                            (args.clone(), args.len() as i32, None)
-                        }
-                        super::decl::ConstructorArguments::CstrRecord(labels) => {
-                            let inline_params = super::typecore::inline_record_type_params(
-                                ctx,
-                                &ext.ext_type_params,
-                                labels,
-                            );
-                            let inline_constr =
-                                ctx.new_generic_constr(ext_path.clone(), inline_params.clone());
-                            let inline_decl = TypeDeclaration {
-                                type_params: inline_params.clone(),
-                                type_arity: inline_params.len() as i32,
-                                type_kind: super::decl::TypeKind::TypeRecord(
-                                    labels.clone(),
-                                    super::decl::RecordRepresentation::RecordExtension,
-                                ),
-                                type_private: ext.ext_private,
-                                type_manifest: None,
-                                type_variance: inline_params
-                                    .iter()
-                                    .map(|_| super::variance::Variance::full())
-                                    .collect(),
-                                type_newtype_level: None,
-                                type_loc: ext.ext_loc,
-                                type_attributes: vec![],
-                                type_immediate: false,
-                                type_unboxed: super::decl::UnboxedStatus::default(),
-                                type_inlined_types: vec![],
-                                type_path: None,
-                            };
-                            (vec![inline_constr], 1, Some(Box::new(inline_decl)))
-                        }
-                    };
-                    let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
-                        &ext.ext_type_path,
-                        &signature,
-                        &access_path,
-                    );
-                    let cstr_res =
-                        ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
-                    constructors
-                        .entry(id.name().to_string())
-                        .or_insert_with(Vec::new)
-                        .insert(
-                            0,
-                            ConstructorDescription {
-                                cstr_name: id.name().to_string(),
-                                cstr_res,
-                                cstr_existentials: vec![],
-                                cstr_args,
-                                cstr_arity,
-                                cstr_tag: ConstructorTag::CstrExtension(ext_path),
-                                cstr_consts: -1,
-                                cstr_nonconsts: -1,
-                                cstr_generalized: ext.ext_ret_type.is_some(),
-                                cstr_private: ext.ext_private,
-                                cstr_loc: ext.ext_loc,
-                                cstr_attributes: ext.ext_attributes.clone(),
-                                cstr_inlined,
-                            },
-                        );
-                }
-                SignatureItem::SigModule(_, _, _) => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
-                SignatureItem::SigClass => {
-                    runtime_pos += 1;
-                }
-            }
-        }
+        let child_components = child_components
+            .into_iter()
+            .map(|(name, component)| (name, Some(component)))
+            .collect();
 
         Self {
             access_path: Arc::new(access_path),
-            signature: Arc::new(signature),
-            values: Arc::new(values),
-            constructors: Arc::new(constructors),
-            labels: Arc::new(labels),
-            types: Arc::new(types),
-            modules: Arc::new(modules),
-            modtypes: Arc::new(modtypes),
+            signature,
+            values: Arc::new(RefCell::new(HashMap::new())),
+            values_indexed: Arc::new(Cell::new(false)),
+            constructors: Arc::new(RefCell::new(HashMap::new())),
+            labels: Arc::new(RefCell::new(HashMap::new())),
+            types: Arc::new(RefCell::new(HashMap::new())),
+            modules: Arc::new(RefCell::new(HashMap::new())),
+            compiler_counters_enabled: ctx.compiler_counters_enabled(),
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
-            child_components: Arc::new(child_components),
+            child_components: Arc::new(RefCell::new(child_components)),
+            value_source_prefix: value_source_prefix.map(Arc::new),
         }
     }
 
@@ -497,28 +556,421 @@ impl QualifiedModuleComponents {
         self.signature.as_slice()
     }
 
+    pub(crate) fn signature_arc(&self) -> Arc<Signature> {
+        self.signature.clone()
+    }
+
     pub(crate) fn cloned_signature(&self) -> Signature {
         self.signature.as_ref().clone()
     }
 
+    fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
+        if let Some(cached) = self.values.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            }
+            return cached;
+        }
+        if self.values_indexed.get() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            }
+            return None;
+        }
+
+        if self.signature.len() >= ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS
+            && self.values.borrow().len() >= ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES
+        {
+            return self.build_value_index_and_get(name);
+        }
+
+        // OCaml compiler/ml/env.ml:1513-1514 stores component tables lazily.
+        // Keep the canonical signature immutable and force only this env.ml:1132
+        // value lookup bucket instead of allocating indexes for every sibling.
+        let mut found = None;
+        let mut runtime_pos = 0usize;
+        for (idx, item) in self.signature.iter().enumerate() {
+            match item {
+                SignatureItem::SigValue(id, desc) => {
+                    if id.name() == name {
+                        found = Some((idx, runtime_pos));
+                    }
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(_, _, _) => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigType(_, _, _)
+                | SignatureItem::SigModtype(_, _)
+                | SignatureItem::SigClassType => {}
+            }
+        }
+        self.values.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Value,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
+        found
+    }
+
+    fn build_value_index_and_get(&self, name: &str) -> Option<(usize, usize)> {
+        let mut values = self.values.borrow_mut();
+        if !self.values_indexed.get() {
+            let mut runtime_pos = 0usize;
+            let mut result_items = 0usize;
+            for (idx, item) in self.signature.iter().enumerate() {
+                match item {
+                    SignatureItem::SigValue(id, desc) => {
+                        values.insert(id.name().to_string(), Some((idx, runtime_pos)));
+                        result_items += 1;
+                        if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                            runtime_pos += 1;
+                        }
+                    }
+                    SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigModule(_, _, _) => {
+                        runtime_pos += 1;
+                    }
+                    SignatureItem::SigType(_, _, _)
+                    | SignatureItem::SigModtype(_, _)
+                    | SignatureItem::SigClassType => {}
+                }
+            }
+            self.values_indexed.set(true);
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_scan(
+                    crate::perf_counters::LazyLookupKind::Value,
+                    self.signature.len(),
+                    result_items,
+                );
+            }
+        }
+        values.get(name).cloned().unwrap_or(None)
+    }
+
+    fn cached_type_index(&self, name: &str) -> Option<usize> {
+        if let Some(cached) = self.types.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
+            }
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1542 stores type declarations in the
+        // component table, but the table itself is behind EnvLazy. Defer this
+        // per-name index until a type lookup actually asks for it.
+        let mut found = None;
+        for (idx, item) in self.signature.iter().enumerate() {
+            if let SignatureItem::SigType(id, _, _) = item
+                && id.name() == name
+            {
+                found = Some(idx);
+            }
+        }
+        self.types.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Type,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
+        found
+    }
+
+    fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
+        if let Some(cached) = self.modules.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
+            }
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1568 and 1573-1578 expose module
+        // declarations/components through separate lazy thunks. Force only the
+        // requested child name here; the full shared signature stays untouched.
+        let mut found = None;
+        let mut runtime_pos = 0usize;
+        for (idx, item) in self.signature.iter().enumerate() {
+            match item {
+                SignatureItem::SigValue(_, desc) => {
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(id, _, _) => {
+                    if id.name() == name {
+                        found = Some((idx, runtime_pos));
+                    }
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigType(_, _, _)
+                | SignatureItem::SigModtype(_, _)
+                | SignatureItem::SigClassType => {}
+            }
+        }
+        self.modules.borrow_mut().insert(name.to_string(), found);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Module,
+                self.signature.len(),
+                usize::from(found.is_some()),
+            );
+        }
+        found
+    }
+
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
-        let (idx, runtime_pos) = *self.values.get(name)?;
+        let (idx, runtime_pos) = self.cached_value_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigValue(id, desc) => Some((runtime_pos, id, desc)),
             _ => None,
         }
     }
 
-    pub(crate) fn lookup_constructors(&self, name: &str) -> Option<&[ConstructorDescription]> {
-        self.constructors.get(name).map(Vec::as_slice)
+    fn value_mentions_local_component_type(
+        &self,
+        desc: &ValueDescription,
+        ctx: &super::context::TypeContext,
+    ) -> bool {
+        // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions
+        // before compiler/ml/subst.ml:303-309 rewrites value descriptions.
+        // Keep the optimized Rust value lookup lazy by detecting the rare
+        // signatures that still need that substitution.
+        let component_types = self
+            .signature
+            .iter()
+            .filter_map(|item| match item {
+                SignatureItem::SigType(id, _, _) => Some((id.stamp(), id.name())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if component_types.is_empty() {
+            return false;
+        }
+
+        fn visit(
+            ty: super::type_expr::TypeExprRef,
+            component_types: &[(i32, &str)],
+            ctx: &super::context::TypeContext,
+            seen: &mut std::collections::HashSet<usize>,
+        ) -> bool {
+            let ty = ctx.repr(ty);
+            if !seen.insert(ty.index()) {
+                return false;
+            }
+
+            let desc = ctx.get_desc(ty);
+            match &*desc {
+                super::type_expr::TypeDesc::Tconstr { path, args, .. } => {
+                    if let Path::Pident(id) = path {
+                        let mentions_component_type =
+                            component_types.iter().any(|(stamp, name)| {
+                                if id.stamp() != 0 && *stamp != 0 {
+                                    id.stamp() == *stamp
+                                } else {
+                                    id.name() == *name
+                                }
+                            });
+                        if mentions_component_type {
+                            return true;
+                        }
+                    }
+                    args.iter()
+                        .any(|arg| visit(*arg, component_types, ctx, seen))
+                }
+                super::type_expr::TypeDesc::Tarrow { arg, ret, .. } => {
+                    visit(arg.typ, component_types, ctx, seen)
+                        || visit(*ret, component_types, ctx, seen)
+                }
+                super::type_expr::TypeDesc::Ttuple(args) => args
+                    .iter()
+                    .any(|arg| visit(*arg, component_types, ctx, seen)),
+                super::type_expr::TypeDesc::Tobject { fields, name } => {
+                    visit(*fields, component_types, ctx, seen)
+                        || name.as_ref().is_some_and(|(_, args)| {
+                            args.iter()
+                                .any(|arg| visit(*arg, component_types, ctx, seen))
+                        })
+                }
+                super::type_expr::TypeDesc::Tfield { typ, rest, .. } => {
+                    visit(*typ, component_types, ctx, seen)
+                        || visit(*rest, component_types, ctx, seen)
+                }
+                super::type_expr::TypeDesc::Tlink(inner)
+                | super::type_expr::TypeDesc::Tsubst(inner) => {
+                    visit(*inner, component_types, ctx, seen)
+                }
+                super::type_expr::TypeDesc::Tvariant(row) => {
+                    visit(row.row_more, component_types, ctx, seen)
+                        || row.row_name.as_ref().is_some_and(|(_, args)| {
+                            args.iter()
+                                .any(|arg| visit(*arg, component_types, ctx, seen))
+                        })
+                        || row.row_fields.iter().any(|(_, field)| match field {
+                            super::type_expr::RowField::Rpresent(Some(arg)) => {
+                                visit(*arg, component_types, ctx, seen)
+                            }
+                            super::type_expr::RowField::Reither { types, .. } => types
+                                .iter()
+                                .any(|arg| visit(*arg, component_types, ctx, seen)),
+                            super::type_expr::RowField::Rpresent(None)
+                            | super::type_expr::RowField::Rabsent => false,
+                        })
+                }
+                super::type_expr::TypeDesc::Tpoly { body, vars } => {
+                    visit(*body, component_types, ctx, seen)
+                        || vars
+                            .iter()
+                            .any(|var| visit(*var, component_types, ctx, seen))
+                }
+                super::type_expr::TypeDesc::Tpackage { args, .. } => args
+                    .iter()
+                    .any(|arg| visit(*arg, component_types, ctx, seen)),
+                super::type_expr::TypeDesc::Tvar(_)
+                | super::type_expr::TypeDesc::Tunivar(_)
+                | super::type_expr::TypeDesc::Tnil => false,
+            }
+        }
+
+        visit(
+            desc.val_type,
+            component_types.as_slice(),
+            ctx,
+            &mut std::collections::HashSet::new(),
+        )
     }
 
-    pub(crate) fn lookup_labels(&self, name: &str) -> Option<&[LabelDescription]> {
-        self.labels.get(name).map(Vec::as_slice)
+    pub(crate) fn lookup_value_for_access(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ValueDescription)> {
+        let (runtime_pos, id, desc) = self.lookup_value(name)?;
+        let needs_component_subst = self.value_mentions_local_component_type(desc, ctx);
+        let desc = if self.value_source_prefix.is_some() || needs_component_subst {
+            let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
+            if let Some(source_prefix) = self.value_source_prefix.as_ref() {
+                let mut item = vec![SignatureItem::SigValue(id.clone(), desc)];
+                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+                    &item,
+                    source_prefix,
+                    self.access_path(),
+                    ctx,
+                );
+                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                    &mut item,
+                    source_prefix,
+                    self.access_path(),
+                );
+                desc = match item.pop().expect("single value item") {
+                    SignatureItem::SigValue(_, desc) => desc,
+                    _ => unreachable!("single value item changed kind"),
+                };
+            }
+            if needs_component_subst {
+                crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
+                    &mut desc,
+                    self.signature.as_ref(),
+                    self.access_path(),
+                    ctx,
+                );
+            }
+            desc
+        } else {
+            desc.clone()
+        };
+        Some((runtime_pos, id.clone(), desc))
+    }
+
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<ConstructorDescription>> {
+        if let Some(cached) = self.constructors.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(
+                    crate::perf_counters::LazyLookupKind::Constructor,
+                );
+            }
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1542-1556 populates `comp_constrs`
+        // while forcing a module's components. Rust keeps the canonical
+        // signature immutable and forces only the requested constructor bucket,
+        // preserving env.ml:1132-1137 lookup semantics without materializing
+        // every constructor in large dependency signatures.
+        let built = Arc::new(build_constructors_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Constructor,
+                self.signature.len(),
+                built.len(),
+            );
+        }
+        self.constructors
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
+    }
+
+    pub(crate) fn lookup_labels(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<LabelDescription>> {
+        if let Some(cached) = self.labels.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Label);
+            }
+            return cached;
+        }
+
+        // OCaml compiler/ml/env.ml:1548-1559 computes `comp_labels` from the
+        // selected component path. For normal compilation, force just the label
+        // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
+        // avoids constructing hundreds of unused JSX record labels per module view.
+        let built = Arc::new(build_labels_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::Label,
+                self.signature.len(),
+                built.len(),
+            );
+        }
+        self.labels
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {
-        let idx = *self.types.get(name)?;
+        let idx = self.cached_type_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigType(id, decl, _) => Some((id, decl)),
             _ => None,
@@ -526,7 +978,7 @@ impl QualifiedModuleComponents {
     }
 
     pub(crate) fn lookup_module(&self, name: &str) -> Option<(usize, &Ident, &ModuleDeclaration)> {
-        let (idx, runtime_pos) = *self.modules.get(name)?;
+        let (idx, runtime_pos) = self.cached_module_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigModule(id, md, _) => Some((runtime_pos, id, md)),
             _ => None,
@@ -537,17 +989,35 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+        if let Some(cached) = self.child_components.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(
+                    crate::perf_counters::LazyLookupKind::ChildComponent,
+                );
+            }
+            return cached;
+        }
+
+        let built = build_child_component_from_signature(self.access_path(), &self.signature, name);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_lazy_scan(
+                crate::perf_counters::LazyLookupKind::ChildComponent,
+                self.signature.len(),
+                usize::from(built.is_some()),
+            );
+        }
         self.child_components
-            .get(name)
-            .map(|(runtime_pos, stored)| (*runtime_pos, stored.clone()))
+            .borrow_mut()
+            .insert(name.to_string(), built.clone());
+        built
     }
 
-    pub(crate) fn lookup_qualified_module(
+    pub(crate) fn lookup_qualified_module_shared(
         &self,
         name: &str,
-        ctx: &super::context::TypeContext<'_>,
-    ) -> Option<(usize, Ident, ModuleDeclaration)> {
-        let (idx, runtime_pos) = *self.modules.get(name)?;
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
+        let (idx, runtime_pos) = self.cached_module_index(name)?;
         if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
             return Some((runtime_pos, id, md));
         }
@@ -584,6 +1054,7 @@ impl QualifiedModuleComponents {
                 &self.access_path,
                 ctx,
             );
+            let md = Arc::new(md);
             self.qualified_modules
                 .borrow_mut()
                 .insert(name.to_string(), (raw_id.clone(), md.clone()));
@@ -606,11 +1077,21 @@ impl QualifiedModuleComponents {
             &self.access_path,
             ctx,
         );
+        let md = Arc::new(md);
         self.qualified_modules
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), md.clone()));
         ctx.register_qualified_module_decl(self.access_path.as_ref(), name, id.clone(), md.clone());
         Some((runtime_pos, id, md))
+    }
+
+    pub(crate) fn lookup_qualified_module(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ModuleDeclaration)> {
+        self.lookup_qualified_module_shared(name, ctx)
+            .map(|(runtime_pos, id, md)| (runtime_pos, id, md.as_ref().clone()))
     }
 
     pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {
@@ -620,7 +1101,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn lookup_qualified_modtype(
         &self,
         name: &str,
-        _ctx: &super::context::TypeContext<'_>,
+        _ctx: &super::context::TypeContext,
     ) -> Option<(Ident, ModtypeDeclaration)> {
         if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
             return Some((id, mtd));
@@ -690,7 +1171,7 @@ fn self_alias_raw_parent_module_item(
     module_name: &str,
     runtime_pos: usize,
     md: &ModuleDeclaration,
-    ctx: &super::context::TypeContext<'_>,
+    ctx: &super::context::TypeContext,
 ) -> Option<(Ident, ModuleDeclaration, Signature)> {
     let selected_path = qualified_submodule_access_path(access_path, module_name, runtime_pos, md);
     let is_self_alias = matches!(
@@ -756,8 +1237,29 @@ fn build_local_module_components<'a>(
     access_path: &Path,
     md: &ModuleDeclaration,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a super::context::TypeContext<'a>,
+    ctx: &'a super::context::TypeContext,
 ) -> Option<QualifiedModuleComponents> {
+    if !ctx.preserve_canonical_typedtree()
+        && ctx.persistent_env_is_in_process()
+        && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
+        && alias_id.is_persistent()
+    {
+        let pers = pers_env.as_mut()?;
+        if let Some(ps) = pers.find_pers_struct(alias_id.name(), ctx) {
+            let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
+            return Some(
+                QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                    access_path.clone(),
+                    ps.ps_sig.clone(),
+                    HashMap::new(),
+                    Some(source_prefix),
+                    ctx,
+                ),
+            );
+        }
+    }
+
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
         // component tables. `scrape_alias` at env.ml:1440-1446 resolves an
@@ -775,9 +1277,12 @@ fn build_local_module_components<'a>(
                 );
             }
             Path::Pident(id) if id.is_persistent() => {
-                if let Some(pers) = pers_env.as_mut() {
-                    let _ = pers.get_renamed_sig(id.name(), ctx);
-                } else if access_path_is_direct_implicit_open_child(access_path)
+                if ctx.preserve_canonical_typedtree()
+                    && let Some(pers) = pers_env.as_mut()
+                {
+                    let _ = pers.force_lazy_signature_rename(id.name(), ctx);
+                } else if ctx.preserve_canonical_typedtree()
+                    && access_path_is_direct_implicit_open_child(access_path)
                     && !ctx.suppresses_component_alias_sig_force()
                     && env.find_module_with_origin(id.name()).is_err()
                 {
@@ -815,9 +1320,11 @@ fn build_local_module_components<'a>(
         return None;
     }
 
-    let mut working_env = env.clone_preserve_id();
+    let qualified_sig = Arc::new(qualified_sig);
+    let eager_child_components = ctx.preserve_canonical_typedtree();
+    let mut working_env = eager_child_components.then(|| env.clone_preserve_id());
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
-    let qualified_sig_for_children = Arc::new(qualified_sig.clone());
+    let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();
     let mut runtime_pos = 0usize;
 
@@ -835,12 +1342,14 @@ fn build_local_module_components<'a>(
                 SignatureItem::SigType(id, decl, _),
                 SignatureItem::SigType(qualified_id, qualified_decl, _),
             ) => {
-                let env_decl = if use_qualified_items_for_env {
-                    qualified_decl.clone()
-                } else {
-                    decl.clone()
-                };
-                working_env.add_type(id.clone(), env_decl);
+                if let Some(working_env) = working_env.as_mut() {
+                    let env_decl = if use_qualified_items_for_env {
+                        qualified_decl.clone()
+                    } else {
+                        decl.clone()
+                    };
+                    working_env.add_type(id.clone(), env_decl);
+                }
                 ctx.register_type_decl(qualified_id.name(), qualified_decl.clone());
                 if qualified_id.stamp() != 0 {
                     ctx.register_type_decl_by_stamp(qualified_id.stamp(), qualified_decl.clone());
@@ -851,58 +1360,61 @@ fn build_local_module_components<'a>(
                 runtime_pos += 1;
             }
             (SignatureItem::SigModule(id, child_md, _), SignatureItem::SigModule(_, qmd, _)) => {
-                let child_access_path =
-                    qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
-                // OCaml compiler/ml/env.ml:1573-1575 builds child
-                // `comp_components` from the same `md` item that
-                // env.ml:1517 got after `scrape_alias`. For alias parents,
-                // compiler/ml/mtype.ml:76-102 has already strengthened child
-                // modules to `Mty_alias` declarations; using the raw child
-                // declaration would skip the later scrape/find_module force.
-                let component_decl = if use_qualified_items_for_env {
-                    qmd.clone()
-                } else {
-                    child_md.clone()
-                };
-                working_env.add_module_with_component_context(
-                    id.clone(),
-                    component_decl.clone(),
-                    // OCaml compiler/ml/env.ml:1573-1578 stores
-                    // `comp_components` as its own lazy over the child module
-                    // declaration. It shares the persistent-alias force point
-                    // above, but otherwise keeps the child declaration separate
-                    // from env.ml:1568's `comp_modules` thunk.
-                    component_decl,
-                    child_access_path,
-                    Some((access_path.clone(), qualified_sig_for_children.clone())),
-                );
+                if let Some(working_env) = working_env.as_mut() {
+                    let child_access_path =
+                        qualified_submodule_access_path(access_path, id.name(), runtime_pos, qmd);
+                    // OCaml compiler/ml/env.ml:1573-1575 builds child
+                    // `comp_components` from the same `md` item that
+                    // env.ml:1517 got after `scrape_alias`. For alias parents,
+                    // compiler/ml/mtype.ml:76-102 has already strengthened child
+                    // modules to `Mty_alias` declarations; using the raw child
+                    // declaration would skip the later scrape/find_module force.
+                    let component_decl = if use_qualified_items_for_env {
+                        qmd.clone()
+                    } else {
+                        child_md.clone()
+                    };
+                    working_env.add_module_with_component_context(
+                        id.clone(),
+                        component_decl.clone(),
+                        // OCaml compiler/ml/env.ml:1573-1578 stores
+                        // `comp_components` as its own lazy over the child module
+                        // declaration. It shares the persistent-alias force point
+                        // above, but otherwise keeps the child declaration separate
+                        // from env.ml:1568's `comp_modules` thunk.
+                        component_decl,
+                        child_access_path,
+                        Some((access_path.clone(), qualified_sig_for_children.clone())),
+                    );
+                }
                 crate::cmi::persistent_env::register_types_by_stamp_recursive(&qmd.md_type, ctx);
-                if let Some(stored) = working_env
-                    .with_local_module_components(&Path::pident(id.clone()), |stored| {
-                        Arc::new(stored.clone())
-                    })
+                if let Some(working_env) = working_env.as_ref()
+                    && let Some(stored) =
+                        working_env.local_module_components_arc(&Path::pident(id.clone()))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
                 runtime_pos += 1;
             }
             (SignatureItem::SigModtype(id, mtd), SignatureItem::SigModtype(_, _)) => {
-                let env_mtd = if use_qualified_items_for_env {
-                    match qualified_item {
-                        SignatureItem::SigModtype(_, qualified_mtd) => qualified_mtd.clone(),
-                        _ => return None,
-                    }
-                } else {
-                    mtd.clone()
-                };
-                working_env.add_modtype(id.clone(), env_mtd);
+                if let Some(working_env) = working_env.as_mut() {
+                    let env_mtd = if use_qualified_items_for_env {
+                        match qualified_item {
+                            SignatureItem::SigModtype(_, qualified_mtd) => qualified_mtd.clone(),
+                            _ => return None,
+                        }
+                    } else {
+                        mtd.clone()
+                    };
+                    working_env.add_modtype(id.clone(), env_mtd);
+                }
             }
             (SignatureItem::SigClassType, SignatureItem::SigClassType) => {}
             _ => return None,
         }
     }
 
-    Some(QualifiedModuleComponents::new_with_child_components(
+    Some(QualifiedModuleComponents::new_with_child_components_arc(
         access_path.clone(),
         qualified_sig,
         child_components,
@@ -946,7 +1458,7 @@ impl StoredModuleComponents {
     pub(crate) fn with_components<'a, R>(
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a super::context::TypeContext<'a>,
+        ctx: &'a super::context::TypeContext,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if self.cached.borrow().is_none() {

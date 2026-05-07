@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
@@ -310,6 +311,26 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                         crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
                             visit_expression(max_stamp, expr);
                         }
+                        crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
+                            _,
+                            _,
+                        ) => {}
+                    }
+                }
+                if let Some(base) = extended_expression {
+                    visit_expression(max_stamp, base);
+                }
+            }
+            ExpressionDesc::Texp_record_sparse {
+                fields,
+                extended_expression,
+                ..
+            } => {
+                for (_, _, field, _) in fields {
+                    if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
+                        field
+                    {
+                        visit_expression(max_stamp, expr);
                     }
                 }
                 if let Some(base) = extended_expression {
@@ -1205,6 +1226,13 @@ pub struct CompilerOptions {
     /// Used by runtime seeding, which only needs signatures, purity, and
     /// closed constants in memory.
     pub skip_js_render: bool,
+    /// Publish a portable in-process signature for downstream module lookup.
+    /// Rewatch can disable this for implementations whose interface already
+    /// supplies the published signature. OCaml still saves before Lambda translation
+    /// (`compiler/ml/typemod.ml:1779-1788`; `compiler/ml/translmod.ml:267`);
+    /// this only skips the Rust-only portable registry extraction when no
+    /// downstream lookup can observe it.
+    pub publish_in_process_signature: bool,
 }
 
 impl Default for CompilerOptions {
@@ -1236,7 +1264,14 @@ impl Default for CompilerOptions {
             make_runtime: false,
             capture_intermediates: false,
             skip_js_render: false,
+            publish_in_process_signature: true,
         }
+    }
+}
+
+impl CompilerOptions {
+    fn preserve_canonical_typedtree(&self) -> bool {
+        self.dump_typed_sexp || self.dump_typed_sexp_locs || self.capture_intermediates
     }
 }
 
@@ -1346,7 +1381,8 @@ pub fn compile_source_to_js_with_options(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -1756,7 +1792,7 @@ fn build_inferred_signature_coercion(
 
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     env: &Env,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
@@ -1794,7 +1830,7 @@ fn compute_raw_implementation_coercion(
         pers.add_load_path(source_dir);
     }
     let _ = pers.find_pers_struct(&module_name, type_ctx);
-    let target_sig = match pers.read_raw_sig(&module_name, type_ctx) {
+    let target_sig = match pers.read_raw_sig_shared(&module_name, type_ctx) {
         Some(sig) => sig,
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
     };
@@ -1805,7 +1841,7 @@ fn compute_raw_implementation_coercion(
         source_file,
         impl_sig,
         "(inferred signature)",
-        &target_sig,
+        target_sig.as_ref(),
     ) {
         Ok(cc) => cc,
         Err(_) if has_resi => {
@@ -1847,7 +1883,8 @@ pub fn typecheck_interface_source(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -1895,7 +1932,7 @@ pub fn typecheck_interface_source(
 pub fn typecheck_interface_file(path: &std::path::Path, options: &CompilerOptions) -> Result<()> {
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let source = crate::source_text::latin1_bytes_to_string(bytes);
     let filename = path.to_string_lossy();
     typecheck_interface_source(&source, &filename, options)
 }
@@ -1916,7 +1953,7 @@ pub fn compile_file_to_js_with_options(
     // correct position tracking in the scanner.
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let source = crate::source_text::latin1_bytes_to_string(bytes);
     let filename = path.to_string_lossy();
     compile_source_to_js_with_options(&source, &filename, options)
 }
@@ -2024,7 +2061,7 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
 pub fn load_pervasives<'a>(
     pers_env: &mut PersistentEnv,
     env: &mut Env,
-    ctx: &'a TypeContext<'a>,
+    ctx: &'a TypeContext,
     open_modules: &[String],
     nopervasives: bool,
     compiling_module: Option<&str>,
@@ -2034,21 +2071,32 @@ pub fn load_pervasives<'a>(
     if !nopervasives {
         // Try to load and open Pervasives
         if pers_env.open_module("Pervasives", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Pervasives", sig.clone());
+            // OCaml `Res_compmisc.initial_env` opens implicit modules through
+            // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
+            // builds, the persistent registry remains available for explicit
+            // `Pervasives.X` lookup, so avoid cloning the whole raw signature a
+            // second time just to add a top-level module binding.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
+                    }
+                    env.add_module(Ident::create_persistent("Pervasives"), md);
                 }
-                env.add_module(Ident::create_persistent("Pervasives"), md);
             }
         }
 
         // Try to load and open Stdlib
         if pers_env.open_module("Stdlib", env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
-                if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                    ctx.register_raw_module_sig("Stdlib", sig.clone());
+            // Same implicit-open behavior as above; keep the opened bindings,
+            // but let explicit module lookup use the in-process registry.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
+                    }
+                    env.add_module(Ident::create_persistent("Stdlib"), md);
                 }
-                env.add_module(Ident::create_persistent("Stdlib"), md);
             }
         }
     }
@@ -2061,8 +2109,14 @@ pub fn load_pervasives<'a>(
             }
         }
         if pers_env.open_module(module_name, env, ctx) {
-            if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                env.add_module(Ident::create_persistent(module_name), md);
+            // Keep bsc's standalone path unchanged, but in-process builds can
+            // resolve explicit `Module.X` lookups through the persistent
+            // registry. Creating this binding would clone the full raw
+            // signature after `open_module` already added the opened contents.
+            if !pers_env.is_in_process_mode() {
+                if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
+                    env.add_module(Ident::create_persistent(module_name), md);
+                }
             }
         }
     }
@@ -2102,7 +2156,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -2155,7 +2210,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
-        let type_ctx = TypeContext::new(&id_gen);
+        let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -2199,7 +2255,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 /// links these shared Tvars to interface types, ALL references update.
 fn apply_moregen_constraints(
     tctx: &mut TypeCheckContext<'_>,
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     options: &CompilerOptions,
     known_has_interface: Option<bool>,
@@ -2256,7 +2312,7 @@ fn apply_moregen_constraints(
         // Ensure the module is loaded first (for side effects like registering types)
         let _ = pers.find_pers_struct(&module_name, type_ctx);
         // Then read raw sig without path substitution for moregen
-        let result = pers.read_raw_sig(&module_name, type_ctx);
+        let result = pers.read_raw_sig_shared(&module_name, type_ctx);
         match result {
             Some(sig) => sig,
             None => return,
@@ -2274,7 +2330,7 @@ fn apply_moregen_constraints(
         let impl_sig = &typed_structure.str_type;
         let mut stamp_remap: ahash::AHashMap<i32, crate::types::Path> = ahash::AHashMap::new();
         // Match OCaml pair_components: remap Sig_type, Sig_module, Sig_modtype
-        for iface_item in &iface_sig {
+        for iface_item in iface_sig.iter() {
             let (iface_id, find_fn): (
                 &crate::ident::Ident,
                 Box<dyn Fn(&SignatureItem) -> Option<&crate::ident::Ident>>,
@@ -2320,7 +2376,7 @@ fn apply_moregen_constraints(
         if !stamp_remap.is_empty() {
             // Apply stamp remapping to interface type_exprs
             crate::cmi::persistent_env::substitute_type_paths_in_sig_with_stamp_map(
-                &iface_sig,
+                iface_sig.as_ref(),
                 &stamp_remap,
                 type_ctx,
             );
@@ -2329,7 +2385,7 @@ fn apply_moregen_constraints(
 
     // Build a map from value name -> interface type
     let mut iface_val_types: ahash::AHashMap<String, TypeExprRef> = ahash::AHashMap::new();
-    for item in &iface_sig {
+    for item in iface_sig.iter() {
         if let SignatureItem::SigValue(id, vd) = item {
             iface_val_types.insert(id.name().to_string(), vd.val_type);
         }
@@ -2387,7 +2443,7 @@ fn apply_moregen_constraints(
 }
 
 fn moregen_link_structure(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
@@ -2456,7 +2512,7 @@ fn moregen_link_structure(
 }
 
 fn moregen_link_mod_expr(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mod_expr: &crate::types::typedtree::ModuleExpr,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
     debug: &mut Vec<String>,
@@ -2473,7 +2529,7 @@ fn moregen_link_mod_expr(
 }
 
 fn dump_all_tvars(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     ty: crate::types::type_expr::TypeExprRef,
     debug: &mut Vec<String>,
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
@@ -2561,7 +2617,7 @@ fn moregen_paths_compatible(p1: &crate::types::Path, p2: &crate::types::Path) ->
 /// Walk two types structurally and link non-generic Tvars in the impl
 /// to the corresponding interface types. Matches OCaml's moregen.
 fn moregen_link(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2574,7 +2630,7 @@ fn moregen_link(
 }
 
 fn moregen_link_exported_alias(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2590,7 +2646,7 @@ fn moregen_link_exported_alias(
 }
 
 fn moregen_link_impl(
-    ctx: &TypeContext<'_>,
+    ctx: &TypeContext,
     impl_ty: crate::types::type_expr::TypeExprRef,
     iface_ty: crate::types::type_expr::TypeExprRef,
     visited: &mut ahash::AHashSet<(
@@ -2921,7 +2977,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -2966,7 +3023,8 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3006,7 +3064,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
 /// val_type = Tpat_any's pat_type, NOT the outer pattern's pat_type. We look up
 /// val_type from the env to match this behavior exactly.
 pub(crate) fn normalize_signature_types(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     final_env: &crate::types::env::Env,
 ) {
@@ -3056,7 +3114,7 @@ pub(crate) fn normalize_signature_types(
     }
 
     fn norm_structure(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &crate::types::env::Env,
         s: &crate::types::typedtree::Structure,
         allow_local_sig_values: bool,
@@ -3111,7 +3169,7 @@ pub(crate) fn normalize_signature_types(
     }
 
     fn norm_modexpr(
-        ctx: &TypeContext<'_>,
+        ctx: &TypeContext,
         env: &crate::types::env::Env,
         me: &crate::types::typedtree::ModuleExpr,
     ) {
@@ -3137,7 +3195,7 @@ pub(crate) fn normalize_signature_types(
 }
 
 fn rename_ident_for_save_signature(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     id: &crate::ident::Ident,
 ) -> crate::ident::Ident {
     let fresh = type_ctx.create_ident(id.name());
@@ -3149,7 +3207,7 @@ fn rename_ident_for_save_signature(
 }
 
 fn consume_module_type_save_signature_renames(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) {
     use crate::types::decl::ModuleType;
@@ -3172,7 +3230,7 @@ fn consume_module_type_save_signature_renames(
 }
 
 fn consume_signature_save_renames(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     sig: &[crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
@@ -3210,7 +3268,7 @@ fn consume_signature_save_renames(
 }
 
 fn prepare_inferred_signature_for_saving(
-    type_ctx: &TypeContext<'_>,
+    type_ctx: &TypeContext,
     typed_structure: &crate::types::typedtree::Structure,
     source_filename: Option<&str>,
     has_resi: bool,
@@ -3242,6 +3300,24 @@ pub struct InProcessCompileResult {
     pub lambda_sexp: String,
 }
 
+/// Owned in-process compilation state after typechecking and Lambda lowering,
+/// before JS backend metadata from dependencies is required.
+pub struct InProcessPreJsCompileResult {
+    pub lowered_lambda: crate::lambda::Lambda,
+    pub possible_required_modules: AHashSet<ModuleId>,
+    pub file_directives: Vec<String>,
+    pub debug: bool,
+    pub jsx_preserve: bool,
+    pub signature: crate::types::decl::Signature,
+    pub pers_struct: Option<PortablePersStruct>,
+    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    /// Intermediate-representation sexps, populated when
+    /// `CompilerOptions::capture_intermediates` is true (for the playground).
+    pub typed_tree_sexp: String,
+    pub raw_lambda_sexp: String,
+    pub lambda_sexp: String,
+}
+
 /// Signature payload produced after in-process implementation typechecking but
 /// before Lambda/JS compilation. Rewatch uses this to unblock dependent
 /// typechecking while preserving OCaml's save-before-translation order
@@ -3256,7 +3332,7 @@ pub type InProcessSignatureReadyHook<'a> =
     dyn FnMut(InProcessSignatureReady) -> Result<Option<ModuleRegistry>> + 'a;
 
 pub type InProcessBeforeJsHook<'a> =
-    dyn FnMut(&std::collections::HashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
+    dyn FnMut(&AHashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
 
 /// Result of an in-process `.resi` interface type-check.
 pub struct InProcessInterfaceResult {
@@ -3335,7 +3411,7 @@ fn effective_js_output_targets(options: &CompilerOptions) -> Vec<JsOutputTarget>
 
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
-    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
@@ -3382,7 +3458,7 @@ fn compile_js_program_for_output(
 
 fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
-    possible_required_modules: &std::collections::HashSet<ModuleId>,
+    possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
     output_module_format: Option<ModuleFormat>,
@@ -3460,6 +3536,36 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     mut before_js: Option<&mut InProcessBeforeJsHook<'_>>,
 ) -> Result<InProcessCompileResult> {
+    let pre_js = compile_preprocessed_structure_in_process_until_js(
+        arena,
+        structure,
+        filename,
+        module_name,
+        options,
+        registry,
+        has_interface,
+        signature_ready.as_deref_mut(),
+    )?;
+
+    let refreshed_registry = if let Some(hook) = before_js.as_deref_mut() {
+        hook(&pre_js.possible_required_modules)?
+    } else {
+        None
+    };
+    let js_registry = refreshed_registry.as_ref().unwrap_or(registry);
+    finish_preprocessed_structure_in_process_from_js_boundary(pre_js, options, js_registry)
+}
+
+pub fn compile_preprocessed_structure_in_process_until_js(
+    arena: &crate::parse_arena::ParseArena,
+    structure: &Structure,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+) -> Result<InProcessPreJsCompileResult> {
     let _span = info_span!(
         "compiler.in_process_compile",
         module = %module_name,
@@ -3487,7 +3593,8 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3563,13 +3670,29 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
             filename,
             &type_ctx,
         );
+        // OCaml saves the current unit into the persistent table before
+        // lambda translation (compiler/ml/typemod.ml:1779-1788). That save
+        // also installs `ps_sig` for later lazy component forcing
+        // (compiler/ml/env.ml:1960-1977). In-process builds do not write/read
+        // the `.cmi`, so keep the just-saved current signature in the
+        // TypeContext raw-signature cache before hiding the transient module.
+        let current_raw_sig = internal_env.read_raw_sig_shared(module_name, &type_ctx).unwrap_or_else(|| {
+            panic!(
+                "in-process invariant violated: saved signature for {module_name} was not available"
+            )
+        });
+        type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
-        let (pers_struct, new_alias_rewrites) = internal_env.extract_module_update(
-            module_name,
-            original_alias_count,
-            &type_ctx,
-            Some(arena),
-        );
+        let (pers_struct, new_alias_rewrites) = if options.publish_in_process_signature {
+            internal_env.extract_module_update(
+                module_name,
+                original_alias_count,
+                &type_ctx,
+                Some(arena),
+            )
+        } else {
+            (None, ahash::AHashMap::new())
+        };
         internal_env.unregister_in_memory_signature(module_name);
         (pers_struct, new_alias_rewrites, internal_env)
     };
@@ -3636,19 +3759,6 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 raw_lambda_current_stamp,
             )
         });
-    if let Some(hook) = before_js.as_deref_mut()
-        && let Some(refreshed_registry) = hook(&possible_required_modules)?
-    {
-        let mut refreshed_env = PersistentEnv::from_registry(&refreshed_registry);
-        refreshed_env.set_load_path(load_path.clone());
-        refreshed_env.set_open_modules(options.open_modules.clone());
-        refreshed_env.set_jsx_version(options.jsx_version);
-        refreshed_env.set_nopervasives(options.nopervasives);
-        refreshed_env.set_compiling_module(options.module_name.clone());
-        refreshed_env.unregister_in_memory_signature(module_name);
-        tctx.persistent_env = Some(refreshed_env);
-    }
-
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -3675,7 +3785,44 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         String::new()
     };
 
-    let persistent_env_for_js = tctx.persistent_env.clone();
+    Ok(InProcessPreJsCompileResult {
+        lowered_lambda,
+        possible_required_modules,
+        file_directives,
+        debug,
+        jsx_preserve,
+        signature: published_signature,
+        pers_struct,
+        new_alias_rewrites,
+        typed_tree_sexp,
+        raw_lambda_sexp,
+        lambda_sexp,
+    })
+}
+
+pub fn finish_preprocessed_structure_in_process_from_js_boundary(
+    pre_js: InProcessPreJsCompileResult,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<InProcessCompileResult> {
+    let _span = info_span!(
+        "compiler.in_process_js_finish",
+        module = options.module_name.as_deref().unwrap_or(""),
+        skip_js_render = options.skip_js_render,
+        js_targets = options.js_output_targets.len()
+    )
+    .entered();
+    let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
+    let load_path = build_load_path(options);
+    persistent_env_for_js.set_load_path(load_path);
+    persistent_env_for_js.set_open_modules(options.open_modules.clone());
+    persistent_env_for_js.set_jsx_version(options.jsx_version);
+    persistent_env_for_js.set_nopervasives(options.nopervasives);
+    persistent_env_for_js.set_compiling_module(options.module_name.clone());
+    if let Some(module_name) = options.module_name.as_deref() {
+        persistent_env_for_js.unregister_in_memory_signature(module_name);
+    }
+    let persistent_env_for_js = Some(persistent_env_for_js);
     let js_targets = effective_js_output_targets(options);
     let primary_target = js_targets.first();
     let primary_output_path = primary_target
@@ -3685,7 +3832,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         .map(|target| target.module_format)
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
-    let mut lowered_lambda = Some(lowered_lambda);
+    let mut lowered_lambda = Some(pre_js.lowered_lambda);
     let (program, module_path_resolver) = {
         let _phase = info_span!(
             "compiler.js_compile",
@@ -3697,24 +3844,24 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for multiple JS targets"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             )
         } else {
             compile_js_program_for_output_owned(
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             )
         }
     };
@@ -3734,12 +3881,12 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
-                &possible_required_modules,
+                &pre_js.possible_required_modules,
                 options,
                 Some(&target.path),
                 Some(target.module_format),
                 persistent_env_for_js.clone(),
-                jsx_preserve,
+                pre_js.jsx_preserve,
             );
             rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
         }
@@ -3760,9 +3907,9 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
             let mut primary_js = print_deps_program_with_directives_and_options(
                 &primary_program,
                 Some(&primary_resolver),
-                &file_directives,
-                debug,
-                jsx_preserve,
+                &pre_js.file_directives,
+                pre_js.debug,
+                pre_js.jsx_preserve,
                 !options.no_version_header,
             );
             let mut js_outputs = Vec::new();
@@ -3785,9 +3932,9 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
                 let code = print_deps_program_with_directives_and_options(
                     &program,
                     Some(&module_path_resolver),
-                    &file_directives,
-                    debug,
-                    jsx_preserve,
+                    &pre_js.file_directives,
+                    pre_js.debug,
+                    pre_js.jsx_preserve,
                     !options.no_version_header,
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
@@ -3799,14 +3946,14 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     Ok(InProcessCompileResult {
         js_output: js,
         js_outputs,
-        signature: published_signature,
-        pers_struct,
-        new_alias_rewrites,
+        signature: pre_js.signature,
+        pers_struct: pre_js.pers_struct,
+        new_alias_rewrites: pre_js.new_alias_rewrites,
         is_pure,
         cmj_export_constants,
-        typed_tree_sexp,
-        raw_lambda_sexp,
-        lambda_sexp,
+        typed_tree_sexp: pre_js.typed_tree_sexp,
+        raw_lambda_sexp: pre_js.raw_lambda_sexp,
+        lambda_sexp: pre_js.lambda_sexp,
     })
 }
 
@@ -3814,36 +3961,59 @@ fn collect_in_process_cmj_export_constants(
     program: &crate::js_ir::Program,
 ) -> ahash::AHashMap<String, CmjExportConstant> {
     let mut constants = ahash::AHashMap::new();
-    for export in &program.exports {
-        let Some(expr) = find_export_binding_expr(&program.block, export) else {
-            continue;
-        };
-        let Some(constant) = cmj_export_constant_from_expr(expr) else {
-            continue;
-        };
-        constants.insert(export.name().to_string(), constant);
+    if program.exports.is_empty() {
+        return constants;
     }
+
+    let mut export_names = ahash::AHashMap::<_, Vec<String>>::with_capacity(program.exports.len());
+    for export in &program.exports {
+        export_names
+            .entry(export.clone())
+            .or_default()
+            .push(export.name().to_string());
+    }
+    collect_export_binding_constants(
+        &program.block,
+        &export_names,
+        program.exports.len(),
+        &mut constants,
+    );
     constants
 }
 
-fn find_export_binding_expr<'a>(
-    block: &'a crate::js_ir::Block,
-    export: &crate::ident::Ident,
-) -> Option<&'a crate::js_ir::Expression> {
+fn collect_export_binding_constants(
+    block: &crate::js_ir::Block,
+    export_names: &ahash::AHashMap<crate::ident::Ident, Vec<String>>,
+    export_count: usize,
+    constants: &mut ahash::AHashMap<String, CmjExportConstant>,
+) {
+    if constants.len() == export_count {
+        return;
+    }
+
     for statement in block {
         match &statement.desc {
-            crate::js_ir::StatementDesc::Variable(decl) if decl.ident.same(export) => {
-                return decl.value.as_ref();
+            crate::js_ir::StatementDesc::Variable(decl) => {
+                if let Some(export_names) = export_names.get(&decl.ident) {
+                    for export_name in export_names {
+                        if !constants.contains_key(export_name)
+                            && let Some(expr) = &decl.value
+                            && let Some(constant) = cmj_export_constant_from_expr(expr)
+                        {
+                            constants.insert(export_name.clone(), constant);
+                        }
+                    }
+                }
             }
             crate::js_ir::StatementDesc::Block(inner) => {
-                if let Some(expr) = find_export_binding_expr(inner, export) {
-                    return Some(expr);
-                }
+                collect_export_binding_constants(inner, export_names, export_count, constants);
             }
             _ => {}
         }
+        if constants.len() == export_count {
+            return;
+        }
     }
-    None
 }
 
 fn cmj_export_constant_from_expr(expr: &crate::js_ir::Expression) -> Option<CmjExportConstant> {
@@ -3903,7 +4073,8 @@ pub fn typecheck_preprocessed_signature_in_process(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -4005,7 +4176,8 @@ pub fn typecheck_implementation_in_process(
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
-    let type_ctx = TypeContext::new(&id_gen);
+    let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -4095,7 +4267,7 @@ mod tests {
             vb_pat: Pattern {
                 pat_desc: PatternDesc::Tpat_var(binding_id, Located::mknoloc("x".to_string())),
                 pat_loc: LocIdx::none(),
-                pat_extra: Vec::new(),
+                pat_extra: Default::default(),
                 pat_type: TypeExprRef::null(),
                 pat_env: EnvRef(0),
                 pat_attributes: Attributes::new(),
@@ -4103,7 +4275,7 @@ mod tests {
             vb_expr: Expression {
                 exp_desc: ExpressionDesc::Texp_constant(crate::types::typedtree::Constant::Int(1)),
                 exp_loc: LocIdx::none(),
-                exp_extra: Vec::new(),
+                exp_extra: Default::default(),
                 exp_type: TypeExprRef::null(),
                 exp_env: EnvRef(0),
                 exp_attributes: Attributes::new(),
@@ -4125,7 +4297,7 @@ mod tests {
                 },
             ),
             exp_loc: LocIdx::none(),
-            exp_extra: Vec::new(),
+            exp_extra: Default::default(),
             exp_type: TypeExprRef::null(),
             exp_env: EnvRef(0),
             exp_attributes: Attributes::new(),

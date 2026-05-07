@@ -5,6 +5,7 @@
 //! clarity over aggressive optimization; it is intended as a correct baseline
 //! that can be extended with more advanced codegen passes.
 
+use ahash::AHashSet;
 use std::collections::{HashMap, HashSet};
 
 use crate::cmi::persistent_env::CmjExportConstant;
@@ -423,7 +424,7 @@ impl LambdaCompiler {
 
     /// Compile an owned Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program_owned(&mut self, lam: Lambda) -> DepsProgram {
-        let possible_required_modules = std::collections::HashSet::new();
+        let possible_required_modules = AHashSet::new();
         self.compile_deps_program_with_possible_required_modules_owned(
             lam,
             &possible_required_modules,
@@ -436,7 +437,7 @@ impl LambdaCompiler {
     pub fn compile_deps_program_with_possible_required_modules(
         &mut self,
         lam: &Lambda,
-        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+        extra_possible_required_modules: &AHashSet<ModuleId>,
     ) -> DepsProgram {
         self.compile_deps_program_with_possible_required_modules_owned(
             lam.clone(),
@@ -452,7 +453,7 @@ impl LambdaCompiler {
     pub fn compile_deps_program_with_possible_required_modules_owned(
         &mut self,
         lam: Lambda,
-        extra_possible_required_modules: &std::collections::HashSet<ModuleId>,
+        extra_possible_required_modules: &AHashSet<ModuleId>,
     ) -> DepsProgram {
         let _span = info_span!(
             "compiler.lambda_to_js",
@@ -2221,7 +2222,7 @@ impl LambdaCompiler {
                 // entries goes through the multi-handler explicit-jump arm
                 // (lam_compile.ml:1000-1010 for `EffectCall tail_type`).
                 let (handlers, flat_body) = flatten_nested_caches(*label, bindings, body, handler);
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=flatten-multi count={} bindings={} body_kind={} handler_kind={}",
                         handlers.len(),
@@ -2235,7 +2236,7 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2250,7 +2251,7 @@ impl LambdaCompiler {
                     body, *label, bindings, handler,
                 ) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=pseudo-fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2270,7 +2271,7 @@ impl LambdaCompiler {
                     && !self.handler_returns_unit_undefined(bindings, handler)
                     && !lambda_contains_static_raise(handler) =>
             {
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path=nested-fallthrough bindings={} body_kind={} handler_kind={}",
                         bindings.len(),
@@ -2285,7 +2286,7 @@ impl LambdaCompiler {
                     && !bindings.is_empty())
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
-                if std::env::var_os("RUST_DEBUG_STATICCATCH_RETURN").is_some() {
+                if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
                         "[staticcatch-return] label={label} path={} bindings={} body_kind={} handler_kind={}",
                         if requires_explicit_jump {
@@ -3123,11 +3124,31 @@ impl LambdaCompiler {
         // OCaml's `block_last_is_return_throw_or_continue` (js_stmt_make.ml:186-193)
         // is non-recursive, so an unnested branch ending in `continue`/`return`/`throw`
         // lets rule 7 fire while a Block-wrapped branch keeps the if-else.
-        block.push(Statement::if_(
-            cond_compiled.expr,
-            unnest_block(then_block),
-            unnest_block(else_block),
-        ));
+        let then_block = unnest_block(then_block);
+        let else_block = unnest_block(else_block);
+        let cond_expr = cond_compiled.expr;
+        let cond_is_conjunction = matches!(&cond_expr.desc, ExpressionDesc::Bin(BinOp::And, _, _));
+        if cond_is_conjunction
+            && block_last_is_continue(&then_block)
+            && block_last_is_non_continue_terminal(&else_block)
+        {
+            // OCaml's tail-call path marks self tail-calls `output_finished=True`
+            // and `S.if_` rule 5/7 interactions keep the terminal fallback under
+            // a negative guard before the `continue` tail
+            // (compiler/core/lam_compile.ml:1582-1629,
+            // compiler/core/js_stmt_make.ml:247-250). Rust represents the same
+            // tail call directly as assignment statements plus `Continue`, so
+            // build that shape explicitly before the generic `Statement::if_`
+            // simplifier flips it back to a positive guard.
+            block.push(Statement::new(StatementDesc::If(
+                Expression::not(cond_expr),
+                merge_terminal_guard_fallthrough_else(else_block),
+                vec![],
+            )));
+            block.extend(then_block);
+            return block;
+        }
+        block.push(Statement::if_(cond_expr, then_block, else_block));
         block
     }
 
@@ -3762,7 +3783,7 @@ impl LambdaCompiler {
     }
 
     fn take_return_tail_expr(&self, block: Block) -> Result<Expression, Block> {
-        if std::env::var_os("RUST_DEBUG_TAKE_RETURN_TAIL").is_some() {
+        if crate::debug_flags::debug_take_return_tail() {
             let rendered = crate::js_ir::print_block(&block);
             if rendered.contains("Invalid_argument")
                 || rendered.contains("RE_EXN_ID === A")
@@ -3894,7 +3915,7 @@ impl LambdaCompiler {
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
-        if std::env::var_os("RUST_DEBUG_COMPILE_TEST_RETURN").is_some() {
+        if crate::debug_flags::debug_compile_test_return() {
             let cond_text = crate::js_ir::print_expression(&cond);
             if cond_text.contains("RE_EXN_ID") || cond_text.contains("_1 === \"x\"") {
                 eprintln!(
@@ -5700,17 +5721,66 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
     state.components
 }
 
+fn binding_is_ocaml_scc_function(bindings: &[(Ident, Lambda)], index: usize) -> bool {
+    matches!(bindings[index].1, Lambda::Lfunction(_))
+}
+
 fn recursive_binding_group_is_function_only(bindings: &[(Ident, Lambda)], group: &[usize]) -> bool {
     group
         .iter()
-        .all(|&index| matches!(bindings[index].1, Lambda::Lfunction(_)))
+        .all(|&index| binding_is_ocaml_scc_function(bindings, index))
 }
 
 fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize]) {
     if recursive_binding_group_is_function_only(bindings, group) {
         return;
     }
-    group.sort_by_key(|index| !matches!(bindings[*index].1, Lambda::Lfunction(_)));
+    group.sort_by_key(|index| !binding_is_ocaml_scc_function(bindings, *index));
+}
+
+fn singleton_recursive_binding_group(group: &[usize]) -> Option<usize> {
+    match group {
+        [index] => Some(*index),
+        _ => None,
+    }
+}
+
+fn reorder_self_recursive_function_helpers_like_ocaml(
+    bindings: &[(Ident, Lambda)],
+    dependencies: &[Vec<usize>],
+    groups: &mut [Vec<usize>],
+) {
+    let mut index = 0;
+    while index + 1 < groups.len() {
+        let Some(helper) = singleton_recursive_binding_group(&groups[index]) else {
+            index += 1;
+            continue;
+        };
+        let Some(caller) = singleton_recursive_binding_group(&groups[index + 1]) else {
+            index += 1;
+            continue;
+        };
+
+        if caller < helper
+            && binding_is_ocaml_scc_function(bindings, helper)
+            && binding_is_ocaml_scc_function(bindings, caller)
+            && dependencies[helper].contains(&helper)
+            && dependencies[caller].contains(&helper)
+            && !dependencies[caller].contains(&caller)
+        {
+            // OCaml's recursive-let lowering runs the SCC split from
+            // `compiler/core/lam_scc.ml:109-128` using `Ext_scc.graph`
+            // (`compiler/ext/ext_scc.ml:39-96`), then compiles each resulting
+            // group in order (`compiler/core/lam_compile.ml:503-513`). For an
+            // earlier non-self-recursive function that calls a later
+            // self-recursive helper, that SCC walk preserves the caller before
+            // the helper while still placing upstream callers afterward.
+            groups.swap(index, index + 1);
+            index = index.saturating_sub(1);
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn recursive_binding_groups(
@@ -5728,6 +5798,7 @@ fn recursive_binding_groups(
             for group in &mut groups {
                 sort_recursive_binding_group(bindings, group);
             }
+            reorder_self_recursive_function_helpers_like_ocaml(bindings, dependencies, &mut groups);
             groups
         }
     }
@@ -5897,6 +5968,51 @@ fn single_return_expression(block: &Block) -> Option<Expression> {
         return None;
     };
     Some(expr.clone())
+}
+
+fn block_last_is_continue(block: &Block) -> bool {
+    matches!(
+        block.last(),
+        Some(Statement {
+            desc: StatementDesc::Continue(_),
+            ..
+        })
+    )
+}
+
+fn block_last_is_non_continue_terminal(block: &Block) -> bool {
+    matches!(
+        block.last(),
+        Some(Statement {
+            desc: StatementDesc::Return(_) | StatementDesc::Throw(_) | StatementDesc::Break(_),
+            ..
+        })
+    )
+}
+
+fn merge_terminal_guard_fallthrough_else(block: Block) -> Block {
+    let [first, rest @ ..] = block.as_slice() else {
+        return block;
+    };
+    let StatementDesc::If(cond, then_block, else_block) = &first.desc else {
+        return block;
+    };
+    if !else_block.is_empty()
+        || !block_last_is_terminal(then_block)
+        || !block_last_is_terminal(&rest.to_vec())
+    {
+        return block;
+    }
+
+    // OCaml's `S.if_` can preserve a terminal `if/else` when the branch reaches
+    // it as a block-wrapped statement (compiler/core/js_stmt_make.ml:247-250).
+    // Rust tail-loop lowering has already flattened that wrapper, so rebuild the
+    // same terminal fallback before placing it under the outer negative guard.
+    vec![Statement::new(StatementDesc::If(
+        cond.clone(),
+        then_block.clone(),
+        rest.to_vec(),
+    ))]
 }
 
 pub(crate) fn trailing_return_expression(block: &[Statement]) -> Option<&Expression> {
@@ -6276,13 +6392,16 @@ fn ocaml_sort_modules(modules: &mut [ModuleId]) {
     modules.swap(0, 1);
 }
 
-fn collect_possible_required_modules(lam: &Lambda) -> std::collections::HashSet<ModuleId> {
-    let mut seen = std::collections::HashSet::new();
+fn collect_possible_required_modules(lam: &Lambda) -> AHashSet<ModuleId> {
+    // OCaml compiler/core/lam_compile_main.ml:277-284 collects into a hash set
+    // and sorts after `populate_required_modules`, so the hash iteration order is
+    // intentionally unobservable here.
+    let mut seen = AHashSet::new();
     collect_modules_from_lambda(lam, &mut seen);
     seen
 }
 
-fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSet<ModuleId>) {
+fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         Lambda::LglobalModule(id, dynamic_import) => {
@@ -6375,7 +6494,7 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut std::collections::HashSe
 
 fn populate_required_modules(
     module_path_resolver: Option<&ModulePathResolver>,
-    extras: &std::collections::HashSet<ModuleId>,
+    extras: &AHashSet<ModuleId>,
     modules: &mut OcamlModuleSet,
 ) {
     for module in extras {

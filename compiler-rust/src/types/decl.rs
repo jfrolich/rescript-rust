@@ -323,7 +323,7 @@ pub struct LabelDescription {
 
 /// Reference to an array of label descriptions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LabelArrayRef(pub usize);
+pub struct LabelArrayRef(pub u32);
 
 // ============================================================================
 // Module Types
