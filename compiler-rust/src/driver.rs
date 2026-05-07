@@ -1932,7 +1932,7 @@ pub fn typecheck_interface_source(
 pub fn typecheck_interface_file(path: &std::path::Path, options: &CompilerOptions) -> Result<()> {
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let source = crate::source_text::latin1_bytes_to_string(bytes);
     let filename = path.to_string_lossy();
     typecheck_interface_source(&source, &filename, options)
 }
@@ -1953,7 +1953,7 @@ pub fn compile_file_to_js_with_options(
     // correct position tracking in the scanner.
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let source = crate::source_text::latin1_bytes_to_string(bytes);
     let filename = path.to_string_lossy();
     compile_source_to_js_with_options(&source, &filename, options)
 }

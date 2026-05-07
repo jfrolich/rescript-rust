@@ -291,7 +291,7 @@ mod tests {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let source = crate::source_text::latin1_bytes_to_string(bytes);
             let filename = file.path.to_string_lossy().to_string();
             let is_interface = file
                 .path
@@ -494,7 +494,7 @@ mod tests {
         // Helper: read file, convert to Latin-1 string, parse
         let parse_once = |filename: &str| -> Option<()> {
             let bytes = std::fs::read(source_file).ok()?;
-            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let source = crate::source_text::latin1_bytes_to_string(bytes);
             let mut parser = crate::parser::Parser::new(filename, &source);
             if is_interface {
                 let _ = crate::parser::module::parse_signature(&mut parser);
@@ -1147,7 +1147,7 @@ mod tests {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let source = crate::source_text::latin1_bytes_to_string(bytes);
             let filename = file.path.to_string_lossy().to_string();
             let is_interface = file
                 .path
@@ -1240,7 +1240,7 @@ mod tests {
                 Ok(b) => b,
                 Err(_) => return,
             };
-            let source: String = bytes.iter().map(|&b| b as char).collect();
+            let source = crate::source_text::latin1_bytes_to_string(bytes);
             let filename = file.path.to_string_lossy().to_string();
             let is_interface = file
                 .path
@@ -1390,7 +1390,7 @@ mod tests {
                     Ok(b) => b,
                     Err(_) => return,
                 };
-                let source: String = bytes.iter().map(|&b| b as char).collect();
+                let source = crate::source_text::latin1_bytes_to_string(bytes);
                 let filename = file.path.to_string_lossy().to_string();
                 let is_interface = file
                     .path

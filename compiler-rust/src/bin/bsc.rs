@@ -18,6 +18,7 @@ use rescript_compiler::driver::{
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::parser::{Parser, module, sexp_locs};
+use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -321,7 +322,7 @@ fn generate_ast(
     // correct position tracking in the scanner and correct UTF-16 offset calculations
     // for multi-byte UTF-8 sequences (e.g., emoji characters).
     let bytes = fs::read(input).with_context(|| format!("Failed to read {}", input.display()))?;
-    let source: String = bytes.iter().map(|&b| b as char).collect();
+    let source = latin1_bytes_to_string(bytes);
 
     // Use the original path as provided (matching OCaml's behavior)
     // OCaml does not canonicalize paths - it uses them as-is

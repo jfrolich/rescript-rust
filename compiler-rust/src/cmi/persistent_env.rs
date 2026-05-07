@@ -1086,7 +1086,7 @@ impl PersistentEnv {
             }
         }
         let bytes = fs::read(path).ok()?;
-        Some(bytes.iter().map(|&b| b as char).collect())
+        Some(crate::source_text::latin1_bytes_to_string(bytes))
     }
 
     /// Maximum recursion depth for source-fallback type checking.

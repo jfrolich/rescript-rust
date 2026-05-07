@@ -25,6 +25,7 @@ use rescript_compiler::parser::{
     Comment, Parser, ParserMode, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
     ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
+use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -143,7 +144,7 @@ fn main() {
     // - The ML printer's escape_string function properly escapes bytes > 127
     // - The output conversion `c as u8` recovers the original bytes
     let source = match fs::read(&args.file) {
-        Ok(bytes) => bytes.iter().map(|&b| b as char).collect::<String>(),
+        Ok(bytes) => latin1_bytes_to_string(bytes),
         Err(e) => {
             eprintln!("Error reading file {:?}: {}", args.file, e);
             process::exit(1);

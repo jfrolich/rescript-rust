@@ -58,6 +58,8 @@ pub mod parser;
 /// Optional aggregate compiler performance counters.
 pub mod perf_counters;
 pub mod raw_lambda;
+/// Source text decoding helpers.
+pub mod source_text;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;

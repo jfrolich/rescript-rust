@@ -9,6 +9,8 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - A later same-commit benchmark during heavy system load reported `3.031s +/- 0.048s`, range `2.853s..3.080s`, while `uptime` showed load averages above 30 from macOS background services. Treat that run as contaminated; the minimum still matched the retained baseline band.
 - Candidate persistent-root type-declaration cache reuse benchmarked at `2.907s +/- 0.043s` over 20 runs, range `2.782s..2.971s`, under continuing Spotlight load. It passed Tella clean compile, JS output parity `660/660`, and canonical typedtree parity `660/660`.
 - Previous retained baseline: `2.941s +/- 0.017s` over 20 runs at `127969d9d`
+- Fresh current-source check after rebuilding release artifacts at `ab4d71481`: Tella clean in-process `hyperfine` `2.755s +/- 0.060s`, range `2.673s..2.877s`; this did not reproduce a real regression back to 2.9s.
+- ASCII source-read helper candidate/no-regression run: Tella clean in-process `hyperfine` `2.750s +/- 0.056s`, range `2.673s..2.847s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
 - JS output parity: 660/660
 - Canonical typedtree parity: 660/660
@@ -127,6 +129,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
 - Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.
+- Compiler source-read paths now share one Latin-1 decoding helper: ASCII sources reuse the read buffer as a `String`, while non-ASCII keeps the byte-to-char fallback. The in-process rewatch source path already had this fast path; this keeps `bsc`, `res_parser`, disk fallback, and parser benchmarks aligned without changing JS or typedtree output.
 
 ## Rejected Experiments
 
