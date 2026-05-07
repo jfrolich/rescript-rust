@@ -1599,7 +1599,7 @@ fn external_module_import_attributes_preserve_all_fields() {
 }
 
 #[test]
-fn skips_dynamic_import_only_possible_required_modules() {
+fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let extras = std::collections::HashSet::from([ModuleId {
         id: Ident::create_persistent("Side_effect"),
@@ -1609,7 +1609,9 @@ fn skips_dynamic_import_only_possible_required_modules() {
     let deps =
         compiler.compile_deps_program_with_possible_required_modules(&Lambda::unit(), &extras);
 
-    assert!(deps.modules.is_empty());
+    assert_eq!(deps.modules.len(), 1);
+    assert!(deps.modules[0].dynamic_import);
+    assert_eq!(deps.side_effect.as_deref(), Some("Side_effect"));
 }
 
 #[test]

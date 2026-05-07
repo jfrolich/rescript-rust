@@ -6405,13 +6405,15 @@ fn collect_modules_from_lambda(lam: &Lambda, seen: &mut AHashSet<ModuleId>) {
     match lam {
         Lambda::Lvar(_) | Lambda::Lconst(_) => {}
         Lambda::LglobalModule(id, dynamic_import) => {
-            if !*dynamic_import {
-                seen.insert(ModuleId {
-                    id: id.clone(),
-                    kind: Kind::Ml,
-                    dynamic_import: false,
-                });
-            }
+            // OCaml records dynamic imports in `may_required_modules` too:
+            // compiler/core/lam_convert.ml:423-474. They are later used for
+            // side-effect detection by compiler/core/lam_compile_env.ml:139-145
+            // even though js_dump_program.ml:76-98 skips static import output.
+            seen.insert(ModuleId {
+                id: id.clone(),
+                kind: Kind::Ml,
+                dynamic_import: *dynamic_import,
+            });
         }
         Lambda::Lapply(apply) => {
             collect_modules_from_lambda(&apply.ap_func, seen);
@@ -6498,11 +6500,7 @@ fn populate_required_modules(
     modules: &mut OcamlModuleSet,
 ) {
     for module in extras {
-        if !module.dynamic_import
-            && required_module_side_effect_reason(
-                module_path_resolver,
-                std::slice::from_ref(module),
-            )
+        if required_module_side_effect_reason(module_path_resolver, std::slice::from_ref(module))
             .is_some()
         {
             modules.insert(module.clone());

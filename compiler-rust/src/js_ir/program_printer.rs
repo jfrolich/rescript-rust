@@ -106,6 +106,13 @@ impl JsPrinter {
         let mut printed_any = false;
 
         for module in modules {
+            // OCaml keeps dynamic imports in deps for effect calculation but
+            // filters them out of static import/require emission; see
+            // compiler/core/js_dump_program.ml:76-98.
+            if module.dynamic_import {
+                continue;
+            }
+
             let path = self
                 .module_path_resolver
                 .as_ref()
@@ -442,6 +449,38 @@ mod tests {
         assert!(rendered.contains(
             "import * as Js_dict from \"@rescript/runtime/lib/es6/Js_dict.js\";\n\nlet dict = {};"
         ));
+    }
+
+    #[test]
+    fn test_print_deps_program_skips_static_import_for_dynamic_dependencies_like_ocaml() {
+        let resolver = ModulePathResolver::from_compile_options(
+            None,
+            Some(Path::new("/tmp/dynamic_import.mjs")),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let rendered = print_deps_program(
+            &DepsProgram {
+                program: Program::new(vec![], vec![]),
+                modules: vec![ModuleId {
+                    id: Ident::create_local("Dynamic_dep"),
+                    kind: Kind::External {
+                        name: "./dynamic_dep.mjs".to_string(),
+                        default: false,
+                        import_attributes: None,
+                    },
+                    dynamic_import: true,
+                }],
+                side_effect: Some("Dynamic_dep".to_string()),
+            },
+            Some(&resolver),
+        );
+
+        assert!(!rendered.contains("import * as Dynamic_dep"));
+        assert!(rendered.ends_with("/* Dynamic_dep Not a pure module */\n"));
     }
 
     #[test]

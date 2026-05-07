@@ -138,8 +138,7 @@ impl ModulePathResolver {
                         .as_ref()
                         .and_then(|env| env.resolve_module_source_path(module.id.name()))
                         .map(|path| normalize_absolute_path(&path))?;
-                    if let Some(path) = self.package_module_path(module.id.name(), &target_source)
-                    {
+                    if let Some(path) = self.package_module_path(module.id.name(), &target_source) {
                         return Some(path);
                     }
                     self.relative_output_path(&target_source)
@@ -220,16 +219,15 @@ impl ModulePathResolver {
         match &module.kind {
             Kind::Runtime => true,
             Kind::External { .. } => false,
-            Kind::Ml => {
-                if self.is_runtime_module(module.id.name()) {
-                    true
-                } else {
-                    self.persistent_env
-                        .as_ref()
-                        .and_then(|env| env.module_cmj_is_pure(module.id.name()))
-                        .unwrap_or(false)
-                }
-            }
+            // OCaml only treats Lam_module_ident.Runtime as automatically
+            // pure; Ml modules still read their `.cmj` purity even when their
+            // JS path points into @rescript/runtime. See
+            // compiler/core/lam_compile_env.ml:124-136.
+            Kind::Ml => self
+                .persistent_env
+                .as_ref()
+                .and_then(|env| env.module_cmj_is_pure(module.id.name()))
+                .unwrap_or(false),
         }
     }
 

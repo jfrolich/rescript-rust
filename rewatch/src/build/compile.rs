@@ -15,9 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
-use rescript_compiler::cmi::persistent_env::{
-    CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
-};
+use rescript_compiler::cmi::persistent_env::{CmjExportConstant, InMemoryModuleInfo, ModuleRegistry};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
@@ -2681,10 +2679,7 @@ fn compile_module_in_process_to_js_boundary(
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
 
     // Register this module's metadata in the local registry
-    local_registry.insert_module_info(
-        module_name.to_string(),
-        provisional_module_info.clone(),
-    );
+    local_registry.insert_module_info(module_name.to_string(), provisional_module_info.clone());
 
     // Step 1: If .resi exists, typecheck the interface first
     if let Some(interface) = &source_file.interface {
@@ -2913,17 +2908,28 @@ fn compile_module_in_process_to_js_boundary(
 
     // OCaml finalizes JS output only after dependency `.cmj` metadata exists:
     // compiler/core/lam_compile_main.ml:279-291 populates hard dependencies
-    // and asks Lam_compile_env.is_pure_module for each dependency effect.
+    // and asks Lam_compile_env.is_pure_module for each dependency effect. The
+    // extras come from Lam_convert.ml:423-474, including dynamic imports that
+    // the parse dependency graph does not treat as static dependencies.
     // Keep the in-process split scheduler equivalent by delaying this module's
-    // JS phase until every direct ML dependency in this build has completed.
+    // JS phase until every relevant in-universe ML dependency has completed.
     let needed_modules = scheduler_hooks
         .map(|hooks| {
-            module
+            let mut needed = module
                 .deps
                 .iter()
                 .filter(|name| *name != module_name && hooks.compile_universe.contains(*name))
                 .cloned()
-                .collect::<Vec<_>>()
+                .collect::<AHashSet<_>>();
+            for dep in &pre_js.possible_required_modules {
+                if matches!(dep.kind, rescript_compiler::js_ir::Kind::Ml) {
+                    let dep_name = dep.id.name();
+                    if dep_name != module_name && hooks.compile_universe.contains(dep_name) {
+                        needed.insert(dep_name.to_string());
+                    }
+                }
+            }
+            needed.into_iter().collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
