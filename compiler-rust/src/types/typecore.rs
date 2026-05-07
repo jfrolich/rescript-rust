@@ -5789,21 +5789,27 @@ fn force_qualified_value_type_paths<'a>(
                     root.is_persistent() && (root.name() == "Stdlib" || root.name() == "Pervasives")
                 })
         });
+    let selected_module_is_dotted_component_path =
+        matches!(selected_module_path.as_ref(), Some(Path::Pdot(..)));
     let should_collect_selected_alias_targets = value_access_root_is_local
         || matches!(selected_module_path.as_ref(), Some(Path::Pident(_)))
         || selected_module_is_implicit_stdlib_path
-        || selected_module_is_opened_component_path;
+        || selected_module_is_opened_component_path
+        || selected_module_is_dotted_component_path;
     let selected_alias_targets = if should_collect_selected_alias_targets {
         // OCaml compiler/ml/env.ml:781-813 reaches component tables for
         // qualified value lookup without forcing env.ml:1568's module
         // declaration thunk. Alias-target recovery is only needed for local
         // aliases selected from env.ml:665-676's local module table, for
         // exact root modules whose declaration is read directly by env.ml:800-813,
-        // or for `Stdlib` paths coming from compiler/core/res_compmisc.ml:58-62's
-        // implicit open. Do not do it for direct persistent child navigation
-        // like `Inline_const.N.f3`: that would force env.ml:1568's child
-        // module-declaration thunk and compiler/ml/subst.ml:352-400
-        // `Subst.modtype` renames too early.
+        // for `Stdlib` paths coming from compiler/core/res_compmisc.ml:58-62's
+        // implicit open, or for dotted component paths whose raw
+        // env.ml:1573-1578 child component still points at a scraped alias
+        // target. In the latter case, compiler/ml/env.ml:1530-1538 and
+        // compiler/ml/subst.ml:303-309 expose the selected component prefix in
+        // `Subst.value_description`, e.g. `DB__Story.Key.t` instead of the
+        // included backing module's `DB__Story__Read.Key.t`, while still
+        // avoiding the env.ml:1568 child module-declaration thunk.
         selected_module_path
             .as_ref()
             .and_then(|path| {
