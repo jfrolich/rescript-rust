@@ -4,8 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
-- Commit: `fea2c7566` (`Shallow-copy cold signature values`)
-- Tella `hyperfine`: `2.537s +/- 0.037s` over 10 runs, range `2.500s..2.631s`
+- Latest retained change: share stored persistent alias component views in normal in-process mode.
+- Tella `hyperfine`: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`
+- Previous retained baseline at `fea2c7566` (`Shallow-copy cold signature values`): `2.537s +/- 0.037s` over 10 runs, range `2.500s..2.631s`
 - A follow-up persistent-root shallow-value experiment compiled Tella but measured `2.588s +/- 0.024s`, range `2.552s..2.637s`, so it was dropped as no improvement.
 - Treat 2.9s readings in the notes below as historical/noisy baselines from before the retained signature-sharing and shallow-value freshening work, or as contaminated runs called out explicitly.
 - Goal: subsecond clean compile of the Tella repo with 100% codegen parity
@@ -116,6 +117,17 @@ Latest named qualification counter run after `fea2c7566`:
 
 Conclusion: the largest remaining access-path full-signature rewrites are concentrated in DOM component views, not Icon. The next shared-signature work should make `resolved_name_pdot` component views contextual/lazy so selecting `Webapi.Dom.Element` does not clone and rewrite the whole element signature each time.
 
+After sharing stored persistent alias component views in normal in-process mode:
+
+- Tella clean in-process compile: `Compiled 2127 modules`
+- signature copies: `calls=23684 items=564930 max_items=559`, down from `25367 / 725754`
+- `resolved_name_pdot`: `calls=3 items=94 max_items=42`, down from `1502 / 157930`
+- JS output parity: `660/660`
+- canonical typedtree parity: `660/660`
+- Tella `hyperfine`: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`; an earlier 10-run measurement had one contaminated `5.934s` outlier but a best run of `2.463s`
+
+Conclusion: stored child-component thunks were still resolving persistent aliases by cloning and qualifying the whole target signature. Reusing the immutable target `Arc<Signature>` with a lazy value source-prefix overlay removes nearly all DOM `resolved_name_pdot` full-signature copies.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`
@@ -173,6 +185,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - Qualified value lookup now builds a value-name index only for signatures with at least 32 items after two distinct value names have already been cached. This keeps one-off lazy lookups cheap but skips repeated full-signature scans for large dependency modules. Counter shape changed from `value hits=0 misses=39128 scans=39128 scanned_items=1565337 result_items=39128` to `hits=5356 misses=33772 scans=33772 scanned_items=1172597 result_items=176483`. Validation: Tella clean in-process compile via `hyperfine` `2.802s +/- 0.018s`, range `2.766s..2.828s`; JS output parity `660/660`; canonical typedtree parity `660/660`.
 - Normal in-process persistent-root component views now share the already-internalized `Arc<Signature>` when canonical typedtree mode is disabled and no flattened alias prefix rewrite is required. Signature-copy counters showed Tella dropping from `53916` full signature copies / `1612664` copied signature items to `31822` copies / `967700` items; the former top persistent-root copy site disappeared. Validation: Tella clean in-process compile `Compiled 2127 modules`; JS output parity `660/660`; canonical typedtree parity `660/660`; `hyperfine` `2.677s +/- 0.014s`, range `2.659s..2.700s`.
 - Normal in-process persistent child aliases now build component views directly over the backing persistent module's shared `Arc<Signature>`. A source-prefix overlay rewrites only forced value descriptions, avoiding a whole-signature copy for dotted reexports such as runtime child modules. Validation: Tella signature-copy counters dropped from `31810 / 967596` to `25353 / 725667`; JS output parity `660/660`; canonical typedtree parity `660/660`; `hyperfine` `2.600s +/- 0.021s`, range `2.566s..2.633s`.
+- Stored child-component thunks for normal in-process persistent aliases now also reuse the backing persistent module's shared `Arc<Signature>` with the same lazy value source-prefix overlay. This covers component descent through modules such as `Webapi.Dom.Element`, where the direct path already had a shared view but the stored thunk still cloned and qualified the target signature.
 - JSX/Layout-heavy files likely stress record labels, component signatures, and Lambda lowering more than Icon-specific sparse prop records.
 - Signature/env sharing should remain the top architectural target because it removes cross-module repeated semantic work.
 - Raw lambda field-position recovery now tries the shared qualified module-components view before falling back to owned module-type reconstruction, avoiding a whole-signature clone when the component cache already has the selected module signature.

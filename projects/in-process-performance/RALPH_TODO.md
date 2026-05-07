@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-07
-**Status:** Tella clean in-process builds are around 2.5-2.6s on the current branch after the latest retained persistent signature sharing and lazy signature freshening optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** Tella clean in-process builds are around 2.49s on the current branch after the latest retained persistent signature sharing and lazy signature freshening optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
 
 ## Goal
 
@@ -33,6 +33,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
   - [x] Reuse cached persistent-root type items before resolving/scanning module signatures again.
   - [x] Cache persistent-root type-item misses to avoid rescanning signatures for paths that are known absent.
   - [x] Share normal in-process persistent child alias component views over backing `Arc<Signature>` and lazily rewrite only forced value descriptions.
+  - [x] Share stored child-component persistent alias views over backing `Arc<Signature>` so component descent through DOM-style reexports does not clone/rewrite whole target signatures.
   - [x] In normal compile mode, shallow-copy top-level values during type-context lazy signature freshening and deep-copy only the value types that actually need binder substitution.
   - [x] Validate retained signature/env skip-work changes with Tella `hyperfine`, JS output parity, and canonical typedtree parity.
 

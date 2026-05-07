@@ -999,6 +999,27 @@ fn build_local_module_components<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext,
 ) -> Option<QualifiedModuleComponents> {
+    if !ctx.preserve_canonical_typedtree()
+        && ctx.persistent_env_is_in_process()
+        && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
+        && alias_id.is_persistent()
+    {
+        let pers = pers_env.as_mut()?;
+        if let Some(ps) = pers.find_pers_struct(alias_id.name(), ctx) {
+            let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
+            return Some(
+                QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                    access_path.clone(),
+                    ps.ps_sig.clone(),
+                    HashMap::new(),
+                    Some(source_prefix),
+                    ctx,
+                ),
+            );
+        }
+    }
+
     if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
         // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before building
         // component tables. Dotted aliases are resolved by `resolve_module_type`
