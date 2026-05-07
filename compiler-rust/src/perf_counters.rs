@@ -70,6 +70,8 @@ static SIGNATURE_COPY_SITES: OnceLock<Mutex<HashMap<(&'static str, u32), Signatu
     OnceLock::new();
 static SIGNATURE_QUALIFICATION_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
     OnceLock::new();
+static SIGNATURE_QUALIFICATION_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
+    OnceLock::new();
 static SIGNATURE_FRESHEN_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
     OnceLock::new();
 static SIGNATURE_FRESHEN_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
@@ -263,6 +265,9 @@ pub fn reset() {
     if let Some(kinds) = SIGNATURE_QUALIFICATION_KINDS.get() {
         kinds.lock().unwrap().clear();
     }
+    if let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() {
+        names.lock().unwrap().clear();
+    }
     if let Some(kinds) = SIGNATURE_FRESHEN_KINDS.get() {
         kinds.lock().unwrap().clear();
     }
@@ -421,6 +426,23 @@ pub(crate) fn record_signature_qualification(kind: &'static str, item_count: usi
     entry.max_items = entry.max_items.max(item_count as u64);
 }
 
+/// Record a named signature qualification entry.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_qualification_name(
+    kind: &'static str,
+    name: &str,
+    item_count: usize,
+) {
+    let names = SIGNATURE_QUALIFICATION_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut names = names.lock().unwrap();
+    let key = format!("{kind}:{name}");
+    let entry = names.entry(key).or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+}
+
 /// Record a signature freshening entry point before it performs full-copy work.
 ///
 /// Caller must check [`enabled`] before calling this helper.
@@ -513,6 +535,7 @@ pub fn print_report() {
     );
     print_signature_copy_sites();
     print_signature_qualification_kinds();
+    print_signature_qualification_names();
     print_signature_freshen_kinds();
     print_signature_freshen_names();
     eprintln!(
@@ -527,6 +550,31 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_signature_qualification_names() {
+    let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() else {
+        return;
+    };
+
+    let mut names = names
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, counters)| (name.clone(), *counters))
+        .collect::<Vec<_>>();
+    names.sort_by(|a, b| {
+        b.1.items
+            .cmp(&a.1.items)
+            .then_with(|| b.1.calls.cmp(&a.1.calls))
+    });
+
+    for (name, counters) in names.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_qualification_name name={} calls={} items={} max_items={}",
+            name, counters.calls, counters.items, counters.max_items,
+        );
+    }
 }
 
 fn print_signature_freshen_names() {

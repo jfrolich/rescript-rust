@@ -22998,6 +22998,11 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             "other"
         };
         crate::perf_counters::record_signature_qualification(kind, resolved_sig.len());
+        crate::perf_counters::record_signature_qualification_name(
+            kind,
+            access_path.name().as_str(),
+            resolved_sig.len(),
+        );
     }
     if qualification_is_identity {
         return resolved_sig.clone();

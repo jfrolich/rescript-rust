@@ -108,6 +108,14 @@ Latest Tella clean build report after persistent child alias component overlays:
 
 Conclusion: persistent child aliases can share the backing `Arc<Signature>` when normal compile mode is active, as long as forced values carry a lazy source-prefix overlay. This removes most dotted reexport full-signature rewrites while preserving JS output parity.
 
+Latest named qualification counter run after `fea2c7566`:
+
+- Tella clean in-process compile: `Compiled 2127 modules`
+- top `resolved_name_pdot` names by copied signature items: `Webapi.Dom.Element 40660`, `Webapi.Dom 19344`, `Webapi.Dom.HtmlElement 17917`, `Webapi.Dom.Document 17493`, `Webapi.Dom.Window 13756`, `Webapi.Dom.EventTarget 5016`
+- top `persistent_root` names by copied signature items: `ReactEvent.Mouse 7524`, `JsxEvent.Mouse 4917`, `Jotai.Atom 4350`, `BaseUI.Tooltip 3240`, `Next.SSR 2771`, `JsxEvent.Pointer 2752`
+
+Conclusion: the largest remaining access-path full-signature rewrites are concentrated in DOM component views, not Icon. The next shared-signature work should make `resolved_name_pdot` component views contextual/lazy so selecting `Webapi.Dom.Element` does not clone and rewrite the whole element signature each time.
+
 ## Slow Non-Icon Files To Watch
 
 - `node_modules/bs-css/src/Css_Js_Core.res`
