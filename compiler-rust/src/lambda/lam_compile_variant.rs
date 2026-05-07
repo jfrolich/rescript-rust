@@ -203,10 +203,15 @@ impl LambdaCompiler {
             })
             .collect();
 
+        // OCaml `compile_general_cases` only calls `Js_output.to_break_block`
+        // for grouped cases (compiler/core/lam_compile.ml:610-624). The
+        // switch default is `Js_output.output_as_block`
+        // (compiler/core/lam_compile.ml:595-605), so it must not get the
+        // case-only trailing `break`.
         let default_block = switch
             .sw_failaction
             .as_ref()
-            .map(|fallback| self.compile_switch_value_block(&tmp, fallback));
+            .map(|fallback| self.compile_assign_to_target_block(&tmp, fallback));
 
         prelude.push(Statement::new(StatementDesc::IntSwitch(
             scrut_compiled.expr,
@@ -280,7 +285,13 @@ impl LambdaCompiler {
             })
             .collect();
 
-        let default_block = default.map(|fallback| self.compile_switch_value_block(&tmp, fallback));
+        // OCaml `compile_general_cases` only calls `Js_output.to_break_block`
+        // for grouped cases (compiler/core/lam_compile.ml:610-624). The
+        // switch default is `Js_output.output_as_block`
+        // (compiler/core/lam_compile.ml:595-605), so it must not get the
+        // case-only trailing `break`.
+        let default_block =
+            default.map(|fallback| self.compile_assign_to_target_block(&tmp, fallback));
 
         prelude.push(Statement::new(StatementDesc::StringSwitch(
             scrut_compiled.expr,
