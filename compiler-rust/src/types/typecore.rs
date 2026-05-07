@@ -17859,10 +17859,17 @@ fn rewrite_child_module_prefixes_from_sig<'a>(
     }
 }
 
+#[track_caller]
 pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
 ) -> crate::types::decl::Signature {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::record_signature_copy(
+            std::panic::Location::caller(),
+            sig_items.len(),
+        );
+    }
     let mut cache = TypeExprRefMap::new();
     copy_lookup_signature(sig_items, ctx, &mut cache)
 }
@@ -22583,6 +22590,42 @@ fn build_module_components_from_parent_path<'a>(
     .flatten()
 }
 
+fn build_shared_persistent_root_components<'a>(
+    module_path: &Path,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
+    if ctx.preserve_canonical_typedtree() || !ctx.persistent_env_is_in_process() {
+        return None;
+    }
+
+    let Path::Pident(id) = module_path else {
+        return None;
+    };
+    if !id.is_persistent() {
+        return None;
+    }
+
+    let pers = pers_env.as_mut()?;
+    if pers
+        .qualified_alias_path_for_flattened_head(id.name())
+        .is_some()
+    {
+        return None;
+    }
+
+    let ps = pers.find_pers_struct(id.name(), ctx)?;
+    let access_path = Path::pident(Ident::create_persistent(id.name()));
+    Some(
+        crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc(
+            access_path,
+            ps.ps_sig.clone(),
+            HashMap::new(),
+            ctx,
+        ),
+    )
+}
+
 pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     module_path: &Path,
     env: &Env,
@@ -22629,6 +22672,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     }
 
     let components = build_module_components_from_parent_path(module_path, env, pers_env, ctx)
+        .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
         .or_else(|| {
             let (access_path, sig) =
                 build_module_signature_for_path(module_path, env, pers_env, ctx)?;

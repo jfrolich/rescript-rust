@@ -4,8 +4,9 @@
 //! process-global so the in-process build can report aggregate behavior across
 //! all worker threads.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
@@ -62,6 +63,12 @@ static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
 static TYPE_ITEM_RESOLVE_FOUND: AtomicU64 = AtomicU64::new(0);
 
+static SIGNATURE_COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_ITEMS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_MAX_ITEMS: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_COPY_SITES: OnceLock<Mutex<HashMap<(&'static str, u32), SignatureCopySite>>> =
+    OnceLock::new();
+
 static REGISTRY_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_SHARED_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -95,6 +102,13 @@ struct LazyCounters {
     scans: &'static AtomicU64,
     scanned_items: &'static AtomicU64,
     results: &'static AtomicU64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SignatureCopySite {
+    calls: u64,
+    items: u64,
+    max_items: u64,
 }
 
 impl LazyLookupKind {
@@ -221,6 +235,9 @@ pub fn reset() {
         &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
         &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
         &TYPE_ITEM_RESOLVE_FOUND,
+        &SIGNATURE_COPY_CALLS,
+        &SIGNATURE_COPY_ITEMS,
+        &SIGNATURE_COPY_MAX_ITEMS,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -232,6 +249,10 @@ pub fn reset() {
         &REGISTRY_LOCAL_FALLBACKS_TOTAL,
     ] {
         counter.store(0, Ordering::Relaxed);
+    }
+
+    if let Some(sites) = SIGNATURE_COPY_SITES.get() {
+        sites.lock().unwrap().clear();
     }
 }
 
@@ -352,6 +373,27 @@ pub(crate) fn record_type_item_resolve_scan(scanned_items: usize, type_items: us
     }
 }
 
+/// Record a full signature copy, grouped by call site.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_copy(
+    location: &'static std::panic::Location<'static>,
+    item_count: usize,
+) {
+    SIGNATURE_COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    SIGNATURE_COPY_ITEMS.fetch_add(item_count as u64, Ordering::Relaxed);
+    SIGNATURE_COPY_MAX_ITEMS.fetch_max(item_count as u64, Ordering::Relaxed);
+
+    let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut sites = sites.lock().unwrap();
+    let entry = sites
+        .entry((location.file(), location.line()))
+        .or_insert_with(SignatureCopySite::default);
+    entry.calls += 1;
+    entry.items += item_count as u64;
+    entry.max_items = entry.max_items.max(item_count as u64);
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -412,6 +454,13 @@ pub fn print_report() {
         TYPE_ITEM_RESOLVE_FOUND.load(Ordering::Relaxed),
     );
     eprintln!(
+        "[compiler-counter] signature_copies calls={} items={} max_items={}",
+        SIGNATURE_COPY_CALLS.load(Ordering::Relaxed),
+        SIGNATURE_COPY_ITEMS.load(Ordering::Relaxed),
+        SIGNATURE_COPY_MAX_ITEMS.load(Ordering::Relaxed),
+    );
+    print_signature_copy_sites();
+    eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
         REGISTRY_SHARED_ENTRIES_TOTAL.load(Ordering::Relaxed),
@@ -423,6 +472,31 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_signature_copy_sites() {
+    let Some(sites) = SIGNATURE_COPY_SITES.get() else {
+        return;
+    };
+
+    let mut sites = sites
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|((file, line), counters)| (*file, *line, *counters))
+        .collect::<Vec<_>>();
+    sites.sort_by(|a, b| {
+        b.2.items
+            .cmp(&a.2.items)
+            .then_with(|| b.2.calls.cmp(&a.2.calls))
+    });
+
+    for (file, line, counters) in sites.into_iter().take(20) {
+        eprintln!(
+            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
+            file, line, counters.calls, counters.items, counters.max_items,
+        );
+    }
 }
 
 fn print_lazy(kind: LazyLookupKind) {
