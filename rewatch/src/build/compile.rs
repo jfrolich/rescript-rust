@@ -2911,21 +2911,18 @@ fn compile_module_in_process_to_js_boundary(
         );
     }
 
+    // OCaml finalizes JS output only after dependency `.cmj` metadata exists:
+    // compiler/core/lam_compile_main.ml:279-291 populates hard dependencies
+    // and asks Lam_compile_env.is_pure_module for each dependency effect.
+    // Keep the in-process split scheduler equivalent by delaying this module's
+    // JS phase until every direct ML dependency in this build has completed.
     let needed_modules = scheduler_hooks
         .map(|hooks| {
-            pre_js
-                .possible_required_modules
+            module
+                .deps
                 .iter()
-                .filter_map(|required_module| {
-                    if !matches!(required_module.kind, rescript_compiler::js_ir::Kind::Ml) {
-                        return None;
-                    }
-                    let name = required_module.id.name();
-                    (name != module_name
-                        && module.deps.contains(name)
-                        && hooks.compile_universe.contains(name))
-                    .then(|| name.to_string())
-                })
+                .filter(|name| *name != module_name && hooks.compile_universe.contains(*name))
+                .cloned()
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
