@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME,
-    TypeDeclaration, TypeKind,
+    Attribute, ConstructorArguments, ConstructorDescription, TypeDeclaration, TypeKind,
+    INTERNAL_OPTIONAL_ATTR_NAME,
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
@@ -288,23 +288,28 @@ pub(crate) fn find_type_decl_pub(
 
 fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
-        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => ctx
-            .find_type_decl_by_stamp(id.stamp())
-            .map(|decl| decl.clone())
-            // OCaml callers such as `matching_polyfill.ml:31-35` use
-            // `Env.find_type`, so predefined stamped paths like `result` and
-            // `option` must still resolve through the current environment when
-            // they are not present in Rust's auxiliary declaration side table.
-            .or_else(|| crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path))
-            .or_else(|| {
-                ctx.find_resolved_pdot_type(&path.name())
-                    .map(|decl| (*decl).clone())
-            })
-            .or_else(|| {
-                ctx.find_type_decl_by_path(&path.name())
-                    .map(|decl| decl.clone())
-            })
-            .or_else(|| env.lookup_type(path).ok().cloned()),
+        Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
+            // `matching_polyfill.ml:31-35` and `ctype.ml:4492-4512` call
+            // `Env.find_type`; for Pident, env.ml:800-862 resolves through the
+            // caller's `IdTbl` before any auxiliary persistent/side-table
+            // fallback. In-process builds can have an abstract exported copy in
+            // `TypeContext` under the same stamp, so the environment must win
+            // for local constructor switches.
+            crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+                .or_else(|| {
+                    ctx.find_type_decl_by_stamp(id.stamp())
+                        .map(|decl| decl.clone())
+                })
+                .or_else(|| {
+                    ctx.find_resolved_pdot_type(&path.name())
+                        .map(|decl| (*decl).clone())
+                })
+                .or_else(|| {
+                    ctx.find_type_decl_by_path(&path.name())
+                        .map(|decl| decl.clone())
+                })
+                .or_else(|| env.lookup_type(path).ok().cloned())
+        }
         _ => crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
             .or_else(|| {
                 ctx.find_resolved_pdot_type(&path.name())
