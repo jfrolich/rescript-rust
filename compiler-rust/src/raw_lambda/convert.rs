@@ -3874,6 +3874,25 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
+        if matches!(&path, crate::types::Path::Pdot(..))
+            || Self::path_may_follow_mty_ident(&path)
+        {
+            if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            ) {
+                if !alias_target.same(&path) {
+                    // OCaml `transl_module_path` calls `Env.normalize_path`
+                    // (compiler/ml/lambda.ml:648-649), whose Pdot case delegates
+                    // to `find_module ~alias:true` (compiler/ml/env.ml:876-880)
+                    // before following `Mty_alias` (compiler/ml/env.ml:903-914).
+                    return self.normalize_module_path_in_env(env, &alias_target);
+                }
+            }
+        }
+
         if Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::alias_target_for_module_path(
                 &path,
@@ -3924,6 +3943,27 @@ impl<'a> RawLambdaConverter<'a> {
                     return self.normalize_value_prefix_path_in_env(env, alias_path);
                 }
                 _ => {}
+            }
+        }
+
+        if matches!(&path, crate::types::Path::Pdot(..))
+            || Self::path_may_follow_mty_ident(&path)
+        {
+            if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            ) {
+                if !alias_target.same(&path) {
+                    // OCaml `transl_value_path` normalizes only the value prefix
+                    // (compiler/ml/lambda.ml:651-652); `normalize_path_prefix`
+                    // calls `normalize_path` on that prefix
+                    // (compiler/ml/env.ml:933-935), and `normalize_path` follows
+                    // `Mty_alias` via `find_module ~alias:true`
+                    // (compiler/ml/env.ml:903-914).
+                    return self.normalize_value_prefix_path_in_env(env, &alias_target);
+                }
             }
         }
 
@@ -12468,6 +12508,124 @@ external myJson: Js.Json.t = "default"
         assert!(matches!(
             info.args.as_slice(),
             [RawLambda::LglobalModule(id, false)] if id.same(&pkg_list)
+        ));
+    }
+
+    #[test]
+    fn translate_value_path_raw_follows_persistent_nested_module_alias_prefixes() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut env = initial_env(&ctx);
+
+        let icon = Ident::create_persistent("Icon");
+        let export = Ident::create_local("Export");
+        let subtitles = Ident::create_local("Subtitles");
+        let main = Ident::create_local("Main");
+        let separate = Ident::create_local("Separate");
+        let make = Ident::create_local("make");
+
+        let icon_export_path = crate::types::Path::pdot(
+            crate::types::Path::Pident(icon.clone()),
+            export.name().to_string(),
+        );
+        let subtitles_path =
+            crate::types::Path::pdot(icon_export_path.clone(), subtitles.name().to_string());
+        let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
+
+        let main_decl = crate::types::decl::ModuleDeclaration {
+            md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                crate::types::SignatureItem::SigValue(
+                    make.clone(),
+                    crate::types::decl::ValueDescription {
+                        val_type: ctx.new_var(None),
+                        val_kind: crate::types::decl::ValueKind::ValReg,
+                        val_loc: Location::none(),
+                        val_attributes: Vec::new(),
+                        val_path: None,
+                    },
+                ),
+            ]),
+            md_attributes: Vec::new(),
+            md_loc: Location::none(),
+            md_path: None,
+        };
+
+        env.add_module(
+            icon.clone(),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                    crate::types::SignatureItem::SigModule(
+                        export.clone(),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                                crate::types::SignatureItem::SigModule(
+                                    subtitles.clone(),
+                                    crate::types::decl::ModuleDeclaration {
+                                        md_type: crate::types::decl::ModuleType::MtySignature(
+                                            vec![
+                                                crate::types::SignatureItem::SigModule(
+                                                    main.clone(),
+                                                    main_decl,
+                                                    crate::types::decl::RecStatus::TrecNot,
+                                                ),
+                                                crate::types::SignatureItem::SigModule(
+                                                    separate.clone(),
+                                                    crate::types::decl::ModuleDeclaration {
+                                                        md_type:
+                                                            crate::types::decl::ModuleType::MtyAlias(
+                                                                crate::types::decl::AliasPresence::MtaPresent,
+                                                                main_path.clone(),
+                                                            ),
+                                                        md_attributes: Vec::new(),
+                                                        md_loc: Location::none(),
+                                                        md_path: None,
+                                                    },
+                                                    crate::types::decl::RecStatus::TrecNot,
+                                                ),
+                                            ],
+                                        ),
+                                        md_attributes: Vec::new(),
+                                        md_loc: Location::none(),
+                                        md_path: None,
+                                    },
+                                    crate::types::decl::RecStatus::TrecNot,
+                                ),
+                            ]),
+                            md_attributes: Vec::new(),
+                            md_loc: Location::none(),
+                            md_path: None,
+                        },
+                        crate::types::decl::RecStatus::TrecNot,
+                    ),
+                ]),
+                md_attributes: Vec::new(),
+                md_loc: Location::none(),
+                md_path: None,
+            },
+        );
+
+        let path = crate::types::Path::pdot(
+            crate::types::Path::pdot(subtitles_path, separate.name().to_string()),
+            make.name().to_string(),
+        );
+        let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let lowered = converter.translate_value_path_raw_in_env(&env, &path, Location::none());
+
+        let RawLambda::Lprim(make_info) = lowered else {
+            panic!("expected value path to lower to make field access");
+        };
+        assert!(matches!(
+            make_info.primitive,
+            Primitive::Pfield(_, FieldDbgInfo::Module { ref name }) if name == "make"
+        ));
+        assert!(matches!(
+            make_info.args.as_slice(),
+            [RawLambda::Lprim(main_info)]
+                if matches!(
+                    main_info.primitive,
+                    Primitive::Pfield(_, FieldDbgInfo::Module { ref name }) if name == "Main"
+                )
         ));
     }
 
