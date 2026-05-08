@@ -3493,6 +3493,22 @@ impl LambdaCompiler {
     ) -> Block {
         let scrut_compiled = self.compile_expr(scrut);
         let mut block = scrut_compiled.prelude;
+        let borrowed_cases: Vec<_> = cases
+            .iter()
+            .map(|(tag, body)| (SwitchCaseTag::String(tag.clone()), body))
+            .collect();
+
+        if let Some(small) = self.compile_small_string_switch_tail_loop_return(
+            scrut_compiled.expr.clone(),
+            &borrowed_cases,
+            default,
+            default.is_none(),
+            tail_loop,
+        ) {
+            block.extend(small);
+            return block;
+        }
+
         // Match OCaml's generic string-switch case construction
         // (compiler/core/lam_compile.ml:792-794) and its shared
         // `compile_general_cases` break logic

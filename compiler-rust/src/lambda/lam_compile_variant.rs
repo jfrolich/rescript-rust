@@ -2162,6 +2162,11 @@ impl LambdaCompiler {
         complete: bool,
         tail_loop: &mut TailLoopState,
     ) -> Option<Block> {
+        // OCaml compiler/core/lam_compile.ml:535-567 handles the same small
+        // switch cases before falling back to `switch`: one non-complete case
+        // becomes `S.if_`, and two complete cases become `S.if_ ... ~else_`.
+        // This tail-loop-specific helper keeps those statement shapes while
+        // still lowering self tail calls to assignment + `continue`.
         match cases {
             [] => Some(
                 default
