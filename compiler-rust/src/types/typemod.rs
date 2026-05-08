@@ -14736,6 +14736,57 @@ fn transl_sig_type_declarations_with_ids<'a>(
                             ld_attributes: label.pld_attributes.clone(),
                         });
                     }
+                    // OCaml compiler/ml/typedecl.ml:631-646 runs
+                    // Record_type_spread.expand_labels_with_type_spreads for
+                    // both structures and signatures before publishing the
+                    // Type_record. Keep `.resi` record spreads expanded too,
+                    // so downstream record literals see the same lbl_all order
+                    // and runtime names as modules loaded from OCaml `.cmi`.
+                    let has_spread = internal_labels
+                        .iter()
+                        .any(|label| label.ld_id.name() == "...");
+                    if has_spread {
+                        let mut expanded_internal_labels = Vec::new();
+                        let mut expanded_typed_labels = Vec::new();
+                        let mut all_spreads_resolved = true;
+
+                        for (internal_label, typed_label) in
+                            internal_labels.iter().zip(typed_tree_labels.iter())
+                        {
+                            if internal_label.ld_id.name() != "..." {
+                                expanded_internal_labels.push(internal_label.clone());
+                                expanded_typed_labels.push(typed_label.clone());
+                                continue;
+                            }
+
+                            let mut visited = HashSet::new();
+                            if let Some(resolved_fields) = expand_record_spread_label(
+                                ctx,
+                                &temp_env,
+                                internal_label,
+                                &mut visited,
+                            ) {
+                                for resolved_field in resolved_fields {
+                                    expanded_typed_labels.push(make_typed_spread_label(
+                                        arena,
+                                        ctx,
+                                        typed_label,
+                                        &resolved_field,
+                                    ));
+                                    expanded_internal_labels.push(resolved_field);
+                                }
+                            } else {
+                                all_spreads_resolved = false;
+                                expanded_internal_labels.push(internal_label.clone());
+                                expanded_typed_labels.push(typed_label.clone());
+                            }
+                        }
+
+                        if all_spreads_resolved {
+                            internal_labels = expanded_internal_labels;
+                            typed_tree_labels = expanded_typed_labels;
+                        }
+                    }
 
                     (
                         crate::types::TypeKind::TypeRecord(
