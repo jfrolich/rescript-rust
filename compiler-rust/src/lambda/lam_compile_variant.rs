@@ -1649,8 +1649,12 @@ impl LambdaCompiler {
             // OCaml only forces a temp here when the backend needs to reuse the
             // scrutinee across both const and payload dispatch.
             (true, true) => true,
-            (true, false) => !self.block_switch_complete(switch),
-            (false, true) => !self.const_switch_complete(switch),
+            // OCaml `compiler/core/lam_compile.ml:715-765` only bypasses the
+            // const/block dispatch when the corresponding switch side is
+            // saturated (`sw_*_full`) and empty. A missing failaction still
+            // goes through `is_a_literal_case`, which reuses the scrutinee.
+            (true, false) => !switch.sw_blocks_full,
+            (false, true) => !switch.sw_consts_full,
             (false, false) => false,
         }
     }
@@ -2393,9 +2397,13 @@ impl LambdaCompiler {
             )
         };
 
-        if const_cases.is_empty() && const_complete {
+        // OCaml `compiler/core/lam_compile.ml:715-765` skips the mixed
+        // const/block dispatch only for saturated empty sides. `Complete`
+        // caused by `sw_failaction = None` still routes through
+        // `is_a_literal_case`, preserving the object guard around TAG access.
+        if const_cases.is_empty() && switch.sw_consts_full {
             block_branch
-        } else if block_cases.is_empty() && block_complete {
+        } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
             self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
@@ -2451,9 +2459,13 @@ impl LambdaCompiler {
             )
         };
 
-        if const_cases.is_empty() && const_complete {
+        // OCaml `compiler/core/lam_compile.ml:715-765` skips the mixed
+        // const/block dispatch only for saturated empty sides. `Complete`
+        // caused by `sw_failaction = None` still routes through
+        // `is_a_literal_case`, preserving the object guard around TAG access.
+        if const_cases.is_empty() && switch.sw_consts_full {
             block_branch
-        } else if block_cases.is_empty() && block_complete {
+        } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
             self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
@@ -2512,9 +2524,13 @@ impl LambdaCompiler {
             )
         };
 
-        if const_cases.is_empty() && const_complete {
+        // OCaml `compiler/core/lam_compile.ml:715-765` skips the mixed
+        // const/block dispatch only for saturated empty sides. `Complete`
+        // caused by `sw_failaction = None` still routes through
+        // `is_a_literal_case`, preserving the object guard around TAG access.
+        if const_cases.is_empty() && switch.sw_consts_full {
             block_branch
-        } else if block_cases.is_empty() && block_complete {
+        } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
             self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
@@ -2570,9 +2586,13 @@ impl LambdaCompiler {
             )
         };
 
-        if const_cases.is_empty() && const_complete {
+        // OCaml `compiler/core/lam_compile.ml:715-765` skips the mixed
+        // const/block dispatch only for saturated empty sides. `Complete`
+        // caused by `sw_failaction = None` still routes through
+        // `is_a_literal_case`, preserving the object guard around TAG access.
+        if const_cases.is_empty() && switch.sw_consts_full {
             block_branch
-        } else if block_cases.is_empty() && block_complete {
+        } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
             self.compile_effect_if(
