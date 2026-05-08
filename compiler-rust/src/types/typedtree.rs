@@ -339,6 +339,7 @@ pub enum ExpressionDesc {
     /// descriptions into every sparse JSX record internally.
     Texp_record_sparse {
         fields: Vec<RecordField>,
+        all_labels: std::sync::Arc<Vec<LabelDescription>>,
         omitted_loc: LocIdx,
         extended_expression: Option<Box<Expression>>,
     },

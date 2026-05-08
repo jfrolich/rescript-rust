@@ -1099,50 +1099,13 @@ fn sexp_record_field(
     ])
 }
 
-fn sparse_record_labels_from_type(
-    ctx: &TypeContext,
-    exp_type: TypeExprRef,
-    fields: &[RecordField],
-) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
-    // OCaml compiler/ml/typecore.ml:2833-2842 expands omitted optionals from
-    // the record family's `lbl_all` array. Sparse Rust records keep only the
-    // expression type and explicit fields; reconstruct the shared label array
-    // here only for canonical typedtree output.
-    record_labels_for_type(ctx, exp_type).or_else(|| {
-        fields
-            .iter()
-            .find_map(|(_, label, _, _)| record_labels_for_type(ctx, label.lbl_res))
-    })
-}
-
-fn record_labels_for_type(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<std::sync::Arc<Vec<crate::types::LabelDescription>>> {
-    let mut current = ctx.repr(ty);
-    for _ in 0..32 {
-        let next = {
-            let desc = ctx.borrow_desc(current);
-            match &*desc {
-                TypeDesc::Tconstr { path, .. } => {
-                    return ctx.get_record_label_descriptions(path);
-                }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
-                _ => return None,
-            }
-        };
-        current = ctx.repr(next?);
-    }
-    None
-}
-
 fn sexp_expression_desc(
     arena: &ParseArena,
     ctx: &TypeContext,
     with_locs: bool,
     dedup: &mut TypeDedupTable,
     desc: &ExpressionDesc,
-    exp_type: TypeExprRef,
+    _exp_type: TypeExprRef,
 ) -> Sexp {
     match desc {
         ExpressionDesc::Texp_ident(p, li, _) => Sexp::list(vec![
@@ -1334,6 +1297,7 @@ fn sexp_expression_desc(
         }
         ExpressionDesc::Texp_record_sparse {
             fields,
+            all_labels,
             omitted_loc,
             extended_expression,
         } => {
@@ -1346,51 +1310,18 @@ fn sexp_expression_desc(
                 }
             }
 
-            let all_labels = sparse_record_labels_from_type(ctx, exp_type, fields);
-            let mut field_items = Vec::with_capacity(
-                all_labels
-                    .as_ref()
-                    .map_or(fields.len(), |labels| labels.len()),
-            );
-            if let Some(all_labels) = all_labels {
-                for (idx, label) in all_labels.iter().enumerate() {
-                    let pos = if label.lbl_pos >= 0 {
-                        label.lbl_pos as usize
-                    } else {
-                        idx
-                    };
-                    if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
-                        field_items.push(sexp_record_field(
-                            arena,
-                            ctx,
-                            with_locs,
-                            dedup,
-                            &ld.lbl_name,
-                            def,
-                            *opt_flag,
-                        ));
-                    } else if label.lbl_optional {
-                        let def = Sexp::list(vec![
-                            Sexp::atom("Overridden"),
-                            sexp_lident_name(&label.lbl_name),
-                            sexp_omitted_optional_none_expression_at_loc(
-                                arena,
-                                ctx,
-                                with_locs,
-                                dedup,
-                                *omitted_loc,
-                                label.lbl_arg,
-                            ),
-                        ]);
-                        field_items.push(Sexp::list(vec![
-                            string(&label.lbl_name),
-                            def,
-                            Sexp::atom("required"),
-                        ]));
-                    }
-                }
-            } else {
-                for (_li, ld, def, opt_flag) in fields.iter() {
+            // OCaml compiler/ml/typecore.ml:2833-2842 builds definitions from
+            // the complete label array before translcore.ml:1145-1191 walks
+            // every slot. Serialize the carried shared array rather than
+            // rediscovering labels through potentially alias-expanded types.
+            let mut field_items = Vec::with_capacity(all_labels.len());
+            for (idx, label) in all_labels.iter().enumerate() {
+                let pos = if label.lbl_pos >= 0 {
+                    label.lbl_pos as usize
+                } else {
+                    idx
+                };
+                if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
                     field_items.push(sexp_record_field(
                         arena,
                         ctx,
@@ -1400,6 +1331,24 @@ fn sexp_expression_desc(
                         def,
                         *opt_flag,
                     ));
+                } else if label.lbl_optional {
+                    let def = Sexp::list(vec![
+                        Sexp::atom("Overridden"),
+                        sexp_lident_name(&label.lbl_name),
+                        sexp_omitted_optional_none_expression_at_loc(
+                            arena,
+                            ctx,
+                            with_locs,
+                            dedup,
+                            *omitted_loc,
+                            label.lbl_arg,
+                        ),
+                    ]);
+                    field_items.push(Sexp::list(vec![
+                        string(&label.lbl_name),
+                        def,
+                        Sexp::atom("required"),
+                    ]));
                 }
             }
             let ext_sexp = match extended_expression {

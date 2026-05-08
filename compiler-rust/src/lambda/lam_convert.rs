@@ -30,8 +30,8 @@ use crate::types::decl::{
 };
 use crate::types::typedtree::{
     Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam, FunctionParamPattern,
-    Pattern, PatternDesc, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
-    ValueBinding,
+    Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
+    StructureItemDesc, ValueBinding,
 };
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
@@ -218,8 +218,15 @@ impl<'a> LambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
             ),
-            ExpressionDesc::Texp_record_sparse { fields, .. } => {
-                self.convert_record(self.loc(expr.exp_loc), fields, None)
+            ExpressionDesc::Texp_record_sparse {
+                fields,
+                all_labels,
+                omitted_loc,
+                ..
+            } => {
+                let expanded_fields =
+                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
+                self.convert_record(self.loc(expr.exp_loc), &expanded_fields, None)
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
@@ -1058,6 +1065,65 @@ impl<'a> LambdaConverter<'a> {
             elements,
             loc,
         )
+    }
+
+    fn expand_sparse_record_fields(
+        &self,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
+        fields: &[RecordField],
+        omitted_loc: LocIdx,
+    ) -> Vec<RecordField> {
+        // OCaml compiler/ml/typecore.ml:2833-2842 stores omitted optionals in
+        // the full `lbl_all` array, and compiler/ml/translcore.ml:1145-1191
+        // lowers every slot. Sparse Rust typedtree nodes carry the shared
+        // label array so this legacy converter keeps the same Lambda shape.
+        let placeholder_lid = fields
+            .first()
+            .map(|(lid, _, _, _)| lid.clone())
+            .unwrap_or_else(|| self.arena.placeholder_located(omitted_loc));
+        let mut explicit_by_pos: std::collections::HashMap<usize, &RecordField> =
+            std::collections::HashMap::with_capacity(fields.len());
+        for field in fields {
+            let pos = field.1.lbl_pos;
+            if pos >= 0 {
+                explicit_by_pos.insert(pos as usize, field);
+            }
+        }
+
+        let mut expanded = Vec::with_capacity(all_labels.len());
+        for (idx, label) in all_labels.iter().enumerate() {
+            let pos = if label.lbl_pos >= 0 {
+                label.lbl_pos as usize
+            } else {
+                idx
+            };
+            if let Some(field) = explicit_by_pos.get(&pos) {
+                expanded.push((*field).clone());
+            } else if label.lbl_optional {
+                let label_lid = Located {
+                    txt: placeholder_lid.txt,
+                    loc: omitted_loc,
+                };
+                expanded.push((
+                    label_lid.clone(),
+                    label.clone(),
+                    RecordLabelDefinition::OmittedOptionalNone(label_lid, label.lbl_arg),
+                    false,
+                ));
+            } else {
+                let label_lid = Located {
+                    txt: placeholder_lid.txt,
+                    loc: omitted_loc,
+                };
+                expanded.push((
+                    label_lid,
+                    label.clone(),
+                    RecordLabelDefinition::Kept(label.lbl_arg),
+                    false,
+                ));
+            }
+        }
+        expanded
     }
 
     fn translate_extension_path(&self, path: &crate::types::Path, loc: Location) -> Lambda {

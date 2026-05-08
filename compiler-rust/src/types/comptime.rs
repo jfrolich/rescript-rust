@@ -1168,6 +1168,7 @@ pub fn specialize_expression(
         }
         typedtree::ExpressionDesc::Texp_record_sparse {
             fields,
+            all_labels,
             omitted_loc,
             extended_expression,
         } => {
@@ -1197,6 +1198,7 @@ pub fn specialize_expression(
                 .transpose()?;
             typedtree::ExpressionDesc::Texp_record_sparse {
                 fields: spec_fields,
+                all_labels: all_labels.clone(),
                 omitted_loc: *omitted_loc,
                 extended_expression: spec_ext.map(Box::new),
             }

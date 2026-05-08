@@ -3176,14 +3176,15 @@ impl<'a> RawLambdaConverter<'a> {
                     ),
                     ExpressionDesc::Texp_record_sparse {
                         fields,
+                        all_labels,
                         omitted_loc,
                         ..
                     } => {
                         let expanded_fields =
-                            self.expand_sparse_record_fields(arg.exp_type, fields, *omitted_loc);
+                            self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
                         self.convert_record_raw(
                             self.loc(arg.exp_loc),
-                            expanded_fields.as_deref().unwrap_or(fields),
+                            &expanded_fields,
                             None,
                             inlined_record_representation(cstr),
                         )
@@ -3453,51 +3454,20 @@ impl<'a> RawLambdaConverter<'a> {
         )
     }
 
-    fn record_labels_for_type(
-        &self,
-        ty: TypeExprRef,
-    ) -> Option<std::sync::Arc<Vec<LabelDescription>>> {
-        let mut current = self.type_ctx.repr(ty);
-        for _ in 0..32 {
-            let next = {
-                let desc = self.type_ctx.borrow_desc(current);
-                match &*desc {
-                    TypeDesc::Tconstr { path, .. } => {
-                        return self.type_ctx.get_record_label_descriptions(path);
-                    }
-                    TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
-                    _ => return None,
-                }
-            };
-            current = self.type_ctx.repr(next?);
-        }
-        None
-    }
-
-    fn sparse_record_labels_from_type(
-        &self,
-        exp_type: TypeExprRef,
-        fields: &[RecordField],
-    ) -> Option<std::sync::Arc<Vec<LabelDescription>>> {
-        self.record_labels_for_type(exp_type).or_else(|| {
-            fields
-                .iter()
-                .find_map(|(_, label, _, _)| self.record_labels_for_type(label.lbl_res))
-        })
-    }
-
     fn expand_sparse_record_fields(
         &self,
-        exp_type: TypeExprRef,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
         fields: &[RecordField],
         omitted_loc: LocIdx,
-    ) -> Option<Vec<RecordField>> {
+    ) -> Vec<RecordField> {
         // OCaml compiler/ml/typecore.ml:2833-2842 stores one definition per
         // `lbl_all` entry, then compiler/ml/translcore.ml:1139-1191 lowers
         // that whole array into the Lambda block. Rust's sparse typedtree node
         // is an internal storage optimization, so expand it before Lambda.
-        let all_labels = self.sparse_record_labels_from_type(exp_type, fields)?;
-        let placeholder_lid = fields.first().map(|(lid, _, _, _)| lid.clone())?;
+        let placeholder_lid = fields
+            .first()
+            .map(|(lid, _, _, _)| lid.clone())
+            .unwrap_or_else(|| self.arena.placeholder_located(omitted_loc));
         let mut explicit_by_pos: HashMap<usize, &RecordField> =
             HashMap::with_capacity(fields.len());
         for field in fields.iter() {
@@ -3528,10 +3498,25 @@ impl<'a> RawLambdaConverter<'a> {
                     false,
                 ));
             } else {
-                return None;
+                // Sparse records are only created after typecore has verified
+                // all mandatory labels are present. If a malformed node reaches
+                // lambda lowering, keep a unit placeholder rather than changing
+                // field order; this mirrors the fallback value OCaml would have
+                // placed in the full record array before translcore.ml:1145-1162
+                // mapped every slot.
+                let label_lid = Located {
+                    txt: placeholder_lid.txt,
+                    loc: omitted_loc,
+                };
+                expanded.push((
+                    label_lid,
+                    label.clone(),
+                    RecordLabelDefinition::Kept(label.lbl_arg),
+                    false,
+                ));
             }
         }
-        Some(expanded)
+        expanded
     }
 
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
@@ -5656,17 +5641,13 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             ExpressionDesc::Texp_record_sparse {
                 fields,
+                all_labels,
                 omitted_loc,
                 ..
             } => {
                 let expanded_fields =
-                    self.expand_sparse_record_fields(expr.exp_type, fields, *omitted_loc);
-                self.convert_record_raw(
-                    self.loc(expr.exp_loc),
-                    expanded_fields.as_deref().unwrap_or(fields),
-                    None,
-                    None,
-                )
+                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
+                self.convert_record_raw(self.loc(expr.exp_loc), &expanded_fields, None, None)
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -5866,16 +5847,13 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             ExpressionDesc::Texp_record_sparse {
                 fields,
+                all_labels,
                 omitted_loc,
                 ..
             } => {
                 let expanded_fields =
-                    self.expand_sparse_record_fields(expr.exp_type, fields, *omitted_loc);
-                self.convert_record(
-                    self.loc(expr.exp_loc),
-                    expanded_fields.as_deref().unwrap_or(fields),
-                    None,
-                )
+                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
+                self.convert_record(self.loc(expr.exp_loc), &expanded_fields, None)
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);

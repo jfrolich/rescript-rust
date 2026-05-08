@@ -14041,9 +14041,15 @@ fn type_record(
     // the same typedtree sharing and force order.
     let record_exp_ty = crate::types::instance(ctx, expected_ty);
 
-    let exp_desc = if sparse_all_label_descriptions.is_some() {
+    let exp_desc = if let Some(all_labels) = sparse_all_label_descriptions.clone() {
         ExpressionDesc::Texp_record_sparse {
             fields: typed_fields,
+            // OCaml translcore.ml:1107-1191 lowers over the complete
+            // `lbl_all` array that typecore.ml:2833-2842 installed while
+            // typing the record. Carry the shared array with the sparse node
+            // so lambda lowering does not have to rediscover it through an
+            // alias-expanded record type path.
+            all_labels,
             omitted_loc: loc,
             extended_expression: typed_base.map(Box::new),
         }
