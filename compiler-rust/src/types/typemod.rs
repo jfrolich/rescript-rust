@@ -7028,23 +7028,9 @@ fn strengthen_semantic_ident_module_type<'a>(
     let mut semantic_mty = semantic_mty;
     let strengthen_path = match semantic_mty.clone() {
         DeclMty::MtyAlias(_, alias_path) => {
-            let mut normalized = alias_path;
-            force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
-            while let Some(next) = crate::types::typecore::alias_target_for_module_path(
-                &normalized,
-                env,
-                pers_env,
-                ctx,
-            ) {
-                if next.same(&normalized) {
-                    break;
-                }
-                normalized = next;
-                force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &normalized);
-            }
             semantic_mty =
                 scrape_alias_module_type(&semantic_mty, env, pers_env, ctx).unwrap_or(semantic_mty);
-            env.normalize_path(&normalized)
+            normalize_module_alias_path(env, pers_env, ctx, &alias_path)
         }
         _ => path.clone(),
     };
@@ -7054,6 +7040,58 @@ fn strengthen_semantic_ident_module_type<'a>(
         &strengthen_path,
         &semantic_mty,
     )
+}
+
+fn normalize_module_alias_path<'a>(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    path: &Path,
+) -> Path {
+    fn normalize_inner<'a>(
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'a crate::types::context::TypeContext,
+        path: &Path,
+    ) -> Path {
+        // OCaml compiler/ml/env.ml:903-914 normalizes dotted prefixes before
+        // asking `find_module ~alias:true` whether the complete path is itself
+        // an alias. This matters for namespace-backed aliases such as
+        // `Webapi.Fetch.Request`: `Webapi.Fetch` must normalize to
+        // `Webapi__Fetch` before the child component is selected.
+        let path = match path {
+            Path::Pdot(prefix, name, pos) => {
+                let normalized_prefix = normalize_inner(env, pers_env, ctx, prefix);
+                if normalized_prefix.same(prefix) {
+                    path.clone()
+                } else {
+                    Path::Pdot(std::sync::Arc::new(normalized_prefix), name.clone(), *pos)
+                }
+            }
+            Path::Papply(functor, arg) => Path::Papply(
+                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, functor)),
+                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, arg)),
+            ),
+            Path::Pident(_) => path.clone(),
+        };
+
+        force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
+        if let Some(alias_target) =
+            crate::types::typecore::alias_target_for_module_path(&path, env, pers_env, ctx)
+            && !alias_target.same(&path)
+        {
+            return normalize_inner(env, pers_env, ctx, &alias_target);
+        }
+
+        let env_normalized = env.normalize_path(&path);
+        if !env_normalized.same(&path) {
+            normalize_inner(env, pers_env, ctx, &env_normalized)
+        } else {
+            path
+        }
+    }
+
+    normalize_inner(env, pers_env, ctx, path)
 }
 
 fn force_persistent_sigs_for_normalize_path<'a>(
@@ -9758,32 +9796,14 @@ fn type_module_expr_with_alias<'a>(
                 // mod_type = Mty_alias(Mta_absent, path).
                 let alias_target = match &mod_type {
                     Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => {
-                        // Match OCaml typemod.ml line 1246: normalize the alias target
-                        let mut normalized = p1.clone();
-                        force_persistent_sigs_for_normalize_path(
+                        // Match OCaml compiler/ml/typemod.ml:1245-1252:
+                        // normalize the alias target before Tcoerce_alias.
+                        normalize_module_alias_path(
                             env,
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
-                            &normalized,
-                        );
-                        while let Some(next) = crate::types::typecore::alias_target_for_module_path(
-                            &normalized,
-                            env,
-                            &mut tctx.persistent_env,
-                            tctx.type_ctx,
-                        ) {
-                            if next.same(&normalized) {
-                                break;
-                            }
-                            normalized = next;
-                            force_persistent_sigs_for_normalize_path(
-                                env,
-                                &mut tctx.persistent_env,
-                                tctx.type_ctx,
-                                &normalized,
-                            );
-                        }
-                        env.normalize_path(&normalized)
+                            p1,
+                        )
                     }
                     _ => path_clone.clone(),
                 };
