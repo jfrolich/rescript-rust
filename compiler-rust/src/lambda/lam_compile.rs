@@ -3939,6 +3939,58 @@ impl LambdaCompiler {
         ))
     }
 
+    /// Statement-valued forms make OCaml's preliminary `NeedValue` pass return
+    /// a non-empty block before the `S.if_` fallback
+    /// (compiler/core/lam_compile.ml:1495-1524), so Rust must not rebuild them
+    /// from later `Return` blocks as if they were pure expressions.
+    fn lambda_contains_statement_value_form(lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Lswitch(_, _)
+            | Lambda::LstringSwitch(_, _, _)
+            | Lambda::LstaticCatch(_, _, _)
+            | Lambda::LtryWith(_, _, _)
+            | Lambda::Lwhile(_, _)
+            | Lambda::Lfor(_, _, _, _, _)
+            | Lambda::Lfor_of(_, _, _)
+            | Lambda::Lfor_await_of(_, _, _)
+            | Lambda::LstaticRaise(_, _)
+            | Lambda::Lbreak
+            | Lambda::Lcontinue => true,
+            Lambda::Llet(_, _, value, body) => {
+                Self::lambda_contains_statement_value_form(value)
+                    || Self::lambda_contains_statement_value_form(body)
+            }
+            Lambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .any(|(_, binding)| Self::lambda_contains_statement_value_form(binding))
+                    || Self::lambda_contains_statement_value_form(body)
+            }
+            Lambda::Lsequence(first, second) => {
+                Self::lambda_contains_statement_value_form(first)
+                    || Self::lambda_contains_statement_value_form(second)
+            }
+            Lambda::LifThenElse(cond, then_, else_) => {
+                Self::lambda_contains_statement_value_form(cond)
+                    || Self::lambda_contains_statement_value_form(then_)
+                    || Self::lambda_contains_statement_value_form(else_)
+            }
+            Lambda::Lprim(info) => info
+                .args
+                .iter()
+                .any(Self::lambda_contains_statement_value_form),
+            Lambda::Lapply(apply) => {
+                Self::lambda_contains_statement_value_form(&apply.ap_func)
+                    || apply
+                        .ap_args
+                        .iter()
+                        .any(Self::lambda_contains_statement_value_form)
+            }
+            Lambda::Lfunction(_) => false,
+            _ => false,
+        }
+    }
+
     /// Mirrors OCaml's `Js_stmt_make.if_ ~declaration` promotion
     /// (js_stmt_make.ml:304-312): when the final statement of `body` is
     /// `id = expr;`, collapse the pending `let id;` and the assignment into a
@@ -3985,7 +4037,7 @@ impl LambdaCompiler {
     }
 
     /// Mirrors OCaml's Lifthenelse `EffectCall (Maybe_tail_is_return)` arm
-    /// (lam_compile.ml:1422-1427). When both branches compile to
+    /// (compiler/core/lam_compile.ml:1495-1524). When both branches compile to
     /// `{block=[]; value=Some e}` via `NeedValue`, OCaml emits
     /// `Return(Cond(cond, out1, out2))` where each `out` is the branch's
     /// tail expression (e.g. `Seq(log, undef)` for `Lsequence(log, Lconst undef)`).
@@ -3995,15 +4047,15 @@ impl LambdaCompiler {
     /// Return undef]` shape printed as `if (cond) { a; } else { b; }`.
     ///
     /// Rust's `compile_return_block` for `Lsequence(effect, Lconst undef)`
-    /// pre-flattens to `[Exp effect; Return Undefined]` — losing the `Seq`
+    /// pre-flattens to `[Exp effect; Return Undefined]` - losing the `Seq`
     /// shape that `take_return_tail_expr`'s undefined-rejection guard then
     /// refuses to reconstruct. Fold here explicitly so the caller can match
     /// OCaml's `Return(Cond(Seq, Seq))` construction.
     ///
     /// Returns `Some(Seq(e1, Seq(e2, ..., Return-expr)))` iff the block is
-    /// exactly `[Exp e1, Exp e2, ..., Return last]`. The prefix must be
-    /// non-empty — for a single `[Return]` block the generic
-    /// `take_return_tail_expr` path is sufficient.
+    /// exactly `[Exp e1, Exp e2, ..., Return last]`. Accept a single
+    /// `[Return tail]` block as well because inner `Lifthenelse` cases can
+    /// already have folded to `Return(Seq(Cond, undef))`.
     fn try_fold_effect_only_return_tail(&self, block: &Block) -> Option<Expression> {
         let (last, prefix) = block.split_last()?;
         let Statement {
@@ -4013,12 +4065,7 @@ impl LambdaCompiler {
         else {
             return None;
         };
-        // Accept both a single `[Return tail]` (empty prefix — the inner
-        // Lifthenelse case where `compile_if_return_block` has already
-        // folded into `Return(Seq(Cond, undef))`) and the multi-statement
-        // `[Exp e1, ..., Exp eN, Return tail]` case. Reject any prefix
-        // statement that isn't a plain `Exp` — control-flow stmts like
-        // Return/Throw/If would break the `Seq` fold.
+
         let mut result = tail_expr.clone();
         for stmt in prefix.iter().rev() {
             let StatementDesc::Exp(effect) = &stmt.desc else {
@@ -4089,27 +4136,47 @@ impl LambdaCompiler {
         let then_block_raw = self.compile_return_block(then_);
         let else_block_raw = self.compile_return_block(else_);
 
-        // Mirror OCaml's Lifthenelse `EffectCall (Maybe_tail_is_return)` arm
-        // (lam_compile.ml:1422-1427). When both branches are pure
-        // effect-plus-Return-tail shapes like `[Exp e1, ..., Return tail]`
-        // (produced by `Lsequence(effect, Lconst undef)` tails), fold each
-        // into a `Seq` expression and build
-        // `Return(Expression::cond(cond, then_seq, else_seq))`.
-        // `Expression::cond` folds `Cond(Seq(a, undef), Seq(b, undef))` to
-        // `Seq(Cond(a, b), undef)` (js_ir/mod.rs:784-805, matching OCaml's
-        // `E.econd` at js_exp_make.ml:1201-1204). The subsequent
-        // `flatten_block` pass rewrites `Return(Seq(_, _))` and `Exp(Cond)`
-        // into the clean `[If(cond, [Exp a], [Exp b]); Return undef]` shape
-        // that `print_function_body` drops to `if (cond) { a; } else { b; }`.
-        if let (Some(then_seq), Some(else_seq)) = (
-            self.try_fold_effect_only_return_tail(&then_block_raw),
-            self.try_fold_effect_only_return_tail(&else_block_raw),
-        ) {
+        // OCaml's preliminary `NeedValue should_return` pass is the reference
+        // shape (compiler/core/lam_compile.ml:1495-1524). Rust's
+        // `compile_expr` currently flattens short-circuit primitives to JS
+        // `&&`/`||` earlier than OCaml's `compile_sequand`/`compile_sequor`
+        // path (compiler/core/lam_compile.ml:1663-1664), so preserve the
+        // nested conditional by folding return blocks when the original
+        // branches contain no statement-valued forms. Switches/static catches
+        // stay excluded because OCaml's NeedValue pass keeps their prelude,
+        // which must fall through to `S.if_` below.
+        if !Self::lambda_contains_statement_value_form(then_)
+            && !Self::lambda_contains_statement_value_form(else_)
+        {
+            if let (Some(then_seq), Some(else_seq)) = (
+                self.try_fold_effect_only_return_tail(&then_block_raw),
+                self.try_fold_effect_only_return_tail(&else_block_raw),
+            ) {
+                let mut block = cond_compiled.prelude;
+                block.push(Statement::return_(Expression::cond(
+                    cond_compiled.expr,
+                    then_seq,
+                    else_seq,
+                )));
+                return block;
+            }
+        }
+
+        // OCaml first compiles both branches in `NeedValue should_return` and
+        // only emits `Return(E.econd ...)` when both results are exactly
+        // `{block = []; value = Some _}` (compiler/core/lam_compile.ml:
+        // 1495-1524). Do the same preliminary value pass instead of
+        // reconstructing a value from later return blocks: switches and other
+        // statement-producing forms must keep their prelude, which makes OCaml
+        // fall through to `S.if_` below.
+        let then_value = self.compile_expr(then_);
+        let else_value = self.compile_expr(else_);
+        if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
             block.push(Statement::return_(Expression::cond(
                 cond_compiled.expr,
-                then_seq,
-                else_seq,
+                then_value.expr,
+                else_value.expr,
             )));
             return block;
         }
