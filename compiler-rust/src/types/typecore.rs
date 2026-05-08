@@ -15950,90 +15950,20 @@ fn type_letmodule(
         Expression,
         TypeExprRef,
     )> {
-        // Type check the module expression and build its signature for the env
-        let (typed_mod, mut mod_sig) = match &*module_expr.pmod_desc {
-            crate::parser::ast::ModuleExprDesc::Pmod_structure(items) => {
-                let (structure, _inner_env) = crate::types::typemod::type_structure(tctx, env, arena, items)
-                    .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
-
-                // Build a signature from the typed structure items
-                let sig_items = build_signature_from_structure(&structure);
-
-                let md = crate::types::typedtree::ModuleExpr {
-                    mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure),
-                    mod_loc: module_expr.pmod_loc,
-                    mod_type: crate::types::decl::ModuleType::MtySignature(sig_items.clone()),
-                    mod_env: EnvRef(0),
-                    mod_attributes: Attributes::new(),
-                };
-                (md, crate::types::decl::ModuleType::MtySignature(sig_items))
-            }
-            crate::parser::ast::ModuleExprDesc::Pmod_ident(lid) => {
-                let md = crate::types::typemod::type_module_expr_with_alias_mode(
-                    tctx,
-                    env,
-                    arena,
-                    module_expr,
-                    true,
-                )
-                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
-                // OCaml compiler/ml/typecore.ml:3399-3406 types the module
-                // expression first, then passes `modl.mod_type` directly to
-                // `Env.enter_module`. For `Pmod_ident`, typemod.ml:1227-1235
-                // has already made that an `Mty_alias`; keep the typed
-                // expression's semantic alias so flattened persistent aliases
-                // use the same component path that OCaml env.ml:781-813
-                // observes through `find_module_descr`.
-                let mod_sig = if matches!(
-                    md.mod_type,
-                    crate::types::decl::ModuleType::MtyAlias(_, _)
-                ) {
-                    md.mod_type.clone()
-                } else if let Some(sig) = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-                    tctx,
-                    env,
-                    arena,
-                    module_expr,
-                ) {
-                    sig
-                } else if let Some(sig) =
-                    crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
-                {
-                    sig
-                } else {
-                    crate::types::decl::ModuleType::MtySignature(vec![])
-                };
-                (md, mod_sig)
-            }
-            _ => {
-                let md = crate::types::typemod::type_module_expr_with_alias_mode(
-                    tctx,
-                    env,
-                    arena,
-                    module_expr,
-                    true,
-                )
-                .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
-                // Match OCaml Pexp_letmodule: prefer semantic module type from the
-                // parsed module expression (same source as Env.enter_module), then
-                // fall back to typed-expression extraction.
-                let mod_sig = if let Some(sig) = crate::types::typemod::lookup_module_type_from_parsed_module_expr(
-                    tctx,
-                    env,
-                    arena,
-                    module_expr,
-                ) {
-                    sig
-                } else if let Some(sig) =
-                    crate::types::typemod::extract_module_type_from_mod_expr_pub(&md)
-                {
-                    sig
-                } else {
-                    crate::types::decl::ModuleType::MtySignature(vec![])
-                };
-                (md, mod_sig)
-            }
-        };
+        // OCaml compiler/ml/typecore.ml:3399-3406 calls the Typemod hook for
+        // every `Pexp_letmodule`, then passes `modl.mod_type` directly to
+        // `Env.enter_module`. That route is important for Pmod_structure because
+        // compiler/ml/typemod.ml:1263-1282 inserts an implicit Tmod_constraint
+        // when `simplify_signature` removes duplicate value names.
+        let typed_mod = crate::types::typemod::type_module_expr_with_alias_mode(
+            tctx,
+            env,
+            arena,
+            module_expr,
+            true,
+        )
+        .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+        let mut mod_sig = typed_mod.mod_type.clone();
 
         // Keep let-module member lookups stable for direct module aliases
         // (`module M = List` / constrained direct idents) by materializing
@@ -16135,158 +16065,6 @@ fn type_letmodule(
         EnvRef(0),
         attributes.to_vec().into(),
     ))
-}
-
-/// Extract value signature items from a binding pattern (for building signatures from structures).
-fn extract_sig_values_from_binding_pattern(
-    pat: &crate::types::typedtree::Pattern,
-    ty: TypeExprRef,
-    sig: &mut Vec<crate::types::decl::SignatureItem>,
-) {
-    use crate::types::typedtree::PatternDesc;
-    match &pat.pat_desc {
-        PatternDesc::Tpat_var(id, _) => {
-            sig.push(crate::types::decl::SignatureItem::SigValue(
-                id.clone(),
-                crate::types::decl::ValueDescription {
-                    val_type: ty,
-                    val_kind: crate::types::decl::ValueKind::ValReg,
-                    val_loc: crate::location::Location::none(),
-                    val_attributes: vec![],
-                    val_path: None,
-                },
-            ));
-        }
-        PatternDesc::Tpat_alias(inner, id, _) => {
-            sig.push(crate::types::decl::SignatureItem::SigValue(
-                id.clone(),
-                crate::types::decl::ValueDescription {
-                    val_type: ty,
-                    val_kind: crate::types::decl::ValueKind::ValReg,
-                    val_loc: crate::location::Location::none(),
-                    val_attributes: vec![],
-                    val_path: None,
-                },
-            ));
-            // Also extract from the inner pattern
-            extract_sig_values_from_binding_pattern(inner, ty, sig);
-        }
-        PatternDesc::Tpat_tuple(pats) => {
-            for p in pats {
-                extract_sig_values_from_binding_pattern(p, p.pat_type, sig);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Build a signature from typed structure items.
-fn build_signature_from_structure(
-    structure: &crate::types::typedtree::Structure,
-) -> Vec<crate::types::decl::SignatureItem> {
-    use crate::types::typedtree::StructureItemDesc;
-
-    fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreType) -> i32 {
-        match &ty.ctyp_desc {
-            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, Some(arity)) => *arity,
-            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, None) => {
-                1 + primitive_arity_from_typed_core_type(ret)
-            }
-            crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(_, inner)
-            | crate::types::typedtree::TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
-                primitive_arity_from_typed_core_type(inner)
-            }
-            _ => 0,
-        }
-    }
-
-    let mut sig = Vec::new();
-    for item in &structure.str_items {
-        match &item.str_desc {
-            StructureItemDesc::Tstr_primitive(tvd) => {
-                let vd = crate::types::decl::ValueDescription {
-                    val_type: tvd.val_desc.ctyp_type,
-                    val_kind: crate::types::decl::ValueKind::ValPrim(
-                        crate::types::decl::PrimitiveDescription {
-                            prim_name: tvd.val_prim.first().cloned().unwrap_or_default(),
-                            prim_arity: primitive_arity_from_typed_core_type(&tvd.val_desc),
-                            prim_native_name: tvd.val_prim.get(1).cloned().unwrap_or_default(),
-                            prim_native_float: false,
-                            prim_from_constructor: false,
-                        },
-                    ),
-                    val_loc: crate::location::Location::none(),
-                    val_attributes: vec![],
-                    val_path: None,
-                };
-                sig.push(crate::types::decl::SignatureItem::SigValue(
-                    tvd.val_id.clone(),
-                    vd,
-                ));
-            }
-            StructureItemDesc::Tstr_value(_rec, bindings) => {
-                for binding in bindings {
-                    extract_sig_values_from_binding_pattern(
-                        &binding.vb_pat,
-                        // Signature values come from bound identifiers (pattern types),
-                        // not the raw expression type.
-                        binding.vb_pat.pat_type,
-                        &mut sig,
-                    );
-                }
-            }
-            StructureItemDesc::Tstr_module(mb) => {
-                let inner_mty =
-                    crate::types::typemod::extract_module_type_from_mod_expr_pub(&mb.mb_expr)
-                        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
-                sig.push(crate::types::decl::SignatureItem::SigModule(
-                    mb.mb_id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: inner_mty,
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
-                        md_path: None,
-                    },
-                    crate::types::decl::RecStatus::TrecNot,
-                ));
-            }
-            StructureItemDesc::Tstr_type(rec_flag, decls) => {
-                let rec_status = match rec_flag {
-                    crate::parser::ast::RecFlag::Recursive => {
-                        crate::types::decl::RecStatus::TrecFirst
-                    }
-                    crate::parser::ast::RecFlag::Nonrecursive => {
-                        crate::types::decl::RecStatus::TrecNot
-                    }
-                };
-                for decl in decls {
-                    sig.push(crate::types::decl::SignatureItem::SigType(
-                        decl.typ_id.clone(),
-                        decl.typ_type.clone(),
-                        rec_status,
-                    ));
-                }
-            }
-            StructureItemDesc::Tstr_exception(ext_cstr) => {
-                sig.push(crate::types::decl::SignatureItem::SigTypext(
-                    ext_cstr.ext_id.clone(),
-                    ext_cstr.ext_type.clone(),
-                    crate::types::decl::ExtStatus::TextException,
-                ));
-            }
-            StructureItemDesc::Tstr_typext(type_ext) => {
-                for ext_cstr in &type_ext.tyext_constructors {
-                    sig.push(crate::types::decl::SignatureItem::SigTypext(
-                        ext_cstr.ext_id.clone(),
-                        ext_cstr.ext_type.clone(),
-                        crate::types::decl::ExtStatus::TextFirst,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    sig
 }
 
 fn type_pack(
