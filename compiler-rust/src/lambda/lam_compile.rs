@@ -3111,11 +3111,17 @@ impl LambdaCompiler {
             })
             .collect();
 
+        // OCaml reference: compiler/core/lam_compile.ml:379-381 folds
+        // `ret.new_params` with `Map_ident.fold ... (fun old new_param acc ->
+        // S.define_variable ... :: acc)`. `Map_ident` is ordered by
+        // `Ext_ident.compare` (compiler/ext/map.cppo.ml:12-15,
+        // compiler/ext/ext_ident.ml:178-180), so the prepended accumulator emits
+        // declarations in descending map-key order.
+        let mut lowered_param_defs: Vec<_> = tail_loop.new_params.iter().collect();
+        lowered_param_defs.sort_by(|(left, _), (right, _)| ext_ident_cmp(right, left));
+
         let mut loop_body = Vec::new();
-        for param in params.iter().rev() {
-            let Some(new_param) = tail_loop.new_params.get(param) else {
-                continue;
-            };
+        for (param, new_param) in lowered_param_defs {
             loop_body.push(Statement::variable(VariableDeclaration {
                 ident: param.clone(),
                 value: Some(Expression::var(new_param.clone())),
@@ -6406,6 +6412,17 @@ fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
         .len()
         .cmp(&right_name.len())
         .then_with(|| left_name.cmp(right_name))
+}
+
+fn ext_ident_cmp(left: &Ident, right: &Ident) -> std::cmp::Ordering {
+    // OCaml reference: compiler/ext/ext_ident.ml:178-180 compares stamp first,
+    // then `Ext_string.compare`; compiler/ext/ext_string.ml:335-338 delegates
+    // to `caml_string_length_based_compare`, implemented in
+    // compiler/ext/ext_basic_hash_stubs.c:110-140 as length, then byte order.
+    left.stamp()
+        .cmp(&right.stamp())
+        .then_with(|| left.name().len().cmp(&right.name().len()))
+        .then_with(|| left.name().as_bytes().cmp(right.name().as_bytes()))
 }
 
 fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
