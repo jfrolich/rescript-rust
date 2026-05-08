@@ -1733,17 +1733,14 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
     }
 
     if let Some((nested_cond, nested_then, nested_else)) = single_if_block(&then_) {
-        let preserve_refinement_guard = preserves_typeof_refinement_guard(&cond, nested_cond);
         let preserve_literal_membership_guard =
             preserves_literal_membership_guard(&cond, nested_cond);
-        // OCaml's `S.if_` rule 10 (js_stmt_make.ml:290-292) merges
-        // `if c1 { if c2 then2 [] } []` into `if (c1 && c2) then2 []` — it
-        // does not require the inner/outer else to be non-empty. Allow the
-        // merge when both else blocks match (including both empty).
-        if !preserve_refinement_guard
-            && !preserve_literal_membership_guard
-            && ocaml_eq_block(nested_else, &else_)
-        {
+        // OCaml's `S.if_` rule 10 (compiler/core/js_stmt_make.ml:290-292)
+        // merges `if c1 { if c2 then2 else2 } else2` into
+        // `if (c1 && c2) then2 else2`. `E.and_` then folds
+        // `typeof x === "string" && x === "lit"` to `x === "lit"`
+        // (compiler/core/js_exp_make.ml:800-813).
+        if !preserve_literal_membership_guard && ocaml_eq_block(nested_else, &else_) {
             return simplify_if_statement(
                 js_and_expression(cond, nested_cond.clone()),
                 nested_then.clone(),
@@ -1751,8 +1748,7 @@ fn simplify_if_statement(cond: Expression, then_: Block, else_: Block) -> Statem
             );
         }
 
-        if !preserve_refinement_guard
-            && !preserve_literal_membership_guard
+        if !preserve_literal_membership_guard
             && !nested_then.is_empty()
             && ocaml_eq_block(nested_then, &else_)
         {
@@ -2258,21 +2254,6 @@ pub fn unnest_block(block: Block) -> Block {
         }
         _ => block,
     }
-}
-
-fn preserves_typeof_refinement_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
-    let Some((outer_vident, type_name)) = typeof_var_type_test(outer_cond) else {
-        return false;
-    };
-    let Some((inner_op, inner_vident, literal)) = strict_var_literal_comparison(inner_cond) else {
-        return false;
-    };
-    if inner_op != BinOp::EqEqEq || !same_vident(outer_vident, inner_vident) {
-        return false;
-    }
-
-    literal_matches_type_name(literal, type_name)
-        || (type_name == "object" && matches!(literal.desc, ExpressionDesc::Null))
 }
 
 fn preserves_literal_membership_guard(outer_cond: &Expression, inner_cond: &Expression) -> bool {
@@ -4008,7 +3989,7 @@ mod tests {
     }
 
     #[test]
-    fn test_if_statement_keeps_explicit_typeof_refinement_guards() {
+    fn test_if_statement_merges_typeof_refinement_guards_like_ocaml() {
         let value = Ident::create_local("value");
         let outer_cond = Expression::bin(
             BinOp::EqEqEq,
@@ -4041,11 +4022,6 @@ mod tests {
             Statement::return_(Expression::undefined(true)),
         ];
 
-        assert!(
-            preserves_typeof_refinement_guard(&outer_cond, &inner_cond),
-            "expected typeof refinement detection to trigger for {outer_cond:#?} / {inner_cond:#?}"
-        );
-
         let stmt = Statement::if_(
             outer_cond.clone(),
             vec![Statement::new(StatementDesc::If(
@@ -4057,42 +4033,14 @@ mod tests {
         );
 
         let StatementDesc::If(test, then_block, else_block) = &stmt.desc else {
-            panic!("expected the explicit outer typeof guard to stay materialized");
+            panic!("expected OCaml-style nested if merge");
         };
         assert!(
-            matches!(
-                &test.desc,
-                ExpressionDesc::Bin(
-                    BinOp::EqEqEq,
-                    left,
-                    right,
-                ) if matches!(
-                    left.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Typeof(inner),
-                        ..
-                    } if matches!(
-                        inner.as_ref(),
-                        Expression {
-                            desc: ExpressionDesc::Var(VIdent::Id(id)),
-                            ..
-                        } if id.same(&value)
-                    )
-                ) && matches!(
-                    right.as_ref(),
-                    Expression {
-                        desc: ExpressionDesc::Str { txt, .. },
-                        ..
-                    } if txt == "string"
-                )
-            ),
-            "outer guard changed unexpectedly: {stmt:#?}"
+            ocaml_eq_expression(test, &inner_cond),
+            "OCaml js_stmt_make.ml:290-292 merges the nested if, and js_exp_make.ml:800-813 drops the redundant typeof guard: {stmt:#?}"
         );
-        let Some((nested_test, _, nested_else)) = single_if_block(then_block) else {
-            panic!("expected the typeof branch to keep the nested literal refinement");
-        };
-        assert!(ocaml_eq_expression(nested_test, &inner_cond));
-        assert!(ocaml_eq_block(nested_else, else_block));
+        assert!(then_block.len() == 2);
+        assert!(else_block.len() == 2);
     }
 
     #[test]
