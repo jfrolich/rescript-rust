@@ -1625,10 +1625,7 @@ fn build_name_based_coercion(
     use crate::types::includemod::is_runtime_component;
     use crate::types::typedtree::{EnvRef, ModuleCoercion, PrimitiveCoercion};
 
-    fn module_type_coercion(
-        impl_mty: &ModuleType,
-        intf_mty: &ModuleType,
-    ) -> ModuleCoercion {
+    fn module_type_coercion(impl_mty: &ModuleType, intf_mty: &ModuleType) -> ModuleCoercion {
         match (impl_mty, intf_mty) {
             (ModuleType::MtySignature(impl_sig), ModuleType::MtySignature(intf_sig)) => {
                 // OCaml recurses into submodule signatures when building
