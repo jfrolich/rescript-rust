@@ -4288,7 +4288,12 @@ impl LambdaCompiler {
                     let mut out =
                         vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
                     out.extend(then_fallback);
-                    return out;
+                    // OCaml wraps the rule-5 result with `block
+                    // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
+                    // 247-248, with `block` at lines 37-42). That block
+                    // boundary is observable by an outer `S.if_`: it hides the
+                    // trailing return until `js_pass_flatten` runs later.
+                    return vec![Statement::block(out)];
                 }
                 // Use the normalized fallback blocks when we can't collapse
                 // to `Return(Cond)`, matching the previous behavior for
