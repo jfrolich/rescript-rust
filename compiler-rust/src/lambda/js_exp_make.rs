@@ -589,7 +589,9 @@ pub(crate) fn int32_lsr(left: Expression, right: Expression) -> Expression {
         {
             int32_lsr(inner.as_ref().clone(), right)
         }
-        _ => to_int32(Expression::bin(BinOp::Lsr, left, right)),
+        // OCaml returns the raw logical shift here rather than applying
+        // `to_int32` (`compiler/core/js_exp_make.ml:1447-1456`).
+        _ => Expression::bin(BinOp::Lsr, left, right),
     }
 }
 

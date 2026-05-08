@@ -342,7 +342,19 @@ impl LambdaCompiler {
                 compiled_args[0].clone(),
                 compiled_args[1].clone(),
             ),
-            Plsrint => int32_lsr(compiled_args[0].clone(), compiled_args[1].clone()),
+            Plsrint => {
+                // OCaml `Plsrint` returns the left operand directly for a
+                // literal zero shift, otherwise wraps the logical shift in
+                // `to_int32` (`compiler/core/lam_compile_primitive.ml:264-267`).
+                if is_zero_int(&compiled_args[1]) {
+                    compiled_args[0].clone()
+                } else {
+                    to_int32(int32_lsr(
+                        compiled_args[0].clone(),
+                        compiled_args[1].clone(),
+                    ))
+                }
+            }
             Pasrint => Expression::bin(
                 BinOp::Asr,
                 compiled_args[0].clone(),

@@ -8665,6 +8665,30 @@ fn lowers_plsrint_with_int32_coercion() {
 }
 
 #[test]
+fn lowers_plsrint_zero_shift_as_identity() {
+    let mut compiler = LambdaCompiler::new();
+    let value = Ident::create_local("value");
+    let program = compiler.compile_program(&Lambda::prim(
+        Primitive::Plsrint,
+        vec![Lambda::var(value.clone()), Lambda::const_(Constant::int(0))],
+        Location::none(),
+    ));
+
+    let [stmt] = program.block.as_slice() else {
+        panic!("expected a single expression statement");
+    };
+    // OCaml `Plsrint` special-cases literal zero shifts before `to_int32`
+    // (`compiler/core/lam_compile_primitive.ml:264-267`).
+    assert!(matches!(
+        &stmt.desc,
+        StatementDesc::Exp(Expression {
+            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+            ..
+        }) if id.same(&value)
+    ));
+}
+
+#[test]
 fn lowers_pmulint_by_positive_power_of_two_to_shift() {
     let value = Ident::create_local("value");
     let expr = int32_mul(Expression::var(value.clone()), int_expr(2));
