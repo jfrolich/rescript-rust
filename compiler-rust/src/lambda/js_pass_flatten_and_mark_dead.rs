@@ -2024,14 +2024,19 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         desc,
                         comment: expr_comment,
                     });
-                    Statement::new(StatementDesc::Block(block))
+                    // OCaml uses `S.block` here, not a raw `Block`
+                    // (compiler/core/js_pass_flatten.ml:43-47), so a single
+                    // empty flattened effect is normalized before printing.
+                    Statement::block(block)
                 }
                 ExpressionDesc::CamlBlock(args, _, _, _) => {
                     let block = args
                         .into_iter()
                         .map(|arg| flatten_statement(Statement::exp(arg)))
                         .collect();
-                    Statement::new(StatementDesc::Block(block))
+                    // OCaml's Caml_block flattening also goes through
+                    // `S.block` (compiler/core/js_pass_flatten.ml:48-53).
+                    Statement::block(block)
                 }
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
                     desc: StatementDesc::If(
@@ -2057,7 +2062,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                             *target,
                             last,
                         ))));
-                        Statement::new(StatementDesc::Block(block))
+                        // Match OCaml's `S.block` in
+                        // compiler/core/js_pass_flatten.ml:63-77.
+                        Statement::block(block)
                     } else {
                         Statement {
                             desc: StatementDesc::Exp(flatten_expression(Expression {
@@ -2109,7 +2116,10 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         .map(|expr| flatten_statement(Statement::exp(expr)))
                         .collect();
                     block.push(flatten_statement(Statement::return_(last)));
-                    Statement::new(StatementDesc::Block(block))
+                    // OCaml wraps the flattened return sequence with
+                    // `S.block` before applying `super.statement`
+                    // (compiler/core/js_pass_flatten.ml:88-96).
+                    Statement::block(block)
                 }
                 desc => Statement {
                     desc: StatementDesc::Return(flatten_expression(Expression {
