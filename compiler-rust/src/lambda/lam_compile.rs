@@ -5990,18 +5990,23 @@ fn recursive_binding_dependencies(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize
         .map(|(index, (id, _))| (id.clone(), index))
         .collect::<HashMap<_, _>>();
 
-    bindings
-        .iter()
-        .map(|(_, expr)| {
-            let mut dependencies = free_variables(expr)
-                .into_iter()
-                .filter_map(|id| index_by_id.get(&id).copied())
-                .collect::<Vec<_>>();
-            dependencies.sort_unstable();
-            dependencies.dedup();
-            dependencies
-        })
-        .collect()
+    // OCaml's `Lam_scc.preprocess_deps` builds `node_vec` with
+    // `Array.make ... (Vec_int.empty ())`, so every slot aliases the same
+    // mutable vector (`compiler/core/lam_scc.ml:73-89`). Each binding's hits
+    // are therefore appended into one shared adjacency list before
+    // `Ext_scc.graph` consumes it (`compiler/ext/ext_scc.ml:39-96`).
+    let mut shared_dependencies = Vec::new();
+    for (_, expr) in bindings {
+        let mut dependencies = free_variables(expr)
+            .into_iter()
+            .filter_map(|id| index_by_id.get(&id).copied())
+            .collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        shared_dependencies.extend(dependencies);
+    }
+
+    vec![shared_dependencies; bindings.len()]
 }
 
 fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -6041,6 +6046,11 @@ fn strongly_connected_binding_components(deps: &[Vec<usize>]) -> Vec<Vec<usize>>
                     break;
                 }
             }
+            // OCaml's `Ext_scc.graph` slices the stack from the SCC root to
+            // the top (`compiler/ext/ext_scc.ml:80-92`), preserving stack
+            // order inside the component. Rust pops from the top, so reverse
+            // the popped list before later recursive-let compilation.
+            component.reverse();
             state.components.push(component);
         }
     }
@@ -6081,51 +6091,6 @@ fn sort_recursive_binding_group(bindings: &[(Ident, Lambda)], group: &mut [usize
     group.sort_by_key(|index| !binding_is_ocaml_scc_function(bindings, *index));
 }
 
-fn singleton_recursive_binding_group(group: &[usize]) -> Option<usize> {
-    match group {
-        [index] => Some(*index),
-        _ => None,
-    }
-}
-
-fn reorder_self_recursive_function_helpers_like_ocaml(
-    bindings: &[(Ident, Lambda)],
-    dependencies: &[Vec<usize>],
-    groups: &mut [Vec<usize>],
-) {
-    let mut index = 0;
-    while index + 1 < groups.len() {
-        let Some(helper) = singleton_recursive_binding_group(&groups[index]) else {
-            index += 1;
-            continue;
-        };
-        let Some(caller) = singleton_recursive_binding_group(&groups[index + 1]) else {
-            index += 1;
-            continue;
-        };
-
-        if caller < helper
-            && binding_is_ocaml_scc_function(bindings, helper)
-            && binding_is_ocaml_scc_function(bindings, caller)
-            && dependencies[helper].contains(&helper)
-            && dependencies[caller].contains(&helper)
-            && !dependencies[caller].contains(&caller)
-        {
-            // OCaml's recursive-let lowering runs the SCC split from
-            // `compiler/core/lam_scc.ml:109-128` using `Ext_scc.graph`
-            // (`compiler/ext/ext_scc.ml:39-96`), then compiles each resulting
-            // group in order (`compiler/core/lam_compile.ml:503-513`). For an
-            // earlier non-self-recursive function that calls a later
-            // self-recursive helper, that SCC walk preserves the caller before
-            // the helper while still placing upstream callers afterward.
-            groups.swap(index, index + 1);
-            index = index.saturating_sub(1);
-        } else {
-            index += 1;
-        }
-    }
-}
-
 fn recursive_binding_groups(
     bindings: &[(Ident, Lambda)],
     dependencies: &[Vec<usize>],
@@ -6141,7 +6106,6 @@ fn recursive_binding_groups(
             for group in &mut groups {
                 sort_recursive_binding_group(bindings, group);
             }
-            reorder_self_recursive_function_helpers_like_ocaml(bindings, dependencies, &mut groups);
             groups
         }
     }

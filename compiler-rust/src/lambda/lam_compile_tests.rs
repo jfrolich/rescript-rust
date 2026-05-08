@@ -156,6 +156,41 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
     )
 }
 
+fn test_apply(target: &Ident) -> Lambda {
+    Lambda::Lapply(Apply {
+        ap_func: Box::new(Lambda::var(target.clone())),
+        ap_args: vec![],
+        ap_info: test_apply_info(),
+        ap_transformed_jsx: false,
+    })
+}
+
+fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Ident, Lambda) {
+    let param = Ident::create_local("param");
+    (
+        ident,
+        Lambda::function_(
+            1,
+            vec![param],
+            Lambda::seq(test_apply(first), test_apply(second)),
+            FunctionAttribute::default(),
+        ),
+    )
+}
+
+fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
+    let param = Ident::create_local("param");
+    (
+        ident,
+        Lambda::function_(
+            1,
+            vec![param],
+            Lambda::const_(Constant::JsUndefined { is_unit: true }),
+            FunctionAttribute::default(),
+        ),
+    )
+}
+
 fn recursive_group_names(bindings: &[(Ident, Lambda)]) -> Vec<Vec<String>> {
     let dependencies = recursive_binding_dependencies(bindings);
     recursive_binding_groups(bindings, &dependencies)
@@ -187,8 +222,7 @@ fn recursive_binding_groups_keep_earlier_caller_before_later_self_recursive_help
     assert_eq!(
         recursive_group_names(&bindings),
         vec![
-            vec!["copyBucket".to_string()],
-            vec!["copyAuxCont".to_string()],
+            vec!["copyBucket".to_string(), "copyAuxCont".to_string()],
             vec!["copyBuckets".to_string()],
         ]
     );
@@ -212,10 +246,25 @@ fn recursive_binding_groups_keep_earlier_self_recursive_helper_before_later_call
     assert_eq!(
         recursive_group_names(&bindings),
         vec![
-            vec!["copyAuxCont".to_string()],
-            vec!["copyBucket".to_string()],
+            vec!["copyAuxCont".to_string(), "copyBucket".to_string()],
             vec!["copyBuckets".to_string()],
         ]
+    );
+}
+
+#[test]
+fn recursive_binding_groups_share_dependency_vector_like_ocaml() {
+    let timer_expired = Ident::create_local("timerExpired");
+    let call = Ident::create_local("call");
+    let (timer_expired, timer_expired_lam) =
+        test_function_calling_two(timer_expired.clone(), &call, &timer_expired);
+    let (call, call_lam) = test_unit_function(call);
+
+    let bindings = vec![(timer_expired, timer_expired_lam), (call, call_lam)];
+
+    assert_eq!(
+        recursive_group_names(&bindings),
+        vec![vec!["timerExpired".to_string(), "call".to_string()]]
     );
 }
 
