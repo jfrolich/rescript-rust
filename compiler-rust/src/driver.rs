@@ -1619,27 +1619,28 @@ fn build_name_based_coercion(
     impl_sig: &crate::types::decl::Signature,
     intf_sig: &crate::types::decl::Signature,
 ) -> crate::types::typedtree::ModuleCoercion {
-    use crate::types::decl::{AliasPresence, ModuleType, SignatureItem};
+    use crate::types::decl::{AliasPresence, ModuleType, SignatureItem, ValueKind};
     use crate::types::includemod::is_runtime_component;
-    use crate::types::typedtree::{EnvRef, ModuleCoercion};
+    use crate::types::typedtree::{EnvRef, ModuleCoercion, PrimitiveCoercion};
 
     // Build name → runtime_position map from the implementation signature.
-    // Only runtime components get a position index.
+    // OCaml indexes every implementation component with the current runtime
+    // position, then advances only for runtime components. That lets primitive
+    // implementations satisfy regular interface values via Tcoerce_primitive.
+    // See compiler/ml/includemod.ml:313-342 and 381-390.
     let mut impl_name_to_component: std::collections::HashMap<String, (usize, &SignatureItem)> =
         std::collections::HashMap::new();
     let mut runtime_pos = 0usize;
     for item in impl_sig {
+        match item {
+            SignatureItem::SigValue(id, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigTypext(id, _, _) => {
+                impl_name_to_component.insert(id.name().to_string(), (runtime_pos, item));
+            }
+            _ => {}
+        }
         if is_runtime_component(item) {
-            let name = match item {
-                SignatureItem::SigValue(id, _)
-                | SignatureItem::SigModule(id, _, _)
-                | SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
-                _ => {
-                    runtime_pos += 1;
-                    continue;
-                }
-            };
-            impl_name_to_component.insert(name, (runtime_pos, item));
             runtime_pos += 1;
         }
     }
@@ -1654,16 +1655,35 @@ fn build_name_based_coercion(
         if !is_runtime_component(item) {
             continue;
         }
-        let (name, is_interface_module) = match item {
-            SignatureItem::SigValue(id, _) => (id.name().to_string(), false),
-            SignatureItem::SigModule(id, _, _) => (id.name().to_string(), true),
-            SignatureItem::SigTypext(id, _, _) => (id.name().to_string(), false),
+        let name = match item {
+            SignatureItem::SigValue(id, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigTypext(id, _, _) => id.name().to_string(),
             _ => continue,
         };
         if let Some(&(pos, impl_item)) = impl_name_to_component.get(&name) {
-            let coercion = match (is_interface_module, impl_item) {
+            let coercion = match (item, impl_item) {
                 (
-                    true,
+                    SignatureItem::SigValue(_, sig_desc),
+                    SignatureItem::SigValue(impl_id, impl_desc),
+                ) if !matches!(sig_desc.val_kind, ValueKind::ValPrim(_)) => {
+                    match &impl_desc.val_kind {
+                        ValueKind::ValPrim(prim) => {
+                            // Mirrors compiler/ml/includecore.ml:52-63:
+                            // Val_prim implementation + regular interface
+                            // value is exported by a primitive coercion.
+                            ModuleCoercion::Tcoerce_primitive(PrimitiveCoercion {
+                                pc_desc: prim.clone(),
+                                pc_type: sig_desc.val_type,
+                                pc_loc: impl_desc.val_loc.clone(),
+                                pc_id: impl_id.clone(),
+                            })
+                        }
+                        ValueKind::ValReg => ModuleCoercion::Tcoerce_none,
+                    }
+                }
+                (
+                    SignatureItem::SigModule(_, _, _),
                     SignatureItem::SigModule(
                         _,
                         crate::types::decl::ModuleDeclaration {
