@@ -5020,6 +5020,60 @@ fn if_value_branches_keep_assignment_continuation_through_let_bindings() {
 }
 
 #[test]
+fn assignment_merge_applies_js_not_swap_before_conditional_like_ocaml() {
+    let compiler = LambdaCompiler::new();
+    let result = Ident::create_local("result");
+    let value = Ident::create_local("value");
+    let cond = Expression::not(Expression::is_null_or_undefined(Expression::var(
+        value.clone(),
+    )));
+    let then_block = vec![Statement::exp(Expression::bin(
+        BinOp::Eq,
+        Expression::var(result.clone()),
+        Expression::number(Number::int(1)),
+    ))];
+    let else_block = vec![Statement::exp(Expression::bin(
+        BinOp::Eq,
+        Expression::var(result.clone()),
+        Expression::undefined(false),
+    ))];
+
+    let block = compiler.compile_test_assignment_block(&result, cond, then_block, else_block);
+
+    assert!(matches!(
+        block.as_slice(),
+        [Statement {
+            desc: StatementDesc::Exp(Expression {
+                desc: ExpressionDesc::Bin(BinOp::Eq, lhs, rhs),
+                ..
+            }),
+            ..
+        }] if matches!(
+            (&lhs.desc, &rhs.desc),
+            (
+                ExpressionDesc::Var(crate::js_ir::VIdent::Id(lhs_id)),
+                ExpressionDesc::Cond(test, consequent, alternate),
+            ) if lhs_id.same(&result)
+                && matches!(
+                    test.as_ref(),
+                    Expression {
+                        desc: ExpressionDesc::IsNullOrUndefined(inner),
+                        ..
+                    } if matches!(
+                        inner.as_ref(),
+                        Expression {
+                            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                            ..
+                        } if id.same(&value)
+                    )
+                )
+                && matches!(consequent.desc, ExpressionDesc::Undefined { .. })
+                && matches!(alternate.desc, ExpressionDesc::Number(Number::Int { i: 1, .. }))
+        )
+    ));
+}
+
+#[test]
 fn if_expression_result_temp_uses_tmp_name_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let cond = Ident::create_local("cond");

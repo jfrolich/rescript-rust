@@ -1223,7 +1223,9 @@ impl LambdaCompiler {
                     // top of `compile_staticcatch`; a `code_table` with >1
                     // entries goes through the multi-handler explicit-jump
                     // arm for `NeedValue` at lam_compile.ml:978-988.
-                    let result = self.fresh_ident("catch");
+                    // OCaml NeedValue staticcatch allocates `Ext_ident.create_tmp ()`
+                    // for the result (compiler/core/lam_compile.ml:1027-1034).
+                    let result = self.fresh_tmp_ident();
                     let mut prelude = vec![Statement::variable(VariableDeclaration {
                         ident: result.clone(),
                         value: None,
@@ -3818,6 +3820,8 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
+        let (cond, then_block, else_block) =
+            normalize_if_assignment_merge_order(cond, then_block, else_block);
         match (
             self.take_single_result_assignment(result, then_block),
             self.take_single_result_assignment(result, else_block),
@@ -3847,6 +3851,8 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
+        let (cond, then_block, else_block) =
+            normalize_if_assignment_merge_order(cond, then_block, else_block);
         match (
             self.take_single_result_assignment(id, then_block),
             self.take_single_result_assignment(id, else_block),
@@ -3882,7 +3888,11 @@ impl LambdaCompiler {
         }
     }
 
-    fn take_single_result_assignment(&self, id: &Ident, block: Block) -> Result<Expression, Block> {
+    pub(crate) fn take_single_result_assignment(
+        &self,
+        id: &Ident,
+        block: Block,
+    ) -> Result<Expression, Block> {
         let [stmt] = block.as_slice() else {
             return Err(block);
         };
@@ -5532,7 +5542,9 @@ impl LambdaCompiler {
         body: &Lambda,
         handler: &Lambda,
     ) -> Compiled {
-        let result = self.fresh_ident("catch");
+        // OCaml NeedValue staticcatch allocates `Ext_ident.create_tmp ()`
+        // for the result (compiler/core/lam_compile.ml:1027-1034).
+        let result = self.fresh_tmp_ident();
         let mut prelude = vec![Statement::variable(VariableDeclaration {
             ident: result.clone(),
             value: None,
@@ -5810,6 +5822,29 @@ impl LambdaCompiler {
         let mut modules = self.collect_required_module_set(block).to_vec();
         ocaml_sort_modules(&mut modules);
         modules
+    }
+}
+
+fn normalize_if_assignment_merge_order(
+    cond: Expression,
+    then_block: Block,
+    else_block: Block,
+) -> (Expression, Block, Block) {
+    // OCaml's `Js_stmt_make.if_` handles `Js_not` before it folds
+    // same-target branch assignments (compiler/core/js_stmt_make.ml:235-286).
+    // Keep that rule order for Rust's eager assignment merge, otherwise a
+    // `!(x == null) ? value : undefined` conditional survives where OCaml
+    // first swaps branches and emits `x == null ? undefined : value`.
+    match cond.desc {
+        ExpressionDesc::JsNot(inner) if !else_block.is_empty() => (*inner, else_block, then_block),
+        other => (
+            Expression {
+                desc: other,
+                comment: cond.comment,
+            },
+            then_block,
+            else_block,
+        ),
     }
 }
 

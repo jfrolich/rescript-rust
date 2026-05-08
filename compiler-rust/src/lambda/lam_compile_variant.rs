@@ -243,12 +243,6 @@ impl LambdaCompiler {
         let scrut_compiled = self.compile_expr(scrut);
         let mut prelude = scrut_compiled.prelude;
         let tmp = self.fresh_tmp_ident();
-        prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp.clone(),
-            value: None,
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        }));
         let borrowed_cases: Vec<_> = cases
             .iter()
             .map(|(tag, body)| (SwitchCaseTag::String(tag.clone()), body))
@@ -261,12 +255,42 @@ impl LambdaCompiler {
             default,
             default.is_none(),
         ) {
-            prelude.extend(small);
+            // OCaml's `Lam_pass_exits.simplify_exits` inlines one-use static
+            // catches before JS lowering (compiler/core/lam_pass_exits.ml:159-169).
+            // The resulting small string switch reaches `Js_stmt_make.if_`,
+            // which folds same-target branch assignments into one conditional
+            // assignment (compiler/core/js_stmt_make.ml:251-286). When that is
+            // the whole body, print the fresh NeedValue temp as `let tmp = ...`
+            // instead of `let tmp; tmp = ...`.
+            match self.take_single_result_assignment(&tmp, small) {
+                Ok(expr) => prelude.push(Statement::variable(VariableDeclaration {
+                    ident: tmp.clone(),
+                    value: Some(expr),
+                    property: LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                })),
+                Err(block) => {
+                    prelude.push(Statement::variable(VariableDeclaration {
+                        ident: tmp.clone(),
+                        value: None,
+                        property: LetKind::Strict,
+                        ident_info: IdentInfo::default(),
+                    }));
+                    prelude.extend(block);
+                }
+            }
             return Compiled {
                 prelude,
                 expr: Expression::var(tmp),
             };
         }
+
+        prelude.push(Statement::variable(VariableDeclaration {
+            ident: tmp.clone(),
+            value: None,
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        }));
 
         let clauses: Vec<_> = self
             .grouped_switch_cases(cases, default, |_, _| true)
