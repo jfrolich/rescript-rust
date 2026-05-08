@@ -31,6 +31,16 @@ enum JsxChildren<'a> {
     Single(&'a Expression),
 }
 
+struct FunctionPrintContext<'a> {
+    is_method: bool,
+    params: &'a [Ident],
+    body: &'a Block,
+    return_unit: bool,
+    async_: bool,
+    directive: Option<&'a str>,
+    function_ident: Option<&'a Ident>,
+}
+
 /// JavaScript printer state
 pub struct JsPrinter {
     /// Output buffer
@@ -751,8 +761,8 @@ impl JsPrinter {
     /// Print a variable declaration
     fn print_variable_declaration(&mut self, decl: &VariableDeclaration) {
         // Eta-reduce `let f = function(x, y) { return g(x, y); }` to `let f = g;`
-        // at print time, matching OCaml's pp_function (js_dump.ml:299-344) for
-        // the `Name_non_top` fn_state.
+        // at print time, matching OCaml's pp_function
+        // (compiler/core/js_dump.ml:299-344) for the `Name_non_top` fn_state.
         if let Some(Expression {
             desc:
                 ExpressionDesc::Fun {
@@ -796,7 +806,35 @@ impl JsPrinter {
         if let Some(value) = &decl.value {
             if !is_undefined_literal(value) {
                 self.write(" = ");
-                self.print_expression(value, 1);
+                if let ExpressionDesc::Fun {
+                    is_method,
+                    params,
+                    body,
+                    return_unit,
+                    async_,
+                    directive,
+                    ..
+                } = &value.desc
+                {
+                    // OCaml reference: compiler/core/js_dump.ml:337-360 builds
+                    // `set_env` including `Name_non_top id`, then
+                    // compiler/core/js_dump.ml:411-414 prints the function in
+                    // `inner_cxt`.
+                    // That makes the function's own binding name reserved inside
+                    // the body, so body-local bindings with the same source name
+                    // get `$N` suffixes.
+                    self.print_function_expression(FunctionPrintContext {
+                        is_method: *is_method,
+                        params,
+                        body,
+                        return_unit: *return_unit,
+                        async_: *async_,
+                        directive: directive.as_deref(),
+                        function_ident: Some(&decl.ident),
+                    });
+                } else {
+                    self.print_expression(value, 1);
+                }
             }
         }
 
@@ -833,6 +871,101 @@ impl JsPrinter {
             .collect::<Vec<_>>();
 
         self.with_local_ident_scope(&reserved_printed_names, f)
+    }
+
+    fn print_function_expression(&mut self, context: FunctionPrintContext<'_>) {
+        let FunctionPrintContext {
+            is_method,
+            params,
+            body,
+            return_unit,
+            async_,
+            directive,
+            function_ident,
+        } = context;
+
+        // compiler/core/js_dump.ml:342-344 - when a function expression's body is
+        // `[ Return (Call (Var v, args, _)) ]` with each
+        // `args[i] == Var(params[i])` and the callee is ML/runtime,
+        // collapse the expression to the underlying `v`. This mirrors
+        // OCaml's `Is_return | No_name _` arm of pp_function that emits
+        // `optimize len ~p cxt f v` -> `vident` for the clean
+        // `arity = Full, call_info = Call_ml | Call_builtin_runtime` case.
+        if let Some(target) = eta_reduce_function_body(is_method, params, body) {
+            self.with_function_ident_scope(params, body, function_ident, |this| {
+                this.print_vident(target);
+            });
+            return;
+        }
+
+        let use_arrow = !is_method;
+        self.with_function_ident_scope(params, body, function_ident, |this| {
+            let (this_binding, param_names) =
+                this.method_params_and_binding(is_method, params, body);
+
+            // Async prefix
+            if async_ {
+                this.write("async ");
+            }
+
+            // Function keyword or arrow
+            if !use_arrow {
+                this.write("function");
+                this.write(" ");
+            }
+
+            // Parameters
+            if param_names.len() == 1 && use_arrow {
+                this.write(&param_names[0]);
+            } else {
+                this.write_char('(');
+                for (i, name) in param_names.iter().enumerate() {
+                    if i > 0 {
+                        this.write(", ");
+                    }
+                    this.write(name);
+                }
+                this.write_char(')');
+            }
+
+            if use_arrow {
+                this.write(" =>");
+            }
+
+            // Body
+            if use_arrow
+                && directive.is_none()
+                && body.as_slice().len() == 1
+                && matches!(
+                    body[0].desc,
+                    StatementDesc::Return(Expression {
+                        desc: ExpressionDesc::Undefined { .. },
+                        ..
+                    })
+                )
+            {
+                this.write(" {}");
+                return;
+            }
+
+            if use_arrow
+                && directive.is_none()
+                && let Some(expr) = single_arrow_function_expr(body)
+            {
+                this.write(" ");
+                let needs_paren = this.arrow_expr_needs_paren(expr);
+                if needs_paren {
+                    this.write_char('(');
+                }
+                this.print_expression(expr, 0);
+                if needs_paren {
+                    this.write_char(')');
+                }
+                return;
+            }
+
+            this.print_function_body_block(body, return_unit, directive, this_binding.as_ref());
+        });
     }
 
     pub(super) fn reserve_idents_in_current_scope(&mut self, idents: &[Ident]) {
@@ -1776,92 +1909,14 @@ impl JsPrinter {
                 directive,
                 ..
             } => {
-                // js_dump.ml:342-344 — when an anonymous Fun expression's body
-                // is `[ Return (Call (Var v, args, _)) ]` with each
-                // `args[i] == Var(params[i])` and the callee is ML/runtime,
-                // collapse the expression to the underlying `v`. This mirrors
-                // OCaml's `Is_return | No_name _` arm of pp_function that
-                // emits `optimize len ~p cxt f v` → `vident` for the clean
-                // `arity = Full, call_info = Call_ml | Call_builtin_runtime`
-                // case.
-                if let Some(target) = eta_reduce_function_body(*is_method, params, body) {
-                    self.with_function_ident_scope(params, body, None, |this| {
-                        this.print_vident(target);
-                    });
-                    return;
-                }
-                let use_arrow = !*is_method;
-                self.with_function_ident_scope(params, body, None, |this| {
-                    let (this_binding, param_names) =
-                        this.method_params_and_binding(*is_method, params, body);
-
-                    // Async prefix
-                    if *async_ {
-                        this.write("async ");
-                    }
-
-                    // Function keyword or arrow
-                    if !use_arrow {
-                        this.write("function");
-                        this.write(" ");
-                    }
-
-                    // Parameters
-                    if param_names.len() == 1 && use_arrow {
-                        this.write(&param_names[0]);
-                    } else {
-                        this.write_char('(');
-                        for (i, name) in param_names.iter().enumerate() {
-                            if i > 0 {
-                                this.write(", ");
-                            }
-                            this.write(name);
-                        }
-                        this.write_char(')');
-                    }
-
-                    if use_arrow {
-                        this.write(" =>");
-                    }
-
-                    // Body
-                    if use_arrow
-                        && directive.is_none()
-                        && body.as_slice().len() == 1
-                        && matches!(
-                            body[0].desc,
-                            StatementDesc::Return(Expression {
-                                desc: ExpressionDesc::Undefined { .. },
-                                ..
-                            })
-                        )
-                    {
-                        this.write(" {}");
-                        return;
-                    }
-
-                    if use_arrow
-                        && directive.is_none()
-                        && let Some(expr) = single_arrow_function_expr(body)
-                    {
-                        this.write(" ");
-                        let needs_paren = this.arrow_expr_needs_paren(expr);
-                        if needs_paren {
-                            this.write_char('(');
-                        }
-                        this.print_expression(expr, 0);
-                        if needs_paren {
-                            this.write_char(')');
-                        }
-                        return;
-                    }
-
-                    this.print_function_body_block(
-                        body,
-                        *return_unit,
-                        directive.as_deref(),
-                        this_binding.as_ref(),
-                    );
+                self.print_function_expression(FunctionPrintContext {
+                    is_method: *is_method,
+                    params,
+                    body,
+                    return_unit: *return_unit,
+                    async_: *async_,
+                    directive: directive.as_deref(),
+                    function_ident: None,
                 });
             }
 
@@ -5919,6 +5974,39 @@ mod tests {
         let after_idx = rendered.find("let after").unwrap();
         assert!(before_idx < fun_idx);
         assert!(fun_idx < after_idx);
+    }
+
+    #[test]
+    fn test_print_function_binding_reserves_own_name_inside_body_like_ocaml() {
+        let function_ident = Ident::create_local("callback");
+        let param = Ident::create_local("time");
+        let inner = Ident::create_local("callback");
+        let rendered = print_block(&vec![Statement::variable(VariableDeclaration {
+            ident: function_ident,
+            value: Some(Expression::new(ExpressionDesc::Fun {
+                is_method: false,
+                params: vec![param],
+                body: vec![
+                    Statement::variable(VariableDeclaration {
+                        ident: inner.clone(),
+                        value: Some(Expression::number(Number::int(1))),
+                        property: crate::lambda::lam_compat::LetKind::Strict,
+                        ident_info: Default::default(),
+                    }),
+                    Statement::return_(Expression::var(inner)),
+                ],
+                env: Default::default(),
+                return_unit: false,
+                async_: false,
+                directive: None,
+            })),
+            property: crate::lambda::lam_compat::LetKind::Strict,
+            ident_info: Default::default(),
+        })]);
+
+        assert!(rendered.contains("let callback = time => {"));
+        assert!(rendered.contains("let callback$1 = 1;"));
+        assert!(rendered.contains("return callback$1;"));
     }
 
     #[test]
