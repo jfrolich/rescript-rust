@@ -8,14 +8,14 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
 
-use crate::cmi::persistent_env::CmjExportConstant;
+use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, UsedStats};
 use crate::js_ir::{
-    BinOp, Block, CallInfo, CaseClause, Delim, DepsProgram, Expression, ExpressionDesc,
-    ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc, StringClause,
-    VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
+    BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, Delim, DepsProgram, Expression,
+    ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
+    StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
@@ -29,11 +29,14 @@ use crate::lambda::js_shake::{
 };
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
+use crate::lambda::lam_compile_context::{Element, ExternalArityInfo, IdKind, LamStats};
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::lam_free_variables::free_variables;
+use crate::lambda::lam_pass_collect::{collect_info, get_arity};
 use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
@@ -262,6 +265,13 @@ pub(crate) struct ExternalModuleCacheKey {
     pub(crate) default: bool,
 }
 
+fn cmj_export_arity_to_external(info: CmjExportArity) -> ExternalArityInfo {
+    match info {
+        CmjExportArity::Single(arity) => ExternalArityInfo::Single(arity),
+        CmjExportArity::Submodule(arities) => ExternalArityInfo::Submodule(arities),
+    }
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     pub(crate) id_gen: IdGenerator,
@@ -270,8 +280,10 @@ pub struct LambdaCompiler {
     pub(crate) check_div_by_zero: bool,
     pub(crate) cross_module_inline: bool,
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
+    pub(crate) cmj_arity_cache: HashMap<String, Option<HashMap<String, CmjExportArity>>>,
     pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
+    pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -357,8 +369,10 @@ impl LambdaCompiler {
             check_div_by_zero: true,
             cross_module_inline: false,
             cmj_constant_cache: HashMap::new(),
+            cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
+            cmj_export_arities: AHashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -397,8 +411,10 @@ impl LambdaCompiler {
             check_div_by_zero,
             cross_module_inline,
             cmj_constant_cache: HashMap::new(),
+            cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
+            cmj_export_arities: AHashMap::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -474,25 +490,53 @@ impl LambdaCompiler {
         let simplified = crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
             let _phase = info_span!("compiler.lambda_simplify").entered();
             let jsx_preserve = self.jsx_preserve;
+            let module_path_resolver = self.module_path_resolver.clone();
+            let cross_module_inline = self.cross_module_inline;
+            let mut cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>> =
+                HashMap::new();
+            let mut cmj_arity_cache: HashMap<String, Option<HashMap<String, CmjExportArity>>> =
+                HashMap::new();
             let mut external_inline =
                 |module_id: &Ident, dynamic_import: bool, field_name: &str| {
-                    self.resolve_cmj_module_field_lambda(
-                        &ModuleId {
-                            id: module_id.clone(),
-                            kind: Kind::Ml,
-                            dynamic_import,
-                        },
-                        field_name,
-                    )
+                    if !cross_module_inline {
+                        return None;
+                    }
+                    if !cmj_lambda_cache.contains_key(module_id.name()) {
+                        let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_export_lambdas(module_id.name())
+                        });
+                        cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
+                    }
+                    let _ = dynamic_import;
+                    cmj_lambda_cache
+                        .get(module_id.name())
+                        .and_then(|exports| exports.as_ref())
+                        .and_then(|exports| exports.get(field_name).cloned())
                 };
+            let mut external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                if !cmj_arity_cache.contains_key(module_id.name()) {
+                    let arities = module_path_resolver
+                        .as_ref()
+                        .and_then(|resolver| resolver.module_cmj_export_arities(module_id.name()));
+                    cmj_arity_cache.insert(module_id.name().to_string(), arities);
+                }
+                let _ = dynamic_import;
+                cmj_arity_cache
+                    .get(module_id.name())
+                    .and_then(|exports| exports.as_ref())
+                    .and_then(|exports| exports.get(field_name).cloned())
+                    .map(cmj_export_arity_to_external)
+            };
             crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_owned(
                 lam,
                 jsx_preserve,
                 &mut external_inline,
+                &mut external_arity,
             )
         });
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified);
+        self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(&simplified);
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -576,6 +620,10 @@ impl LambdaCompiler {
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
         std::mem::take(&mut self.cmj_export_constants)
+    }
+
+    pub(crate) fn take_cmj_export_arities(&mut self) -> AHashMap<String, CmjExportArity> {
+        std::mem::take(&mut self.cmj_export_arities)
     }
 
     fn coerce_toplevel_exports(
@@ -758,8 +806,8 @@ impl LambdaCompiler {
             }
         }
 
-        if let Some(inlined) = self.try_compile_external_field_apply(apply) {
-            return inlined;
+        if let Some(compiled) = self.compile_external_field_apply(apply) {
+            return compiled;
         }
 
         let mut prelude = vec![];
@@ -782,12 +830,12 @@ impl LambdaCompiler {
         }
     }
 
-    fn resolve_cmj_module_field_lambda(
+    fn resolve_cmj_module_field_lambda_any(
         &mut self,
         module: &ModuleId,
         field_name: &str,
     ) -> Option<Lambda> {
-        if !self.cross_module_inline || !matches!(module.kind, Kind::Ml) {
+        if !matches!(module.kind, Kind::Ml) {
             return None;
         }
 
@@ -804,6 +852,46 @@ impl LambdaCompiler {
             .get(module.id.name())
             .and_then(|exports| exports.as_ref())
             .and_then(|exports| exports.get(field_name).cloned())
+    }
+
+    fn resolve_cmj_module_field_lambda(
+        &mut self,
+        module: &ModuleId,
+        field_name: &str,
+    ) -> Option<Lambda> {
+        if !self.cross_module_inline {
+            return None;
+        }
+        self.resolve_cmj_module_field_lambda_any(module, field_name)
+    }
+
+    fn resolve_cmj_module_field_arity(
+        &mut self,
+        module: &ModuleId,
+        field_name: &str,
+    ) -> Option<Arity> {
+        if !matches!(module.kind, Kind::Ml) {
+            return None;
+        }
+
+        if !self.cmj_arity_cache.contains_key(module.id.name()) {
+            let arities = self
+                .module_path_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.module_cmj_export_arities(module.id.name()));
+            self.cmj_arity_cache
+                .insert(module.id.name().to_string(), arities);
+        }
+
+        match self
+            .cmj_arity_cache
+            .get(module.id.name())
+            .and_then(|exports| exports.as_ref())
+            .and_then(|exports| exports.get(field_name))
+        {
+            Some(CmjExportArity::Single(arity)) => Some(arity.clone()),
+            Some(CmjExportArity::Submodule(_)) | None => None,
+        }
     }
 
     fn module_field_apply_target<'a>(&self, lam: &'a Lambda) -> Option<(ModuleId, &'a str)> {
@@ -828,32 +916,135 @@ impl LambdaCompiler {
         ))
     }
 
-    fn try_compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
+    fn compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
         let (module, field_name) = self.module_field_apply_target(&apply.ap_func)?;
-        let lambda = self.resolve_cmj_module_field_lambda(&module, field_name)?;
-        let Lambda::Lfunction(func) = lambda else {
-            return None;
-        };
-        if func.params.len() != apply.ap_args.len() || !lfunction_can_be_inlined(&func) {
-            return None;
+
+        if let Some(Lambda::Lfunction(func)) =
+            self.resolve_cmj_module_field_lambda(&module, field_name)
+        {
+            if func.params.len() == apply.ap_args.len() && lfunction_can_be_inlined(&func) {
+                // OCaml compiler/core/lam_compile.ml:275-290 inlines closed
+                // `persistent_closed_lambda` functions from `.cmj` during
+                // `compile_external_field_apply`, then beta-reduces them with
+                // Lam_beta_reduce.propagate_beta_reduce_with_map.
+                let exports = ahash::AHashSet::new();
+                let (_, param_map) = is_closed_with_map(&exports, &func.params, &func.body);
+                let mut ident_tbl = crate::lambda::lam_compile_context::IdentTable::new();
+                let reduced =
+                    crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
+                        &mut ident_tbl,
+                        &self.id_gen,
+                        &param_map,
+                        &func.params,
+                        &func.body,
+                        &apply.ap_args,
+                    );
+                return Some(self.compile_expr(&reduced));
+            }
         }
 
-        // OCaml lam_compile.ml:275-290 inlines closed `persistent_closed_lambda`
-        // functions from `.cmj` during `compile_external_field_apply`, then
-        // beta-reduces them with Lam_beta_reduce.propagate_beta_reduce_with_map.
-        let exports = ahash::AHashSet::new();
-        let (_, param_map) = is_closed_with_map(&exports, &func.params, &func.body);
-        let mut ident_tbl = crate::lambda::lam_compile_context::IdentTable::new();
-        let reduced =
-            crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
-                &mut ident_tbl,
-                &self.id_gen,
-                &param_map,
-                &func.params,
-                &func.body,
-                &apply.ap_args,
-            );
-        Some(self.compile_expr(&reduced))
+        let known_arity = self.resolve_cmj_module_field_arity(&module, field_name);
+        let mut prelude = Vec::new();
+        let mut args = Vec::with_capacity(apply.ap_args.len());
+        for arg in &apply.ap_args {
+            let compiled = self.compile_expr(arg);
+            prelude.extend(compiled.prelude);
+            args.push(compiled.expr);
+        }
+
+        let func = Expression::qualified(module, Some(field_name.to_string()));
+        let expr = match apply.ap_info.status {
+            // compiler/core/lam_compile.ml:303-309 keeps the explicit
+            // App_infer_full/App_uncurry call info instead of consulting CMJ
+            // arity. In particular App_uncurry stays Call_na.
+            ApplyStatus::InferFull | ApplyStatus::Uncurry => Expression::call(
+                func,
+                args,
+                call_info_of_apply_status(apply.ap_transformed_jsx, apply.ap_info.status),
+            ),
+            // compiler/core/lam_compile.ml:310-316 uses
+            // `ident_info.arity`; a known `Single` arity is lowered through
+            // `apply_with_arity`, while missing/Submodule arity uses dummy
+            // Call_na information.
+            ApplyStatus::Na => match known_arity {
+                Some(arity) if !arity.is_na() => self.apply_with_arity(func, arity, args),
+                _ => Expression::call(func, args, CallInfo::default()),
+            },
+        };
+        Some(Compiled { prelude, expr })
+    }
+
+    fn apply_with_arity(
+        &self,
+        func: Expression,
+        arity: Arity,
+        args: Vec<Expression>,
+    ) -> Expression {
+        // Direct port of compiler/core/lam_compile.ml:42-79. The OCaml helper
+        // repeatedly consumes known arity groups, emits `ml_full_call` for each
+        // saturated group, eta-expands duplicable partial applications, and
+        // falls back to dummy Call_na otherwise.
+        fn aux(
+            id_gen: &IdGenerator,
+            func: Expression,
+            mut arities: Vec<i32>,
+            args: Vec<Expression>,
+        ) -> Expression {
+            let len = args.len();
+            if len == 0 {
+                return func;
+            }
+
+            if arities.is_empty() {
+                return Expression::call(func, args, CallInfo::default());
+            }
+
+            let mut x = arities.remove(0);
+            if x == 0 {
+                x = 1;
+            }
+            let x_len = x as usize;
+            if len >= x_len {
+                let first_part = args[..x_len].to_vec();
+                let continue_args = args[x_len..].to_vec();
+                let call = Expression::call(
+                    func,
+                    first_part,
+                    CallInfo {
+                        kind: CallKind::MlCall,
+                        arity: CallArity::Full,
+                        ..CallInfo::default()
+                    },
+                );
+                aux(id_gen, call, arities, continue_args)
+            } else if args.iter().all(js_expr_no_side_effects) {
+                let missing = x_len - len;
+                let params: Vec<Ident> = (0..missing).map(|_| id_gen.create("param")).collect();
+                let mut full_args = args;
+                full_args.extend(params.iter().cloned().map(Expression::var));
+                Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params,
+                    body: vec![Statement::return_(Expression::call(
+                        func,
+                        full_args,
+                        CallInfo {
+                            kind: CallKind::MlCall,
+                            arity: CallArity::Full,
+                            ..CallInfo::default()
+                        },
+                    ))],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })
+            } else {
+                Expression::call(func, args, CallInfo::default())
+            }
+        }
+
+        aux(&self.id_gen, func, arity.extract_arity(), args)
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
@@ -6463,6 +6654,72 @@ fn collect_cmj_export_constants_from_simplified_lambda(
         }
     }
     constants
+}
+
+fn collect_cmj_export_arities_from_simplified_lambda(
+    lam: &Lambda,
+) -> AHashMap<String, CmjExportArity> {
+    // OCaml writes `.cmj` arity metadata from `Lam_stats_export.values_of_export`
+    // (compiler/core/lam_stats_export.ml:32-49). Recompute the same
+    // `Lam_pass_collect.collect_info` view over the simplified lambda and
+    // publish the arity for each top-level export into the in-process registry.
+    let mut bindings = Vec::new();
+    let Some((exports, args)) = collect_toplevel_export_bindings(lam, &mut bindings) else {
+        return AHashMap::new();
+    };
+
+    let mut meta = LamStats::new(exports.to_vec());
+    collect_info(&mut meta, lam);
+
+    let mut arities = AHashMap::new();
+    for (export, arg) in exports.iter().zip(args) {
+        match meta.ident_tbl.get(export) {
+            Some(IdKind::FunctionId { arity, .. }) => {
+                arities.insert(
+                    export.name().to_string(),
+                    CmjExportArity::Single(arity.clone()),
+                );
+            }
+            Some(IdKind::ImmutableBlock(items)) => {
+                let submodule_arities = items
+                    .iter()
+                    .map(|item| match item {
+                        Element::Na => Arity::na(),
+                        Element::SimpleForm(lam) => get_arity(&meta, lam),
+                    })
+                    .collect::<Vec<_>>();
+                arities.insert(
+                    export.name().to_string(),
+                    CmjExportArity::Submodule(submodule_arities),
+                );
+            }
+            _ => {
+                let value = match arg {
+                    Lambda::Lvar(id) => bindings
+                        .iter()
+                        .rev()
+                        .find_map(|(binding, value)| binding.same(id).then_some(*value))
+                        .unwrap_or(arg),
+                    _ => arg,
+                };
+                if let Lambda::Lprim(PrimInfo {
+                    primitive:
+                        Primitive::Pmakeblock(_, _, crate::lambda::lam_primitive::Mutable::Immutable),
+                    args,
+                    ..
+                }) = value
+                {
+                    let submodule_arities =
+                        args.iter().map(|lam| get_arity(&meta, lam)).collect::<Vec<_>>();
+                    arities.insert(
+                        export.name().to_string(),
+                        CmjExportArity::Submodule(submodule_arities),
+                    );
+                }
+            }
+        }
+    }
+    arities
 }
 
 fn collect_toplevel_export_bindings<'a>(

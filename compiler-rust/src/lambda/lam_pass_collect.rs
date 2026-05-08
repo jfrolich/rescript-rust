@@ -18,9 +18,16 @@ use crate::lambda::lam_analysis::{
 };
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
-use crate::lambda::lam_compile_context::{BoxedNullable, Element, IdKind, LamStats, RecFlag};
+use crate::lambda::lam_compile_context::{
+    BoxedNullable, Element, ExternalArityInfo, ExternalArityKey, IdKind, LamStats, RecFlag,
+};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
+
+/// Rust counterpart to `Lam_compile_env.query_external_id_info` for
+/// `Lam_arity_analysis.get_arity` (compiler/core/lam_arity_analysis.ml:43-71).
+pub type ExternalArityResolver<'a> =
+    dyn FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo> + 'a;
 
 /// Direct port of `Lam_util.element_of_lambda` (lam_util.ml:188-196).
 ///
@@ -74,13 +81,33 @@ fn arity_of_var(meta: &LamStats, v: &Ident) -> Arity {
     }
 }
 
+fn external_arity_key(
+    module_id: &Ident,
+    dynamic_import: bool,
+    field_name: &str,
+) -> ExternalArityKey {
+    ExternalArityKey {
+        module_name: module_id.name().to_string(),
+        dynamic_import,
+        field_name: field_name.to_string(),
+    }
+}
+
+fn query_external_arity<'a>(
+    meta: &'a LamStats,
+    module_id: &Ident,
+    dynamic_import: bool,
+    field_name: &str,
+) -> Option<&'a ExternalArityInfo> {
+    meta.external_arities
+        .get(&external_arity_key(module_id, dynamic_import, field_name))
+}
+
 /// Direct port of `Lam_arity_analysis.get_arity` (lam_arity_analysis.ml:38-132).
 ///
 /// The two `Pfield (_, Fld_module _)` arms in OCaml call
 /// `Lam_compile_env.query_external_id_info` to fetch the foreign module's
-/// recorded arity. The Rust code has no equivalent yet, so both arms return
-/// [`Arity::na`] here. This matches OCaml's behavior whenever the external
-/// info is unavailable.
+/// recorded arity (compiler/core/lam_arity_analysis.ml:43-71).
 pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
     match lam {
         // lam_arity_analysis.ml:40
@@ -89,15 +116,23 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
         Lambda::Lconst(_) => Arity::non_function(),
         // lam_arity_analysis.ml:42
         Lambda::Llet(_, _, _, body) => get_arity(meta, body),
-        // lam_arity_analysis.ml:43-71 — cross-module Pfield arms. No Rust
-        // counterpart for `query_external_id_info`, so fall back to NA.
+        // lam_arity_analysis.ml:43-56 — cross-module Pfield arm.
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { .. }),
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
             args,
             ..
-        }) if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]) => Arity::na(),
+        }) if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]) => {
+            let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+                unreachable!("guarded by matches!");
+            };
+            match query_external_arity(meta, id, *dynamic_import, name) {
+                Some(ExternalArityInfo::Single(arity)) => arity.clone(),
+                Some(ExternalArityInfo::Submodule(_)) | None => Arity::na(),
+            }
+        }
+        // lam_arity_analysis.ml:57-71 — nested submodule Pfield arm.
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(_, _),
+            primitive: Primitive::Pfield(index, _),
             args,
             ..
         }) if matches!(
@@ -109,7 +144,26 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
             })] if matches!(inner_args.as_slice(), [Lambda::LglobalModule(_, _)])
         ) =>
         {
-            Arity::na()
+            let [
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+                    args: inner_args,
+                    ..
+                }),
+            ] = args.as_slice()
+            else {
+                unreachable!("guarded by matches!");
+            };
+            let [Lambda::LglobalModule(id, dynamic_import)] = inner_args.as_slice() else {
+                unreachable!("guarded by matches!");
+            };
+            match query_external_arity(meta, id, *dynamic_import, name) {
+                Some(ExternalArityInfo::Submodule(arities)) => arities
+                    .get(*index as usize)
+                    .cloned()
+                    .unwrap_or_else(Arity::na),
+                Some(ExternalArityInfo::Single(_)) | None => Arity::na(),
+            }
         }
         // lam_arity_analysis.ml:72
         Lambda::Lprim(PrimInfo {
@@ -486,9 +540,115 @@ fn collect(meta: &mut LamStats, lam: &Lambda) {
     }
 }
 
+fn collect_external_arities(
+    meta: &mut LamStats,
+    lam: &Lambda,
+    resolver: &mut ExternalArityResolver<'_>,
+) {
+    match lam {
+        Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => {}
+        Lambda::Lapply(apply) => {
+            collect_external_arities(meta, &apply.ap_func, resolver);
+            for arg in &apply.ap_args {
+                collect_external_arities(meta, arg, resolver);
+            }
+        }
+        Lambda::Lfunction(func) => collect_external_arities(meta, &func.body, resolver),
+        Lambda::Llet(_, _, value, body) => {
+            collect_external_arities(meta, value, resolver);
+            collect_external_arities(meta, body, resolver);
+        }
+        Lambda::Lletrec(bindings, body) => {
+            for (_, value) in bindings {
+                collect_external_arities(meta, value, resolver);
+            }
+            collect_external_arities(meta, body, resolver);
+        }
+        Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+            args,
+            ..
+        }) if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]) => {
+            let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
+                unreachable!("guarded by matches!");
+            };
+            let key = external_arity_key(id, *dynamic_import, name);
+            if !meta.external_arities.contains_key(&key) {
+                if let Some(arity) = resolver(id, *dynamic_import, name) {
+                    meta.external_arities.insert(key, arity);
+                }
+            }
+        }
+        Lambda::Lprim(PrimInfo { args, .. }) => {
+            for arg in args {
+                collect_external_arities(meta, arg, resolver);
+            }
+        }
+        Lambda::Lswitch(scrutinee, switch) => {
+            collect_external_arities(meta, scrutinee, resolver);
+            if let Some(failaction) = &switch.sw_failaction {
+                collect_external_arities(meta, failaction, resolver);
+            }
+            for (_, lam) in &switch.sw_consts {
+                collect_external_arities(meta, lam, resolver);
+            }
+            for (_, lam) in &switch.sw_blocks {
+                collect_external_arities(meta, lam, resolver);
+            }
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            collect_external_arities(meta, scrutinee, resolver);
+            for (_, lam) in cases {
+                collect_external_arities(meta, lam, resolver);
+            }
+            if let Some(default) = default {
+                collect_external_arities(meta, default, resolver);
+            }
+        }
+        Lambda::LstaticRaise(_, args) => {
+            for arg in args {
+                collect_external_arities(meta, arg, resolver);
+            }
+        }
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            collect_external_arities(meta, body, resolver);
+            collect_external_arities(meta, handler, resolver);
+        }
+        Lambda::LifThenElse(test, consequent, alternate) => {
+            collect_external_arities(meta, test, resolver);
+            collect_external_arities(meta, consequent, resolver);
+            collect_external_arities(meta, alternate, resolver);
+        }
+        Lambda::Lsequence(left, right) | Lambda::Lwhile(left, right) => {
+            collect_external_arities(meta, left, resolver);
+            collect_external_arities(meta, right, resolver);
+        }
+        Lambda::Lfor(_, start, finish, _, body) => {
+            collect_external_arities(meta, start, resolver);
+            collect_external_arities(meta, finish, resolver);
+            collect_external_arities(meta, body, resolver);
+        }
+        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
+            collect_external_arities(meta, iterable, resolver);
+            collect_external_arities(meta, body, resolver);
+        }
+        Lambda::Lassign(_, value) => collect_external_arities(meta, value, resolver),
+        Lambda::Lbreak | Lambda::Lcontinue => {}
+    }
+}
+
 /// Direct port of `Lam_pass_collect.collect_info`
 /// (lam_pass_collect.ml:57-152). Mutates `meta.ident_tbl` with the kind /
 /// arity info gathered from a single traversal of `lam`.
 pub fn collect_info(meta: &mut LamStats, lam: &Lambda) {
+    collect(meta, lam);
+}
+
+pub fn collect_info_with_external_arity(
+    meta: &mut LamStats,
+    lam: &Lambda,
+    resolver: &mut ExternalArityResolver<'_>,
+) {
+    collect_external_arities(meta, lam, resolver);
     collect(meta, lam);
 }

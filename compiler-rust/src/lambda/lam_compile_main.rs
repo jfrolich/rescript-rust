@@ -10,7 +10,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_owned;
-use crate::lambda::lam_pass_collect::collect_info;
+use crate::lambda::lam_pass_collect::{ExternalArityResolver, collect_info_with_external_arity};
 use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets_owned;
@@ -43,7 +43,13 @@ pub fn simplify_for_js_backend_with_jsx_preserve(lam: &Lambda, jsx_preserve: boo
 /// without changing the pass order or behavior.
 pub fn simplify_for_js_backend_with_jsx_preserve_owned(lam: Lambda, jsx_preserve: bool) -> Lambda {
     let mut no_external_inline = |_: &Ident, _: bool, _: &str| None;
-    simplify_for_js_backend_with_external_inline_owned(lam, jsx_preserve, &mut no_external_inline)
+    let mut no_external_arity = |_: &Ident, _: bool, _: &str| None;
+    simplify_for_js_backend_with_external_inline_owned(
+        lam,
+        jsx_preserve,
+        &mut no_external_inline,
+        &mut no_external_arity,
+    )
 }
 
 /// Same JS-backend simplify pipeline, with the Rust counterpart to
@@ -54,6 +60,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     lam: Lambda,
     jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
+    external_arity: &mut ExternalArityResolver<'_>,
 ) -> Lambda {
     // OCaml constructs `meta` once at lam_compile_main.ml:150-153 with
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
@@ -81,13 +88,13 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:154 — collect_info into meta.
-    collect_info(&mut meta, &lam);
+    collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:159 — simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:161 — collect_info before simplify_alias.
-    collect_info(&mut meta, &lam);
+    collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:167 — simplify_alias.
     let lam = simplify_alias_with_jsx_and_external_inline_owned(
@@ -101,7 +108,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:173 — collect_info.
-    collect_info(&mut meta, &lam);
+    collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:174 — simplify_alias.
     let lam = simplify_alias_with_jsx_and_external_inline_owned(
@@ -115,7 +122,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     let lam = deep_flatten_owned(lam);
 
     // lam_compile_main.ml:176 — collect_info.
-    collect_info(&mut meta, &lam);
+    collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:180 — alpha_conversion.
     let lam = alpha_conversion_owned(&meta, lam);
@@ -124,7 +131,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     let lam = simplify_exits_owned(lam, &meta.id_gen);
 
     // lam_compile_main.ml:183 — collect_info.
-    collect_info(&mut meta, &lam);
+    collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:188 — simplify_alias.
     let lam = simplify_alias_with_jsx_and_external_inline_owned(

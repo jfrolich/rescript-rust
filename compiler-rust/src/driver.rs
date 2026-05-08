@@ -12,7 +12,9 @@ use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
 use crate::binary_ast::ppx;
-use crate::cmi::persistent_env::{CmjExportConstant, ModuleRegistry, PersistentEnv};
+use crate::cmi::persistent_env::{
+    CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv,
+};
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
 use crate::js_ir::{
@@ -1623,6 +1625,48 @@ fn build_name_based_coercion(
     use crate::types::includemod::is_runtime_component;
     use crate::types::typedtree::{EnvRef, ModuleCoercion, PrimitiveCoercion};
 
+    fn module_type_coercion(
+        impl_mty: &ModuleType,
+        intf_mty: &ModuleType,
+    ) -> ModuleCoercion {
+        match (impl_mty, intf_mty) {
+            (ModuleType::MtySignature(impl_sig), ModuleType::MtySignature(intf_sig)) => {
+                // OCaml recurses into submodule signatures when building
+                // structural coercions (compiler/ml/includemod.ml:253-292,
+                // 329-342), so an interface can hide fields inside an exported
+                // module without leaking the implementation block shape.
+                build_name_based_coercion(impl_sig, intf_sig)
+            }
+            (
+                ModuleType::MtyFunctor {
+                    result: impl_result,
+                    ..
+                },
+                ModuleType::MtyFunctor {
+                    result: intf_result,
+                    ..
+                },
+            ) => {
+                let result = module_type_coercion(impl_result, intf_result);
+                if matches!(result, ModuleCoercion::Tcoerce_none) {
+                    ModuleCoercion::Tcoerce_none
+                } else {
+                    // OCaml represents functor inclusion as a result coercion
+                    // over the applied body (compiler/ml/includemod.ml:144-166;
+                    // compiler/ml/translmod.ml:160-168). This fallback is used
+                    // only after the real inclusion check failed, so keep the
+                    // argument side identity and preserve the observable result
+                    // export shape.
+                    ModuleCoercion::Tcoerce_functor(
+                        Box::new(ModuleCoercion::Tcoerce_none),
+                        Box::new(result),
+                    )
+                }
+            }
+            _ => ModuleCoercion::Tcoerce_none,
+        }
+    }
+
     // Build name → runtime_position map from the implementation signature.
     // OCaml indexes every implementation component with the current runtime
     // position, then advances only for runtime components. That lets primitive
@@ -1706,6 +1750,10 @@ fn build_name_based_coercion(
                         Box::new(ModuleCoercion::Tcoerce_none),
                     )
                 }
+                (
+                    SignatureItem::SigModule(_, sig_md, _),
+                    SignatureItem::SigModule(_, impl_md, _),
+                ) => module_type_coercion(&impl_md.md_type, &sig_md.md_type),
                 _ => ModuleCoercion::Tcoerce_none,
             };
             coercions.push((pos, coercion));
@@ -3313,6 +3361,7 @@ pub struct InProcessCompileResult {
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
+    pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -3441,6 +3490,7 @@ fn compile_js_program_for_output(
     DepsProgram,
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
+    ahash::AHashMap<String, CmjExportArity>,
 ) {
     let _span = info_span!(
         "compiler.js_backend",
@@ -3478,8 +3528,14 @@ fn compile_js_program_for_output(
         possible_required_modules,
     );
     let cmj_export_constants = compiler.take_cmj_export_constants();
+    let cmj_export_arities = compiler.take_cmj_export_arities();
 
-    (program, module_path_resolver, cmj_export_constants)
+    (
+        program,
+        module_path_resolver,
+        cmj_export_constants,
+        cmj_export_arities,
+    )
 }
 
 fn compile_js_program_for_output_owned(
@@ -3494,6 +3550,7 @@ fn compile_js_program_for_output_owned(
     DepsProgram,
     ModulePathResolver,
     ahash::AHashMap<String, CmjExportConstant>,
+    ahash::AHashMap<String, CmjExportArity>,
 ) {
     let _span = info_span!(
         "compiler.js_backend",
@@ -3531,8 +3588,14 @@ fn compile_js_program_for_output_owned(
         possible_required_modules,
     );
     let cmj_export_constants = compiler.take_cmj_export_constants();
+    let cmj_export_arities = compiler.take_cmj_export_arities();
 
-    (program, module_path_resolver, cmj_export_constants)
+    (
+        program,
+        module_path_resolver,
+        cmj_export_constants,
+        cmj_export_arities,
+    )
 }
 
 pub fn compile_preprocessed_structure_in_process(
@@ -3874,7 +3937,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
     let mut lowered_lambda = Some(pre_js.lowered_lambda);
-    let (program, module_path_resolver, cmj_export_constants) = {
+    let (program, module_path_resolver, cmj_export_constants, cmj_export_arities) = {
         let _phase = info_span!(
             "compiler.js_compile",
             multiple_targets = compile_multiple_js_targets
@@ -3917,7 +3980,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
             module_path_resolver,
         )];
         for target in js_targets.iter().skip(1) {
-            let (program, module_path_resolver, _) = compile_js_program_for_output(
+            let (program, module_path_resolver, _, _) = compile_js_program_for_output(
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
@@ -3991,6 +4054,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         new_alias_rewrites: pre_js.new_alias_rewrites,
         is_pure,
         cmj_export_constants,
+        cmj_export_arities,
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,

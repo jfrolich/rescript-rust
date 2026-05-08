@@ -2784,19 +2784,9 @@ fn unwrap_single_block_stmt(stmt: &Statement) -> &Statement {
 }
 
 /// Direct port of the eta-reduction check in OCaml's `pp_function`
-/// (js_dump.ml:299-344). Returns the callee to print when the function body
-/// is `[ Return (Call (Var v, args, _)) ]` with each `args[i] == Var(params[i])`
-/// and the callee is an ML/runtime call target, not an FFI global.
-///
-/// OCaml's guard gates the rewrite on `call_info = Call_ml | Call_builtin_runtime`
-/// (js_call_info.ml:27-30). Rust's `CallInfo` does not carry that field, but
-/// FFI callees reach the printer as one of:
-///   - `VIdent::Id(id)` where `id.is_global()` (created via the `js_global`
-///     path used by `Lam_compile_external_call.translate_ffi`), or
-///   - `VIdent::Qualified(module, _)` with `module.kind = Kind::External`
-///     (external JS module). OCaml-module / runtime callees reach this point
-///     as `Kind::Ml` or `Kind::Runtime`, which is exactly the set `Call_ml |
-///     Call_builtin_runtime` covers.
+/// (compiler/core/js_dump.ml:299-344). Returns the callee to print when the
+/// function body is `[ Return (Call (Var v, args, _)) ]`, every argument is the
+/// matching parameter, and call info permits the rewrite.
 fn eta_reduce_function_body<'a>(
     is_method: bool,
     params: &[Ident],
@@ -2828,30 +2818,19 @@ fn eta_reduce_function_body<'a>(
             return None;
         }
     }
-    // js_dump.ml:309-313 requires `arity = Full | NA` AND `call_info =
-    // Call_ml | Call_builtin_runtime`. For local `Id` callees we check the
-    // CallInfo carried on the Call expression, which is set by
-    // `call_info_of_apply_status` (compile.rs) from OCaml's
-    // `call_info_of_ap_status` (lam_compile.ml:34-40). Local parameters
-    // resolve to `App_uncurry` (→ Call_na + Full) because alpha_conversion
-    // cannot infer a parameter's arity; those must NOT be eta-reduced.
-    //
-    // For `Qualified(Ml | Runtime, _)` callees we accept the rewrite even
-    // when `info.kind = Na`. Without a `Lam_compile_env.query_external_id_info`
-    // port, alpha_conversion leaves cross-module calls as `App_uncurry`
-    // (lam_pass_alpha_conversion.ml:29-48 bails via the `0 :: _ | []` arm
-    // when `get_arity` returns NA). OCaml, armed with the CMJ-backed
-    // external arity, promotes them to `App_infer_full` and so hits the
-    // eta-reduction. Accepting Qualified Ml/Runtime callees unconditionally
-    // matches the OCaml-with-CMJ output.
+    // compiler/core/js_dump.ml:309-313 requires `arity = Full | NA` and
+    // `call_info = Call_ml | Call_builtin_runtime`. Rust does not emit the
+    // Curry wrapper used for `arity = NA` (js_dump.ml:331-343), so keep the
+    // reduction to the exact `Full` case.
+    if !matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime)
+        || !matches!(info.arity, CallArity::Full)
+    {
+        return None;
+    }
+
     match v {
         VIdent::Id(callee_id) => {
             if params.iter().any(|p| p.same(callee_id)) {
-                return None;
-            }
-            if !matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime)
-                || !matches!(info.arity, CallArity::Full)
-            {
                 return None;
             }
         }

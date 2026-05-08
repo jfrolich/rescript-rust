@@ -22,6 +22,7 @@ use crate::driver::{
     load_pervasives, normalize_signature_types,
 };
 use crate::ident::Ident;
+use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_constant::{Constant as LambdaConstant, StringDelim};
 use crate::lambda::lam_primitive::{
@@ -192,6 +193,12 @@ pub enum CmjExportConstant {
 }
 
 #[derive(Debug, Clone)]
+pub enum CmjExportArity {
+    Single(Arity),
+    Submodule(Vec<Arity>),
+}
+
+#[derive(Debug, Clone)]
 pub struct CmjModuleMetadata {
     pub is_pure: bool,
     pub export_constants: HashMap<String, CmjExportConstant>,
@@ -210,6 +217,8 @@ pub struct InMemoryModuleInfo {
     pub is_pure: bool,
     /// Closed constant exports (replaces `.cmj` constant lookup)
     pub cmj_export_constants: HashMap<String, CmjExportConstant>,
+    /// Arity metadata for exports (replaces `.cmj` arity lookup)
+    pub cmj_export_arities: HashMap<String, CmjExportArity>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
     /// Package name used by JS import rebasing in `--in-process` builds.
@@ -231,11 +240,20 @@ impl InMemoryModuleInfo {
             source_path,
             is_pure,
             cmj_export_constants,
+            cmj_export_arities: HashMap::new(),
             is_runtime,
             package_name: None,
             package_root: None,
             js_output_suffix: None,
         }
+    }
+
+    pub fn with_cmj_export_arities(
+        mut self,
+        cmj_export_arities: HashMap<String, CmjExportArity>,
+    ) -> Self {
+        self.cmj_export_arities = cmj_export_arities;
+        self
     }
 
     pub fn with_package(
@@ -1107,6 +1125,25 @@ impl PersistentEnv {
         read_cmj_export_constants(&path)
     }
 
+    /// Read arity metadata recorded in a module's companion `.cmj`.
+    ///
+    /// OCaml keeps `arity` even when `compiler/core/js_cmj_format.ml:113-121`
+    /// strips non-constant `persistent_closed_lambda` with cross-module
+    /// inlining off.
+    pub fn module_cmj_export_arities(&self, name: &str) -> Option<HashMap<String, CmjExportArity>> {
+        if let Some(info) = self.in_memory_info(name) {
+            return Some(info.cmj_export_arities.clone());
+        }
+
+        // In in-process mode, the registry is authoritative — no disk fallback.
+        if self.in_process_mode {
+            return None;
+        }
+
+        let path = self.resolve_module_cmj_path(name)?;
+        read_cmj_export_arities(&path)
+    }
+
     /// Read closed lambda exports recorded in a module's `.cmj` metadata.
     ///
     /// This mirrors the `cross_module_inline = true` arm of OCaml
@@ -1882,6 +1919,11 @@ fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportC
     decode_cmj_export_constants(&value)
 }
 
+fn read_cmj_export_arities(path: &FsPath) -> Option<HashMap<String, CmjExportArity>> {
+    let value = read_marshaled_cmj(path)?;
+    decode_cmj_export_arities(&value)
+}
+
 fn read_cmj_export_lambdas(path: &FsPath) -> Option<HashMap<String, Lambda>> {
     let value = read_marshaled_cmj(path)?;
     decode_cmj_export_lambdas(&value)
@@ -1911,6 +1953,64 @@ fn decode_cmj_export_constants(value: &OcamlValue) -> Option<HashMap<String, Cmj
     }
 
     Some(exports)
+}
+
+fn decode_cmj_export_arities(value: &OcamlValue) -> Option<HashMap<String, CmjExportArity>> {
+    let (_, fields) = value.as_block_opt()?;
+    let values_field = fields.first()?;
+    let (_, values) = values_field.as_block_opt()?;
+    let mut exports = HashMap::new();
+
+    for entry in values {
+        let Some((_, entry_fields)) = entry.as_block_opt() else {
+            continue;
+        };
+        if entry_fields.len() != 3 {
+            continue;
+        }
+        let name = match &entry_fields[0] {
+            OcamlValue::String(name) => name.clone(),
+            _ => continue,
+        };
+        let Some(arity) = decode_cmj_export_arity(&entry_fields[1]) else {
+            continue;
+        };
+        exports.insert(name, arity);
+    }
+
+    Some(exports)
+}
+
+fn decode_cmj_export_arity(value: &OcamlValue) -> Option<CmjExportArity> {
+    match value {
+        // compiler/core/js_cmj_format.ml:27: `Single of Lam_arity.t`.
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(CmjExportArity::Single(decode_cmj_lam_arity(&fields[0])?))
+        }
+        // compiler/core/js_cmj_format.ml:27: `Submodule of Lam_arity.t array`.
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            let (_, items) = fields[0].as_block_opt()?;
+            let mut arities = Vec::with_capacity(items.len());
+            for item in items {
+                arities.push(decode_cmj_lam_arity(item)?);
+            }
+            Some(CmjExportArity::Submodule(arities))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_lam_arity(value: &OcamlValue) -> Option<Arity> {
+    match value {
+        // compiler/core/lam_arity.ml:27-34: `Arity_na`.
+        OcamlValue::Int(0) => Some(Arity::na()),
+        // compiler/core/lam_arity.ml:27-34: `Arity_info of int list * bool`.
+        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(Arity::info(
+            decode_cmj_list(&fields[0], |item| Some(item.as_int() as i32))?,
+            fields[1].as_bool(),
+        )),
+        _ => None,
+    }
 }
 
 fn decode_cmj_persistent_closed_constant(value: &OcamlValue) -> Option<CmjExportConstant> {

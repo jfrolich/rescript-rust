@@ -15,7 +15,9 @@ use anyhow::{Context, Result, anyhow};
 use console::style;
 use log::{debug, info, trace, warn};
 use rayon::prelude::*;
-use rescript_compiler::cmi::persistent_env::{CmjExportConstant, InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::cmi::persistent_env::{
+    CmjExportArity, CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
+};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
@@ -1710,13 +1712,16 @@ fn in_memory_module_info_for_package(
     source_path: PathBuf,
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
+    cmj_export_arities: AHashMap<String, CmjExportArity>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
-    InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime).with_package(
-        package.name.clone(),
-        package.path.clone(),
-        js_output_suffix_for_registry(root_config),
-    )
+    InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
+        .with_cmj_export_arities(cmj_export_arities)
+        .with_package(
+            package.name.clone(),
+            package.path.clone(),
+            js_output_suffix_for_registry(root_config),
+        )
 }
 
 /// Write JS output to the correct location(s) based on package specs.
@@ -2265,7 +2270,8 @@ fn compile_runtime_module_from_source(
         compile_result.is_pure,
         compile_result.cmj_export_constants,
         true,
-    );
+    )
+    .with_cmj_export_arities(compile_result.cmj_export_arities);
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
@@ -2670,6 +2676,7 @@ fn compile_module_in_process_to_js_boundary(
         source_abs.clone(),
         provisional_is_pure,
         AHashMap::new(),
+        AHashMap::new(),
         is_runtime,
     );
 
@@ -3036,12 +3043,14 @@ fn finish_in_process_js_inner(
 
     let is_pure = compile_result.is_pure;
     let cmj_export_constants = compile_result.cmj_export_constants.clone();
+    let cmj_export_arities = compile_result.cmj_export_arities.clone();
     let module_info = in_memory_module_info_for_package(
         package,
         root_config,
         pre_js_msg.source_abs.clone(),
         is_pure,
         cmj_export_constants,
+        cmj_export_arities,
         pre_js_msg.is_runtime,
     );
     let mut registry_updates = Vec::new();
