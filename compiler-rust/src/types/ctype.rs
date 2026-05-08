@@ -2474,6 +2474,7 @@ fn proper_abbrevs(
 enum ExpandHeadMode {
     General,
     Unify,
+    Optimize,
 }
 
 fn try_expand_head_with_mode<'a>(
@@ -2512,10 +2513,13 @@ fn try_expand_head_with_mode<'a>(
 
             drop(desc);
 
+            let private_flag = match mode {
+                ExpandHeadMode::Optimize => PrivateFlag::Private,
+                ExpandHeadMode::General | ExpandHeadMode::Unify => PrivateFlag::Public,
+            };
+
             // OCaml ctype.ml expand_abbrev_gen: check memoized expansions first.
-            if let Some(cached) =
-                ctx.find_abbrev_expansion(lookup_abbrev, PrivateFlag::Public, &path)
-            {
+            if let Some(cached) = ctx.find_abbrev_expansion(lookup_abbrev, private_flag, &path) {
                 let cached_repr = ctx.repr(cached);
                 let stale_same_path = {
                     let desc = ctx.borrow_desc(cached_repr);
@@ -2537,14 +2541,27 @@ fn try_expand_head_with_mode<'a>(
 
             let expand_with_subst =
                 |params: &[TypeExprRef], manifest: TypeExprRef| -> TypeExprRef {
-                    let expanded =
-                        subst_with_memo(ctx, env, ty, lookup_abbrev, params, &args, manifest);
-                    expanded
+                    subst_with_memo(
+                        ctx,
+                        env,
+                        ty,
+                        lookup_abbrev,
+                        private_flag,
+                        params,
+                        &args,
+                        manifest,
+                    )
                 };
 
             let can_expand_decl_manifest =
                 |decl: &super::decl::TypeDeclaration, manifest: TypeExprRef| {
-                    matches!(decl.type_private, PrivateFlag::Public)
+                    // OCaml `expand_head_opt` exposes private abstract
+                    // manifests for type-based optimizations
+                    // (compiler/ml/ctype.ml:1464-1478). The regular
+                    // `expand_head` path still follows `Env.find_type_expansion`
+                    // privacy (compiler/ml/env.ml:944-957).
+                    matches!(mode, ExpandHeadMode::Optimize)
+                        || matches!(decl.type_private, PrivateFlag::Public)
                         || !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
                         || btype::has_constr_row(ctx, manifest)
                 };
@@ -2870,7 +2887,9 @@ fn try_expand_head_with_mode<'a>(
             }
             {
                 let path_norm = match mode {
-                    ExpandHeadMode::General => normalize_path_full(ctx, env, &path),
+                    ExpandHeadMode::General | ExpandHeadMode::Optimize => {
+                        normalize_path_full(ctx, env, &path)
+                    }
                     ExpandHeadMode::Unify => normalize_path_forward_only(ctx, env, &path),
                 };
                 if path_norm != path {
@@ -2926,6 +2945,10 @@ pub(crate) fn expand_head_unif<'a>(
     ty: TypeExprRef,
 ) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Unify)
+}
+
+pub(crate) fn expand_head_opt<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
 }
 
 pub(crate) fn touch_constraint_match_head_expansion(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
@@ -3252,6 +3275,7 @@ fn subst_with_memo(
     _env: &Env,
     ty: TypeExprRef,              // original Tconstr being expanded
     lookup_abbrev: AbbrevMemoRef, // proper_abbrevs target memo
+    private_flag: PrivateFlag,    // OCaml subst `priv` argument
     params: &[TypeExprRef],       // type declaration params
     args: &[TypeExprRef],         // actual type arguments
     body: TypeExprRef,            // manifest
@@ -3280,7 +3304,7 @@ fn subst_with_memo(
         let path = path.clone();
         ctx.memorize_abbrev_expansion(
             memo_ref,
-            PrivateFlag::Public,
+            private_flag,
             path,
             ty,    // abbrev: original type (returned by find_repr)
             body0, // expansion: stub (returned by find_expans)
@@ -8904,6 +8928,7 @@ fn nondep_type_rec<'a>(
                                 env,
                                 ty,
                                 super::type_expr::AbbrevMemoRef::nil(),
+                                PrivateFlag::Public,
                                 params,
                                 args,
                                 manifest,

@@ -35,8 +35,8 @@ use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
-    constructor_has_optional_shape, type_cannot_contain_undefined,
-    type_cannot_contain_undefined_no_env, type_is_builtin_object,
+    constructor_has_optional_shape, is_base_type as typeopt_is_base_type,
+    type_cannot_contain_undefined, type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
 use crate::types::ConstructorTag;
@@ -2122,23 +2122,10 @@ impl<'a> RawLambdaConverter<'a> {
         name: &str,
         env: &crate::types::env::Env,
     ) -> bool {
-        // First try without expansion (common case)
-        match self.type_desc(ty) {
-            TypeDesc::Tconstr { path, .. } if path.head_name() == name || path.last() == name => {
-                return true;
-            }
-            _ => {}
-        }
-        // Expand type aliases (like OCaml's scrape/expand_head_opt)
-        let expanded = crate::types::ctype::expand_head(self.type_ctx, env, ty);
-        if expanded != self.type_ctx.repr(ty) {
-            match &*self.type_ctx.get_desc(expanded) {
-                TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
-                _ => false,
-            }
-        } else {
-            false
-        }
+        // OCaml primitive specialization goes through `Typeopt.is_base_type`
+        // (compiler/ml/translcore.ml:407-415), whose `scrape` uses
+        // `Ctype.expand_head_opt` (compiler/ml/typeopt.ml:19-31,99-101).
+        typeopt_is_base_type(self.type_ctx, env, ty, name)
     }
 
     fn is_immediate_type(&self, ty: TypeExprRef) -> bool {

@@ -220,11 +220,10 @@ fn get_unboxed_repr_rec(
     }
 }
 
-fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
-    // OCaml's scrape_ty uses expand_head_opt (less aggressive) and then handles
-    // unboxed types by getting their representation. We approximate this by
-    // expanding and then checking for the unboxed case.
-    let ty = crate::types::ctype::expand_head(ctx, env, ty);
+pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
+    // OCaml `Typeopt.scrape_ty` uses `Ctype.expand_head_opt`, then checks
+    // unboxed representations (compiler/ml/typeopt.ml:19-31).
+    let ty = crate::types::ctype::expand_head_opt(ctx, env, ty);
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, .. } => {
             if let Some(decl) = find_type_decl(ctx, env, path) {
@@ -245,6 +244,15 @@ fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
             }
         }
         _ => ty,
+    }
+}
+
+pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
+    // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
+    // (compiler/ml/typeopt.ml:99-101).
+    match &*ctx.get_desc(scrape_ty(ctx, env, ty)) {
+        TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
+        _ => false,
     }
 }
 
@@ -362,6 +370,9 @@ pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprR
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+    use crate::ident::Ident;
+    use crate::location::Location;
+    use crate::types::asttypes::PrivateFlag;
 
     #[test]
     fn builtin_object_recognizes_object_types() {
@@ -371,6 +382,36 @@ mod tests {
         let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
 
         assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
+    }
+
+    #[test]
+    fn base_type_uses_private_manifest_for_optimization() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut env = crate::types::env::initial_env(&ctx);
+        let alias_id = Ident::create_local("private_string_alias");
+        env.add_type(
+            alias_id.clone(),
+            TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: TypeKind::TypeAbstract,
+                type_private: PrivateFlag::Private,
+                type_manifest: Some(ctx.predef_string()),
+                type_variance: vec![],
+                type_newtype_level: None,
+                type_loc: Location::none(),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_unboxed: crate::types::decl::UnboxedStatus::default(),
+                type_inlined_types: vec![],
+                type_path: None,
+            },
+        );
+
+        let alias_ty = ctx.new_constr(Path::Pident(alias_id), vec![]);
+
+        assert!(is_base_type(&ctx, &env, alias_ty, "string"));
     }
 }
 
