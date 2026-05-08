@@ -11,7 +11,7 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_owned;
 use crate::lambda::lam_pass_collect::{ExternalArityResolver, collect_info_with_external_arity};
-use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned;
+use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned_with_id_gen;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
 use crate::lambda::lam_pass_lets_dce::simplify_lets_owned;
 use crate::lambda::lam_pass_remove_alias::{
@@ -85,7 +85,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
         ));
 
     // lam_compile_main.ml:148 — initial deep_flatten.
-    let lam = deep_flatten_owned(lam);
+    let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
     // lam_compile_main.ml:154 — collect_info into meta.
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
@@ -105,7 +105,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     );
 
     // lam_compile_main.ml:169 — deep_flatten.
-    let lam = deep_flatten_owned(lam);
+    let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
     // lam_compile_main.ml:173 — collect_info.
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
@@ -119,7 +119,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     );
 
     // lam_compile_main.ml:175 — deep_flatten.
-    let lam = deep_flatten_owned(lam);
+    let lam = deep_flatten_owned_with_id_gen(lam, &meta.id_gen);
 
     // lam_compile_main.ml:176 — collect_info.
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
