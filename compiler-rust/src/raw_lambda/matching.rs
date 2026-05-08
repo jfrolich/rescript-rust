@@ -338,6 +338,59 @@ fn equal_tag(t1: &ConstructorTag, t2: &ConstructorTag) -> bool {
     }
 }
 
+type RecordPatternField = (
+    crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+    crate::types::LabelDescription,
+    Pattern,
+    bool,
+);
+
+fn records_args_for_le_pats(
+    l1: &[RecordPatternField],
+    l2: &[RecordPatternField],
+) -> (Vec<Pattern>, Vec<Pattern>) {
+    let mut ps = Vec::new();
+    let mut qs = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+
+    // OCaml `Parmatch.records_args` aligns already-sorted record fields by
+    // `lbl_pos`, filling absent fields with omega (compiler/ml/parmatch.ml:267-283).
+    while i < l1.len() || j < l2.len() {
+        match (l1.get(i), l2.get(j)) {
+            (Some((_, lbl1, p1, _)), Some((_, lbl2, p2, _))) => {
+                if lbl1.lbl_pos < lbl2.lbl_pos {
+                    ps.push(p1.clone());
+                    qs.push(omega());
+                    i += 1;
+                } else if lbl1.lbl_pos > lbl2.lbl_pos {
+                    ps.push(omega());
+                    qs.push(p2.clone());
+                    j += 1;
+                } else {
+                    ps.push(p1.clone());
+                    qs.push(p2.clone());
+                    i += 1;
+                    j += 1;
+                }
+            }
+            (Some((_, _, p1, _)), None) => {
+                ps.push(p1.clone());
+                qs.push(omega());
+                i += 1;
+            }
+            (None, Some((_, _, p2, _))) => {
+                ps.push(omega());
+                qs.push(p2.clone());
+                j += 1;
+            }
+            (None, None) => break,
+        }
+    }
+
+    (ps, qs)
+}
+
 /// Check if one pattern is less specific than another (le_pat p q means
 /// everything matched by q is also matched by p).
 /// Equivalent to OCaml's `le_pat`.
@@ -346,6 +399,13 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_var(..) | PatternDesc::Tpat_any, _) => true,
         (PatternDesc::Tpat_alias(p, _, _), _) => le_pat(p, q),
         (_, PatternDesc::Tpat_alias(q, _, _)) => le_pat(p, q),
+        // OCaml reaches or-pattern implication through the `satisfiable`
+        // fallback in `Parmatch.le_pat` (compiler/ml/parmatch.ml:1772-1791).
+        (PatternDesc::Tpat_or(_, _, _), PatternDesc::Tpat_or(q1, q2, _)) => {
+            le_pat(p, q1) && le_pat(p, q2)
+        }
+        (PatternDesc::Tpat_or(p1, p2, _), _) => le_pat(p1, q) || le_pat(p2, q),
+        (_, PatternDesc::Tpat_or(q1, q2, _)) => le_pat(p, q1) && le_pat(p, q2),
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
@@ -361,10 +421,16 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         }
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
+        (PatternDesc::Tpat_record(l1, _), PatternDesc::Tpat_record(l2, _)) => {
+            let (ps, qs) = records_args_for_le_pats(l1, l2);
+            le_pats(&ps, &qs)
+        }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
             ps.len() == qs.len() && le_pats(ps, qs)
         }
-        // Omit record and satisfiable fallback for now — conservative false.
+        // OCaml falls back to `not (satisfiable [[p]] [q])` here
+        // (compiler/ml/parmatch.ml:1772-1791). Keep the remaining fallback
+        // conservative until that enumeration path is ported.
         _ => false,
     }
 }
