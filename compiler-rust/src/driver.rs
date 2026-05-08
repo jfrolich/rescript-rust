@@ -1627,6 +1627,42 @@ fn build_name_based_coercion(
 
     fn module_type_coercion(impl_mty: &ModuleType, intf_mty: &ModuleType) -> ModuleCoercion {
         match (impl_mty, intf_mty) {
+            (
+                ModuleType::MtyAlias(pres_impl, impl_path),
+                ModuleType::MtyAlias(pres_sig, intf_path),
+            ) => {
+                // OCaml `try_modtypes` first compares normalized alias paths,
+                // then only emits `Tcoerce_alias` for absent implementation
+                // aliases matched against present interface aliases
+                // (compiler/ml/includemod.ml:209-228). Same absent aliases are
+                // runtime-empty on both sides, so the fallback must keep them
+                // identity instead of materializing the target module.
+                if impl_path.same(intf_path)
+                    && matches!(pres_impl, AliasPresence::MtaAbsent)
+                    && matches!(pres_sig, AliasPresence::MtaPresent)
+                {
+                    ModuleCoercion::Tcoerce_alias(
+                        EnvRef(0),
+                        impl_path.clone(),
+                        Box::new(ModuleCoercion::Tcoerce_none),
+                    )
+                } else {
+                    ModuleCoercion::Tcoerce_none
+                }
+            }
+            (ModuleType::MtyAlias(AliasPresence::MtaAbsent, impl_path), _) => {
+                // OCaml wraps an absent implementation alias when the
+                // interface expects an expanded module type
+                // (compiler/ml/includemod.ml:230-241). This name-based
+                // fallback cannot safely expand the target after the real
+                // inclusion check failed, so preserve the existing alias
+                // coercion at the same boundary.
+                ModuleCoercion::Tcoerce_alias(
+                    EnvRef(0),
+                    impl_path.clone(),
+                    Box::new(ModuleCoercion::Tcoerce_none),
+                )
+            }
             (ModuleType::MtySignature(impl_sig), ModuleType::MtySignature(intf_sig)) => {
                 // OCaml recurses into submodule signatures when building
                 // structural coercions (compiler/ml/includemod.ml:253-292,
@@ -1722,30 +1758,6 @@ fn build_name_based_coercion(
                         }
                         ValueKind::ValReg => ModuleCoercion::Tcoerce_none,
                     }
-                }
-                (
-                    SignatureItem::SigModule(_, _, _),
-                    SignatureItem::SigModule(
-                        _,
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, alias_path),
-                            ..
-                        },
-                        _,
-                    ),
-                ) => {
-                    // This fallback runs only after `Includemod.compunit`
-                    // cannot compare Rust's implementation signature with an
-                    // OCaml-built `.cmi`. Preserve the alias coercion OCaml
-                    // would have produced for an absent implementation module
-                    // alias (`compiler/ml/includemod.ml:221-241`) so
-                    // `Translmod.apply_coercion` exports the target path
-                    // (`compiler/ml/translmod.ml:84-87`).
-                    ModuleCoercion::Tcoerce_alias(
-                        EnvRef(0),
-                        alias_path.clone(),
-                        Box::new(ModuleCoercion::Tcoerce_none),
-                    )
                 }
                 (
                     SignatureItem::SigModule(_, sig_md, _),
@@ -4277,6 +4289,7 @@ pub fn typecheck_implementation_in_process(
 
 #[cfg(test)]
 mod tests {
+    use super::build_name_based_coercion;
     use super::extract_file_directives_from_structure;
     use super::max_lambda_input_stamp;
     use super::normalize_load_path_entry;
@@ -4285,8 +4298,11 @@ mod tests {
     use crate::parse_arena::{LidentIdx, LocIdx, Located};
     use crate::parser::ast::{Attributes, RecFlag};
     use crate::parser::{Parser, module};
-    use crate::types::decl::{ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind};
+    use crate::types::decl::{
+        AliasPresence, ModuleDeclaration, ModuleType, RecStatus, SignatureItem, ValueKind,
+    };
     use crate::types::path::Path as TypePath;
+    use crate::types::typedtree::ModuleCoercion;
     use crate::types::typedtree::{
         EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc, Structure, StructureItem,
         StructureItemDesc, ValueBinding,
@@ -4376,6 +4392,23 @@ mod tests {
         let normalized =
             normalize_load_path_entry(std::path::Path::new("../ocaml"), None, Some(cwd));
         assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/ocaml"));
+    }
+
+    #[test]
+    fn name_based_coercion_keeps_same_absent_module_alias_identity() {
+        let module_id = Ident::create_local("Alias");
+        let target_id = Ident::create_persistent("Alias_Target");
+        let md = ModuleDeclaration {
+            md_type: ModuleType::MtyAlias(AliasPresence::MtaAbsent, TypePath::pident(target_id)),
+            md_attributes: vec![],
+            md_loc: Location::none(),
+            md_path: None,
+        };
+        let sig = vec![SignatureItem::SigModule(module_id, md, RecStatus::TrecNot)];
+
+        let coercion = build_name_based_coercion(&sig, &sig);
+
+        assert!(matches!(coercion, ModuleCoercion::Tcoerce_none));
     }
 
     #[test]
