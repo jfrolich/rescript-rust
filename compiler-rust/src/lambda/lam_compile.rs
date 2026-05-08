@@ -2986,7 +2986,7 @@ impl LambdaCompiler {
             // compiler/core/js_output.ml:88-100). When a case resolves to a
             // fallthrough static-raise handler, the empty body still needs a
             // `break;` so the appended handler runs once after the switch.
-            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -3426,7 +3426,7 @@ impl LambdaCompiler {
             // that break only when the source lambda has an exit
             // (compiler/core/lam_compile.ml:613-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -4506,7 +4506,7 @@ impl LambdaCompiler {
             // case body resolved away through a fallthrough static-raise
             // handler, OCaml still prints an explicit `break;` to exit the
             // switch so the subsequent appended handler reads cleanly.
-            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
+            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
@@ -7136,6 +7136,66 @@ pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
         Lambda::LifThenElse(cond, then_, else_) => {
             lambda_has_exit(cond) || lambda_has_exit(then_) || lambda_has_exit(else_)
         }
+    }
+}
+
+pub(crate) fn return_switch_case_needs_break_like_ocaml(
+    body: &Lambda,
+    compiled_body: &Block,
+) -> bool {
+    if !lambda_has_exit(body) {
+        return false;
+    }
+    if !block_terminates(compiled_body) {
+        return true;
+    }
+    return_output_is_compound_like_ocaml(body, compiled_body)
+}
+
+fn return_output_is_compound_like_ocaml(body: &Lambda, compiled_body: &Block) -> bool {
+    match body {
+        Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
+            return_output_is_compound_like_ocaml(body, compiled_body)
+        }
+        // `compile_general_cases` uses `Js_output.to_break_block`, then gates
+        // it with `Lam_exit_code.has_exit` in return continuation
+        // (compiler/core/lam_compile.ml:610-624). `to_break_block` only
+        // suppresses `break` when `output_finished=True`
+        // (compiler/core/js_output.ml:88-100); it does not do structural JS
+        // termination analysis. Compound return forms like the generic
+        // `Lifthenelse` EffectCall fallback keep `output_finished=False`
+        // (compiler/core/lam_compile.ml:1456-1531), so OCaml prints `break;`
+        // even if every generated branch returns.
+        Lambda::LifThenElse(_, _, _)
+        | Lambda::Lswitch(_, _)
+        | Lambda::LstringSwitch(_, _, _)
+        | Lambda::LstaticCatch(_, _, _)
+        | Lambda::LtryWith(_, _, _) => return_block_has_multi_test_guard_chain(compiled_body),
+        _ => false,
+    }
+}
+
+fn return_block_has_multi_test_guard_chain(block: &Block) -> bool {
+    // OCaml's `S.if_` folding happens while compiling each conditional
+    // (compiler/core/js_stmt_make.ml:244-250). A single top-level test can
+    // still be emitted as an `output_finished=True` return block, while
+    // guard chains that leave multiple sibling tests in the switch case are
+    // the `output_finished=False` shape observed by `to_break_block`.
+    count_top_level_if_statements(block) > 1
+}
+
+fn count_top_level_if_statements(block: &Block) -> usize {
+    block
+        .iter()
+        .map(count_top_level_if_statements_in_stmt)
+        .sum()
+}
+
+fn count_top_level_if_statements_in_stmt(stmt: &Statement) -> usize {
+    match &stmt.desc {
+        StatementDesc::If(_, _, _) => 1,
+        StatementDesc::Block(block) => count_top_level_if_statements(block),
+        _ => 0,
     }
 }
 

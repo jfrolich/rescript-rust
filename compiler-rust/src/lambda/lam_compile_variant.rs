@@ -11,7 +11,8 @@ use super::js_stmt_make::{block_terminates, strict_single_return_expr};
 use super::lam_coercion::push_s_exp;
 use super::lam_compile::{
     Compiled, GroupedSwitchDefault, LambdaCompiler, TailLoopState, compiled_from_effect_block,
-    lambda_has_exit, pointer_info_comment_text, trailing_return_expression,
+    pointer_info_comment_text, return_switch_case_needs_break_like_ocaml,
+    trailing_return_expression,
 };
 use crate::ident::Ident;
 use crate::js_ir::op::{IdentInfo, Number, UsedStats};
@@ -2109,13 +2110,12 @@ impl LambdaCompiler {
                         }
                     } else {
                         // Mirror `grouped_return_string_clauses`'s break
-                        // calculation: a body that doesn't terminate but
-                        // contains a static raise compiles to an exit
-                        // assignment (`exit$N = N`) that needs an explicit
-                        // `break;` to leave the switch. Without it the
-                        // next clause falls through.
+                        // calculation from `compile_general_cases`
+                        // (compiler/core/lam_compile.ml:610-624) and
+                        // `Js_output.to_break_block`
+                        // (compiler/core/js_output.ml:88-100).
                         let should_break =
-                            !block_terminates(&compiled_body) && lambda_has_exit(body);
+                            return_switch_case_needs_break_like_ocaml(body, &compiled_body);
                         CaseClause {
                             body: compiled_body,
                             should_break,
@@ -2207,12 +2207,10 @@ impl LambdaCompiler {
             let (_, body, _) = &grouped_cases[group_end];
             let compiled_body = self.compile_tail_loop_return_block(body, tail_loop);
             let group_falls_through = compiled_body.is_empty();
-            // Mirror `grouped_return_string_clauses`'s break calculation:
-            // a body that doesn't terminate but contains a static raise
-            // compiles to an exit assignment (`exit$N = N`) that needs an
-            // explicit `break;` to leave the switch — otherwise the next
-            // case clause falls through and overwrites the exit value.
-            let should_break = !block_terminates(&compiled_body) && lambda_has_exit(body);
+            // Mirror `compile_general_cases` + `Js_output.to_break_block`
+            // (compiler/core/lam_compile.ml:610-624;
+            // compiler/core/js_output.ml:88-100).
+            let should_break = return_switch_case_needs_break_like_ocaml(body, &compiled_body);
 
             for (tag, _, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
