@@ -3794,7 +3794,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         } else {
             (None, ahash::AHashMap::new())
         };
-        internal_env.unregister_in_memory_signature(module_name);
+        // Keep the just-saved current unit visible through raw-lambda
+        // conversion. OCaml saves the inferred signature in the no-interface
+        // branch before translation (compiler/ml/typemod.ml:1779-1788), and
+        // optional-pattern lowering can still expand current-unit aliases via
+        // Env.find_type while choosing Pval_from_option_not_nest
+        // (compiler/ml/typeopt.ml:40-88; compiler/ml/matching.ml:1259-1267).
+        // `finish_preprocessed_structure_in_process_from_js_boundary` hides it
+        // again before JS module-path probing.
         (pers_struct, new_alias_rewrites, internal_env)
     };
     if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {

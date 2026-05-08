@@ -1676,11 +1676,11 @@ impl PersistentEnv {
 
     /// Remove a transient in-memory signature from this worker's local cache.
     ///
-    /// In-process implementation compilation serializes the inferred signature
-    /// before Lambda lowering, matching OCaml's save-before-translation order
-    /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
-    /// The current module is then removed from the worker env so later raw/JS
-    /// probing sees only dependency modules, just like the reference compiler.
+    /// The in-process no-interface implementation path keeps the current
+    /// signature visible through Lambda lowering, matching OCaml's
+    /// save-before-translation order (compiler/ml/typemod.ml:1779-1788). JS
+    /// finishing then uses this helper to hide the current module from later
+    /// module-path probing.
     pub fn unregister_in_memory_signature(&mut self, name: &str) {
         self.cache_remove(name);
         Arc::make_mut(&mut self.renamed_sig_cache).remove(name);
