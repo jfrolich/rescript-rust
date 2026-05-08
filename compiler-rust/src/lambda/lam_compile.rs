@@ -2954,29 +2954,13 @@ impl LambdaCompiler {
     pub(crate) fn reorder_fallthrough_return_clauses<T>(
         &self,
         clauses: Vec<T>,
-        mut body_is_empty: impl FnMut(&T) -> bool,
+        _body_is_empty: impl FnMut(&T) -> bool,
     ) -> Vec<T> {
-        if self.active_fallthrough_return_handler().is_none() {
-            return clauses;
-        }
-
-        let mut fallthrough = Vec::new();
-        let mut returning = Vec::new();
-        for clause in clauses {
-            if body_is_empty(&clause) {
-                fallthrough.push(clause);
-            } else {
-                returning.push(clause);
-            }
-        }
-
-        if fallthrough.is_empty() || returning.is_empty() {
-            returning.extend(fallthrough);
-            return returning;
-        }
-
-        returning.extend(fallthrough);
-        returning
+        // OCaml's `group_apply` preserves the order produced by
+        // `Ext_list.stable_group`; it does not partition fallthrough clauses
+        // after returning clauses (compiler/core/lam_compile.ml:126-130,
+        // 610-624; compiler/ext/ext_list.ml:534-547).
+        clauses
     }
 
     pub(crate) fn grouped_return_string_clauses<'a, T: Clone>(
