@@ -822,7 +822,7 @@ fn flatten_and_mark_dead_statement(
                         let mut bindings = Vec::new();
 
                         for (index, item) in items.into_iter().enumerate() {
-                            if is_simple_block_binding_item(decl.property, &item) {
+                            if is_simple_block_binding_item(&item) {
                                 rewritten_items.push(item);
                             } else {
                                 let rewritten = flatten_and_mark_dead_expression(
@@ -1515,23 +1515,21 @@ fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
     }
 }
 
-fn is_simple_block_binding_item(property: LetKind, expr: &Expression) -> bool {
+fn is_simple_block_binding_item(expr: &Expression) -> bool {
     // Mirror OCaml's `js_pass_flatten_and_mark_dead.ml:188-193` "simple"
     // case: only `Var`, `Number`, `Str`, `Bool`, `Undefined` items stay
-    // inline; everything else (including any `Caml_block`) is hoisted into
-    // a fresh local binding. `Lconst Const_block` materializes as
-    // `Caml_block(NA, ...)` (see `Self::compile_constant`) so it intentionally
-    // does NOT match `Caml_block(Immutable, ...)` patterns elsewhere — and
-    // therefore does NOT count as simple here either.
+    // inline; everything else, including `Optional_block` and any
+    // `Caml_block`, is hoisted into a fresh local binding. `Lconst
+    // Const_block` materializes as `Caml_block(NA, ...)` (see
+    // `Self::compile_constant`) so it intentionally does NOT match
+    // `Caml_block(Immutable, ...)` patterns elsewhere — and therefore does
+    // NOT count as simple here either.
     match &expr.desc {
         ExpressionDesc::Var(_)
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::OptionalBlock(inner, true) if property != LetKind::StrictOpt => {
-            is_simple_block_binding_item(property, inner)
-        }
         _ => false,
     }
 }

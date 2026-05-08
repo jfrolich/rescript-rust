@@ -7887,6 +7887,119 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
 }
 
 #[test]
+fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_like_ocaml() {
+    let record = Ident::create_local("story");
+    let deps = apply_js_flatten_and_mark_dead_pass(
+        DepsProgram {
+            program: Program::new(
+                vec![Statement::variable(VariableDeclaration {
+                    ident: record.clone(),
+                    value: Some(Expression::new(ExpressionDesc::CamlBlock(
+                        vec![
+                            Expression::string("STORY#id"),
+                            Expression::new(ExpressionDesc::OptionalBlock(
+                                Box::new(Expression::string("IDLE")),
+                                true,
+                            )),
+                            Expression::new(ExpressionDesc::OptionalBlock(
+                                Box::new(Expression::bool(true)),
+                                true,
+                            )),
+                        ],
+                        MutableFlag::Immutable,
+                        Box::new(Expression::number(Number::int(0))),
+                        TagInfo::Record {
+                            fields: vec![
+                                ("pk".to_string(), false),
+                                ("exportStatus".to_string(), true),
+                                ("instantPlayerEligible".to_string(), true),
+                            ],
+                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        },
+                    ))),
+                    property: LetKind::Strict,
+                    ident_info: IdentInfo::default(),
+                })],
+                vec![],
+            ),
+            modules: vec![],
+            side_effect: None,
+        },
+        false,
+    );
+
+    let [record_stmt] = deps.program.block.as_slice() else {
+        panic!("expected the pass to return a single transparent block");
+    };
+    match &record_stmt.desc {
+        StatementDesc::Block(bindings) => {
+            let [export_status_stmt, instant_player_stmt, record_stmt] = bindings.as_slice() else {
+                panic!("expected the hoisted optional bindings plus the record binding");
+            };
+            match &export_status_stmt.desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::OptionalBlock(_, true),
+                            ..
+                        }),
+                    ..
+                }) => assert_eq!(ident.name(), "story_exportStatus"),
+                other => panic!("expected the exportStatus hoist, got {other:?}"),
+            }
+            match &instant_player_stmt.desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::OptionalBlock(_, true),
+                            ..
+                        }),
+                    ..
+                }) => assert_eq!(ident.name(), "story_instantPlayerEligible"),
+                other => panic!("expected the instantPlayerEligible hoist, got {other:?}"),
+            }
+            match &record_stmt.desc {
+                StatementDesc::Variable(VariableDeclaration {
+                    ident,
+                    value:
+                        Some(Expression {
+                            desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                            ..
+                        }),
+                    ..
+                }) => {
+                    assert!(ident.same(&record));
+                    assert!(matches!(
+                        items.as_slice(),
+                        [
+                            Expression {
+                                desc: ExpressionDesc::Str { .. },
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(export_status)),
+                                ..
+                            },
+                            Expression {
+                                desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(instant_player)),
+                                ..
+                            }
+                        ] if export_status.name() == "story_exportStatus"
+                            && instant_player.name() == "story_instantPlayerEligible"
+                    ));
+                }
+                other => panic!(
+                    "expected the rewritten record binding to reference the hoisted optionals, got {other:?}"
+                ),
+            }
+        }
+        other => panic!("expected the optional record binding block, got {other:?}"),
+    }
+}
+
+#[test]
 fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_ocaml() {
     let record = Ident::create_local("v");
     let deps = apply_js_flatten_and_mark_dead_pass(
