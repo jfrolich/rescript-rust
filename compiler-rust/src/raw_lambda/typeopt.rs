@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    Attribute, ConstructorArguments, ConstructorDescription, TypeDeclaration, TypeKind,
-    INTERNAL_OPTIONAL_ATTR_NAME,
+    Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME,
+    TypeDeclaration, TypeKind,
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
