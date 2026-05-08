@@ -124,17 +124,27 @@ impl LambdaCompiler {
     }
 
     fn compile_switch_inner(&mut self, scrut: &Lambda, switch: &LambdaSwitch) -> Compiled {
-        if self.uses_untagged_variant_switch(switch) {
-            let scrut_compiled = self.compile_expr(scrut);
-            let (mut prelude, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            let tmp = self.fresh_tmp_ident();
-            prelude.push(Statement::variable(VariableDeclaration {
+        // OCaml reference: compiler/core/lam_compile.ml:775-786 creates the
+        // NeedValue result temp before `compile_whole`, and `compile_whole`
+        // compiles the switch scrutinee at lam_compile.ml:707-713. Keep the
+        // allocation order and statement order identical so any scrutinee temps
+        // get later names and the result declaration precedes scrutinee prelude.
+        let tmp = self.fresh_tmp_ident();
+        let tmp_declaration = || {
+            Statement::variable(VariableDeclaration {
                 ident: tmp.clone(),
                 value: None,
                 property: LetKind::Strict,
                 ident_info: IdentInfo::default(),
-            }));
+            })
+        };
+
+        if self.uses_untagged_variant_switch(switch) {
+            let scrut_compiled = self.compile_expr(scrut);
+            let (scrut_prelude, scrut_expr) =
+                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
+            let mut prelude = vec![tmp_declaration()];
+            prelude.extend(scrut_prelude);
             prelude.extend(
                 self.compile_untagged_variant_switch_assignment_statements(
                     &tmp, scrut_expr, switch,
@@ -148,19 +158,14 @@ impl LambdaCompiler {
 
         if self.uses_named_variant_switch(switch) {
             let scrut_compiled = self.compile_expr(scrut);
-            let (mut prelude, scrut_expr) =
+            let (scrut_prelude, scrut_expr) =
                 if self.named_variant_switch_needs_bound_scrutinee(switch) {
                     self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
                 } else {
                     (scrut_compiled.prelude, scrut_compiled.expr)
                 };
-            let tmp = self.fresh_tmp_ident();
-            prelude.push(Statement::variable(VariableDeclaration {
-                ident: tmp.clone(),
-                value: None,
-                property: LetKind::Strict,
-                ident_info: IdentInfo::default(),
-            }));
+            let mut prelude = vec![tmp_declaration()];
+            prelude.extend(scrut_prelude);
             prelude.extend(
                 self.compile_named_variant_switch_assignment_statements(&tmp, scrut_expr, switch),
             );
@@ -172,14 +177,8 @@ impl LambdaCompiler {
         }
 
         let scrut_compiled = self.compile_expr(scrut);
-        let mut prelude = scrut_compiled.prelude;
-        let tmp = self.fresh_tmp_ident();
-        prelude.push(Statement::variable(VariableDeclaration {
-            ident: tmp.clone(),
-            value: None,
-            property: LetKind::Strict,
-            ident_info: IdentInfo::default(),
-        }));
+        let mut prelude = vec![tmp_declaration()];
+        prelude.extend(scrut_compiled.prelude);
 
         let cases: Vec<_> = self
             .grouped_switch_cases(
