@@ -2039,8 +2039,14 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    // OCaml keeps the conditional predicate untouched here;
+                    // only the consequent/alternate are re-entered as
+                    // statements (compiler/core/js_pass_flatten.ml:54-61).
+                    // Re-flattening `test` eagerly expands nested callback
+                    // bodies inside large conditions before later passes see
+                    // the same shape OCaml preserves.
                     desc: StatementDesc::If(
-                        flatten_expression(*test),
+                        *test,
                         vec![flatten_statement(Statement::exp(*consequent))],
                         vec![flatten_statement(Statement::exp(*alternate))],
                     ),
@@ -2092,8 +2098,10 @@ fn flatten_statement(stmt: Statement) -> Statement {
 
             match desc {
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    // Same predicate preservation as OCaml's Return(Cond)
+                    // flatten arm (compiler/core/js_pass_flatten.ml:79-86).
                     desc: StatementDesc::If(
-                        flatten_expression(*test),
+                        *test,
                         vec![flatten_statement(Statement::return_(*consequent))],
                         vec![flatten_statement(Statement::return_(*alternate))],
                     ),
