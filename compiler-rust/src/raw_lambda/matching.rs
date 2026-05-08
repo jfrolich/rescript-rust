@@ -4876,12 +4876,10 @@ fn make_constr_matching(
                 result
             } else {
                 match &cstr.cstr_tag {
-                    ConstructorTag::CstrBlock(_)
-                        if constructor_has_optional_shape(cstr)
-                            || (cstr.cstr_name == "Some"
-                                && cstr.cstr_consts == 1
-                                && cstr.cstr_nonconsts == 1
-                                && cstr.cstr_arity == 1) =>
+                    // OCaml compiler/ml/matching.ml:1257-1277 only unwraps
+                    // option-shaped constructors when Datarepr marks the
+                    // constructor with internal.optional.
+                    ConstructorTag::CstrBlock(_) if constructor_has_optional_shape(cstr) =>
                     {
                         let from_option = match &p.pat_desc {
                             PatternDesc::Tpat_construct(_, _, args_inner)
@@ -7524,10 +7522,7 @@ fn combine_constructor(
             act // Identical actions, no failure
         } else {
             let (mut consts, mut nonconsts) = split_cases(actions);
-            let is_option = constructor_has_optional_shape(cstr)
-                || ((cstr.cstr_name == "Some" || cstr.cstr_name == "None")
-                    && cstr.cstr_consts == 1
-                    && cstr.cstr_nonconsts == 1);
+            let is_option = constructor_has_optional_shape(cstr);
             if cstr.cstr_consts == 1
                 && cstr.cstr_nonconsts == 1
                 && consts.len() == 1

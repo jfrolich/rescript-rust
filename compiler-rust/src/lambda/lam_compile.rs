@@ -7749,6 +7749,7 @@ pub(crate) enum GroupedSwitchDefault<'a> {
 pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option<String> {
     match comment {
         Some(PointerInfo::None) | None => None,
+        Some(PointerInfo::ShapeNone) => None,
         Some(PointerInfo::Constructor(tag)) => Some(tag.name.clone()),
         Some(PointerInfo::AssertFalse) => Some("assert_false".to_string()),
         Some(PointerInfo::Some(name)) | Some(PointerInfo::PolyVariant(name)) => Some(name.clone()),

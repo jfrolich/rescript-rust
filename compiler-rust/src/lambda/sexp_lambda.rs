@@ -272,6 +272,7 @@ fn pointer_info(info: &Option<PointerInfo>) -> Sexp {
     match info {
         None => Sexp::atom("None"),
         Some(PointerInfo::None) => Sexp::atom("None"),
+        Some(PointerInfo::ShapeNone) => Sexp::atom("Pt_shape_none"),
         Some(PointerInfo::Constructor(tag)) => Sexp::list(vec![
             Sexp::atom("Pt_constructor"),
             string(&tag.name),

@@ -85,26 +85,29 @@ fn recmodule_function_shape_constant() -> Constant {
 }
 
 fn raw_constructor_constant(cstr: &crate::types::ConstructorDescription, tag: i32) -> Constant {
-    Constant::Int {
-        i: tag,
-        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
+    // OCaml compiler/ml/translcore.ml:800-816 emits Pt_shape_none
+    // only when Datarepr.constructor_has_optional_shape marks the
+    // constructor; an ordinary constructor named `None` stays Pt_constructor.
+    let comment = if constructor_has_optional_shape(cstr) {
+        PointerInfo::ShapeNone
+    } else {
+        PointerInfo::Constructor(PointerConstructorTag {
             name: cstr.cstr_name.clone(),
             const_: cstr.cstr_consts,
             non_const: cstr.cstr_nonconsts,
             runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
-        })),
+        })
+    };
+    Constant::Int {
+        i: tag,
+        comment: Some(comment),
     }
 }
 
 fn raw_optional_none_constant() -> Constant {
     Constant::Int {
         i: 0,
-        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
-            name: "None".to_string(),
-            const_: 1,
-            non_const: 1,
-            runtime_tag: None,
-        })),
+        comment: Some(PointerInfo::ShapeNone),
     }
 }
 

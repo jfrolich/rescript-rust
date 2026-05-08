@@ -600,6 +600,14 @@ fn lower_constant(constant: Constant) -> Constant {
             comment,
         },
         Constant::Int {
+            comment: Some(PointerInfo::ShapeNone),
+            ..
+        } => {
+            // OCaml compiler/core/lam_constant_convert.ml:40-43 maps
+            // Pt_shape_none to Lam_constant.lam_none.
+            Constant::JsUndefined { is_unit: false }
+        }
+        Constant::Int {
             i,
             comment: Some(PointerInfo::Constructor(tag)),
         } => {
@@ -611,9 +619,6 @@ fn lower_constant(constant: Constant) -> Constant {
                 "()" if tag.const_ == 1 && tag.non_const == 0 => {
                     Constant::JsUndefined { is_unit: true }
                 }
-                "None" if tag.const_ == 1 && tag.non_const == 1 => {
-                    Constant::JsUndefined { is_unit: false }
-                }
                 _ => Constant::Int {
                     i,
                     comment: Some(PointerInfo::Constructor(tag)),
@@ -621,7 +626,7 @@ fn lower_constant(constant: Constant) -> Constant {
             }
         }
         Constant::Int {
-            i,
+            i: _,
             comment: Some(PointerInfo::PolyVariant(name)),
         } => name
             .parse::<i32>()
@@ -2226,7 +2231,20 @@ mod tests {
     }
 
     #[test]
-    fn lowers_none_constructor_to_none_constant() {
+    fn lowers_shape_none_to_none_constant() {
+        let raw = RawLambda::const_(Constant::Int {
+            i: 0,
+            comment: Some(PointerInfo::ShapeNone),
+        });
+
+        assert!(matches!(
+            lower_to_lambda(raw),
+            Lambda::Lconst(Constant::JsUndefined { is_unit: false })
+        ));
+    }
+
+    #[test]
+    fn keeps_constructor_named_none_without_shape_info() {
         let raw = RawLambda::const_(Constant::Int {
             i: 0,
             comment: Some(PointerInfo::Constructor(ConstructorTag {
@@ -2239,7 +2257,10 @@ mod tests {
 
         assert!(matches!(
             lower_to_lambda(raw),
-            Lambda::Lconst(Constant::JsUndefined { is_unit: false })
+            Lambda::Lconst(Constant::Int {
+                i: 0,
+                comment: Some(PointerInfo::Constructor(_)),
+            })
         ));
     }
 

@@ -26,6 +26,8 @@ pub enum PointerInfo {
     None,
     /// Constructor with tag information
     Constructor(ConstructorTag),
+    /// Option `None` shape (`Pt_shape_none` in OCaml lambda).
+    ShapeNone,
     /// Assert false (for exhaustiveness)
     AssertFalse,
     /// Named pointer payload

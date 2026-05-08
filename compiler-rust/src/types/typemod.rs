@@ -12682,6 +12682,26 @@ fn type_structure_item<'a>(
                             ));
                         }
 
+                        // OCaml compiler/ml/datarepr.ml:166-189 post-processes the
+                        // complete constructor list from describe_constructors before
+                        // adding optional_shape. Doing this while Rust's
+                        // internal_cstrs is still partial misses the first constructor
+                        // of `type t = None | Some(_)`.
+                        if crate::types::decl::variant_has_optional_shape(&internal_cstrs) {
+                            for (cstr_id, desc) in &mut cstr_descs {
+                                if let Some(cd) = internal_cstrs.iter().find(|cd| {
+                                    cd.cd_id.stamp() == cstr_id.stamp()
+                                        || cd.cd_id.name() == cstr_id.name()
+                                }) {
+                                    desc.cstr_attributes =
+                                        crate::types::decl::constructor_description_attrs_for_variant(
+                                            &internal_cstrs,
+                                            cd,
+                                        );
+                                }
+                            }
+                        }
+
                         (
                             crate::types::TypeKind::TypeVariant(internal_cstrs),
                             TypedTypeKind::Ttype_variant(typed_tree_cstrs),
