@@ -289,6 +289,7 @@ pub struct LambdaCompiler {
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
     pub(crate) fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
     pub(crate) return_unit_stack: Vec<bool>,
+    pub(crate) try_body_depth: usize,
     /// Number of enclosing JS `switch` statements between the current
     /// expression and the closest enclosing loop. Mirrors OCaml
     /// `lambda_cxt.switch_depth`. Used to decide whether a `Lbreak` /
@@ -378,6 +379,7 @@ impl LambdaCompiler {
             static_jump_handlers: Vec::new(),
             fallthrough_return_handlers: Vec::new(),
             return_unit_stack: Vec::new(),
+            try_body_depth: 0,
             switch_depth: 0,
             loop_stack: Vec::new(),
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -420,6 +422,7 @@ impl LambdaCompiler {
             static_jump_handlers: Vec::new(),
             fallthrough_return_handlers: Vec::new(),
             return_unit_stack: Vec::new(),
+            try_body_depth: 0,
             switch_depth: 0,
             loop_stack: Vec::new(),
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -1434,18 +1437,28 @@ impl LambdaCompiler {
         result
     }
 
-    /// Run `f` with the loop tracking state reset (empty `loop_stack`
-    /// and `switch_depth = 0`). Used when entering a fresh function
-    /// body. Mirrors OCaml's nested-function compilation in
-    /// `lam_compile.ml`, which builds a brand-new compile context with
-    /// `switch_depth = 0; loop_stack = []` whenever it descends into a
-    /// closure body.
+    /// Run `f` with function-local control-flow state reset. Used when
+    /// entering a fresh function body.
     pub(crate) fn with_function_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        // OCaml reference: compiler/core/lam_compile.ml:1840-1858 rebuilds
+        // the nested-function context with `jmp_table =
+        // Lam_compile_context.empty_handler_map`, `switch_depth = 0`, and
+        // `loop_stack = []`. Staticcatch jump tables cannot cross function
+        // boundaries, so the Rust handler stacks must be cleared here too.
         let saved_switch_depth = std::mem::replace(&mut self.switch_depth, 0);
         let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let saved_static_handlers = std::mem::take(&mut self.static_handlers);
+        let saved_static_jump_handlers = std::mem::take(&mut self.static_jump_handlers);
+        let saved_fallthrough_return_handlers =
+            std::mem::take(&mut self.fallthrough_return_handlers);
+        let saved_try_body_depth = std::mem::replace(&mut self.try_body_depth, 0);
         let result = f(self);
         self.switch_depth = saved_switch_depth;
         self.loop_stack = saved_loop_stack;
+        self.static_handlers = saved_static_handlers;
+        self.static_jump_handlers = saved_static_jump_handlers;
+        self.fallthrough_return_handlers = saved_fallthrough_return_handlers;
+        self.try_body_depth = saved_try_body_depth;
         result
     }
 
@@ -2475,6 +2488,7 @@ impl LambdaCompiler {
             }
             Lambda::LstaticCatch(body, (label, bindings), handler)
                 if bindings.is_empty()
+                    && self.try_body_depth == 0
                     && matches!(
                         body.as_ref(),
                         Lambda::LstaticCatch(_, _, nested_handler)
@@ -2496,6 +2510,7 @@ impl LambdaCompiler {
             Lambda::LstaticCatch(body, (label, bindings), handler) => {
                 let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
                     && !bindings.is_empty())
+                    || self.try_body_depth > 0
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if crate::debug_flags::debug_staticcatch_return() {
@@ -2553,7 +2568,14 @@ impl LambdaCompiler {
                 }
             }
             Lambda::LtryWith(body, exn, handler) => {
-                let body_block = self.compile_return_block(body);
+                // OCaml reference: compiler/core/lam_compile.ml:1311-1344
+                // compiles the `try` body with `Tail_in_try` while the catch
+                // handler keeps the surrounding return context. `Tail_in_try`
+                // still returns from the JS function, but it is not the
+                // `Tail_with_name {in_staticcatch=false}` context required by
+                // `compile_staticcatch`'s pseudo-jump arm.
+                let body_block =
+                    self.with_try_body_context(|this| this.compile_return_block(body));
                 let handler_block = self.compile_return_block(handler);
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
@@ -2596,6 +2618,13 @@ impl LambdaCompiler {
         self.return_unit_stack.push(return_unit);
         let result = f(self);
         self.return_unit_stack.pop();
+        result
+    }
+
+    fn with_try_body_context<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.try_body_depth += 1;
+        let result = f(self);
+        self.try_body_depth -= 1;
         result
     }
 
@@ -2796,6 +2825,9 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
+        if self.try_body_depth > 0 {
+            return false;
+        }
         if !self.fallthrough_return_handlers.is_empty() {
             return false;
         }
@@ -2949,6 +2981,9 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
+        if self.try_body_depth > 0 {
+            return false;
+        }
         self.return_unit_stack.last().copied() == Some(true)
             && !bindings.is_empty()
             && self.fallthrough_return_handlers.is_empty()
@@ -3234,6 +3269,7 @@ impl LambdaCompiler {
                     self.uses_fallthrough_staticcatch_return(body, *label, bindings, handler);
                 let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
                     && !bindings.is_empty())
+                    || self.try_body_depth > 0
                     || self
                         .return_staticcatch_requires_explicit_jump(*label, bindings, body, handler);
                 if uses_fallthrough {
