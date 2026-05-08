@@ -156,9 +156,13 @@ fn rewrite_case_clause(clause: CaseClause, shadowed_globals: &HashSet<String>) -
 }
 
 fn rewrite_shadowed_global_in_expr(expr: Expression, name: &str) -> Expression {
-    let expr = rewrite_expr_children(expr, &mut |child| {
-        rewrite_shadowed_global_in_expr(child, name)
-    });
+    let mut rewrite_expr = |child| rewrite_shadowed_global_in_expr(child, name);
+    let mut rewrite_function_body = |body| {
+        rewrite_block_exprs(body, &mut |expr| {
+            rewrite_shadowed_global_in_expr(expr, name)
+        })
+    };
+    let expr = rewrite_expr_children(expr, &mut rewrite_expr, &mut rewrite_function_body);
     match &expr.desc {
         ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
             if id.is_global() && id.name() == name =>
@@ -173,9 +177,9 @@ fn rewrite_global_static_index_expr(
     expr: Expression,
     shadowed_globals: &HashSet<String>,
 ) -> Expression {
-    let expr = rewrite_expr_children(expr, &mut |child| {
-        rewrite_global_static_index_expr(child, shadowed_globals)
-    });
+    let mut rewrite_expr = |child| rewrite_global_static_index_expr(child, shadowed_globals);
+    let mut rewrite_function_body = |body| rewrite_block(body, shadowed_globals);
+    let expr = rewrite_expr_children(expr, &mut rewrite_expr, &mut rewrite_function_body);
     let Expression { desc, comment } = expr;
     match desc {
         ExpressionDesc::StaticIndex(obj, field, pos) => match &obj.desc {
@@ -200,6 +204,7 @@ fn rewrite_global_static_index_expr(
 fn rewrite_expr_children(
     expr: Expression,
     rewrite: &mut impl FnMut(Expression) -> Expression,
+    rewrite_function_body: &mut impl FnMut(Block) -> Block,
 ) -> Expression {
     let Expression { desc, comment } = expr;
     let desc = match desc {
@@ -269,11 +274,11 @@ fn rewrite_expr_children(
             is_method,
             params,
             // Match `Js_record_map.super` as used by
-            // `compiler/core/js_pass_external_shadow.ml:76-101`: entering a
-            // function body starts a fresh statement traversal, so the
-            // top-level `shadowed_globals` set is not threaded through nested
-            // function scopes.
-            body: rewrite_block(body, &HashSet::new()),
+            // `compiler/core/js_pass_external_shadow.ml:43-57` and 76-101:
+            // function expressions recurse into their body through
+            // `compiler/core/js_record_map.ml:165-168`, so global-shadow
+            // rewrites remain visible inside nested functions.
+            body: rewrite_function_body(body),
             env,
             return_unit,
             async_,
@@ -313,6 +318,98 @@ fn rewrite_expr_children(
     };
 
     Expression { desc, comment }
+}
+
+fn rewrite_block_exprs(block: Block, rewrite: &mut impl FnMut(Expression) -> Expression) -> Block {
+    block
+        .into_iter()
+        .map(|stmt| rewrite_statement_exprs(stmt, rewrite))
+        .collect()
+}
+
+fn rewrite_case_clause_exprs(
+    clause: CaseClause,
+    rewrite: &mut impl FnMut(Expression) -> Expression,
+) -> CaseClause {
+    CaseClause {
+        body: rewrite_block_exprs(clause.body, rewrite),
+        should_break: clause.should_break,
+        comment: clause.comment,
+    }
+}
+
+fn rewrite_statement_exprs(
+    stmt: Statement,
+    rewrite: &mut impl FnMut(Expression) -> Expression,
+) -> Statement {
+    let Statement { desc, comment } = stmt;
+    let desc = match desc {
+        StatementDesc::Block(block) => StatementDesc::Block(rewrite_block_exprs(block, rewrite)),
+        StatementDesc::Variable(mut decl) => {
+            decl.value = decl.value.map(rewrite);
+            StatementDesc::Variable(decl)
+        }
+        StatementDesc::Exp(expr) => StatementDesc::Exp(rewrite(expr)),
+        StatementDesc::If(cond, then_block, else_block) => StatementDesc::If(
+            rewrite(cond),
+            rewrite_block_exprs(then_block, rewrite),
+            rewrite_block_exprs(else_block, rewrite),
+        ),
+        StatementDesc::While(label, cond, body) => {
+            StatementDesc::While(label, rewrite(cond), rewrite_block_exprs(body, rewrite))
+        }
+        StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
+            label,
+            init.map(&mut *rewrite),
+            rewrite(end),
+            id,
+            direction,
+            rewrite_block_exprs(body, rewrite),
+        ),
+        StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
+            label,
+            id,
+            rewrite(iterable),
+            rewrite_block_exprs(body, rewrite),
+        ),
+        StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
+            label,
+            id,
+            rewrite(iterable),
+            rewrite_block_exprs(body, rewrite),
+        ),
+        StatementDesc::Continue(label) => StatementDesc::Continue(label),
+        StatementDesc::Break(label) => StatementDesc::Break(label),
+        StatementDesc::Return(expr) => StatementDesc::Return(rewrite(expr)),
+        StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
+            rewrite(expr),
+            clauses
+                .into_iter()
+                .map(|(value, clause)| (value, rewrite_case_clause_exprs(clause, rewrite)))
+                .collect(),
+            default.map(|block| rewrite_block_exprs(block, rewrite)),
+        ),
+        StatementDesc::StringSwitch(expr, clauses, default) => StatementDesc::StringSwitch(
+            rewrite(expr),
+            clauses
+                .into_iter()
+                .map(|clause| StringClause {
+                    tag_type: clause.tag_type,
+                    clause: rewrite_case_clause_exprs(clause.clause, rewrite),
+                })
+                .collect(),
+            default.map(|block| rewrite_block_exprs(block, rewrite)),
+        ),
+        StatementDesc::Throw(expr) => StatementDesc::Throw(rewrite(expr)),
+        StatementDesc::Try(body, catch, finally) => StatementDesc::Try(
+            rewrite_block_exprs(body, rewrite),
+            catch.map(|(ident, block)| (ident, rewrite_block_exprs(block, rewrite))),
+            finally.map(|block| rewrite_block_exprs(block, rewrite)),
+        ),
+        StatementDesc::Debugger => StatementDesc::Debugger,
+    };
+
+    Statement { desc, comment }
 }
 
 fn global_this_field(name: &str) -> Expression {
