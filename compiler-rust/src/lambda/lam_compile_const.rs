@@ -209,10 +209,14 @@ impl LambdaCompiler {
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => pure_indexed_block_item(target, idx)
                 .unwrap_or_else(|| {
+                    // OCaml `record_access` keeps the field position in
+                    // `Static_index` so `js_pass_flatten_and_mark_dead` can
+                    // substitute projections from materialized blocks
+                    // (compiler/core/js_exp_make.ml:399-409).
                     Expression::new(ExpressionDesc::StaticIndex(
                         Box::new(target.clone()),
                         name.clone(),
-                        None,
+                        Some(idx),
                     ))
                 }),
             FieldDbgInfo::Extension => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
@@ -223,6 +227,8 @@ impl LambdaCompiler {
                 ))
             }),
             FieldDbgInfo::Cons => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
+                // OCaml `cons_access` delegates to `record_access`, preserving
+                // the position metadata (compiler/core/js_exp_make.ml:417-423).
                 Expression::new(ExpressionDesc::StaticIndex(
                     Box::new(target.clone()),
                     match idx {
@@ -230,7 +236,7 @@ impl LambdaCompiler {
                         1 => "tl".to_string(),
                         _ => format!("_{}", idx),
                     },
-                    None,
+                    Some(idx),
                 ))
             }),
             FieldDbgInfo::PolyVarTag => poly_var_tag_access(target),
@@ -243,11 +249,12 @@ impl LambdaCompiler {
                 ))
             }),
             FieldDbgInfo::Variant => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
-                // Variant fields are accessed as _0, _1, _2, ...
+                // OCaml `variant_access` delegates to `record_access`, preserving
+                // the position metadata (compiler/core/js_exp_make.ml:414-415).
                 Expression::new(ExpressionDesc::StaticIndex(
                     Box::new(target.clone()),
                     format!("_{}", idx),
-                    None,
+                    Some(idx),
                 ))
             }),
             _ => pure_indexed_block_item(target, idx).unwrap_or_else(|| {
@@ -261,7 +268,7 @@ impl LambdaCompiler {
 
     pub(crate) fn compile_set_field(
         &self,
-        _idx: i32,
+        idx: i32,
         info: &crate::lambda::lam_compat::SetFieldDbgInfo,
         target: &Expression,
         value: &Expression,
@@ -279,10 +286,12 @@ impl LambdaCompiler {
             crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet(name)
             | crate::lambda::lam_compat::SetFieldDbgInfo::RecordInlineSet(name)
             | crate::lambda::lam_compat::SetFieldDbgInfo::RecordExtensionSet(name) => {
+                // OCaml record assignment keeps `Some(pos)` on the indexed
+                // property (compiler/core/js_exp_make.ml:504-520).
                 Expression::new(ExpressionDesc::StaticIndex(
                     Box::new(target.clone()),
                     name.clone(),
-                    None,
+                    Some(idx),
                 ))
             }
         };

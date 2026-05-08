@@ -355,11 +355,18 @@ impl LambdaCompiler {
             ),
             Poffsetint(offset) => int32_offset(compiled_args[0].clone(), *offset),
             Poffsetref(offset) => {
-                let field = Expression::new(ExpressionDesc::StaticIndex(
-                    Box::new(compiled_args[0].clone()),
-                    "contents".to_string(),
-                    None,
-                ));
+                // OCaml lowers through `Js_of_lam_block.field
+                // Lambda.ref_field_info`, so the `contents` access keeps
+                // record field position metadata
+                // (compiler/core/lam_compile_primitive.ml:342-348).
+                let field = self.compile_field_access(
+                    0,
+                    &FieldDbgInfo::Record {
+                        name: "contents".to_string(),
+                        mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+                    },
+                    &compiled_args[0],
+                );
                 Expression::new(ExpressionDesc::Seq(
                     Box::new(Expression::bin(
                         BinOp::Eq,

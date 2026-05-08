@@ -8388,9 +8388,10 @@ fn lowers_poffsetref_to_ref_contents_update() {
             assert!(matches!(
                 left.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::StaticIndex(target, field, None),
+                    desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
                     ..
                 } if field == "contents"
+                    && *index == 0
                     && matches!(
                         target.as_ref(),
                         Expression {
@@ -8420,9 +8421,10 @@ fn lowers_poffsetref_to_ref_contents_update() {
                     if matches!(
                         read_back.as_ref(),
                         Expression {
-                            desc: ExpressionDesc::StaticIndex(target, field, None),
+                            desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
                             ..
                         } if field == "contents"
+                            && *index == 0
                             && matches!(
                                 target.as_ref(),
                                 Expression {
@@ -9051,6 +9053,37 @@ fn lowers_module_pfield_with_ocaml_identifier_conversion() {
     }
 
     assert_eq!(print_expression(&expr), "Js_promise2.$$catch");
+}
+
+#[test]
+fn lowers_record_pfield_to_positioned_static_access_like_ocaml() {
+    let mut compiler = LambdaCompiler::new();
+    let record = Ident::create_local("record");
+    let expr = compiler.compile_field_access(
+        2,
+        &FieldDbgInfo::Record {
+            name: "field".to_string(),
+            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+        },
+        &Expression::var(record.clone()),
+    );
+
+    match &expr.desc {
+        ExpressionDesc::StaticIndex(target, field, Some(index)) => {
+            assert_eq!(field, "field");
+            assert_eq!(*index, 2);
+            assert!(matches!(
+                target.as_ref(),
+                Expression {
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
+                    ..
+                } if id.same(&record)
+            ));
+        }
+        other => panic!("expected record field access to keep field position, got {other:?}"),
+    }
+
+    assert_eq!(print_expression(&expr), "record.field");
 }
 
 #[test]
@@ -9805,9 +9838,10 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
     assert!(matches!(
         left.as_ref(),
         Expression {
-            desc: ExpressionDesc::StaticIndex(target, field, None),
+            desc: ExpressionDesc::StaticIndex(target, field, Some(index)),
             ..
         } if field == "xx"
+            && *index == 0
             && matches!(
                 target.as_ref(),
                 Expression {
