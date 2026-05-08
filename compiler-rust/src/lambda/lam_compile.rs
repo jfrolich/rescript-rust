@@ -3271,10 +3271,14 @@ impl LambdaCompiler {
                     })
                 }
             }
-            Lambda::LtryWith(body, exn, handler)
-                if !self.fallthrough_return_handlers.is_empty() =>
-            {
-                let body_block = self.compile_tail_loop_return_block(body, tail_loop);
+            Lambda::LtryWith(body, exn, handler) => {
+                // OCaml's `compile_trywith` preserves the surrounding
+                // tail-return context for the catch handler but changes only
+                // the try body to `Tail_in_try` (compiler/core/lam_compile.ml:
+                // 1315-1344). Compile the body through the normal return path
+                // so direct self calls inside `try` stay as calls, while the
+                // handler can still trigger the self-tailcall loop.
+                let body_block = self.compile_return_block(body);
                 let handler_block = self.compile_tail_loop_return_block(handler, tail_loop);
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
@@ -6401,7 +6405,12 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
             function_has_self_tailcall(tail_targets, body)
                 || function_has_self_tailcall(tail_targets, handler)
         }
-        Lambda::LtryWith(_, _, _) => false,
+        Lambda::LtryWith(_, _, handler) => {
+            // OCaml `compile_trywith` changes only the try body's tail type to
+            // `Tail_in_try`; the handler keeps the original `Tail_with_name`
+            // context (compiler/core/lam_compile.ml:1315-1344).
+            function_has_self_tailcall(tail_targets, handler)
+        }
         Lambda::Lvar(_)
         | Lambda::LglobalModule(_, _)
         | Lambda::Lconst(_)

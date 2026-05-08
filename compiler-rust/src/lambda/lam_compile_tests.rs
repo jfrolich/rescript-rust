@@ -2763,6 +2763,70 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
 }
 
 #[test]
+fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
+    let mut compiler = LambdaCompiler::new();
+    let loop_ = Ident::create_local("loop");
+    let read = Ident::create_local("read");
+    let acc = Ident::create_local("acc");
+    let exn = Ident::create_local("exn");
+    let tailcall = Lambda::Lapply(Apply {
+        ap_func: Box::new(Lambda::var(loop_.clone())),
+        ap_args: vec![Lambda::var(acc.clone())],
+        ap_info: ApInfo {
+            loc: Location::none(),
+            inlined: InlineAttribute::Default,
+            status: ApplyStatus::Na,
+        },
+        ap_transformed_jsx: false,
+    });
+    let lam = Lambda::letrec(
+        vec![(
+            loop_.clone(),
+            Lambda::function_(
+                1,
+                vec![acc.clone()],
+                Lambda::LtryWith(
+                    Box::new(Lambda::Lapply(Apply {
+                        ap_func: Box::new(Lambda::var(read)),
+                        ap_args: vec![Lambda::var(acc)],
+                        ap_info: ApInfo {
+                            loc: Location::none(),
+                            inlined: InlineAttribute::Default,
+                            status: ApplyStatus::Na,
+                        },
+                        ap_transformed_jsx: false,
+                    })),
+                    exn,
+                    Box::new(tailcall),
+                ),
+                FunctionAttribute::default(),
+            ),
+        )],
+        Lambda::unit(),
+    );
+
+    let compiled = compiler.compile_expr(&lam);
+    let rendered = print_block(&compiled.prelude);
+
+    assert!(
+        rendered.contains("while (true)"),
+        "expected handler self-tailcall lowering to emit a loop:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("try {"),
+        "expected the non-tail try body to stay under try:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("continue;"),
+        "expected the handler self-tailcall to continue the loop:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("return loop("),
+        "unexpected recursive return call remained in handler tail position:\n{rendered}"
+    );
+}
+
+#[test]
 fn block_finishes_output_ignores_switch_case_breaks() {
     let block = vec![Statement::new(StatementDesc::StringSwitch(
         Expression::bool(true),
