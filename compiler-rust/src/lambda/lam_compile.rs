@@ -4270,9 +4270,14 @@ impl LambdaCompiler {
         };
         match folded {
             Some((then_expr, else_expr)) => {
-                vec![Statement::return_(Expression::cond(
-                    cond, then_expr, else_expr,
-                ))]
+                // Go through `S.if_` instead of calling `E.econd` directly:
+                // OCaml applies the `Js_not` branch swap before the
+                // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
+                vec![Statement::if_(
+                    cond,
+                    vec![Statement::return_(then_expr)],
+                    vec![Statement::return_(else_expr)],
+                )]
             }
             None => {
                 // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
