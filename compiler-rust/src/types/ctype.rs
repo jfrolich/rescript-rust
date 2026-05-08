@@ -5567,6 +5567,545 @@ fn unify_object_fields<'a>(
 }
 
 // ============================================================================
+// More-general Inclusion Check
+// ============================================================================
+
+fn moregen_may_instantiate(ctx: &TypeContext, inst_nongen: bool, ty: TypeExprRef) -> bool {
+    if inst_nongen {
+        ctx.get_level(ty) != GENERIC_LEVEL - 1
+    } else {
+        ctx.get_level(ty) == GENERIC_LEVEL
+    }
+}
+
+fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> TypeResult<()> {
+    fn occur(
+        ctx: &TypeContext,
+        level: i32,
+        ty: TypeExprRef,
+        seen: &mut TypeExprRefSet,
+    ) -> TypeResult<()> {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return Ok(());
+        }
+        if ctx.get_level(ty) > level {
+            let desc = ctx.get_desc(ty);
+            if matches!(&*desc, TypeDesc::Tvar(_)) && ctx.get_level(ty) >= GENERIC_LEVEL - 1 {
+                return Err(TypeError::Unify(vec![]));
+            }
+            let static_variant_row = match &*desc {
+                TypeDesc::Tvariant(row) if btype::static_row(ctx, row) => Some(row.clone()),
+                _ => None,
+            };
+            drop(desc);
+            if let Some(row) = static_variant_row {
+                let mut children = Vec::new();
+                btype::iter_row(ctx, &row, |child| children.push(child));
+                for child in children {
+                    occur(ctx, level, child, seen)?;
+                }
+            } else {
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                for child in children {
+                    occur(ctx, level, child, seen)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // OCaml compiler/ml/ctype.ml:2934-2952 checks that subject-side generic
+    // variables are not captured before lowering the candidate with
+    // `update_level`.
+    let mut seen = TypeExprRefSet::new();
+    occur(ctx, level, ty, &mut seen)?;
+    update_level_expand(ctx, env, level, ty);
+    Ok(())
+}
+
+fn moregen_list(
+    ctx: &TypeContext,
+    inst_nongen: bool,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    env: &Env,
+    left: &[TypeExprRef],
+    right: &[TypeExprRef],
+) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3018-3020 rejects different arities before
+    // recursing pairwise.
+    if left.len() != right.len() {
+        return Err(TypeError::Unify(vec![]));
+    }
+    for (&left, &right) in left.iter().zip(right.iter()) {
+        moregen(ctx, inst_nongen, type_pairs, env, left, right)?;
+    }
+    Ok(())
+}
+
+fn moregen_kind(left: &FieldKind, right: &FieldKind) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3041-3049 allows an open field kind on the
+    // pattern side to match either another open kind or a present field.
+    match (left, right) {
+        (FieldKind::Fvar(_), FieldKind::Fvar(_) | FieldKind::Fpresent)
+        | (FieldKind::Fpresent, FieldKind::Fpresent) => Ok(()),
+        _ => Err(TypeError::Unify(vec![])),
+    }
+}
+
+fn moregen_fields(
+    ctx: &TypeContext,
+    inst_nongen: bool,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    env: &Env,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3022-3039 flattens both object field chains,
+    // requires the implementation-side fields to cover the signature-side
+    // fields, then compares paired field payloads.
+    let (fields1, rest1) = flatten_fields(ctx, ty1);
+    let (fields2, rest2) = flatten_fields(ctx, ty2);
+    let (pairs, miss1, miss2) = associate_fields(fields1, fields2);
+    if !miss1.is_empty() {
+        return Err(TypeError::Unify(vec![]));
+    }
+    let rest2_with_missing = build_fields(ctx, ctx.get_level(ctx.repr(ty2)), &miss2, rest2);
+    moregen(ctx, inst_nongen, type_pairs, env, rest1, rest2_with_missing)?;
+    for (_name, kind1, ty1, kind2, ty2) in pairs {
+        moregen_kind(&kind1, &kind2)?;
+        moregen(ctx, inst_nongen, type_pairs, env, ty1, ty2)?;
+    }
+    Ok(())
+}
+
+fn moregen_filter_row_fields(
+    ctx: &TypeContext,
+    erase: bool,
+    fields: Vec<RowFieldEntryRef<'_>>,
+) -> Vec<(Label, RowField)> {
+    // OCaml compiler/ml/ctype.ml:473-482 drops absent row fields and, when
+    // requested, mutates unmatched Reither refs to Rabsent while filtering.
+    let mut filtered = Vec::new();
+    for (label, field) in fields {
+        match btype::row_field_repr(ctx, field) {
+            RowField::Rabsent => {}
+            RowField::Reither {
+                matched: false,
+                link,
+                ..
+            } if erase => {
+                ctx.set_row_field(link, RowField::Rabsent);
+            }
+            field => filtered.push((label.clone(), field)),
+        }
+    }
+    filtered
+}
+
+fn moregen_row(
+    ctx: &TypeContext,
+    inst_nongen: bool,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    env: &Env,
+    row1: &RowDesc,
+    row2: &RowDesc,
+) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3051-3109 compares row descriptors after
+    // `row_repr`, preserving the same row-field mutation order.
+    let row1 = row_repr(ctx, row1);
+    let row2 = row_repr(ctx, row2);
+    let rm1 = ctx.repr(row_more(ctx, &row1));
+    let rm2 = ctx.repr(row_more(ctx, &row2));
+    if rm1 == rm2 {
+        return Ok(());
+    }
+
+    let may_inst = {
+        let rm1_desc = ctx.get_desc(rm1);
+        let is_instantiable_var = matches!(&*rm1_desc, TypeDesc::Tvar(_))
+            && moregen_may_instantiate(ctx, inst_nongen, rm1);
+        let is_nil = matches!(&*rm1_desc, TypeDesc::Tnil);
+        is_instantiable_var || is_nil
+    };
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
+    let (r1, r2) = if row2.row_closed {
+        (
+            moregen_filter_row_fields(ctx, may_inst, r1),
+            moregen_filter_row_fields(ctx, false, r2),
+        )
+    } else {
+        (
+            r1.into_iter()
+                .map(|(label, field)| (label.clone(), field.clone()))
+                .collect(),
+            r2.into_iter()
+                .map(|(label, field)| (label.clone(), field.clone()))
+                .collect(),
+        )
+    };
+
+    if !r1.is_empty() || (row1.row_closed && (!row2.row_closed || !r2.is_empty())) {
+        return Err(TypeError::Unify(vec![]));
+    }
+
+    let rm1_desc = ctx.get_desc(rm1);
+    let rm2_desc = ctx.get_desc(rm2);
+    match (&*rm1_desc, &*rm2_desc) {
+        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => {}
+        (TypeDesc::Tunivar(_), _) | (_, TypeDesc::Tunivar(_)) => {
+            return Err(TypeError::Unify(vec![]));
+        }
+        _ if btype::static_row(ctx, &row1) => {}
+        _ if may_inst => {
+            drop(rm1_desc);
+            drop(rm2_desc);
+            let ext = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
+                row_fields: r2,
+                row_name: None,
+                ..row2.clone()
+            }));
+            moregen_occur(ctx, env, ctx.get_level(rm1), ext)?;
+            link_type(ctx, rm1, ext);
+        }
+        (TypeDesc::Tconstr { .. }, TypeDesc::Tconstr { .. }) => {
+            drop(rm1_desc);
+            drop(rm2_desc);
+            moregen(ctx, inst_nongen, type_pairs, env, rm1, rm2)?;
+        }
+        _ => return Err(TypeError::Unify(vec![])),
+    }
+
+    for (_label, field1, field2) in pairs {
+        let field1 = btype::row_field_repr(ctx, field1);
+        let field2 = btype::row_field_repr(ctx, field2);
+        match (&field1, &field2) {
+            (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
+                moregen(ctx, inst_nongen, type_pairs, env, *ty1, *ty2)?;
+            }
+            (RowField::Rpresent(None), RowField::Rpresent(None))
+            | (RowField::Rabsent, RowField::Rabsent) => {}
+            (
+                RowField::Reither {
+                    constant: false,
+                    types,
+                    link,
+                    ..
+                },
+                RowField::Rpresent(Some(ty2)),
+            ) if may_inst => {
+                ctx.set_row_field(*link, field2.clone());
+                for ty1 in types {
+                    moregen(ctx, inst_nongen, type_pairs, env, *ty1, *ty2)?;
+                }
+            }
+            (
+                RowField::Reither {
+                    constant: c1,
+                    types: types1,
+                    link: link1,
+                    ..
+                },
+                RowField::Reither {
+                    constant: c2,
+                    types: types2,
+                    matched: matched2,
+                    link: link2,
+                },
+            ) => {
+                if link1 != link2 {
+                    if *c1 && !*c2 {
+                        return Err(TypeError::Unify(vec![]));
+                    }
+                    ctx.set_row_field(
+                        *link1,
+                        RowField::Reither {
+                            constant: *c2,
+                            types: vec![],
+                            matched: *matched2,
+                            link: *link2,
+                        },
+                    );
+                    if types1.len() == types2.len() {
+                        for (&ty1, &ty2) in types1.iter().zip(types2.iter()) {
+                            moregen(ctx, inst_nongen, type_pairs, env, ty1, ty2)?;
+                        }
+                    } else if let Some(&ty2) = types2.first() {
+                        for &ty1 in types1 {
+                            moregen(ctx, inst_nongen, type_pairs, env, ty1, ty2)?;
+                        }
+                    } else if !types1.is_empty() {
+                        return Err(TypeError::Unify(vec![]));
+                    }
+                }
+            }
+            (
+                RowField::Reither {
+                    constant: true,
+                    types,
+                    link,
+                    ..
+                },
+                RowField::Rpresent(None),
+            ) if may_inst && types.is_empty() => {
+                ctx.set_row_field(*link, field2.clone());
+            }
+            (RowField::Reither { link, .. }, RowField::Rabsent) if may_inst => {
+                ctx.set_row_field(*link, field2.clone());
+            }
+            _ => return Err(TypeError::Unify(vec![])),
+        }
+    }
+    Ok(())
+}
+
+fn moregen(
+    ctx: &TypeContext,
+    inst_nongen: bool,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> TypeResult<()> {
+    let t1 = ctx.repr(t1);
+    let t2 = ctx.repr(t2);
+    if t1 == t2 {
+        return Ok(());
+    }
+
+    // OCaml compiler/ml/ctype.ml:2958-3016 first handles instantiable pattern
+    // variables, then expands both heads and records the expanded pair before
+    // structural recursion. The pair table is what prevents recursive alias
+    // expansion from becoming an eager unification loop.
+    {
+        let desc1 = ctx.get_desc(t1);
+        if matches!(&*desc1, TypeDesc::Tvar(_)) && moregen_may_instantiate(ctx, inst_nongen, t1) {
+            drop(desc1);
+            moregen_occur(ctx, env, ctx.get_level(t1), t2)?;
+            if occurs(ctx, t1, t2) {
+                return Err(TypeError::Unify(vec![]));
+            }
+            link_type(ctx, t1, t2);
+            return Ok(());
+        }
+    }
+
+    {
+        let desc1 = ctx.get_desc(t1);
+        let desc2 = ctx.get_desc(t2);
+        if let (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) = (&*desc1, &*desc2)
+        {
+            if args1.is_empty() && args2.is_empty() && path1.same(path2) {
+                return Ok(());
+            }
+        }
+    }
+
+    let t1_expanded = ctx.repr(expand_head(ctx, env, t1));
+    let t2_expanded = ctx.repr(expand_head(ctx, env, t2));
+    if t1_expanded == t2_expanded {
+        return Ok(());
+    }
+    if !type_pairs.insert((t1_expanded, t2_expanded)) {
+        return Ok(());
+    }
+
+    let desc1 = ctx.get_desc(t1_expanded);
+    let desc2 = ctx.get_desc(t2_expanded);
+    match (&*desc1, &*desc2) {
+        (TypeDesc::Tvar(_), _) if moregen_may_instantiate(ctx, inst_nongen, t1_expanded) => {
+            drop(desc1);
+            drop(desc2);
+            moregen_occur(ctx, env, ctx.get_level(t1_expanded), t2)?;
+            link_type(ctx, t1_expanded, t2);
+            Ok(())
+        }
+        // OCaml compiler/ml/ctype.ml:2986-2989 uses
+        // `Asttypes.same_arg_label`, so source locations on labels do not
+        // participate in the inclusion check.
+        (
+            TypeDesc::Tarrow {
+                arg: arg1,
+                ret: ret1,
+                ..
+            },
+            TypeDesc::Tarrow {
+                arg: arg2,
+                ret: ret2,
+                ..
+            },
+        ) if arg1.lbl.same_label(&arg2.lbl) => {
+            let arg1 = arg1.typ;
+            let arg2 = arg2.typ;
+            let ret1 = *ret1;
+            let ret2 = *ret2;
+            drop(desc1);
+            drop(desc2);
+            moregen(ctx, inst_nongen, type_pairs, env, arg1, arg2)?;
+            moregen(ctx, inst_nongen, type_pairs, env, ret1, ret2)
+        }
+        (TypeDesc::Ttuple(left), TypeDesc::Ttuple(right)) => {
+            let left = left.clone();
+            let right = right.clone();
+            drop(desc1);
+            drop(desc2);
+            moregen_list(ctx, inst_nongen, type_pairs, env, &left, &right)
+        }
+        (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) if path1.same(path2) => {
+            let args1 = args1.clone();
+            let args2 = args2.clone();
+            drop(desc1);
+            drop(desc2);
+            moregen_list(ctx, inst_nongen, type_pairs, env, &args1, &args2)
+        }
+        (
+            TypeDesc::Tpackage {
+                path: path1,
+                lids: lids1,
+                args: args1,
+            },
+            TypeDesc::Tpackage {
+                path: path2,
+                lids: lids2,
+                args: args2,
+            },
+        ) => {
+            let path1 = path1.clone();
+            let path2 = path2.clone();
+            let lids1 = lids1.clone();
+            let lids2 = lids2.clone();
+            let args1 = args1.clone();
+            let args2 = args2.clone();
+            drop(desc1);
+            drop(desc2);
+            // OCaml compiler/ml/ctype.ml:2996-3002 routes package
+            // comparison through `unify_package`; ctype.ml:2237-2238 calls
+            // `complete_type_list` twice, and ctype.ml:2199-2201 allocates a
+            // hidden `Pkg` module for each completion even when the labels are
+            // already identical.
+            let complete_right = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                Some(env),
+                crate::types::decl::ModuleType::MtyIdent(path2.clone()),
+                &lids1,
+                &lids2,
+            );
+            let complete_left = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                Some(env),
+                crate::types::decl::ModuleType::MtyIdent(path1.clone()),
+                &lids2,
+                &lids1,
+            );
+            if !(complete_right && complete_left && path1.same(&path2)) {
+                return Err(TypeError::Unify(vec![]));
+            }
+            moregen_list(ctx, inst_nongen, type_pairs, env, &args1, &args2)
+        }
+        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            let row1 = row1.clone();
+            let row2 = row2.clone();
+            drop(desc1);
+            drop(desc2);
+            moregen_row(ctx, inst_nongen, type_pairs, env, &row1, &row2)
+        }
+        (
+            TypeDesc::Tobject {
+                fields: fields1, ..
+            },
+            TypeDesc::Tobject {
+                fields: fields2, ..
+            },
+        ) => {
+            let fields1 = *fields1;
+            let fields2 = *fields2;
+            drop(desc1);
+            drop(desc2);
+            moregen_fields(ctx, inst_nongen, type_pairs, env, fields1, fields2)
+        }
+        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => {
+            drop(desc1);
+            drop(desc2);
+            moregen_fields(ctx, inst_nongen, type_pairs, env, t1_expanded, t2_expanded)
+        }
+        (TypeDesc::Tnil, TypeDesc::Tnil) => Ok(()),
+        (
+            TypeDesc::Tpoly { body: body1, vars },
+            TypeDesc::Tpoly {
+                body: body2,
+                vars: vars2,
+            },
+        ) if vars.is_empty() && vars2.is_empty() => {
+            let body1 = *body1;
+            let body2 = *body2;
+            drop(desc1);
+            drop(desc2);
+            moregen(ctx, inst_nongen, type_pairs, env, body1, body2)
+        }
+        (
+            TypeDesc::Tpoly { body: body1, vars },
+            TypeDesc::Tpoly {
+                body: body2,
+                vars: vars2,
+            },
+        ) if vars.len() == vars2.len() => {
+            let body1 = *body1;
+            let body2 = *body2;
+            drop(desc1);
+            drop(desc2);
+            moregen(ctx, inst_nongen, type_pairs, env, body1, body2)
+        }
+        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => Ok(()),
+        _ => Err(TypeError::Unify(vec![])),
+    }
+}
+
+pub fn moregeneral(
+    ctx: &TypeContext,
+    env: &Env,
+    inst_nongen: bool,
+    pat_sch: TypeExprRef,
+    subj_sch: TypeExprRef,
+) -> bool {
+    // OCaml compiler/ml/ctype.ml:3124-3144 copies the subject with
+    // `current_level = generic_level - 1`, then copies the pattern with
+    // `current_level = generic_level`, and finally runs `moregen` with a fresh
+    // TypePairs table.
+    let old_level = ctx.current_level();
+    ctx.set_current_level(GENERIC_LEVEL - 1);
+    let subj = subst_identity_copy(ctx, instance(ctx, subj_sch));
+    ctx.set_current_level(GENERIC_LEVEL);
+    let patt = instance(ctx, pat_sch);
+    let mut type_pairs = HashSet::new();
+    let result = moregen(ctx, inst_nongen, &mut type_pairs, env, patt, subj).is_ok();
+    ctx.set_current_level(old_level);
+    result
+}
+
+// ============================================================================
 // Generalization
 // ============================================================================
 

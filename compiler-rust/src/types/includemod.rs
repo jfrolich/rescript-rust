@@ -12,7 +12,7 @@
 
 use crate::ident::Ident;
 use crate::types::Path;
-use crate::types::ctype::{self, UnifyState};
+use crate::types::ctype;
 use crate::types::decl::{
     ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
     ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration,
@@ -60,6 +60,29 @@ pub enum IncludeModError {
     NotAFunctor,
     /// Signature mismatch with details.
     SignatureMismatch(Vec<IncludeModError>),
+}
+
+#[derive(Clone, Default)]
+struct InclusionSubst {
+    type_paths: HashMap<Path, Path>,
+    module_paths: HashMap<Path, Path>,
+    modtype_paths: HashMap<Path, Path>,
+}
+
+impl InclusionSubst {
+    fn is_empty(&self) -> bool {
+        self.type_paths.is_empty() && self.module_paths.is_empty() && self.modtype_paths.is_empty()
+    }
+}
+
+fn lookup_path_subst(map: &HashMap<Path, Path>, path: &Path) -> Option<Path> {
+    // OCaml compiler/ml/path.ml:27-35 defines `Path.compare` for PathMap and
+    // ignores the `Pdot` position hint, so substitution lookups must use
+    // `Path.same` rather than Rust's derived Eq/Hash which includes that field.
+    map.get(path).cloned().or_else(|| {
+        map.iter()
+            .find_map(|(key, value)| key.same(path).then(|| value.clone()))
+    })
 }
 
 // ============================================================================
@@ -129,15 +152,18 @@ pub fn modtypes<'a>(
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
 ) -> IncludeModResult<ModuleCoercion> {
-    modtypes_inner(type_ctx, env, mty_impl, mty_sig, false)
+    let subst = InclusionSubst::default();
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, false)
 }
 
 /// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
 fn modtypes_inner<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
+    subst: &InclusionSubst,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
+    sig_access_path: Option<&Path>,
     aliasable: bool,
 ) -> IncludeModResult<ModuleCoercion> {
     // Guard against infinite recursion in module type expansion
@@ -293,7 +319,15 @@ fn modtypes_inner<'a>(
                     let expanded = ctype::strengthen_module_type_for_inclusion_path(
                         type_ctx, env, &impl_path, expanded,
                     );
-                    modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        subst,
+                        &expanded,
+                        mty_sig,
+                        sig_access_path,
+                        aliasable,
+                    )
                 }) {
                 coercion?
             } else {
@@ -304,7 +338,15 @@ fn modtypes_inner<'a>(
                         )
                     })
                     .unwrap_or_else(|| ModuleType::MtyAlias(pres_impl.clone(), impl_path.clone()));
-                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)?
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    &expanded,
+                    mty_sig,
+                    sig_access_path,
+                    aliasable,
+                )?
             };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
@@ -319,12 +361,28 @@ fn modtypes_inner<'a>(
         // Alias on the signature side - expand and check
         (mty_impl, ModuleType::MtyAlias(_, path)) => {
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             }) {
                 return result;
             }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    &expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
             }
@@ -332,7 +390,7 @@ fn modtypes_inner<'a>(
 
         // Signature matching
         (ModuleType::MtySignature(sig_impl), ModuleType::MtySignature(sig_sig)) => {
-            signatures(type_ctx, env, sig_impl, sig_sig)
+            signatures_with_subst(type_ctx, env, subst, sig_access_path, sig_impl, sig_sig)
         }
 
         // Functor matching
@@ -348,24 +406,19 @@ fn modtypes_inner<'a>(
                 result: result_sig,
             },
         ) => {
+            let empty_subst = InclusionSubst::default();
             let expected_param_type = param_type_sig.as_deref().map(|pt_sig| {
                 // OCaml compiler/ml/includemod.ml:257-262 computes
                 // `arg2' = Subst.modtype subst arg2` before both the
                 // contravariant argument check and `Env.add_module`.
-                substitute_module_type_paths(
-                    type_ctx,
-                    pt_sig,
-                    &HashMap::new(),
-                    &HashMap::new(),
-                    &HashMap::new(),
-                )
+                substitute_module_type_paths(type_ctx, pt_sig, subst)
             });
 
             // Check parameter (contravariant)
             let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
                 (Some(pt_impl), Some(pt_sig)) => {
                     // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(type_ctx, env, pt_sig, pt_impl, true)?
+                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, true)?
                 }
                 (None, None) => ModuleCoercion::Tcoerce_none,
                 _ => {
@@ -392,23 +445,18 @@ fn modtypes_inner<'a>(
                     md_path: None,
                 },
             );
-            let mut result_module_subst = HashMap::new();
-            result_module_subst.insert(
-                param_sig.name().to_string(),
+            let mut result_subst = subst.clone();
+            result_subst.module_paths.insert(
+                Path::pident(param_sig.clone()),
                 Path::pident(param_impl.clone()),
-            );
-            let adjusted_result_sig = substitute_module_type_paths_no_freshen(
-                type_ctx,
-                result_sig,
-                &HashMap::new(),
-                &result_module_subst,
-                &HashMap::new(),
             );
             let result_coercion = modtypes_inner(
                 type_ctx,
                 &result_env,
+                &result_subst,
                 result_impl,
-                &adjusted_result_sig,
+                result_sig,
+                sig_access_path,
                 false,
             )?;
 
@@ -429,12 +477,28 @@ fn modtypes_inner<'a>(
         // Signature implementation matches identifier signature
         (ModuleType::MtySignature(sig_impl), ModuleType::MtyIdent(path)) => {
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             }) {
                 return result;
             }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    &expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
             }
@@ -443,12 +507,28 @@ fn modtypes_inner<'a>(
         // Identifier implementation matches signature
         (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(type_ctx, env, expanded, mty_sig, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    expanded,
+                    mty_sig,
+                    sig_access_path,
+                    aliasable,
+                )
             }) {
                 return result;
             }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    &expanded,
+                    mty_sig,
+                    sig_access_path,
+                    aliasable,
+                )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
             }
@@ -459,12 +539,28 @@ fn modtypes_inner<'a>(
             // `Mty_ident` expands before OCaml reaches the same-identifier
             // check in `try_modtypes2` at compiler/ml/includemod.ml:269-280.
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(type_ctx, env, expanded, mty_sig, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    expanded,
+                    mty_sig,
+                    sig_access_path,
+                    aliasable,
+                )
             }) {
                 return result;
             }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, &expanded, mty_sig, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    &expanded,
+                    mty_sig,
+                    sig_access_path,
+                    aliasable,
+                )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
             }
@@ -472,12 +568,28 @@ fn modtypes_inner<'a>(
 
         (mty_impl, ModuleType::MtyIdent(path)) => {
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(type_ctx, env, mty_impl, expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             }) {
                 return result;
             }
             if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(type_ctx, env, mty_impl, &expanded, aliasable)
+                modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    mty_impl,
+                    &expanded,
+                    sig_access_path,
+                    aliasable,
+                )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
             }
@@ -633,23 +745,54 @@ fn item_field_desc_to_key(field_desc: &FieldDesc) -> FieldDesc {
 
 fn register_paired_signature_substitution(
     paired: PairedSignatureItem<'_>,
-    type_subst: &mut HashMap<String, Path>,
-    module_subst: &mut HashMap<String, Path>,
-    modtype_subst: &mut HashMap<String, Path>,
+    sig_access_path: Option<&Path>,
+    subst: &mut InclusionSubst,
 ) {
     match (paired.impl_item, paired.sig_item) {
-        (SignatureItem::SigType(impl_id, _, _), SignatureItem::SigType(sig_id, _, _)) => {
+        (SignatureItem::SigType(impl_id, _, _), SignatureItem::SigType(sig_id, sig_decl, _)) => {
             // OCaml compiler/ml/includemod.ml:348-359 registers paired
             // signature type components with `Subst.add_type id2 (Pident id1)`;
-            // strengthened manifests remain in the declaration, not in the
-            // inclusion substitution.
-            type_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
+            // compiler/ml/subst.ml:87-95 then rewrites exact type paths before
+            // recursively rewriting module prefixes.
+            let impl_path = Path::pident(impl_id.clone());
+            subst
+                .type_paths
+                .insert(Path::pident(sig_id.clone()), impl_path.clone());
+            if let Some(access_path) = sig_access_path {
+                subst.type_paths.insert(
+                    Path::pdot(access_path.clone(), sig_id.name()),
+                    impl_path.clone(),
+                );
+            }
+            if let Some(sig_path) = &sig_decl.type_path {
+                subst.type_paths.insert(sig_path.clone(), impl_path);
+            }
         }
-        (SignatureItem::SigModule(impl_id, _, _), SignatureItem::SigModule(sig_id, _, _)) => {
-            module_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
+        (
+            SignatureItem::SigModule(impl_id, _, _),
+            SignatureItem::SigModule(sig_id, sig_decl, _),
+        ) => {
+            // OCaml compiler/ml/includemod.ml:360-362 adds module and
+            // module-type substitutions; compiler/ml/subst.ml:69-75 applies
+            // them to exact paths before dotted-prefix recursion.
+            let impl_path = Path::pident(impl_id.clone());
+            subst
+                .module_paths
+                .insert(Path::pident(sig_id.clone()), impl_path.clone());
+            if let Some(access_path) = sig_access_path {
+                subst.module_paths.insert(
+                    Path::pdot(access_path.clone(), sig_id.name()),
+                    impl_path.clone(),
+                );
+            }
+            if let Some(sig_path) = &sig_decl.md_path {
+                subst.module_paths.insert(sig_path.clone(), impl_path);
+            }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
-            modtype_subst.insert(sig_id.name().to_string(), Path::pident(impl_id.clone()));
+            subst
+                .modtype_paths
+                .insert(Path::pident(sig_id.clone()), Path::pident(impl_id.clone()));
         }
         _ => {}
     }
@@ -669,9 +812,8 @@ fn missing_signature_item_error(item: &SignatureItem, id: &Ident) -> IncludeModE
 fn pair_signature_items<'a>(
     sig_impl: &'a Signature,
     sig_sig: &'a Signature,
-    type_subst: &mut HashMap<String, Path>,
-    module_subst: &mut HashMap<String, Path>,
-    modtype_subst: &mut HashMap<String, Path>,
+    sig_access_path: Option<&Path>,
+    subst: &mut InclusionSubst,
 ) -> (usize, Vec<PairedSignatureItem<'a>>, Vec<IncludeModError>) {
     let (len_impl, component_table) = build_component_table(sig_impl);
     let mut paired = Vec::with_capacity(sig_sig.len());
@@ -686,7 +828,7 @@ fn pair_signature_items<'a>(
                 sig_item,
                 runtime_pos: entry.runtime_pos,
             };
-            register_paired_signature_substitution(pair, type_subst, module_subst, modtype_subst);
+            register_paired_signature_substitution(pair, sig_access_path, subst);
             paired.push(pair);
         } else if report_missing {
             errors.push(missing_signature_item_error(sig_item, sig_id));
@@ -700,9 +842,8 @@ fn check_paired_signature_items<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
     paired: &[PairedSignatureItem<'_>],
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    sig_access_path: Option<&Path>,
+    subst: &InclusionSubst,
 ) -> IncludeModResult<Vec<(usize, ModuleCoercion)>> {
     let mut coercions = Vec::new();
 
@@ -718,9 +859,7 @@ fn check_paired_signature_items<'a>(
                     impl_id.clone(),
                     impl_val_desc,
                     sig_val_desc,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
+                    subst,
                 )?;
                 if !matches!(sig_val_desc.val_kind, ValueKind::ValPrim(_)) {
                     coercions.push((pair.runtime_pos, coercion));
@@ -735,13 +874,8 @@ fn check_paired_signature_items<'a>(
                 // package types, compiler/ml/subst.ml:180-181 rewrites only
                 // the package path and type arguments; it does not freshen the
                 // typedtree-only pack_type from typetexp.ml:547-568.
-                let expected_type_decl = substitute_type_declaration_paths(
-                    type_ctx,
-                    sig_type_decl,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                );
+                let expected_type_decl =
+                    substitute_type_declaration_paths(type_ctx, sig_type_decl, subst);
                 type_declarations(
                     type_ctx,
                     env,
@@ -765,38 +899,37 @@ fn check_paired_signature_items<'a>(
             }
             (
                 SignatureItem::SigModule(impl_id, impl_mod_decl, _),
-                SignatureItem::SigModule(_, sig_mod_decl, _),
+                SignatureItem::SigModule(sig_id, sig_mod_decl, _),
             ) => {
-                let expected_mod_decl = substitute_module_declaration_paths(
-                    type_ctx,
-                    sig_mod_decl,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                );
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
-                // module type and recurses through `modtypes`.
+                // module type and recurses through `modtypes` with the current
+                // substitution rather than pre-substituting the declaration.
                 let impl_mty = crate::types::ctype::strengthen_module_type_for_inclusion_path(
                     type_ctx,
                     env,
                     &Path::pident(impl_id.clone()),
                     &impl_mod_decl.md_type,
                 );
-                let coercion = modtypes(type_ctx, env, &impl_mty, &expected_mod_decl.md_type)?;
+                let nested_sig_access_path =
+                    sig_access_path.map(|path| Path::pdot(path.clone(), sig_id.name()));
+                let coercion = modtypes_inner(
+                    type_ctx,
+                    env,
+                    subst,
+                    &impl_mty,
+                    &sig_mod_decl.md_type,
+                    nested_sig_access_path.as_ref(),
+                    false,
+                )?;
                 coercions.push((pair.runtime_pos, coercion));
             }
             (
                 SignatureItem::SigModtype(impl_id, impl_modtype_decl),
                 SignatureItem::SigModtype(_, sig_modtype_decl),
             ) => {
-                let expected_modtype_decl = substitute_modtype_declaration_paths(
-                    type_ctx,
-                    sig_modtype_decl,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                );
+                let expected_modtype_decl =
+                    substitute_modtype_declaration_paths(type_ctx, sig_modtype_decl, subst);
                 modtype_declarations(
                     type_ctx,
                     env,
@@ -834,12 +967,40 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
 pub fn compunit<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
-    _impl_name: &str,
+    impl_name: &str,
     impl_sig: &Signature,
     _intf_name: &str,
     intf_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
-    signatures(type_ctx, env, impl_sig, intf_sig)
+    fn module_name_from_source_filename(path: &str) -> String {
+        let basename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path);
+        let name = basename.split('.').next().unwrap_or(basename);
+        let mut chars = name.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(ch) => ch.to_uppercase().collect::<String>() + chars.as_str(),
+        }
+    }
+
+    // OCaml compiler/ml/includemod.ml:468-475 starts compilation-unit
+    // inclusion from `signatures`; Rust additionally carries the persisted
+    // compilation-unit access path so Subst.add_* mappings can cover CMI paths
+    // like `Unit.Nested.t` that no longer appear as local `Pident`s.
+    let subst = InclusionSubst::default();
+    let access_path = Path::pident(Ident::create_persistent(module_name_from_source_filename(
+        impl_name,
+    )));
+    signatures_with_subst(
+        type_ctx,
+        env,
+        &subst,
+        Some(&access_path),
+        impl_sig,
+        intf_sig,
+    )
 }
 
 /// Check if signature `sig_impl` is a subtype of `sig_sig`.
@@ -849,10 +1010,22 @@ pub fn signatures<'a>(
     sig_impl: &Signature,
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
+    let subst = InclusionSubst::default();
+    signatures_with_subst(type_ctx, env, &subst, None, sig_impl, sig_sig)
+}
+
+fn signatures_with_subst<'a>(
+    type_ctx: &'a TypeContext,
+    env: &Env,
+    incoming_subst: &InclusionSubst,
+    sig_access_path: Option<&Path>,
+    sig_impl: &Signature,
+    sig_sig: &Signature,
+) -> IncludeModResult<ModuleCoercion> {
     let mut include_env = env.clone();
-    let mut type_subst = HashMap::new();
-    let mut module_subst = HashMap::new();
-    let mut modtype_subst = HashMap::new();
+    // OCaml compiler/ml/includemod.ml:284-337 threads the current `Subst.t`
+    // into nested signature checks, then extends it while pairing components.
+    let mut subst = incoming_subst.clone();
     let len_sig = sig_sig
         .iter()
         .filter(|item| is_runtime_component(item))
@@ -883,26 +1056,15 @@ pub fn signatures<'a>(
         add_sig_item_to_env(sig_item, &mut include_env);
     }
 
-    let (len_impl, paired, errors) = pair_signature_items(
-        sig_impl,
-        sig_sig,
-        &mut type_subst,
-        &mut module_subst,
-        &mut modtype_subst,
-    );
+    let (len_impl, paired, errors) =
+        pair_signature_items(sig_impl, sig_sig, sig_access_path, &mut subst);
 
     if !errors.is_empty() {
         return Err(IncludeModError::SignatureMismatch(errors));
     }
 
-    let coercions = check_paired_signature_items(
-        type_ctx,
-        &include_env,
-        &paired,
-        &type_subst,
-        &module_subst,
-        &modtype_subst,
-    )?;
+    let coercions =
+        check_paired_signature_items(type_ctx, &include_env, &paired, sig_access_path, &subst)?;
 
     if len_impl == len_sig {
         Ok(simplify_structure_coercion(
@@ -930,89 +1092,19 @@ fn value_descriptions<'a>(
     id: Ident,
     impl_desc: &ValueDescription,
     sig_desc: &ValueDescription,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> IncludeModResult<ModuleCoercion> {
-    fn has_non_row_type_variables(
-        type_ctx: &TypeContext,
-        ty: TypeExprRef,
-        seen: &mut HashSet<TypeExprRef>,
-    ) -> bool {
-        use crate::types::type_expr::{RowField, TypeDesc};
-
-        let ty = type_ctx.repr(ty);
-        if !seen.insert(ty) {
-            return false;
-        }
-
-        match &*type_ctx.get_desc(ty) {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => true,
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                has_non_row_type_variables(type_ctx, arg.typ, seen)
-                    || has_non_row_type_variables(type_ctx, *ret, seen)
-            }
-            TypeDesc::Ttuple(items) => items
-                .iter()
-                .any(|item| has_non_row_type_variables(type_ctx, *item, seen)),
-            TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => args
-                .iter()
-                .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen)),
-            TypeDesc::Tobject { fields, .. } => has_non_row_type_variables(type_ctx, *fields, seen),
-            TypeDesc::Tfield { typ, rest, .. } => {
-                has_non_row_type_variables(type_ctx, *typ, seen)
-                    || has_non_row_type_variables(type_ctx, *rest, seen)
-            }
-            TypeDesc::Tvariant(row0) => {
-                let row = crate::types::btype::row_repr(type_ctx, &row0);
-                row.row_fields.iter().any(|(_, field)| match field {
-                    RowField::Rpresent(Some(arg)) => {
-                        has_non_row_type_variables(type_ctx, *arg, seen)
-                    }
-                    RowField::Reither { types, .. } => types
-                        .iter()
-                        .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen)),
-                    RowField::Rpresent(None) | RowField::Rabsent => false,
-                }) || row.row_name.as_ref().is_some_and(|(_, tys)| {
-                    tys.iter()
-                        .any(|arg| has_non_row_type_variables(type_ctx, *arg, seen))
-                })
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                has_non_row_type_variables(type_ctx, *body, seen)
-                    || vars
-                        .iter()
-                        .any(|var| has_non_row_type_variables(type_ctx, *var, seen))
-            }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                has_non_row_type_variables(type_ctx, *target, seen)
-            }
-            TypeDesc::Tnil => false,
-        }
-    }
-
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
-    let mut unify_state = UnifyState::default();
-    unify_state.set_env(env);
-    let expected_ty = substitute_value_type_paths(
-        type_ctx,
-        sig_desc.val_type,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    let expected_ty = substitute_value_type_paths(type_ctx, sig_desc.val_type, subst);
 
     // OCaml compiler/ml/includemod.ml:56-60 only substitutes the expected
     // value description before calling compiler/ml/includecore.ml:43-48,
     // where `Ctype.moregeneral` compares the two value types directly. Forcing
     // manifest aliases up front changes Env.normalize_path side effects and
     // shifts subsequent Ident stamps.
-    let impl_ty = ctype::instance(type_ctx, impl_desc.val_type);
-    let sig_ty = ctype::instance(type_ctx, expected_ty);
-
-    // Try to unify (signature type should match implementation type)
-    if ctype::unify(type_ctx, &mut unify_state, impl_ty, sig_ty).is_err() {
+    let moregeneral = ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
+    if !moregeneral {
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
             expected: expected_ty,
@@ -1063,75 +1155,41 @@ fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
 fn substitute_value_description_paths<'a>(
     type_ctx: &'a TypeContext,
     desc: &ValueDescription,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ValueDescription {
     // OCaml compiler/ml/subst.ml:303-309 copies a value description and runs
     // the full current substitution over `val_type`.
     let mut substituted = desc.clone();
-    substituted.val_type = substitute_value_type_paths(
-        type_ctx,
-        desc.val_type,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    substituted.val_type = substitute_value_type_paths(type_ctx, desc.val_type, subst);
     substituted
 }
 
 fn substitute_label_declaration_paths<'a>(
     type_ctx: &'a TypeContext,
     label: &LabelDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> LabelDeclaration {
     let mut substituted = label.clone();
-    substituted.ld_type = substitute_value_type_paths(
-        type_ctx,
-        label.ld_type,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    substituted.ld_type = substitute_value_type_paths(type_ctx, label.ld_type, subst);
     substituted
 }
 
 fn substitute_constructor_arguments_paths<'a>(
     type_ctx: &'a TypeContext,
     args: &ConstructorArguments,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ConstructorArguments {
     match args {
         ConstructorArguments::CstrTuple(items) => ConstructorArguments::CstrTuple(
             items
                 .iter()
-                .map(|ty| {
-                    substitute_value_type_paths(
-                        type_ctx,
-                        *ty,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                    )
-                })
+                .map(|ty| substitute_value_type_paths(type_ctx, *ty, subst))
                 .collect(),
         ),
         ConstructorArguments::CstrRecord(labels) => ConstructorArguments::CstrRecord(
             labels
                 .iter()
-                .map(|label| {
-                    substitute_label_declaration_paths(
-                        type_ctx,
-                        label,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                    )
-                })
+                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
                 .collect(),
         ),
     }
@@ -1140,30 +1198,21 @@ fn substitute_constructor_arguments_paths<'a>(
 fn substitute_constructor_declaration_paths<'a>(
     type_ctx: &'a TypeContext,
     constructor: &ConstructorDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ConstructorDeclaration {
     let mut substituted = constructor.clone();
-    substituted.cd_args = substitute_constructor_arguments_paths(
-        type_ctx,
-        &constructor.cd_args,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
-    substituted.cd_res = constructor.cd_res.map(|ty| {
-        substitute_value_type_paths(type_ctx, ty, type_subst, module_subst, modtype_subst)
-    });
+    substituted.cd_args =
+        substitute_constructor_arguments_paths(type_ctx, &constructor.cd_args, subst);
+    substituted.cd_res = constructor
+        .cd_res
+        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
     substituted
 }
 
 fn substitute_type_kind_paths<'a>(
     type_ctx: &'a TypeContext,
     kind: &TypeKind,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> TypeKind {
     match kind {
         TypeKind::TypeAbstract => TypeKind::TypeAbstract,
@@ -1171,15 +1220,7 @@ fn substitute_type_kind_paths<'a>(
         TypeKind::TypeRecord(labels, repr) => TypeKind::TypeRecord(
             labels
                 .iter()
-                .map(|label| {
-                    substitute_label_declaration_paths(
-                        type_ctx,
-                        label,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                    )
-                })
+                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
                 .collect(),
             repr.clone(),
         ),
@@ -1187,13 +1228,7 @@ fn substitute_type_kind_paths<'a>(
             constructors
                 .iter()
                 .map(|constructor| {
-                    substitute_constructor_declaration_paths(
-                        type_ctx,
-                        constructor,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                    )
+                    substitute_constructor_declaration_paths(type_ctx, constructor, subst)
                 })
                 .collect(),
         ),
@@ -1203,24 +1238,14 @@ fn substitute_type_kind_paths<'a>(
 fn substitute_type_inlined_paths<'a>(
     type_ctx: &'a TypeContext,
     inlined: &TypeInlinedType,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> TypeInlinedType {
     match inlined {
         TypeInlinedType::Record { type_name, labels } => TypeInlinedType::Record {
             type_name: type_name.clone(),
             labels: labels
                 .iter()
-                .map(|label| {
-                    substitute_label_declaration_paths(
-                        type_ctx,
-                        label,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                    )
-                })
+                .map(|label| substitute_label_declaration_paths(type_ctx, label, subst))
                 .collect(),
         },
     }
@@ -1229,9 +1254,7 @@ fn substitute_type_inlined_paths<'a>(
 fn substitute_type_declaration_paths<'a>(
     type_ctx: &'a TypeContext,
     decl: &TypeDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> TypeDeclaration {
     // OCaml compiler/ml/includemod.ml:66-70 applies
     // `Subst.type_declaration` before comparing a signature declaration;
@@ -1240,32 +1263,16 @@ fn substitute_type_declaration_paths<'a>(
     substituted.type_params = decl
         .type_params
         .iter()
-        .map(|ty| {
-            substitute_value_type_paths(type_ctx, *ty, type_subst, module_subst, modtype_subst)
-        })
+        .map(|ty| substitute_value_type_paths(type_ctx, *ty, subst))
         .collect();
-    substituted.type_manifest = decl.type_manifest.map(|ty| {
-        substitute_value_type_paths(type_ctx, ty, type_subst, module_subst, modtype_subst)
-    });
-    substituted.type_kind = substitute_type_kind_paths(
-        type_ctx,
-        &decl.type_kind,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    substituted.type_manifest = decl
+        .type_manifest
+        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
+    substituted.type_kind = substitute_type_kind_paths(type_ctx, &decl.type_kind, subst);
     substituted.type_inlined_types = decl
         .type_inlined_types
         .iter()
-        .map(|inlined| {
-            substitute_type_inlined_paths(
-                type_ctx,
-                inlined,
-                type_subst,
-                module_subst,
-                modtype_subst,
-            )
-        })
+        .map(|inlined| substitute_type_inlined_paths(type_ctx, inlined, subst))
         .collect();
     substituted
 }
@@ -1273,125 +1280,93 @@ fn substitute_type_declaration_paths<'a>(
 fn substitute_extension_constructor_paths<'a>(
     type_ctx: &'a TypeContext,
     ext: &ExtensionConstructor,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ExtensionConstructor {
     // OCaml compiler/ml/includemod.ml:77-80 applies
     // `Subst.extension_constructor`; compiler/ml/subst.ml:311-325 copies
     // the extension path, params, arguments, and return type.
     let mut substituted = ext.clone();
-    substituted.ext_type_path =
-        substitute_type_constructor_path(&ext.ext_type_path, type_subst, module_subst);
+    substituted.ext_type_path = substitute_type_constructor_path(&ext.ext_type_path, subst);
     substituted.ext_type_params = ext
         .ext_type_params
         .iter()
-        .map(|ty| {
-            substitute_value_type_paths(type_ctx, *ty, type_subst, module_subst, modtype_subst)
-        })
+        .map(|ty| substitute_value_type_paths(type_ctx, *ty, subst))
         .collect();
-    substituted.ext_args = substitute_constructor_arguments_paths(
-        type_ctx,
-        &ext.ext_args,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
-    substituted.ext_ret_type = ext.ext_ret_type.map(|ty| {
-        substitute_value_type_paths(type_ctx, ty, type_subst, module_subst, modtype_subst)
-    });
+    substituted.ext_args = substitute_constructor_arguments_paths(type_ctx, &ext.ext_args, subst);
+    substituted.ext_ret_type = ext
+        .ext_ret_type
+        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
     substituted
 }
 
-fn substitute_type_constructor_path(
-    path: &Path,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-) -> Path {
+fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path {
+    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
+        return replacement;
+    }
     match path {
-        Path::Pident(id) => type_subst
-            .get(id.name())
-            .cloned()
-            .unwrap_or_else(|| path.clone()),
+        Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_constructor_path(
-                functor,
-                type_subst,
-                module_subst,
-            )),
-            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_type_constructor_path(functor, subst)),
+            std::sync::Arc::new(substitute_module_path(arg, subst)),
         ),
     }
 }
 
-fn substitute_module_path(path: &Path, module_subst: &HashMap<String, Path>) -> Path {
+fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
+    if let Some(replacement) = lookup_path_subst(&subst.module_paths, path) {
+        return replacement;
+    }
     match path {
-        Path::Pident(id) => module_subst
-            .get(id.name())
-            .cloned()
-            .unwrap_or_else(|| path.clone()),
+        Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_module_path(functor, module_subst)),
-            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_module_path(functor, subst)),
+            std::sync::Arc::new(substitute_module_path(arg, subst)),
         ),
     }
 }
 
-fn substitute_type_path(
-    path: &Path,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-) -> Path {
+fn substitute_type_path(path: &Path, subst: &InclusionSubst) -> Path {
+    if let Some(replacement) = lookup_path_subst(&subst.type_paths, path) {
+        return replacement;
+    }
     match path {
-        Path::Pident(id) => type_subst
-            .get(id.name())
-            .cloned()
-            .unwrap_or_else(|| path.clone()),
+        Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_type_path(functor, type_subst, module_subst)),
-            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_type_path(functor, subst)),
+            std::sync::Arc::new(substitute_module_path(arg, subst)),
         ),
     }
 }
 
-fn substitute_modtype_path(
-    path: &Path,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
-) -> Path {
+fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
+    if let Some(replacement) = lookup_path_subst(&subst.modtype_paths, path) {
+        return replacement;
+    }
     match path {
-        Path::Pident(id) => modtype_subst
-            .get(id.name())
-            .cloned()
-            .or_else(|| module_subst.get(id.name()).cloned())
-            .unwrap_or_else(|| path.clone()),
+        Path::Pident(_) => path.clone(),
         Path::Pdot(prefix, name, pos) => Path::Pdot(
-            std::sync::Arc::new(substitute_module_path(prefix, module_subst)),
+            std::sync::Arc::new(substitute_module_path(prefix, subst)),
             name.clone(),
             *pos,
         ),
         Path::Papply(functor, arg) => Path::Papply(
-            std::sync::Arc::new(substitute_modtype_path(
-                functor,
-                module_subst,
-                modtype_subst,
-            )),
-            std::sync::Arc::new(substitute_module_path(arg, module_subst)),
+            std::sync::Arc::new(substitute_modtype_path(functor, subst)),
+            std::sync::Arc::new(substitute_module_path(arg, subst)),
         ),
     }
 }
@@ -1399,17 +1374,9 @@ fn substitute_modtype_path(
 fn substitute_module_type_paths(
     type_ctx: &TypeContext,
     mty: &ModuleType,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModuleType {
-    let mut substituted = substitute_module_type_paths_no_freshen(
-        type_ctx,
-        mty,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    let mut substituted = substitute_module_type_paths_no_freshen(type_ctx, mty, subst);
     // OCaml compiler/ml/includemod.ml:396-421 checks expected-side module and
     // module-type declarations under a `Subst.t`. That reaches
     // compiler/ml/subst.ml:328-355, where `Subst.modtype` freshens every
@@ -1421,19 +1388,15 @@ fn substitute_module_type_paths(
 fn substitute_module_type_paths_no_freshen(
     type_ctx: &TypeContext,
     mty: &ModuleType,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModuleType {
     // Mirrors OCaml Subst.modtype/signature, including functor-result module
     // substitution and nested signature component substitution.
     // See compiler/ml/subst.ml:345-356 and compiler/ml/subst.ml:358-389.
     match mty {
-        ModuleType::MtyIdent(path) => {
-            ModuleType::MtyIdent(substitute_modtype_path(path, module_subst, modtype_subst))
-        }
+        ModuleType::MtyIdent(path) => ModuleType::MtyIdent(substitute_modtype_path(path, subst)),
         ModuleType::MtyAlias(presence, path) => {
-            ModuleType::MtyAlias(*presence, substitute_module_path(path, module_subst))
+            ModuleType::MtyAlias(*presence, substitute_module_path(path, subst))
         }
         ModuleType::MtyFunctor {
             param,
@@ -1443,19 +1406,11 @@ fn substitute_module_type_paths_no_freshen(
             param: param.clone(),
             param_type: param_type.as_ref().map(|param_type| {
                 Box::new(substitute_module_type_paths_no_freshen(
-                    type_ctx,
-                    param_type,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
+                    type_ctx, param_type, subst,
                 ))
             }),
             result: Box::new(substitute_module_type_paths_no_freshen(
-                type_ctx,
-                result,
-                type_subst,
-                module_subst,
-                modtype_subst,
+                type_ctx, result, subst,
             )),
         },
         ModuleType::MtySignature(sig) => ModuleType::MtySignature(
@@ -1463,56 +1418,26 @@ fn substitute_module_type_paths_no_freshen(
                 .map(|item| match item {
                     SignatureItem::SigValue(id, desc) => SignatureItem::SigValue(
                         id.clone(),
-                        substitute_value_description_paths(
-                            type_ctx,
-                            desc,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                        ),
+                        substitute_value_description_paths(type_ctx, desc, subst),
                     ),
                     SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
                         id.clone(),
-                        substitute_type_declaration_paths(
-                            type_ctx,
-                            decl,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                        ),
+                        substitute_type_declaration_paths(type_ctx, decl, subst),
                         *rec_status,
                     ),
                     SignatureItem::SigTypext(id, ext, ext_status) => SignatureItem::SigTypext(
                         id.clone(),
-                        substitute_extension_constructor_paths(
-                            type_ctx,
-                            ext,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                        ),
+                        substitute_extension_constructor_paths(type_ctx, ext, subst),
                         *ext_status,
                     ),
                     SignatureItem::SigModule(id, md, rec_status) => SignatureItem::SigModule(
                         id.clone(),
-                        substitute_module_declaration_paths_no_freshen(
-                            type_ctx,
-                            md,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                        ),
+                        substitute_module_declaration_paths_no_freshen(type_ctx, md, subst),
                         *rec_status,
                     ),
                     SignatureItem::SigModtype(id, mtd) => SignatureItem::SigModtype(
                         id.clone(),
-                        substitute_modtype_declaration_paths_no_freshen(
-                            type_ctx,
-                            mtd,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                        ),
+                        substitute_modtype_declaration_paths_no_freshen(type_ctx, mtd, subst),
                     ),
                     _ => item.clone(),
                 })
@@ -1524,59 +1449,35 @@ fn substitute_module_type_paths_no_freshen(
 fn substitute_module_declaration_paths(
     _type_ctx: &TypeContext,
     md: &ModuleDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModuleDeclaration {
     // OCaml compiler/ml/includemod.ml:396-413 does not call
     // `Subst.module_declaration` here. It passes the current substitution into
     // the recursive `modtypes` check, so this boundary only rewrites paths that
     // Rust cannot currently thread lazily through the recursion.
-    substitute_module_declaration_paths_no_freshen(
-        _type_ctx,
-        md,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    )
+    substitute_module_declaration_paths_no_freshen(_type_ctx, md, subst)
 }
 
 fn substitute_module_declaration_paths_no_freshen(
     type_ctx: &TypeContext,
     md: &ModuleDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModuleDeclaration {
     let mut substituted = md.clone();
-    substituted.md_type = substitute_module_type_paths_no_freshen(
-        type_ctx,
-        &md.md_type,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    substituted.md_type = substitute_module_type_paths_no_freshen(type_ctx, &md.md_type, subst);
     substituted.md_path = md
         .md_path
         .as_ref()
-        .map(|path| substitute_module_path(path, module_subst));
+        .map(|path| substitute_module_path(path, subst));
     substituted
 }
 
 fn substitute_modtype_declaration_paths(
     type_ctx: &TypeContext,
     mtd: &ModtypeDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModtypeDeclaration {
-    let mut substituted = substitute_modtype_declaration_paths_no_freshen(
-        type_ctx,
-        mtd,
-        type_subst,
-        module_subst,
-        modtype_subst,
-    );
+    let mut substituted = substitute_modtype_declaration_paths_no_freshen(type_ctx, mtd, subst);
     if let Some(module_type) = substituted.mtd_type.as_mut() {
         crate::cmi::persistent_env::freshen_module_type_bound_idents(module_type, type_ctx);
     }
@@ -1586,42 +1487,31 @@ fn substitute_modtype_declaration_paths(
 fn substitute_modtype_declaration_paths_no_freshen(
     type_ctx: &TypeContext,
     mtd: &ModtypeDeclaration,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> ModtypeDeclaration {
     let mut substituted = mtd.clone();
-    substituted.mtd_type = mtd.mtd_type.as_ref().map(|mty| {
-        substitute_module_type_paths_no_freshen(
-            type_ctx,
-            mty,
-            type_subst,
-            module_subst,
-            modtype_subst,
-        )
-    });
+    substituted.mtd_type = mtd
+        .mtd_type
+        .as_ref()
+        .map(|mty| substitute_module_type_paths_no_freshen(type_ctx, mty, subst));
     substituted
 }
 
 fn substitute_value_type_paths<'a>(
     type_ctx: &'a TypeContext,
     ty: TypeExprRef,
-    type_subst: &HashMap<String, Path>,
-    module_subst: &HashMap<String, Path>,
-    modtype_subst: &HashMap<String, Path>,
+    subst: &InclusionSubst,
 ) -> TypeExprRef {
     use crate::types::type_expr::{RowField, TypeDesc};
 
-    if type_subst.is_empty() && module_subst.is_empty() && modtype_subst.is_empty() {
+    if subst.is_empty() {
         return ty;
     }
 
     fn rewrite<'a>(
         type_ctx: &'a TypeContext,
         ty: TypeExprRef,
-        type_subst: &HashMap<String, Path>,
-        module_subst: &HashMap<String, Path>,
-        modtype_subst: &HashMap<String, Path>,
+        subst: &InclusionSubst,
         seen: &mut HashSet<TypeExprRef>,
     ) {
         let ty = type_ctx.repr(ty);
@@ -1633,16 +1523,9 @@ fn substitute_value_type_paths<'a>(
         match &*desc {
             TypeDesc::Tconstr { path, args, abbrev } => {
                 for arg in args {
-                    rewrite(
-                        type_ctx,
-                        *arg,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                        seen,
-                    );
+                    rewrite(type_ctx, *arg, subst, seen);
                 }
-                let new_path = substitute_type_constructor_path(path, type_subst, module_subst);
+                let new_path = substitute_type_constructor_path(path, subst);
                 if new_path != *path {
                     type_ctx.set_desc(
                         ty,
@@ -1655,131 +1538,47 @@ fn substitute_value_type_paths<'a>(
                 }
             }
             TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite(
-                    type_ctx,
-                    arg.typ,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
-                rewrite(
-                    type_ctx,
-                    *ret,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, arg.typ, subst, seen);
+                rewrite(type_ctx, *ret, subst, seen);
             }
             TypeDesc::Ttuple(items) => {
                 for item in items {
-                    rewrite(
-                        type_ctx,
-                        *item,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                        seen,
-                    );
+                    rewrite(type_ctx, *item, subst, seen);
                 }
             }
             TypeDesc::Tobject { fields, .. } => {
-                rewrite(
-                    type_ctx,
-                    *fields,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, *fields, subst, seen);
             }
             TypeDesc::Tfield { typ, rest, .. } => {
-                rewrite(
-                    type_ctx,
-                    *typ,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
-                rewrite(
-                    type_ctx,
-                    *rest,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, *typ, subst, seen);
+                rewrite(type_ctx, *rest, subst, seen);
             }
             TypeDesc::Tvariant(row0) => {
                 let row = crate::types::btype::row_repr(type_ctx, &row0);
                 for (_, field) in &row.row_fields {
                     match field {
-                        RowField::Rpresent(Some(arg)) => rewrite(
-                            type_ctx,
-                            *arg,
-                            type_subst,
-                            module_subst,
-                            modtype_subst,
-                            seen,
-                        ),
+                        RowField::Rpresent(Some(arg)) => rewrite(type_ctx, *arg, subst, seen),
                         RowField::Reither { types, .. } => {
                             for ty in types {
-                                rewrite(
-                                    type_ctx,
-                                    *ty,
-                                    type_subst,
-                                    module_subst,
-                                    modtype_subst,
-                                    seen,
-                                );
+                                rewrite(type_ctx, *ty, subst, seen);
                             }
                         }
                         RowField::Rpresent(None) | RowField::Rabsent => {}
                     }
                 }
-                rewrite(
-                    type_ctx,
-                    row.row_more,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, row.row_more, subst, seen);
             }
             TypeDesc::Tpoly { body, vars } => {
-                rewrite(
-                    type_ctx,
-                    *body,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, *body, subst, seen);
                 for var in vars {
-                    rewrite(
-                        type_ctx,
-                        *var,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                        seen,
-                    );
+                    rewrite(type_ctx, *var, subst, seen);
                 }
             }
             TypeDesc::Tpackage { path, args, lids } => {
                 for arg in args {
-                    rewrite(
-                        type_ctx,
-                        *arg,
-                        type_subst,
-                        module_subst,
-                        modtype_subst,
-                        seen,
-                    );
+                    rewrite(type_ctx, *arg, subst, seen);
                 }
-                let new_path = substitute_modtype_path(path, module_subst, modtype_subst);
+                let new_path = substitute_modtype_path(path, subst);
                 if new_path != *path {
                     type_ctx.set_desc(
                         ty,
@@ -1792,14 +1591,7 @@ fn substitute_value_type_paths<'a>(
                 }
             }
             TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                rewrite(
-                    type_ctx,
-                    *target,
-                    type_subst,
-                    module_subst,
-                    modtype_subst,
-                    seen,
-                );
+                rewrite(type_ctx, *target, subst, seen);
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
         }
@@ -1810,14 +1602,7 @@ fn substitute_value_type_paths<'a>(
     // substitutes the value type rather than mutating the original scheme.
     let copied = ctype::subst_identity_copy(type_ctx, ty);
     let mut seen = HashSet::new();
-    rewrite(
-        type_ctx,
-        copied,
-        type_subst,
-        module_subst,
-        modtype_subst,
-        &mut seen,
-    );
+    rewrite(type_ctx, copied, subst, &mut seen);
     copied
 }
 
