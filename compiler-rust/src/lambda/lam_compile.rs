@@ -673,17 +673,27 @@ impl LambdaCompiler {
             let export = &extracted.exports[index];
             let value = &extracted.values[index];
             let later_exports = &extracted.exports[index + 1..];
-            if let Some((late_value, property)) =
-                move_same_name_export_alias_to_export_tail(block, export, value)
-            {
-                exports.push(export.clone());
-                rebound_exports.push(Statement::variable(VariableDeclaration {
-                    ident: export.clone(),
-                    value: Some(late_value),
-                    property,
-                    ident_info: IdentInfo::default(),
-                }));
-                continue;
+            let exact_self_export = matches!(
+                &value.desc,
+                ExpressionDesc::Var(VIdent::Id(target)) if target.same(export)
+            );
+            // OCaml's `Lvar id` branch only changes the export list/set and
+            // emits no rebound group when the value is already the same
+            // physical identifier (`compiler/core/lam_coercion.ml:99-111`).
+            // Keep that source binding in place instead of tail-moving it.
+            if !exact_self_export {
+                if let Some((late_value, property)) =
+                    move_same_name_export_alias_to_export_tail(block, export, value)
+                {
+                    exports.push(export.clone());
+                    rebound_exports.push(Statement::variable(VariableDeclaration {
+                        ident: export.clone(),
+                        value: Some(late_value),
+                        property,
+                        ident_info: IdentInfo::default(),
+                    }));
+                    continue;
+                }
             }
             if let ExpressionDesc::Var(VIdent::Id(target)) = &value.desc {
                 if target.name() == export.name() {
