@@ -296,6 +296,13 @@ impl JsPrinter {
         *next = (*next).max(next_suffix);
     }
 
+    fn visible_next_suffix_for_base(&self, base: &str) -> Option<usize> {
+        self.name_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.next_suffix.get(base).copied())
+    }
+
     fn assign_scoped_ident_name(&mut self, id: &Ident, base: String) -> String {
         let next = self
             .current_name_scope_mut()
@@ -841,21 +848,6 @@ impl JsPrinter {
         self.semi();
     }
 
-    fn with_local_ident_scope<T>(
-        &mut self,
-        reserved_printed_names: &[String],
-        f: impl FnOnce(&mut Self) -> T,
-    ) -> T {
-        let mut scope = NameScope::default();
-        for printed in reserved_printed_names {
-            Self::reserve_printed_name(&mut scope, printed);
-        }
-        self.name_scopes.push(scope);
-        let out = f(self);
-        self.name_scopes.pop();
-        out
-    }
-
     fn with_function_ident_scope<T>(
         &mut self,
         params: &[Ident],
@@ -865,12 +857,27 @@ impl JsPrinter {
     ) -> T {
         let reserved_idents = function_reserved_idents(params, body, function_ident);
 
-        let reserved_printed_names = reserved_idents
-            .into_iter()
-            .map(|ident| self.ident_name(&ident))
-            .collect::<Vec<_>>();
+        let mut scope = NameScope::default();
+        for ident in reserved_idents {
+            let printed = self.ident_name(&ident);
+            let (base, next_suffix) = printed_name_base_and_next_suffix(&printed);
+            // OCaml's Ext_pp_scope.sub_scope copies the whole stamp map for a
+            // captured mangled name, not just the one captured identifier
+            // (compiler/ext/ext_pp_scope.ml:109-117). That means capturing
+            // outer `match` also reserves an already-visible sibling
+            // `match$1`, so body-local `match` starts at `match$2`.
+            let visible_next = self
+                .visible_next_suffix_for_base(&base)
+                .unwrap_or(next_suffix);
+            scope
+                .next_suffix
+                .insert(base, visible_next.max(next_suffix));
+        }
 
-        self.with_local_ident_scope(&reserved_printed_names, f)
+        self.name_scopes.push(scope);
+        let out = f(self);
+        self.name_scopes.pop();
+        out
     }
 
     fn print_function_expression(&mut self, context: FunctionPrintContext<'_>) {
@@ -6077,6 +6084,61 @@ mod tests {
 
         assert!(rendered.contains("function foo(arg) {"));
         assert!(rendered.contains("return value + arg;"));
+    }
+
+    #[test]
+    fn test_print_function_scope_copies_captured_base_suffix_map_like_ocaml() {
+        let outer_start = Ident::create_local("match");
+        let outer_end = Ident::create_local("match");
+        let callback = Ident::create_local("callback");
+        let param = Ident::create_local("preset");
+        let inner_match = Ident::create_local("match");
+
+        let rendered = print_block(&vec![
+            Statement::variable(VariableDeclaration {
+                ident: outer_start.clone(),
+                value: Some(Expression::number(Number::int(1))),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: outer_end,
+                value: Some(Expression::number(Number::int(2))),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+            Statement::variable(VariableDeclaration {
+                ident: callback,
+                value: Some(Expression::new(ExpressionDesc::Fun {
+                    is_method: false,
+                    params: vec![param],
+                    body: vec![
+                        Statement::variable(VariableDeclaration {
+                            ident: inner_match.clone(),
+                            value: Some(Expression::number(Number::int(3))),
+                            property: crate::lambda::lam_compat::LetKind::Strict,
+                            ident_info: Default::default(),
+                        }),
+                        Statement::return_(Expression::bin(
+                            BinOp::Plus,
+                            Expression::var(outer_start),
+                            Expression::var(inner_match),
+                        )),
+                    ],
+                    env: Default::default(),
+                    return_unit: false,
+                    async_: false,
+                    directive: None,
+                })),
+                property: crate::lambda::lam_compat::LetKind::Strict,
+                ident_info: Default::default(),
+            }),
+        ]);
+
+        assert!(rendered.contains("let match = 1;"));
+        assert!(rendered.contains("let match$1 = 2;"));
+        assert!(rendered.contains("let match$2 = 3;"));
+        assert!(rendered.contains("return match + match$2;"));
     }
 
     #[test]
