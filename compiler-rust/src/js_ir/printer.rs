@@ -2564,15 +2564,9 @@ impl JsPrinter {
             return;
         }
 
-        if return_unit {
-            // OCaml's `function_body` only drops/elides unit tails while walking
-            // statements; it does not rewrite non-unit early-return guard chains
-            // into a positive success guard (compiler/core/js_dump.ml:1675-1703).
-            if let Some(merged) = try_function_body_negative_guard_chain_merge(stmts) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-        }
+        // OCaml's `function_body` only drops/elides unit tails while walking
+        // statements; it does not rewrite early-return guard chains into a
+        // positive success guard (compiler/core/js_dump.ml:1675-1703).
 
         if return_unit {
             let implicit_return = Statement::return_(Expression::undefined(true));
@@ -2654,15 +2648,8 @@ impl JsPrinter {
     }
 
     fn print_function_tail_statement(&mut self, stmt: &Statement, return_unit: bool) {
-        if return_unit {
-            // Keep non-unit functions faithful to OCaml's `function_body`
-            // traversal (compiler/core/js_dump.ml:1675-1703); guard-chain
-            // inversion is only used to match unit-tail elision shapes.
-            if let Some(merged) = try_function_tail_negative_guard_chain_merge(stmt) {
-                self.print_function_tail_statement(&merged, return_unit);
-                return;
-            }
-        }
+        // OCaml's `function_body` keeps guard chains as emitted by `S.if_`;
+        // see compiler/core/js_dump.ml:1675-1703.
 
         if return_unit {
             if let Some(merged) = try_unit_function_tail_shared_else_guard_chain_merge(stmt) {
@@ -3126,23 +3113,6 @@ fn positive_guard_merge_outer_cond_is_redundant(
     )
 }
 
-fn try_function_tail_negative_guard_chain_merge(stmt: &Statement) -> Option<Statement> {
-    let mut guards = Vec::new();
-    let body = collect_function_tail_negative_guard_chain_stmt(stmt, &mut guards)?;
-    if guards.len() < 2 || body.is_empty() {
-        return None;
-    }
-
-    let mut guards = guards.into_iter();
-    let cond = guards.next()?;
-    let cond = guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
-
-    Some(Statement {
-        desc: StatementDesc::If(cond, body, vec![]),
-        comment: stmt.comment.clone(),
-    })
-}
-
 fn strip_trailing_return_undefined_block(block: &Block) -> Option<Block> {
     let (tail, body) = block.split_last()?;
     if !return_is_undefined(unwrap_single_block_stmt(tail)) {
@@ -3171,12 +3141,6 @@ fn strip_leading_negative_guard_shared_else(
     }
 
     Some((cond.clone(), stripped_block))
-}
-
-fn try_function_body_negative_guard_chain_merge(stmts: &Block) -> Option<Statement> {
-    try_function_tail_negative_guard_chain_merge(&Statement::new(StatementDesc::Block(
-        stmts.clone(),
-    )))
 }
 
 fn try_unit_function_body_single_clean_negative_guard_merge(stmts: &Block) -> Option<Statement> {
