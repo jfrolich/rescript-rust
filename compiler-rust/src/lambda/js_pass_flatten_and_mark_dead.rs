@@ -1489,9 +1489,13 @@ fn substituted_caml_block_item(
 fn should_materialize_block_binding_items(
     property: LetKind,
     items: &[Expression],
-    tag_info: &TagInfo,
+    _tag_info: &TagInfo,
 ) -> bool {
-    if items.len() < 2 || matches!(tag_info, TagInfo::PolyVar(_)) {
+    // OCaml's substitution pass matches every immutable `Caml_block`
+    // with at least two elements, including `Blk_poly_var`, before
+    // splitting complex payload fields
+    // (`compiler/core/js_pass_flatten_and_mark_dead.ml:174-221`).
+    if items.len() < 2 {
         return false;
     }
 
