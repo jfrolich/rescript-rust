@@ -3123,15 +3123,32 @@ fn touch_type_constraint_path(
         return;
     }
 
-    let constr_path = {
+    let constr = {
         let desc = ctx.get_desc(ty);
         match &*desc {
-            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+            crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
+                Some((path.clone(), !args.is_empty()))
+            }
             _ => None,
         }
     };
 
-    if let Some(path) = constr_path {
+    if let Some((path, has_args)) = constr {
+        // OCaml compiler/ml/typedecl.ml:767-781 checks every declaration
+        // constraint with `Ctype.enforce_constraints` followed by
+        // `Ctype.matches`; compiler/ml/ctype.ml:3187-3198 snapshots the
+        // mutations, but compiler/ml/ctype.ml:2338-2344 still expands both
+        // heads before backtracking. That expansion can force persistent
+        // signatures through env.ml:903-914 `normalize_path`.
+        // OCaml compiler/ml/env.ml:903-914 only reaches the persistent-module
+        // force through module paths while normalizing prefixes. A bare local
+        // type constructor has no module prefix; in the reference compiler it
+        // returns unchanged through env.ml:920-923's lax `normalize_path None`
+        // path rather than forcing a persistent signature.
+        if has_args && !matches!(path, Path::Pident(_)) {
+            crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
+        }
+
         if constraint_path_needs_primitive_js_match_force(ctx, env, pers_env, &path) {
             crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
         }
