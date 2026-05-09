@@ -2575,8 +2575,7 @@ impl LambdaCompiler {
                 // still returns from the JS function, but it is not the
                 // `Tail_with_name {in_staticcatch=false}` context required by
                 // `compile_staticcatch`'s pseudo-jump arm.
-                let body_block =
-                    self.with_try_body_context(|this| this.compile_return_block(body));
+                let body_block = self.with_try_body_context(|this| this.compile_return_block(body));
                 let handler_block = self.compile_return_block(handler);
                 vec![self.try_statement(body_block, exn, handler_block)]
             }
@@ -6860,8 +6859,10 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                     ..
                 }) = value
                 {
-                    let submodule_arities =
-                        args.iter().map(|lam| get_arity(&meta, lam)).collect::<Vec<_>>();
+                    let submodule_arities = args
+                        .iter()
+                        .map(|lam| get_arity(&meta, lam))
+                        .collect::<Vec<_>>();
                     arities.insert(
                         export.name().to_string(),
                         CmjExportArity::Submodule(submodule_arities),

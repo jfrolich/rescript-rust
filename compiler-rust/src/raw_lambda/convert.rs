@@ -3859,9 +3859,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..))
-            || Self::path_may_follow_mty_ident(&path)
-        {
+        if matches!(&path, crate::types::Path::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,
@@ -3931,9 +3929,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
 
-        if matches!(&path, crate::types::Path::Pdot(..))
-            || Self::path_may_follow_mty_ident(&path)
-        {
+        if matches!(&path, crate::types::Path::Pdot(..)) || Self::path_may_follow_mty_ident(&path) {
             if let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
                 &path,
                 env,

@@ -1781,7 +1781,8 @@ fn close_matching_variant_rows_from_expected<'a>(
                     args: impl_args, ..
                 },
                 TypeDesc::Tconstr {
-                    args: expected_args, ..
+                    args: expected_args,
+                    ..
                 },
             ) if impl_args.is_empty() && expected_args.is_empty() => {
                 // OCaml compiler/ml/includemod.ml:56-60 delegates value

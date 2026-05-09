@@ -165,9 +165,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         Constant::Int { i, comment } => match comment {
             Some(PointerInfo::Constructor(_))
             | Some(PointerInfo::ShapeNone)
-            | Some(PointerInfo::PolyVariant(_)) => {
-                f.print(format_args!("{i}a"))
-            }
+            | Some(PointerInfo::PolyVariant(_)) => f.print(format_args!("{i}a")),
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),

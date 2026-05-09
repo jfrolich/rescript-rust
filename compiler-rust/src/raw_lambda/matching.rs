@@ -4879,8 +4879,7 @@ fn make_constr_matching(
                     // OCaml compiler/ml/matching.ml:1257-1277 only unwraps
                     // option-shaped constructors when Datarepr marks the
                     // constructor with internal.optional.
-                    ConstructorTag::CstrBlock(_) if constructor_has_optional_shape(cstr) =>
-                    {
+                    ConstructorTag::CstrBlock(_) if constructor_has_optional_shape(cstr) => {
                         let from_option = match &p.pat_desc {
                             PatternDesc::Tpat_construct(_, _, args_inner)
                                 if args_inner.len() == 1 =>
