@@ -2495,7 +2495,7 @@ impl LambdaCompiler {
                             if lambda_contains_static_raise(nested_handler)
                     )
                     && !self.handler_returns_unit_undefined(bindings, handler)
-                    && !lambda_contains_static_raise(handler) =>
+                    && no_static_raise_in_handler_like_ocaml(handler) =>
             {
                 if crate::debug_flags::debug_staticcatch_return() {
                     eprintln!(
@@ -2528,15 +2528,16 @@ impl LambdaCompiler {
                 }
                 if requires_explicit_jump {
                     self.compile_staticcatch_return_block(*label, bindings, body, handler)
-                } else if !has_exit_code(handler, |_| true)
+                } else if no_static_raise_in_handler_like_ocaml(handler)
                     && !lambda_contains_staticcatch(handler)
                     && lambda_contains_static_raise_to_label(body, *label, bindings.len())
                 {
                     // OCaml's `compile_staticcatch` pseudo-jmp path
-                    // (lam_compile.ml:937-962, add_pseudo_jmp at
-                    // lam_compile_context.ml:99-104) fires for any single
-                    // code_table with `no_static_raise_in_handler`
-                    // (lam_compile_context.ml:80-81 — `has_exit_code handler
+                    // (compiler/core/lam_compile.ml:983-1008, add_pseudo_jmp
+                    // at compiler/core/lam_compile_context.ml:125-130) fires
+                    // for any single code_table with `no_static_raise_in_handler`
+                    // (compiler/core/lam_compile_context.ml:105-106:
+                    // `has_exit_code handler
                     // (fun _ -> true)`). We mirror that here via the ported
                     // `Lam_exit_code.has_exit_code`, which STOPS at Lfunction
                     // boundaries (lam_exit_code.ml:28). Rust's prior
@@ -2846,7 +2847,7 @@ impl LambdaCompiler {
                     && switch.sw_failaction.is_none()
                     && switch.sw_consts_full
                     && switch.sw_blocks_full
-                    && !lambda_contains_static_raise(handler)
+                    && no_static_raise_in_handler_like_ocaml(handler)
                     && lambda_contains_static_raise_to_other_label(body, label)
         );
         // Lam_pass_exits can inline outward handlers away before backend
@@ -2856,7 +2857,7 @@ impl LambdaCompiler {
         let shared_multi_exit_fallthrough_like_ocaml = !inside_enclosing_staticcatch_chain
             && !keep_complete_named_variant_plain_handler_inline
             && !self.handler_returns_unit_undefined(bindings, handler)
-            && !lambda_contains_static_raise(handler)
+            && no_static_raise_in_handler_like_ocaml(handler)
             && body_has_target_exit
             && lambda_has_multiple_static_raises_to_label(body, label, arity);
         match body {
@@ -2872,7 +2873,7 @@ impl LambdaCompiler {
                 }
                 _ if !self.uses_untagged_variant_switch(switch)
                     && !keep_complete_named_variant_plain_handler_inline
-                    && !lambda_contains_static_raise(handler)
+                    && no_static_raise_in_handler_like_ocaml(handler)
                     && !lambda_contains_staticcatch(handler)
                     && switch_cases_contain_static_raise_to_label(
                         &switch.sw_consts,
@@ -2899,7 +2900,7 @@ impl LambdaCompiler {
                 // compiler/core/lam_compile.ml:1907-1911.
                 _ if !inside_enclosing_staticcatch_chain
                     && !self.handler_returns_unit_undefined(bindings, handler)
-                    && !lambda_contains_static_raise(handler) =>
+                    && no_static_raise_in_handler_like_ocaml(handler) =>
                 {
                     if !bindings.is_empty() {
                         body_has_target_exit
@@ -2923,7 +2924,7 @@ impl LambdaCompiler {
                 {
                     true
                 }
-                _ if !lambda_contains_static_raise(handler)
+                _ if no_static_raise_in_handler_like_ocaml(handler)
                     && !keep_complete_named_variant_plain_handler_inline
                     && !lambda_contains_staticcatch(handler)
                     && string_switch_cases_contain_static_raise_to_label(cases, label, arity)
@@ -2943,7 +2944,7 @@ impl LambdaCompiler {
                 // compiler/core/lam_compile.ml:1907-1911.
                 _ if !inside_enclosing_staticcatch_chain
                     && !self.handler_returns_unit_undefined(bindings, handler)
-                    && !lambda_contains_static_raise(handler) =>
+                    && no_static_raise_in_handler_like_ocaml(handler) =>
                 {
                     if !bindings.is_empty() {
                         body_has_target_exit
@@ -2963,7 +2964,7 @@ impl LambdaCompiler {
                     && !bindings.is_empty()
                     && !self.staticcatch_handler_is_identity_binding(bindings, handler)
                     && !self.handler_returns_unit_undefined(bindings, handler)
-                    && !lambda_contains_static_raise(handler)
+                    && no_static_raise_in_handler_like_ocaml(handler)
                     && !lambda_contains_staticcatch(handler)
                     && body_has_target_exit
                     && !lambda_contains_static_raise_to_other_label(try_body, label) =>
@@ -2989,7 +2990,7 @@ impl LambdaCompiler {
             && self.fallthrough_return_handlers.is_empty()
             && !matches!(body, Lambda::Lswitch(_, _) | Lambda::LstringSwitch(_, _, _))
             && lambda_contains_static_raise_to_label(body, label, bindings.len())
-            && !lambda_contains_static_raise(handler)
+            && no_static_raise_in_handler_like_ocaml(handler)
     }
 
     pub(crate) fn active_fallthrough_return_handler(&self) -> Option<&FallthroughReturnHandler> {
@@ -3280,22 +3281,24 @@ impl LambdaCompiler {
                     self.compile_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
                     )
-                } else if !has_exit_code(handler, |_| true)
+                } else if no_static_raise_in_handler_like_ocaml(handler)
                     && !lambda_contains_staticcatch(handler)
                     && lambda_contains_static_raise_to_label(body, *label, bindings.len())
                 {
                     // Mirror the fallthrough / pseudo-jmp arm from
                     // `compile_return_block`. OCaml's pseudo-jmp path
-                    // (lam_compile.ml:937-962) gates on
+                    // (compiler/core/lam_compile.ml:983-1008) gates on
                     // `no_static_raise_in_handler`
-                    // (lam_compile_context.ml:80-81) which itself wraps
-                    // `has_exit_code handler (fun _ -> true)` — stopping at
+                    // (compiler/core/lam_compile_context.ml:105-106) which
+                    // itself wraps `has_exit_code handler (fun _ -> true)`,
+                    // stopping at
                     // Lfunction boundaries. Using `has_exit_code` here lets
                     // handlers whose only static_raises live inside a
                     // nested closure reach the fallthrough emission
-                    // (lam_compile.ml:957-962), eliminating the spurious
-                    // outer explicit-jump layer that miss_colon_test saw
-                    // when `lambda_contains_static_raise` over-counted.
+                    // (compiler/core/lam_compile.ml:1002-1008), eliminating
+                    // the spurious outer explicit-jump layer that
+                    // miss_colon_test saw when `lambda_contains_static_raise`
+                    // over-counted.
                     self.compile_fallthrough_staticcatch_tail_loop_return_block(
                         *label, bindings, body, handler, tail_loop,
                     )
@@ -5220,7 +5223,7 @@ impl LambdaCompiler {
             | Lambda::LstringSwitch(_, _, _)
             | Lambda::Llet(_, _, _, _)
             | Lambda::Lsequence(_, _)
-                if lambda_contains_static_raise(lam)
+                if handler_has_static_raise_like_ocaml(lam)
                     && !self.handler_is_pure_outward_static_raise_forwarder(lam) =>
             {
                 true
@@ -7217,6 +7220,21 @@ fn lambda_contains_static_raise(lam: &Lambda) -> bool {
                 || lambda_contains_static_raise(else_)
         }
     }
+}
+
+fn handler_has_static_raise_like_ocaml(handler: &Lambda) -> bool {
+    // OCaml's `Lam_compile_context.no_static_raise_in_handler`
+    // (compiler/core/lam_compile_context.ml:105-106) is defined in terms of
+    // `Lam_exit_code.has_exit_code`; that search stops at `Lfunction`
+    // (compiler/core/lam_exit_code.ml:25-31), because static exits cannot cross
+    // function boundaries. Handler guards in Rust must use the same reachability
+    // rule instead of the broader `lambda_contains_static_raise`, which also
+    // sees static raises nested inside closures.
+    has_exit_code(handler, |_| true)
+}
+
+fn no_static_raise_in_handler_like_ocaml(handler: &Lambda) -> bool {
+    !handler_has_static_raise_like_ocaml(handler)
 }
 
 pub(crate) fn lambda_has_exit(lam: &Lambda) -> bool {
