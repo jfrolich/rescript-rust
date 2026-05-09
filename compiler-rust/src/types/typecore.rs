@@ -3027,6 +3027,30 @@ fn preserve_alias_unify_representative(
         (type_name == "t" && type_parent.same(value_parent)).then_some(value_parent)
     }
 
+    fn selected_child_parent_type_alias(
+        parameter_path: &Path,
+        argument_path: &Path,
+        selected_value_path: Option<&Path>,
+    ) -> bool {
+        let Some(Path::Pdot(selected_parent, _, _)) = selected_value_path else {
+            return false;
+        };
+        let Path::Pdot(parameter_parent, parameter_type_name, _) = parameter_path else {
+            return false;
+        };
+        if !parameter_parent.same(selected_parent) {
+            return false;
+        }
+        let Path::Pdot(selected_grandparent, _, _) = selected_parent.as_ref() else {
+            return false;
+        };
+        let Path::Pdot(argument_parent, argument_type_name, _) = argument_path else {
+            return false;
+        };
+        parameter_type_name == argument_type_name
+            && argument_parent.same(selected_grandparent.as_ref())
+    }
+
     fn raw_signature_manifest_path(
         ctx: &TypeContext,
         env: &Env,
@@ -3082,6 +3106,12 @@ fn preserve_alias_unify_representative(
             &argument_path,
             arity,
         );
+        let selected_child_parent_alias = parameter_args.len() == argument_args.len()
+            && selected_child_parent_type_alias(
+                &parameter_path,
+                &argument_path,
+                selected_value_path,
+            );
         let direction = if argument_is_local_alias && !parameter_is_local_alias {
             Some(AliasLinkDirection::ParameterToArgument)
         } else if parameter_is_local_alias && !argument_is_local_alias {
@@ -3093,6 +3123,15 @@ fn preserve_alias_unify_representative(
             // representative over the unpack payload's underlying `Belt.Id.cmp`
             // path.
             Some(AliasLinkDirection::ArgumentToParameter)
+        } else if selected_child_parent_alias {
+            // OCaml compiler/ml/typecore.ml:3771-3773 types the source
+            // argument before `unify_exp`; ctype.ml:2340-2364 expands both
+            // heads before linking the expression representatives. For a value
+            // selected through a child module that was also included into the
+            // parent, e.g. `LayerStyleID.ID.explode : LayerStyleID.ID.t -> _`
+            // applied to `LayerStyleID.t`, the included parent type can become
+            // the shared representative.
+            Some(AliasLinkDirection::ParameterToArgument)
         } else if flattened_alias_equiv {
             // OCaml compiler/ml/typecore.ml:3771-3773 only runs
             // `type_expect` followed by `unify_exp`; compiler/ml/env.ml:1530-1538
@@ -3215,6 +3254,15 @@ fn preserve_alias_unify_representative(
             return;
         }
         let shares_item_identity = shares_direct_identity || shares_ctype_identity;
+        let selected_child_parent_alias_equiv = selected_child_parent_alias
+            && (shares_item_identity
+                || compare_type_paths_for_disambiguation(
+                    &parameter_path,
+                    &argument_path,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                ));
         let preserve_flattened_alias =
             flattened_alias_equiv && (arity == 0 || !shares_item_identity);
         // OCaml compiler/ml/ctype.ml:2412-2414 unifies arguments after
@@ -3226,6 +3274,7 @@ fn preserve_alias_unify_representative(
         // plus the local package cases below where Rust is compensating for
         // OCaml ref sharing.
         let shares_identity = selected_local_parameter_alias
+            || selected_child_parent_alias_equiv
             || preserve_flattened_alias
             || (arity == 0 && shares_item_identity);
         if !shares_identity {
