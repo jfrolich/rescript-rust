@@ -4229,10 +4229,18 @@ fn unify_types<'a>(
                     let p1_local_alias = path_root_is_local_module_alias(env, path1);
                     let p2_local_alias = path_root_is_local_module_alias(env, path2);
                     let flat_persistent_parent = |path: &Path| {
+                        // OCaml compiler/ml/ctype.ml:2393-2414 can link an
+                        // expanded backing-unit representative after
+                        // env.ml:1530-1538 and subst.ml:87-95 have substituted
+                        // selected module components. Limit that compensation to
+                        // ReScript's flattened persistent backing units; ordinary
+                        // persistent source modules such as `ZoomGenerator.t`
+                        // keep their explicit annotation path.
                         matches!(
                             path,
                             Path::Pdot(parent, _, _)
-                                if matches!(parent.as_ref(), Path::Pident(id) if id.is_persistent())
+                                if matches!(parent.as_ref(), Path::Pident(id)
+                                    if id.is_persistent() && id.name().contains('_'))
                         )
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
