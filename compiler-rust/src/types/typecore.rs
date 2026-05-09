@@ -12851,6 +12851,53 @@ fn qualified_record_label_from_info<'a>(
         })
 }
 
+fn force_unqualified_record_label_disambiguate_by_type_compare<'a>(
+    field_name: &str,
+    record_opath_ty: Option<TypeExprRef>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) {
+    let Some(record_ty) = record_opath_ty else {
+        return;
+    };
+    let Some(target_path) =
+        extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)
+    else {
+        return;
+    };
+
+    let labels = env.find_all_labels(field_name);
+    if labels.is_empty() {
+        return;
+    }
+
+    for label in labels.iter().rev() {
+        let Some(label_path) = label_result_path(ctx, label) else {
+            continue;
+        };
+        // OCaml compiler/ml/typecore.ml:1120-1125 passes the full unqualified
+        // label scope to `Label.disambiguate` when `opath` is present. That then
+        // runs `disambiguate_by_type` at typecore.ml:983-988, calling
+        // `compare_type_path env tpath lbl_tpath` until the first match.
+        // `compare_type_path` reaches typecore.ml:775-787 `expand_path`, whose
+        // `Env.normalize_path` fallback forces persistent `ps_sig` lazies through
+        // compiler/ml/env.ml:914-926 and env.ml:865-875. Rust's canonical
+        // record-label fast path below already knows the selected record, so
+        // replay this comparison before taking it to preserve the same lazy
+        // mutation and identifier-stamp order.
+        if compare_type_paths_for_label_disambiguation(
+            &target_path,
+            &label_path,
+            env,
+            pers_env,
+            ctx,
+        ) {
+            break;
+        }
+    }
+}
+
 fn select_record_type_for_fields<'a>(
     ctx: &'a TypeContext,
     env: &Env,
@@ -13040,9 +13087,9 @@ fn type_record(
     // (typecore.ml:1098-1126) is not passed as `opath` to
     // `Label.disambiguate`; otherwise typecore.ml:983-988 would force
     // `compare_type_path` too early for qualified labels.
-    let mut record_opath_ty =
-        extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx)
-            .map(|_| expected_ty);
+    let expected_record_info =
+        extract_concrete_record_type_info(expected_ty, env, &mut tctx.persistent_env, ctx);
+    let mut record_opath_ty = expected_record_info.as_ref().map(|_| expected_ty);
     // Match OCaml Pexp_record(Some exp):
     // when expected type does not reveal a concrete record path, but the base
     // expression does, use a fresh constructor instance from the base path as
@@ -13167,6 +13214,15 @@ fn type_record(
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
         let prefer_known_record_label = !ctx.preserve_canonical_typedtree();
+        if !prefer_known_record_label && matches!(resolved_lid, Longident::Lident(_)) {
+            force_unqualified_record_label_disambiguate_by_type_compare(
+                field_name,
+                record_opath_ty,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            );
+        }
         let disambiguated = if prefer_known_record_label {
             qualified_record_label_from_info(
                 disambiguation_label_descriptions.as_ref(),
