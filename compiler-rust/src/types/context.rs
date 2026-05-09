@@ -362,6 +362,15 @@ pub struct TypeContext {
         >,
     >,
 
+    /// Cached forced module-type declarations from qualified component tables.
+    ///
+    /// OCaml compiler/ml/env.ml:1513-1519 memoizes one component table per
+    /// `scrape_alias` access path, and env.ml:1581-1585 stores the substituted
+    /// module-type declarations in that table.
+    qualified_modtype_decl_cache: RefCell<
+        ahash::AHashMap<Path, ahash::AHashMap<String, (Ident, super::decl::ModtypeDeclaration)>>,
+    >,
+
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
@@ -519,6 +528,7 @@ impl TypeContext {
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
+            qualified_modtype_decl_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             persistent_env: RefCell::new(None),
@@ -819,6 +829,22 @@ impl TypeContext {
             .cloned()
     }
 
+    /// Return flattened persistent heads that back a selected component path.
+    ///
+    /// This mirrors the alias source selected by OCaml compiler/ml/env.ml:1513
+    /// through `scrape_alias`, while env.ml:1573-1578 stores child component
+    /// paths under the selected access path.
+    pub(crate) fn flattened_alias_heads_for_component_path(
+        &self,
+        component_path: &Path,
+    ) -> Vec<String> {
+        self.flattened_alias_component_paths
+            .borrow()
+            .iter()
+            .filter_map(|(flat_head, path)| path.same(component_path).then(|| flat_head.clone()))
+            .collect()
+    }
+
     /// Look up a module alias target from the qualified module components cache.
     ///
     /// For a path like `Pdot(Pident("Js"), "Exn", _)`, checks whether `Js`'s
@@ -953,6 +979,41 @@ impl TypeContext {
             .borrow()
             .get(parent_path)
             .and_then(|modules| modules.get(child_name))
+            .cloned()
+    }
+
+    /// Cache a forced qualified module-type declaration.
+    ///
+    /// Matches OCaml compiler/ml/env.ml:1513-1519 and env.ml:1581-1585: once a
+    /// component modtype is forced for an access path, later lookups through
+    /// the same component table observe that same declaration.
+    pub(crate) fn register_qualified_modtype_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+        id: Ident,
+        mtd: super::decl::ModtypeDeclaration,
+    ) {
+        self.qualified_modtype_decl_cache
+            .borrow_mut()
+            .entry(parent_path.clone())
+            .or_default()
+            .insert(child_name.to_string(), (id, mtd));
+    }
+
+    /// Look up a forced qualified module-type declaration.
+    ///
+    /// This is the Rust side of OCaml compiler/ml/env.ml:1513-1519's component
+    /// table memoization for qualified module-type lookups.
+    pub(crate) fn find_qualified_modtype_decl(
+        &self,
+        parent_path: &Path,
+        child_name: &str,
+    ) -> Option<(Ident, super::decl::ModtypeDeclaration)> {
+        self.qualified_modtype_decl_cache
+            .borrow()
+            .get(parent_path)
+            .and_then(|modtypes| modtypes.get(child_name))
             .cloned()
     }
 

@@ -472,6 +472,43 @@ impl QualifiedModuleComponents {
         value_source_prefix: Option<Path>,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        // OCaml compiler/ml/env.ml:1513-1519 builds one component table after
+        // `scrape_alias`, so aliases like `Webapi.Dom` and their flattened
+        // backing unit can reach the same env.ml:1581-1585 modtype force.
+        let mut source_prefixes = Vec::new();
+        if let Some(source_prefix) = value_source_prefix.as_ref() {
+            source_prefixes.push(source_prefix.clone());
+        }
+        let one_hop_selected_alias = matches!(
+            &access_path,
+            Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pident(_))
+        );
+        if one_hop_selected_alias {
+            for flat_head in ctx.flattened_alias_heads_for_component_path(&access_path) {
+                let source_prefix = Path::pident(Ident::create_persistent(&flat_head));
+                if !source_prefix.same(&access_path)
+                    && !source_prefixes
+                        .iter()
+                        .any(|existing| existing.same(&source_prefix))
+                {
+                    source_prefixes.push(source_prefix);
+                }
+            }
+        }
+        // Registered namespace backing units such as `Webapi__Dom` are the
+        // persistent side of the same OCaml env.ml:1513-1519 component force
+        // reached after `scrape_alias`; share their env.ml:1581-1585 modtype
+        // declarations with the selected component path. Single-underscore
+        // stdlib backing units such as `Belt_Map` still use the ordinary
+        // component force path here, matching env.ml:1513-1519's separate
+        // memoization point.
+        let share_modtype_force = !source_prefixes.is_empty()
+            || (access_path.head().is_persistent()
+                && access_path.head().name().contains("__")
+                && ctx
+                    .find_flattened_alias_component_path(access_path.head().name())
+                    .is_some());
+
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
@@ -508,18 +545,73 @@ impl QualifiedModuleComponents {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(id, mtd) => {
-                    let mut component_mtd = mtd.clone();
-                    // OCaml compiler/ml/env.ml:1530 and 1581-1585 apply the
-                    // `prefix_idents` substitution while building component
-                    // modtypes. Keep this eager side effect because it consumes
-                    // fresh identifiers in canonical typedtree order.
-                    crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
-                        &mut component_mtd,
-                        &signature,
-                        &access_path,
-                        ctx,
-                    );
-                    component_modtypes.insert(id.name().to_string(), (id.clone(), component_mtd));
+                    let (component_id, component_mtd) = if !share_modtype_force {
+                        let mut component_mtd = mtd.clone();
+                        // OCaml compiler/ml/env.ml:1513-1514 memoizes a
+                        // component table per force point, then env.ml:1581-1585
+                        // applies `Subst.modtype_declaration` for that table.
+                        // With no scraped alias source, this Rust component
+                        // construction is the force point, so freshen locally.
+                        crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
+                            &mut component_mtd,
+                            &signature,
+                            &access_path,
+                            ctx,
+                        );
+                        (id.clone(), component_mtd)
+                    } else {
+                        ctx.find_qualified_modtype_decl(&access_path, id.name())
+                            .or_else(|| {
+                                source_prefixes.iter().find_map(|source_prefix| {
+                                    ctx.find_qualified_modtype_decl(source_prefix, id.name())
+                                })
+                            })
+                            .unwrap_or_else(|| {
+                                let mut component_mtd = mtd.clone();
+                                // OCaml compiler/ml/env.ml:1513-1514 memoizes the
+                                // component table, then env.ml:1581-1585 applies
+                                // `Subst.modtype_declaration` once for each
+                                // module type in that table. Cache the forced
+                                // declaration by selected access path so Rust
+                                // component views reached through type-path probes
+                                // reuse the same OCaml force point instead of
+                                // freshening the module type again.
+                                crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
+                                    &mut component_mtd,
+                                    &signature,
+                                    &access_path,
+                                    ctx,
+                                );
+                                let result = (id.clone(), component_mtd);
+                                ctx.register_qualified_modtype_decl(
+                                    &access_path,
+                                    id.name(),
+                                    result.0.clone(),
+                                    result.1.clone(),
+                                );
+                                for source_prefix in source_prefixes.iter() {
+                                    if source_prefix.same(&access_path) {
+                                        continue;
+                                    }
+                                    // OCaml compiler/ml/env.ml:1513-1519 keeps
+                                    // one component-table force result reachable
+                                    // through both the selected path and the
+                                    // scraped alias source. Rust has separate
+                                    // views for paths such as `Webapi.Dom` and
+                                    // `Webapi__Dom`, so share the
+                                    // env.ml:1581-1585 modtype declaration force
+                                    // across both keys.
+                                    ctx.register_qualified_modtype_decl(
+                                        source_prefix,
+                                        id.name(),
+                                        result.0.clone(),
+                                        result.1.clone(),
+                                    );
+                                }
+                                result
+                            })
+                    };
+                    component_modtypes.insert(id.name().to_string(), (component_id, component_mtd));
                 }
                 SignatureItem::SigClassType => {}
             }
@@ -1148,14 +1240,18 @@ impl QualifiedModuleComponents {
             .map(|(runtime_pos, id, md)| (runtime_pos, id, md.as_ref().clone()))
     }
 
-    pub(crate) fn lookup_modtype(&self, name: &str) -> Option<(&Ident, &ModtypeDeclaration)> {
-        self.component_modtypes.get(name).map(|(id, mtd)| (id, mtd))
+    pub(crate) fn lookup_modtype(
+        &self,
+        name: &str,
+        _ctx: &super::context::TypeContext,
+    ) -> Option<(Ident, ModtypeDeclaration)> {
+        self.component_modtypes.get(name).cloned()
     }
 
     pub(crate) fn lookup_qualified_modtype(
         &self,
         name: &str,
-        _ctx: &super::context::TypeContext,
+        ctx: &super::context::TypeContext,
     ) -> Option<(Ident, ModtypeDeclaration)> {
         if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
             return Some((id, mtd));
@@ -1166,7 +1262,7 @@ impl QualifiedModuleComponents {
         // lookup reads that cached declaration. Do not run the child-module
         // substitution pass again here; it would double-substitute package
         // identities that were already handled while building the component.
-        let (id, mtd) = self.component_modtypes.get(name).cloned()?;
+        let (id, mtd) = self.lookup_modtype(name, ctx)?;
         self.qualified_modtypes
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), mtd.clone()));

@@ -2897,7 +2897,7 @@ fn preferred_alias_equiv_representative<'a>(
     lhs: TypeExprRef,
     rhs: TypeExprRef,
 ) -> Option<TypeExprRef> {
-    fn prefer_top_level_qualified_flat_alias(
+    fn prefer_qualified_flat_alias(
         lhs: TypeExprRef,
         rhs: TypeExprRef,
         path1: &Path,
@@ -2909,11 +2909,20 @@ fn preferred_alias_equiv_representative<'a>(
         let seg2: Vec<&str> = name2.split('.').collect();
 
         let qualifies = |long: &[&str], short: &[&str]| {
-            long.len() == 3
-                && short.len() == 2
-                && short[1] == long[2]
-                && (short[0] == format!("{}_{}", long[0], long[1])
-                    || short[0] == format!("{}__{}", long[0], long[1]))
+            // OCaml compiler/ml/env.ml:1530-1538 prefixes the selected
+            // component path before compiler/ml/subst.ml:303-309 substitutes
+            // value descriptions. Prefer that qualified component path over
+            // ReScript's flattened backing unit for both `A.B.t`/`A__B.t` and
+            // deeper `A.B.C.t`/`A__B.C.t` namespace families.
+            (long.len() == short.len() + 1
+                && long.len() >= 3
+                && short.len() >= 2
+                && short[0] == format!("{}__{}", long[0], long[1])
+                && long[2..] == short[1..])
+                || (long.len() == 3
+                    && short.len() == 2
+                    && short[1] == long[2]
+                    && short[0] == format!("{}_{}", long[0], long[1]))
         };
 
         if qualifies(&seg1, &seg2) {
@@ -2952,7 +2961,7 @@ fn preferred_alias_equiv_representative<'a>(
                     Some(rhs_repr)
                 }
             } else if let Some(preferred) =
-                prefer_top_level_qualified_flat_alias(lhs_repr, rhs_repr, path1, path2)
+                prefer_qualified_flat_alias(lhs_repr, rhs_repr, path1, path2)
             {
                 Some(preferred)
             } else {
@@ -4881,6 +4890,16 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
+    fn module_path_is_nested_under_selected(
+        module_path: &Path,
+        selected_module_path: Option<&Path>,
+    ) -> bool {
+        let Some(selected_module_path) = selected_module_path else {
+            return false;
+        };
+        path_descendant_depth(module_path, selected_module_path).is_some_and(|depth| depth > 1)
+    }
+
     fn path_with_rewritten_root(path: &Path, new_root: &Path) -> Option<Path> {
         let mut segments = Vec::new();
         let mut cursor = path;
@@ -4919,10 +4938,11 @@ fn force_qualified_value_type_paths<'a>(
         if !flat_root.is_persistent() {
             return None;
         }
-        let qualified_root = pers_env
+        let persistent_qualified_root = pers_env
             .as_ref()
-            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_root.name()))
-            .or_else(|| ctx.find_flattened_alias_component_path(flat_root.name()))?;
+            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_root.name()));
+        let context_qualified_root = ctx.find_flattened_alias_component_path(flat_root.name());
+        let qualified_root = persistent_qualified_root.or(context_qualified_root)?;
         // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
         // compiler/ml/env.ml:1530-1538 builds the selected component table, and
         // compiler/ml/mtype.ml:41-49 leaves value descriptions unchanged while
@@ -4974,9 +4994,6 @@ fn force_qualified_value_type_paths<'a>(
                     .is_some_and(|depth| depth > 0)
                 && path_descendant_depth(candidate_parent, &qualified_root)
                     .is_some_and(|depth| depth > 0);
-            let qualified_root_is_namespace_alias = pers_env
-                .as_ref()
-                .is_some_and(|pers| pers.path_head_is_namespace_alias(&qualified_root));
             let raw_candidate_parent_is_alias = candidate_and_selected_share_non_stdlib_alias_root
                 && matches!(path, Path::Pdot(raw_parent, _, _) if {
                     let mut persistent_env = pers_env.clone();
@@ -4986,7 +5003,6 @@ fn force_qualified_value_type_paths<'a>(
             if !candidate_parent_is_selected_or_child
                 && !(selected_is_inside_candidate_parent && !candidate_root_is_stdlib)
                 && !(candidate_and_selected_share_non_stdlib_alias_root
-                    && !qualified_root_is_namespace_alias
                     && !raw_candidate_parent_is_alias)
             {
                 // OCaml compiler/ml/env.ml:1516-1538 scrapes the selected
@@ -4996,13 +5012,10 @@ fn force_qualified_value_type_paths<'a>(
                 // A sibling path such as `Webapi__Canvas.Canvas2d.t` inside
                 // selected `Webapi.Canvas.CanvasElement.getContext2d` therefore
                 // stays on the backing unit when `Canvas2d` is itself another
-                // module alias. Synthetic namespace alias roots (loaded from
-                // `.mlmap`, or from alias-only namespace `.cmi` files) behave
-                // the same way: `NodeJs.Crypto.Decipher.make` keeps sibling
-                // types such as `Crypto-NodeJs.KeyObject.t`. Non-alias
-                // siblings such as `Layout__Types.Name.t` still follow
-                // env.ml:1530-1538's component substitution to
-                // `Layout.Types.Name.t`.
+                // module alias. Non-alias siblings under the same selected alias
+                // root, including namespace-backed roots such as `Webapi.Fetch`,
+                // still follow env.ml:1530-1538's component substitution to
+                // `Webapi.Fetch.HeadersInit.t`/`Layout.Types.Name.t`.
                 return None;
             }
         }
@@ -5380,6 +5393,8 @@ fn force_qualified_value_type_paths<'a>(
         selected_alias_targets: &[Path],
         allow_stdlib_flat_parent_inference: bool,
         allow_non_stdlib_implicit_stdlib_inference: bool,
+        defer_selected_value_final_result: bool,
+        suppress_selected_value_forces: bool,
         seen: &mut TypeExprRefSet,
     ) {
         let ctx = tctx.type_ctx;
@@ -5422,6 +5437,11 @@ fn force_qualified_value_type_paths<'a>(
                     let arg_desc = ctx.get_desc(arg_repr);
                     matches!(*arg_desc, TypeDesc::Tarrow { .. })
                 };
+                let ret_is_arrow = {
+                    let ret_repr = ctx.repr(ret_ty);
+                    let ret_desc = ctx.get_desc(ret_repr);
+                    matches!(*ret_desc, TypeDesc::Tarrow { .. })
+                };
                 // OCaml compiler/ml/typecore.ml:4171-4192 calls `type_argument`
                 // once for each source argument. A function-typed argument is then
                 // typed by typecore.ml:2404-2457 against that expected function
@@ -5442,20 +5462,52 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     arg_allow_stdlib_flat_parent_inference,
                     arg_allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
-                visit(
-                    tctx,
-                    env,
-                    ret_ty,
-                    value_access_root_is_local,
-                    value_access_root,
-                    selected_module_path,
-                    selected_alias_targets,
-                    ret_allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
-                    seen,
-                );
+                if defer_selected_value_final_result && !ret_is_arrow {
+                    // OCaml compiler/ml/typecore.ml:4219-4224 leaves the final
+                    // application result to the caller, but env.ml:1530-1538 and
+                    // compiler/ml/subst.ml:303-309 have already substituted the
+                    // selected component path into the value description. Keep
+                    // those component-table side effects visible while still
+                    // leaving the final result to the caller.
+                    visit(
+                        tctx,
+                        env,
+                        ret_ty,
+                        value_access_root_is_local,
+                        value_access_root,
+                        selected_module_path,
+                        selected_alias_targets,
+                        ret_allow_stdlib_flat_parent_inference,
+                        allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        false,
+                        seen,
+                    );
+                } else {
+                    // OCaml compiler/ml/typecore.ml:4171-4192 advances through
+                    // curried source arguments, but typecore.ml:4219-4224 leaves
+                    // the final application result to be unified/expanded by the
+                    // caller. Keep forcing argument arrows in the selected value
+                    // scheme, while leaving the final non-arrow result lazy.
+                    visit(
+                        tctx,
+                        env,
+                        ret_ty,
+                        value_access_root_is_local,
+                        value_access_root,
+                        selected_module_path,
+                        selected_alias_targets,
+                        ret_allow_stdlib_flat_parent_inference,
+                        allow_non_stdlib_implicit_stdlib_inference,
+                        defer_selected_value_final_result && ret_is_arrow,
+                        suppress_selected_value_forces,
+                        seen,
+                    );
+                }
             }
             TypeDesc::Ttuple(items) => {
                 let items = items.clone();
@@ -5471,6 +5523,8 @@ fn force_qualified_value_type_paths<'a>(
                         selected_alias_targets,
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5519,8 +5573,9 @@ fn force_qualified_value_type_paths<'a>(
                                 selected_module_path,
                                 value_access_root_is_local,
                             );
-                    let resolved = if (nested_inside_selected_module
-                        && !selected_module_is_implicit_stdlib_path)
+                    let resolved = if suppress_selected_value_forces
+                        || (nested_inside_selected_module
+                            && !selected_module_is_implicit_stdlib_path)
                         || type_parent_is_implicit_stdlib_for_non_stdlib_value
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
@@ -5554,7 +5609,8 @@ fn force_qualified_value_type_paths<'a>(
                     // `Stdlib`/`Pervasives` paths lazy: compiler/core/res_compmisc.ml:58-62
                     // opens those as components, and env.ml:1874-1877 reads them
                     // without selecting a persistent root module here.
-                    if !allow_stdlib_flat_parent_inference
+                    if !suppress_selected_value_forces
+                        && !allow_stdlib_flat_parent_inference
                         && !type_parent_is_selected_value_module
                         && !type_parent_root_is_implicit_stdlib
                         && let Some(decl) = resolved
@@ -5609,18 +5665,62 @@ fn force_qualified_value_type_paths<'a>(
                     )
                 })
                 .or_else(|| {
-                    persistent_nested_type_path(
-                        ctx,
-                        env,
-                        &path,
-                        args.len(),
-                        value_access_root,
-                        selected_module_path,
-                        false,
-                    )
+                    if suppress_selected_value_forces {
+                        return None;
+                    }
+                    let Path::Pdot(parent, _, _) = &path else {
+                        return None;
+                    };
+                    if !module_path_is_nested_under_selected(parent, selected_module_path) {
+                        return None;
+                    }
+                    // OCaml compiler/ml/typecore.ml:775-787 `expand_path`
+                    // reaches compiler/ml/ctype.ml:1367-1372's
+                    // `Env.normalize_path` fallback. env.ml:923-934 first
+                    // normalizes the module prefix, and env.ml:896-900 then
+                    // reads `comp_modules`, forcing the env.ml:1568 module
+                    // declaration thunk. Rust's component type lookup above uses
+                    // env.ml:809-813-equivalent `comp_components`, so explicitly
+                    // run the normalize-path side effect for nested component
+                    // aliases such as `Css.Types.PercentageLengthCalc.t`.
+                    let normalized_module_path =
+                        crate::types::ctype::force_normalize_path_full_side_effects(
+                            ctx, env, parent,
+                        );
+                    if let Path::Pdot(normalized_parent, module_name, _) = &normalized_module_path {
+                        // OCaml compiler/ml/env.ml:923-934 normalizes the
+                        // prefix first, then env.ml:896-900 calls
+                        // `find_module ~alias:true` for the normalized dotted
+                        // module path. That second step forces the
+                        // env.ml:1568 `comp_modules` thunk for
+                        // `Css_AtomicTypes.PercentageLengthCalc`.
+                        let _ = lookup_module_in_resolved_path(
+                            normalized_parent,
+                            module_name.as_str(),
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                        );
+                    }
+                    None
                 })
                 .or_else(|| {
-                    allow_implicit_stdlib_flat_parent_inference
+                    (!suppress_selected_value_forces)
+                        .then(|| {
+                            persistent_nested_type_path(
+                                ctx,
+                                env,
+                                &path,
+                                args.len(),
+                                value_access_root,
+                                selected_module_path,
+                                false,
+                            )
+                        })
+                        .flatten()
+                })
+                .or_else(|| {
+                    (!suppress_selected_value_forces && allow_implicit_stdlib_flat_parent_inference)
                         .then(|| {
                             persistent_nested_type_path(
                                 ctx,
@@ -5655,6 +5755,8 @@ fn force_qualified_value_type_paths<'a>(
                         selected_alias_targets,
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5673,6 +5775,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
                 if let Some(args) = name_args {
@@ -5687,6 +5791,8 @@ fn force_qualified_value_type_paths<'a>(
                             selected_alias_targets,
                             allow_stdlib_flat_parent_inference,
                             allow_non_stdlib_implicit_stdlib_inference,
+                            false,
+                            suppress_selected_value_forces,
                             seen,
                         );
                     }
@@ -5706,6 +5812,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
                 visit(
@@ -5718,6 +5826,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
             }
@@ -5734,6 +5844,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
             }
@@ -5760,6 +5872,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
                 for arg in field_args {
@@ -5773,6 +5887,8 @@ fn force_qualified_value_type_paths<'a>(
                         selected_alias_targets,
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5791,6 +5907,8 @@ fn force_qualified_value_type_paths<'a>(
                     selected_alias_targets,
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
+                    false,
+                    suppress_selected_value_forces,
                     seen,
                 );
                 for var in vars {
@@ -5804,6 +5922,8 @@ fn force_qualified_value_type_paths<'a>(
                         selected_alias_targets,
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5822,6 +5942,8 @@ fn force_qualified_value_type_paths<'a>(
                         selected_alias_targets,
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
+                        false,
+                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5940,6 +6062,8 @@ fn force_qualified_value_type_paths<'a>(
         selected_alias_targets.as_slice(),
         false,
         true,
+        true,
+        false,
         &mut seen,
     );
 }
@@ -16226,6 +16350,23 @@ fn type_pack(
             ));
         }
     };
+    // OCaml compiler/ml/typecore.ml:3518-3525 expands `instance env ty_expected`
+    // before entering Typemod.type_package. That expansion reaches qualified
+    // type declarations through Env.find_type_full/find_module_descr
+    // (compiler/ml/env.ml:781-813), whose component-table force runs
+    // Subst.modtype_declaration for sibling module types
+    // (compiler/ml/env.ml:1513-1519,1581-1585). Rust may reconstruct the
+    // Tpackage from a raw persistent type item, so force the same parent
+    // component table before the Ident.set_current_time below.
+    if let Path::Pdot(parent, _, _) = &pack_path {
+        let _ = with_resolved_module_components_for_path(
+            parent,
+            env,
+            &mut tctx.persistent_env,
+            ctx,
+            |_| (),
+        );
+    }
     // Matches compiler/ml/typemod.ml:1676-1685: type_package uses
     // Pexp_letmodule-style scoping, sets the ident clock to the saved type
     // level, types the module, then reinitializes from Ident.current_time().
@@ -23620,6 +23761,50 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
+    }
+
+    if let Path::Pident(id) = parent_module_path
+        && id.is_persistent()
+    {
+        let persistent_sig = ctx
+            .with_raw_module_sig(id.name(), |raw_sig| Arc::new(raw_sig.clone()))
+            .or_else(|| {
+                pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .map(|ps| ps.ps_sig.clone())
+            })
+            .or_else(|| {
+                let mut pers = ctx.persistent_env_clone()?;
+                pers.find_pers_struct(id.name(), ctx)
+                    .map(|ps| ps.ps_sig.clone())
+            });
+        if let Some(found) = persistent_sig.and_then(|sig| {
+            sig.iter().find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
+                    if sig_id.name() == type_name =>
+                {
+                    Some((
+                        parent_module_path.clone(),
+                        sig_id.clone(),
+                        Arc::new(sig_decl.clone()),
+                    ))
+                }
+                _ => None,
+            })
+        }) {
+            // OCaml compiler/ml/env.ml:781-788 returns persistent `ps_comps` for
+            // direct module-descriptor lookup, then env.ml:800-813 reads
+            // `comp_types`. Rust's `find_pers_struct` path mirrors
+            // env.ml:658-678 by loading/finalizing the persistent signature, but
+            // scanning `SigType` here avoids constructing the broader
+            // `QualifiedModuleComponents` view whose env.ml:1581-1585
+            // modtype/module thunks would be forced only by later lookups. Do
+            // not use the raw CMI reader here: OCaml's `ps_comps` is built from
+            // the acknowledged persistent structure, not from an uncomponentized
+            // CMI declaration.
+            return Some(found);
+        }
     }
 
     // OCaml compiler/ml/typetexp.ml:116-122 resolves source type

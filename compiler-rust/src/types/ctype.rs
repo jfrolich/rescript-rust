@@ -464,9 +464,10 @@ fn path_root_is_local_module_alias(env: &Env, path: &Path) -> bool {
         return false;
     };
     !root.is_persistent()
-        && env.find_module_same(root).ok().is_some_and(|md| {
-            matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
-        })
+        && env
+            .find_module_same(root)
+            .ok()
+            .is_some_and(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..)))
 }
 
 pub(crate) fn decl_manifest_aliases_path(
@@ -2037,6 +2038,27 @@ fn lookup_raw_module_sig_type<'a>(
         }
     }
 
+    if let Path::Pident(id) = module_path
+        && id.is_persistent()
+    {
+        // OCaml compiler/ml/env.ml:800-813 `find_type_full` reaches persistent
+        // roots through env.ml:781-788 `find_module_descr`, then reads the
+        // already-built `comp_types` table. It does not force env.ml:865-882
+        // `find_module` just to check whether a raw persistent parent has a
+        // direct type item. Mirror that by scanning the raw signature and
+        // returning `None` when the type is absent.
+        return ctx
+            .with_raw_module_sig(id.name(), |raw_sig| {
+                raw_sig.iter().find_map(|item| match item {
+                    SignatureItem::SigType(raw_id, raw_decl, _) if raw_id.name() == type_name => {
+                        Some((raw_id.clone(), raw_decl.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .flatten();
+    }
+
     let mut visiting = HashSet::new();
     let raw_sig = resolve_module_type_through_env_path(ctx, env, module_path, &mut visiting)
         .and_then(|resolved| {
@@ -2277,6 +2299,22 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
+}
+
+pub(crate) fn force_normalize_path_full_side_effects<'a>(
+    ctx: &'a TypeContext,
+    env: &Env,
+    path: &Path,
+) -> Path {
+    // OCaml compiler/ml/ctype.ml:1367-1372 calls
+    // compiler/ml/env.ml:923-934 `Env.normalize_path` as an expansion fallback.
+    // That path is intentionally side-effectful: env.ml:896-900 reads
+    // `comp_modules` and forces the env.ml:1568 module-declaration thunk even
+    // when the normalized path is discarded by the caller. Do not use Rust's
+    // normalized-path cache for this side-effect-only call, because an earlier
+    // component-table probe may have cached the same structural answer before
+    // the OCaml-equivalent module thunk was forced.
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None)
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
@@ -2765,19 +2803,20 @@ fn try_expand_head_with_mode<'a>(
                     });
                     let alias_backed_parent = match &path {
                         Path::Pdot(parent, _, _) => {
-                            let mut visiting = HashSet::new();
-                            matches!(
-                                resolve_module_type_through_env_path(
-                                    ctx,
-                                    env,
-                                    parent,
-                                    &mut visiting
-                                ),
-                                Some(
-                                    super::decl::ModuleType::MtyAlias(..)
-                                        | super::decl::ModuleType::MtyIdent(..)
-                                )
+                            let mut persistent_env = in_process_module_resolution_env(ctx);
+                            // OCaml compiler/ml/env.ml:800-813 resolves type
+                            // expansions through `find_type_full`, whose
+                            // dotted case descends via env.ml:781-793
+                            // `find_module_descr` and `comp_components`.
+                            // Probe the alias from that component table instead
+                            // of forcing env.ml:865-882 `find_module`.
+                            crate::types::typecore::module_alias_target_for_path(
+                                parent,
+                                env,
+                                &mut persistent_env,
+                                ctx,
                             )
+                            .is_some()
                         }
                         _ => false,
                     };
@@ -2889,23 +2928,26 @@ fn try_expand_head_with_mode<'a>(
                     {
                         let immediate_alias_target_path = match &path {
                             Path::Pdot(parent, type_name, pos) => {
-                                let mut visiting = HashSet::new();
-                                match resolve_module_type_through_env_path(
-                                    ctx,
-                                    env,
+                                let mut persistent_env = in_process_module_resolution_env(ctx);
+                                // OCaml compiler/ml/env.ml:800-813 reaches
+                                // aliases for type expansion through
+                                // `find_module_descr`/`comp_components`
+                                // (env.ml:781-793), leaving the module
+                                // declaration thunk at env.ml:865-882 lazy.
+                                crate::types::typecore::module_alias_target_for_path(
                                     parent,
-                                    &mut visiting,
-                                ) {
-                                    Some(super::decl::ModuleType::MtyAlias(
-                                        _,
-                                        target_module_path,
-                                    )) if !target_module_path.same(parent) => Some(Path::Pdot(
+                                    env,
+                                    &mut persistent_env,
+                                    ctx,
+                                )
+                                .filter(|target_module_path| !target_module_path.same(parent))
+                                .map(|target_module_path| {
+                                    Path::Pdot(
                                         std::sync::Arc::new(target_module_path),
                                         type_name.clone(),
                                         *pos,
-                                    )),
-                                    _ => None,
-                                }
+                                    )
+                                })
                             }
                             _ => None,
                         };
@@ -4199,33 +4241,29 @@ fn unify_types<'a>(
                         p1_flat_persistent || (p1_persistent && p2_local_alias);
                     let p2_selected_alias_candidate =
                         p2_flat_persistent || (p2_persistent && p1_local_alias);
-                    let p1_flat_decl = if p1_selected_alias_candidate
-                        && !p2_selected_alias_candidate
-                    {
-                        lookup_type_decl_for_path(ctx, env, path1)
-                    } else {
-                        None
-                    };
-                    let p2_flat_decl = if p2_selected_alias_candidate
-                        && !p1_selected_alias_candidate
-                    {
-                        lookup_type_decl_for_path(ctx, env, path2)
-                    } else {
-                        None
-                    };
+                    let p1_flat_decl =
+                        if p1_selected_alias_candidate && !p2_selected_alias_candidate {
+                            lookup_type_decl_for_path(ctx, env, path1)
+                        } else {
+                            None
+                        };
+                    let p2_flat_decl =
+                        if p2_selected_alias_candidate && !p1_selected_alias_candidate {
+                            lookup_type_decl_for_path(ctx, env, path2)
+                        } else {
+                            None
+                        };
                     let p1_selected_decl = if p1_selected_alias_candidate
                         && !p2_selected_alias_candidate
                     {
-                        resolve_type_item_through_env(ctx, env, path2, false)
-                            .map(|(_, decl)| decl)
+                        resolve_type_item_through_env(ctx, env, path2, false).map(|(_, decl)| decl)
                     } else {
                         None
                     };
                     let p2_selected_decl = if p2_selected_alias_candidate
                         && !p1_selected_alias_candidate
                     {
-                        resolve_type_item_through_env(ctx, env, path1, false)
-                            .map(|(_, decl)| decl)
+                        resolve_type_item_through_env(ctx, env, path1, false).map(|(_, decl)| decl)
                     } else {
                         None
                     };

@@ -1641,10 +1641,18 @@ impl PersistentEnv {
         let components = ctx
             .with_qualified_module_components(&components_key, |components| components.clone())
             .unwrap_or_else(|| {
-                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc(
+                let alias_source = self.qualified_alias_path_for_flattened_head(name);
+                // OCaml compiler/ml/env.ml:1513-1519 builds the component
+                // table after `scrape_alias`, and env.ml:1581-1585 stores the
+                // substituted modtypes in that table. When ReScript's
+                // persistent registry knows this opened unit is the flattened
+                // backing head for a selected alias path, share the same
+                // component modtype force with that alias path.
+                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     module_path.clone(),
                     ps.ps_sig.clone(),
                     ahash::AHashMap::new(),
+                    alias_source,
                     ctx,
                 );
                 ctx.register_qualified_module_components(components_key, components.clone());
@@ -2771,6 +2779,8 @@ fn freshen_signature_bound_idents_with_maps_and_value_mode(
     ctx: &TypeContext,
     shallow_values: bool,
 ) {
+    let mut local_maps = SubstMaps::default();
+
     if !maps.is_empty() {
         if shallow_values {
             substitute_type_paths_in_sig_with_maps_skip_top_values(sig_items, maps, ctx);
@@ -2780,8 +2790,6 @@ fn freshen_signature_bound_idents_with_maps_and_value_mode(
         }
         substitute_sig_decl_paths_in_place_with_maps(sig_items, maps);
     }
-
-    let mut local_maps = SubstMaps::default();
 
     for item in sig_items.iter_mut() {
         match item {
@@ -4884,8 +4892,8 @@ impl AliasRewriteSink for AliasPrefixRewrites {
     }
 }
 
-/// Collect alias rewrite mappings from MtyAlias submodules.
-/// When a module has `module JSON = Stdlib_JSON` (MtyAlias), record
+/// Collect alias rewrite mappings from alias-shaped submodules.
+/// When a module has `module JSON = Stdlib_JSON` (MtyAlias/MtyIdent), record
 /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON") so that when
 /// Stdlib_JSON.cmi is later loaded, its types get rewritten.
 fn collect_alias_rewrites<S: AliasRewriteSink>(
@@ -4895,9 +4903,14 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
 ) {
     for item in sig_items {
         if let SignatureItem::SigModule(id, md, _) = item {
-            if let ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-                // The alias target is typically Pident("Stdlib_JSON") for
-                // flattened submodules. Record the mapping.
+            if let ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) =
+                &md.md_type
+            {
+                // OCaml compiler/ml/env.ml:1517 scrapes aliases before
+                // env.ml:1530-1538 prefixes component identifiers. Rust can store
+                // that alias-shaped module as either MtyAlias or MtyIdent after CMI
+                // loading, so record both forms for flattened namespace units such
+                // as `Webapi__Fetch`.
                 if let Path::Pident(alias_id) = alias_path {
                     let qualified = Path::pdot(module_path.clone(), id.name());
                     rewrites.insert_alias_rewrite_if_absent(alias_id.name().to_string(), qualified);
@@ -5678,7 +5691,7 @@ fn add_signature_to_env_with_options(
                         // `comp_modtypes`, whose entries were built at
                         // env.ml:1581-1584 via `Subst.modtype_declaration`.
                         components
-                            .lookup_modtype(id.name())
+                            .lookup_modtype(id.name(), ctx)
                             .map(|(_, component_mtd)| component_mtd.clone())
                     })
                     .unwrap_or_else(|| mtd.clone());
