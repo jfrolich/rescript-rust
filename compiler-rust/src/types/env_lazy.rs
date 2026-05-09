@@ -991,26 +991,15 @@ impl QualifiedModuleComponents {
     ) -> Option<(usize, Ident, ValueDescription)> {
         let (runtime_pos, id, desc) = self.lookup_value(name)?;
         let needs_component_subst = self.value_mentions_local_component_type(desc, ctx);
-        let desc = if self.value_source_prefix.is_some() || needs_component_subst {
+        let desc = if needs_component_subst {
             let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
-            if let Some(source_prefix) = self.value_source_prefix.as_ref() {
-                let mut item = vec![SignatureItem::SigValue(id.clone(), desc)];
-                crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                    &item,
-                    source_prefix,
-                    self.access_path(),
-                    ctx,
-                );
-                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                    &mut item,
-                    source_prefix,
-                    self.access_path(),
-                );
-                desc = match item.pop().expect("single value item") {
-                    SignatureItem::SigValue(_, desc) => desc,
-                    _ => unreachable!("single value item changed kind"),
-                };
-            }
+            // OCaml compiler/ml/env.ml:1435-1444 follows module aliases with
+            // `scrape_alias`, then compiler/ml/env.ml:1530-1538 applies
+            // `Subst.value_description` using only the substitution produced
+            // by `prefix_idents`. compiler/ml/mtype.ml:41-49 deliberately
+            // leaves value descriptions unchanged while strengthening the
+            // alias target, so do not rewrite every path under
+            // `value_source_prefix` to this selected access path.
             if needs_component_subst {
                 crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
                     &mut desc,

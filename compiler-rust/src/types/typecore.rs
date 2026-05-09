@@ -4929,13 +4929,24 @@ fn force_qualified_value_type_paths<'a>(
         env: &Env,
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
+        value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
+        selected_alias_targets: &[Path],
     ) -> Option<Path> {
         if !matches!(path, Path::Pdot(_, type_name, _) if type_name == "t") {
             return None;
         }
         let flat_root = path_root_ident(path)?;
         if !flat_root.is_persistent() {
+            return None;
+        }
+        if value_access_root.is_some_and(|root| root.same(flat_root)) {
+            // OCaml compiler/ml/env.ml:1091-1100 keeps an explicitly selected
+            // flattened backing module such as `Webapi__Dom.Event` on that
+            // access path. compiler/ml/env.ml:1530-1538 only substitutes
+            // identifiers introduced by `prefix_idents`; it does not rewrite
+            // the explicit selected root to an alias path such as
+            // `Webapi.Dom`.
             return None;
         }
         let persistent_qualified_root = pers_env
@@ -4984,6 +4995,22 @@ fn force_qualified_value_type_paths<'a>(
             // value path is `Stdlib.JSON.Encode.null`.
             let candidate_parent_is_selected_or_child = candidate_parent.same(selected_module_path)
                 || path_descendant_depth(candidate_parent, selected_module_path).is_some();
+            let raw_path_uses_selected_alias_source = selected_alias_targets.iter().any(|target| {
+                path_descendant_depth(path, target).is_some()
+                    || target.parent().is_some_and(|source_parent| {
+                        path_descendant_depth(path, &source_parent).is_some()
+                    })
+            });
+            if raw_path_uses_selected_alias_source && !candidate_parent_is_selected_or_child {
+                // OCaml compiler/ml/env.ml:1435-1444 scrapes the alias source,
+                // then compiler/ml/mtype.ml:41-49 strengthens that source
+                // without rewriting value descriptions. A value selected from
+                // `NodeJs.Crypto.Decipher` can therefore still mention sibling
+                // source paths such as `Crypto-NodeJs.KeyObject.t`; only paths
+                // rooted in the selected component itself follow the
+                // env.ml:1530-1538 `prefix_idents` substitution.
+                return None;
+            }
             let selected_is_inside_candidate_parent =
                 path_descendant_depth(selected_module_path, candidate_parent)
                     .is_some_and(|depth| depth > 0);
@@ -5338,6 +5365,7 @@ fn force_qualified_value_type_paths<'a>(
     fn selected_opened_alias_type_path(
         path: &Path,
         value_access_root_is_local: bool,
+        value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
         selected_alias_targets: &[Path],
     ) -> Option<Path> {
@@ -5348,6 +5376,17 @@ fn force_qualified_value_type_paths<'a>(
         let Path::Pdot(parent, type_name, pos) = path else {
             return None;
         };
+        if value_access_root
+            .is_some_and(|root| path_root_ident(path).is_some_and(|path_root| path_root.same(root)))
+        {
+            // OCaml compiler/ml/env.ml:1091-1100 keeps explicit flattened
+            // persistent access paths selected from an open, such as
+            // `Webapi__Dom.Event`, on that path. The env.ml:1530-1538
+            // substitution only rewrites identifiers bound by the opened
+            // component table; it does not replace the source-level root with
+            // a registered alias path.
+            return None;
+        }
 
         fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
             if path.same(old_prefix) {
@@ -5640,6 +5679,7 @@ fn force_qualified_value_type_paths<'a>(
                 let rewritten_path = selected_opened_alias_type_path(
                     &path,
                     value_access_root_is_local,
+                    value_access_root,
                     selected_module_path,
                     selected_alias_targets,
                 )
@@ -5661,7 +5701,9 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         &tctx.persistent_env,
                         &path,
+                        value_access_root,
                         selected_module_path,
+                        selected_alias_targets,
                     )
                 })
                 .or_else(|| {
