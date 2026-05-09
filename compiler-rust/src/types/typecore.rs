@@ -4907,6 +4907,7 @@ fn force_qualified_value_type_paths<'a>(
 
     fn flattened_persistent_alias_type_path(
         ctx: &TypeContext,
+        env: &Env,
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
         selected_module_path: Option<&Path>,
@@ -4971,12 +4972,37 @@ fn force_qualified_value_type_paths<'a>(
             let candidate_and_selected_share_non_stdlib_alias_root = !candidate_root_is_stdlib
                 && path_descendant_depth(selected_module_path, &qualified_root)
                     .is_some_and(|depth| depth > 0)
-                && path_descendant_depth(&candidate_parent, &qualified_root)
+                && path_descendant_depth(candidate_parent, &qualified_root)
                     .is_some_and(|depth| depth > 0);
+            let qualified_root_is_namespace_alias = pers_env
+                .as_ref()
+                .is_some_and(|pers| pers.path_head_is_namespace_alias(&qualified_root));
+            let raw_candidate_parent_is_alias = candidate_and_selected_share_non_stdlib_alias_root
+                && matches!(path, Path::Pdot(raw_parent, _, _) if {
+                    let mut persistent_env = pers_env.clone();
+                    raw_alias_target_for_module_path(raw_parent, env, &mut persistent_env, ctx)
+                        .is_some()
+                });
             if !candidate_parent_is_selected_or_child
                 && !(selected_is_inside_candidate_parent && !candidate_root_is_stdlib)
-                && !candidate_and_selected_share_non_stdlib_alias_root
+                && !(candidate_and_selected_share_non_stdlib_alias_root
+                    && !qualified_root_is_namespace_alias
+                    && !raw_candidate_parent_is_alias)
             {
+                // OCaml compiler/ml/env.ml:1516-1538 scrapes the selected
+                // module alias, then prefixes only identifiers reached through
+                // `prefix_idents`; compiler/ml/mtype.ml:41-49 leaves value
+                // descriptions unchanged while strengthening the alias target.
+                // A sibling path such as `Webapi__Canvas.Canvas2d.t` inside
+                // selected `Webapi.Canvas.CanvasElement.getContext2d` therefore
+                // stays on the backing unit when `Canvas2d` is itself another
+                // module alias. Synthetic namespace alias roots (loaded from
+                // `.mlmap`, or from alias-only namespace `.cmi` files) behave
+                // the same way: `NodeJs.Crypto.Decipher.make` keeps sibling
+                // types such as `Crypto-NodeJs.KeyObject.t`. Non-alias
+                // siblings such as `Layout__Types.Name.t` still follow
+                // env.ml:1530-1538's component substitution to
+                // `Layout.Types.Name.t`.
                 return None;
             }
         }
@@ -5576,6 +5602,7 @@ fn force_qualified_value_type_paths<'a>(
                 .or_else(|| {
                     flattened_persistent_alias_type_path(
                         ctx,
+                        env,
                         &tctx.persistent_env,
                         &path,
                         selected_module_path,

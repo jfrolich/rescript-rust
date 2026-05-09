@@ -814,6 +814,47 @@ impl PersistentEnv {
         self.alias_prefix_rewrites.get(flat_head)
     }
 
+    pub fn path_head_is_namespace_alias(&self, path: &Path) -> bool {
+        fn signature_is_namespace_alias(head: &str, sig: &[SignatureItem]) -> bool {
+            let namespace_suffix = format!("-{head}");
+            !sig.is_empty()
+                && sig.iter().all(|item| {
+                    matches!(
+                        item,
+                        SignatureItem::SigModule(
+                            _,
+                            ModuleDeclaration {
+                                md_type:
+                                    ModuleType::MtyAlias(
+                                        _,
+                                        Path::Pident(target)
+                                    ),
+                                ..
+                            },
+                            _
+                        ) if target.is_persistent()
+                            && target.name().ends_with(&namespace_suffix)
+                    )
+                })
+        }
+
+        let head = path.head().name();
+        // OCaml compiler/ml/env.ml:711-746 goes through the persistent-table
+        // lookup path for loaded units; use the same case/override-aware cache
+        // helpers as `find_pers_struct` so in-process `.mlmap` namespace
+        // entries are visible here too. Namespace `.cmi` files also arrive as
+        // alias-only signatures whose components point at `Component-Head`
+        // backing units; compiler/ml/mtype.ml:41-49 leaves those value
+        // descriptions unchanged while strengthening the selected alias.
+        if let Some((_, Some(ps))) = self.cache_lookup_entry(head) {
+            return ps.ps_filename.ends_with(".mlmap")
+                || signature_is_namespace_alias(head, ps.ps_sig.as_ref());
+        }
+        self.portable_cache_entry(head).is_some_and(|(_, ps)| {
+            ps.ps_filename.ends_with(".mlmap") || signature_is_namespace_alias(head, &ps.ps_sig)
+        })
+    }
+
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
         // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
         // forcing its signature when `lookup_module ~load:false` only needs to
