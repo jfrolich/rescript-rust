@@ -384,12 +384,24 @@ fn get_level_with_lookup_capture(
     let found_decl = match path {
         Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
         Path::Pdot(parent, type_name, _) => {
-            let mut no_persistent_env = None;
+            // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
+            // dotted path lookup reaches compiler/ml/env.ml:800-813 with the
+            // active persistent table available. In Rust's in-process mode the
+            // equivalent table lives on TypeContext, so use it here instead of
+            // a no-persistent probe; otherwise row-name get_level checks miss
+            // the env.ml:865-887 ps_sig force through alias scraping.
+            let mut persistent_env = in_process_module_resolution_env(ctx);
+            crate::types::typecore::force_module_aliases_for_type_lookup(
+                parent,
+                env,
+                &mut persistent_env,
+                ctx,
+            );
             crate::types::typecore::lookup_type_in_resolved_path(
                 parent,
                 type_name.as_str(),
                 env,
-                &mut no_persistent_env,
+                &mut persistent_env,
                 ctx,
             )
             .map(|(_, _, decl)| (*decl).clone())
@@ -885,6 +897,69 @@ fn update_level_expand_with_lookup_capture<'a>(
                     }
                 }
                 // Couldn't expand; just set level and recurse
+                ctx.set_level(ty, level);
+                iter_type_expr(ctx, ty, |child| {
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        child,
+                        pending_type_lookup_paths,
+                    );
+                });
+            }
+            TypeDesc::Tobject {
+                fields,
+                name: Some((path, _)),
+            } => {
+                let fields = *fields;
+                let path = path.clone();
+                // OCaml compiler/ml/ctype.ml:720-722 clears a named object
+                // row before lowering when `get_level env p` is above the
+                // target level. The `get_level` call is observable because
+                // env.ml:800-813 may force module components while resolving
+                // the path.
+                let should_clear_name = level
+                    < get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths);
+                drop(desc);
+                if should_clear_name {
+                    ctx.set_desc(ty, TypeDesc::Tobject { fields, name: None });
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        ty,
+                        pending_type_lookup_paths,
+                    );
+                    return;
+                }
+                ctx.set_level(ty, level);
+                iter_type_expr(ctx, ty, |child| {
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        child,
+                        pending_type_lookup_paths,
+                    );
+                });
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = row.clone();
+                drop(desc);
+                let mut row = row_repr(ctx, &row);
+                // OCaml compiler/ml/ctype.ml:723-730 checks the polymorphic
+                // variant `row_name` path with `get_level env p` before
+                // lowering the row. That call reaches Env.find_type
+                // (compiler/ml/ctype.ml:666-673), so persistent alias
+                // signatures force at the same point as OCaml.
+                if let Some((path, _)) = &row.row_name
+                    && level
+                        < get_level_with_lookup_capture(ctx, env, path, pending_type_lookup_paths)
+                {
+                    row.row_name = None;
+                    ctx.set_desc(ty, TypeDesc::Tvariant(row));
+                }
                 ctx.set_level(ty, level);
                 iter_type_expr(ctx, ty, |child| {
                     update_level_expand_with_lookup_capture(

@@ -3308,6 +3308,17 @@ fn type_expr_path_may_change(
                 work_stack.push(*rest);
             }
             TypeDesc::Tvariant(row) => {
+                // OCaml compiler/ml/subst.ml:226-235 rewrites row_name with
+                // `type_path s p`; this predicate must notice that path before
+                // the shallow value-description substitution decides to copy.
+                if let Some((path, _)) = &row.row_name
+                    && type_path_may_change(path, maps)
+                {
+                    return true;
+                }
+                if let Some((_, args)) = &row.row_name {
+                    work_stack.extend(args.iter().copied());
+                }
                 work_stack.push(row.row_more);
                 for field in &row.row_fields {
                     match &field.1 {
@@ -3834,6 +3845,32 @@ fn substitute_type_expr_path(
                 work_stack.push(*rest);
             }
             TypeDesc::Tvariant(row) => {
+                // OCaml compiler/ml/subst.ml:226-235 rewrites
+                // polymorphic-variant row_name paths while copying the row.
+                if let Some((path, _)) = &row.row_name {
+                    let new_path = substitute_type_path(
+                        path,
+                        type_stamp_map,
+                        type_name_map,
+                        module_stamp_map,
+                        module_name_map,
+                        protected_module_head,
+                    );
+                    if new_path != *path {
+                        let mut new_desc = (*desc).clone();
+                        if let TypeDesc::Tvariant(ref mut row) = new_desc
+                            && let Some((ref mut path, _)) = row.row_name
+                        {
+                            *path = new_path;
+                        }
+                        ctx.set_desc(ty_ref, new_desc);
+                    }
+                }
+                if let Some((_, args)) = &row.row_name {
+                    for &arg in args {
+                        work_stack.push(arg);
+                    }
+                }
                 work_stack.push(row.row_more);
                 for field in &row.row_fields {
                     match &field.1 {
@@ -4132,6 +4169,22 @@ fn rewrite_type_expr_prefix(
             rewrite_type_expr_prefix(*rest, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            if let Some((path, _)) = &row.row_name
+                && let Some(new_path) = rewrite_path_prefix(path, old_name, new_prefix)
+            {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tvariant(ref mut row) = new_desc
+                    && let Some((ref mut path, _)) = row.row_name
+                {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            if let Some((_, args)) = &row.row_name {
+                for &arg in args {
+                    rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
+                }
+            }
             rewrite_type_expr_prefix(row.row_more, old_name, new_prefix, ctx, visited);
             for field in &row.row_fields {
                 match &field.1 {
@@ -4575,6 +4628,22 @@ fn rewrite_type_expr_by_path_prefix(
             rewrite_type_expr_by_path_prefix(*rest, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            if let Some((path, _)) = &row.row_name
+                && let Some(new_path) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+            {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tvariant(ref mut row) = new_desc
+                    && let Some((ref mut path, _)) = row.row_name
+                {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            if let Some((_, args)) = &row.row_name {
+                for &arg in args {
+                    rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
+                }
+            }
             rewrite_type_expr_by_path_prefix(row.row_more, old_prefix, new_prefix, ctx, visited);
             for field in &row.row_fields {
                 match &field.1 {
@@ -4974,6 +5043,22 @@ fn rewrite_deep_prefix_expr(
             rewrite_deep_prefix_expr(*rest, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Tvariant(row) => {
+            if let Some((path, _)) = &row.row_name
+                && let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix)
+            {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tvariant(ref mut row) = new_desc
+                    && let Some((ref mut path, _)) = row.row_name
+                {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            if let Some((_, args)) = &row.row_name {
+                for &arg in args {
+                    rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
+                }
+            }
             rewrite_deep_prefix_expr(row.row_more, old_name, new_prefix, ctx, visited);
             for field in &row.row_fields {
                 match &field.1 {
@@ -5148,6 +5233,11 @@ fn add_signature_to_env_with_options(
                     }
                 }
                 TypeDesc::Tvariant(row) => {
+                    if let Some((_, args)) = &row.row_name {
+                        for arg in args {
+                            work_stack.push(*arg);
+                        }
+                    }
                     work_stack.push(row.row_more);
                     for (_label, field) in &row.row_fields {
                         match field {
