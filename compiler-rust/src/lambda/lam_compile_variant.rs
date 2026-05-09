@@ -927,20 +927,19 @@ impl LambdaCompiler {
         }
         let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
-        let mut tail = if typeof_cases.is_empty() {
-            self.block_switch_default(switch)
-                .map(|fallback| self.compile_assign_to_target_block(result, fallback))
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_assignment_with_strategy(
-                result,
-                ocaml_typeof_expr(scrut_expr.clone()),
-                &typeof_cases,
-                self.block_switch_default(switch),
-                self.block_switch_complete(switch),
-                allow_small_typeof_tail,
-            )
-        };
+        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
+        // runtime-instance chain with a `typeof_switch` tail. That tail is
+        // still emitted when default filtering leaves zero typeof clauses,
+        // because `compile_general_cases` filters cases only after selecting
+        // the general switch path (compiler/core/lam_compile.ml:567-630).
+        let mut tail = self.compile_named_string_switch_assignment_with_strategy(
+            result,
+            ocaml_typeof_expr(scrut_expr.clone()),
+            &typeof_cases,
+            self.block_switch_default(switch),
+            self.block_switch_complete(switch),
+            allow_small_typeof_tail && !typeof_cases.is_empty(),
+        );
 
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
@@ -1085,19 +1084,18 @@ impl LambdaCompiler {
         }
         let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
-        let mut tail = if typeof_cases.is_empty() {
-            self.block_switch_default(switch)
-                .map(|fallback| self.compile_return_block(fallback))
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_return_with_strategy(
-                ocaml_typeof_expr(scrut_expr.clone()),
-                &typeof_cases,
-                self.block_switch_default(switch),
-                self.block_switch_complete(switch),
-                allow_small_typeof_tail,
-            )
-        };
+        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
+        // runtime-instance chain with a `typeof_switch` tail. That tail is
+        // still emitted when default filtering leaves zero typeof clauses,
+        // because `compile_general_cases` filters cases only after selecting
+        // the general switch path (compiler/core/lam_compile.ml:567-630).
+        let mut tail = self.compile_named_string_switch_return_with_strategy(
+            ocaml_typeof_expr(scrut_expr.clone()),
+            &typeof_cases,
+            self.block_switch_default(switch),
+            self.block_switch_complete(switch),
+            allow_small_typeof_tail && !typeof_cases.is_empty(),
+        );
 
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
@@ -1269,19 +1267,18 @@ impl LambdaCompiler {
         }
         let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
 
-        let mut tail = if typeof_cases.is_empty() {
-            self.block_switch_default(switch)
-                .map(|fallback| self.compile_effect_block(fallback))
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_effect_with_strategy(
-                ocaml_typeof_expr(scrut_expr.clone()),
-                &typeof_cases,
-                self.block_switch_default(switch),
-                self.block_switch_complete(switch),
-                allow_small_typeof_tail,
-            )
-        };
+        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
+        // runtime-instance chain with a `typeof_switch` tail. That tail is
+        // still emitted when default filtering leaves zero typeof clauses,
+        // because `compile_general_cases` filters cases only after selecting
+        // the general switch path (compiler/core/lam_compile.ml:567-630).
+        let mut tail = self.compile_named_string_switch_effect_with_strategy(
+            ocaml_typeof_expr(scrut_expr.clone()),
+            &typeof_cases,
+            self.block_switch_default(switch),
+            self.block_switch_complete(switch),
+            allow_small_typeof_tail && !typeof_cases.is_empty(),
+        );
 
         // #8251: guard typeof "object" against null / arrays
         if !typeof_cases.is_empty()
