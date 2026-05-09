@@ -2985,6 +2985,7 @@ fn preserve_alias_unify_representative(
     parameter_ty: TypeExprRef,
     argument_ty: TypeExprRef,
     allow_local_aliases: bool,
+    selected_value_path: Option<&Path>,
 ) {
     #[derive(Clone, Copy)]
     enum AliasLinkDirection {
@@ -3007,6 +3008,23 @@ fn preserve_alias_unify_representative(
             TypeDesc::Tconstr { path, args, .. } => Some((path.clone(), args.len())),
             _ => None,
         }
+    }
+
+    fn selected_value_parent_is_flattened_backing_path(value_parent: &Path) -> bool {
+        value_parent.head().name().contains("__")
+    }
+
+    fn selected_value_parent_for_type_path<'a>(
+        type_path: &Path,
+        value_path: Option<&'a Path>,
+    ) -> Option<&'a Path> {
+        let Some(Path::Pdot(value_parent, _, _)) = value_path else {
+            return None;
+        };
+        let Path::Pdot(type_parent, type_name, _) = type_path else {
+            return None;
+        };
+        (type_name == "t" && type_parent.same(value_parent)).then_some(value_parent)
     }
 
     fn raw_signature_manifest_path(
@@ -3048,6 +3066,7 @@ fn preserve_alias_unify_representative(
         parameter_args: &[TypeExprRef],
         argument_args: &[TypeExprRef],
         allow_local_aliases: bool,
+        selected_value_path: Option<&Path>,
     ) {
         let ctx = tctx.type_ctx;
         let argument_is_local_alias = path_head_is_local_module_alias(env, &argument_path);
@@ -3082,11 +3101,36 @@ fn preserve_alias_unify_representative(
             // Keep the explicit representative compensation to flattened
             // ReScript component aliases, and let normal unification decide
             // ordinary manifests such as `Webapi.Dom.Document.t = Dom.document`.
-            match preferred_alias_equiv_representative(env, ctx, parameter_repr, argument_repr) {
-                Some(preferred) if preferred == parameter_repr => {
+            if let Some(selected_parent) =
+                selected_value_parent_for_type_path(&parameter_path, selected_value_path)
+            {
+                if selected_value_parent_is_flattened_backing_path(selected_parent) {
+                    // OCaml compiler/ml/typecore.ml:2421-2457 constructs
+                    // `Texp_ident` from `instance env desc.val_type` before
+                    // `rue` unifies it with the expected type, and
+                    // compiler/ml/env.ml:1091-1100 selects the value from the exact
+                    // source module path. For an explicit backing-unit selection such
+                    // as `Webapi__Dom.Event.target`, the value scheme's own
+                    // `Webapi__Dom.Event.t` node remains the representative; the
+                    // expected callback type may be the namespace alias
+                    // `Webapi.Dom.Event.t`, but it should not rewrite the selected
+                    // value's typedtree shape.
+                    None
+                } else {
+                    // For an ordinary namespace selection, OCaml
+                    // compiler/ml/typecore.ml:3771-3773 lets the selected
+                    // value's parameter type remain the representative, so the
+                    // argument expression is rewritten to the namespace alias.
                     Some(AliasLinkDirection::ArgumentToParameter)
                 }
-                _ => Some(AliasLinkDirection::ParameterToArgument),
+            } else {
+                match preferred_alias_equiv_representative(env, ctx, parameter_repr, argument_repr)
+                {
+                    Some(preferred) if preferred == parameter_repr => {
+                        Some(AliasLinkDirection::ArgumentToParameter)
+                    }
+                    _ => Some(AliasLinkDirection::ParameterToArgument),
+                }
             }
         } else {
             None
@@ -3244,6 +3288,7 @@ fn preserve_alias_unify_representative(
         parameter_ty: TypeExprRef,
         argument_ty: TypeExprRef,
         allow_local_aliases: bool,
+        selected_value_path: Option<&Path>,
         seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
     ) {
         let ctx = tctx.type_ctx;
@@ -3337,6 +3382,7 @@ fn preserve_alias_unify_representative(
                         parameter_args.as_slice(),
                         argument_args.as_slice(),
                         allow_local_aliases,
+                        selected_value_path,
                     );
                 }
                 for (parameter_arg, argument_arg) in parameter_args.iter().zip(argument_args.iter())
@@ -3347,6 +3393,7 @@ fn preserve_alias_unify_representative(
                         *parameter_arg,
                         *argument_arg,
                         allow_local_aliases,
+                        selected_value_path,
                         seen,
                     );
                 }
@@ -3359,6 +3406,7 @@ fn preserve_alias_unify_representative(
                         parameter_child,
                         argument_child,
                         allow_local_aliases,
+                        selected_value_path,
                         seen,
                     );
                 }
@@ -3374,6 +3422,7 @@ fn preserve_alias_unify_representative(
         parameter_ty,
         argument_ty,
         allow_local_aliases,
+        selected_value_path,
         &mut seen,
     );
 }
@@ -3745,7 +3794,7 @@ fn merge_or_pattern_variables(
                     // same selected representative before Rust's unification so
                     // nested flattened aliases from the second branch do not win
                     // over the first branch's selected component path.
-                    preserve_alias_unify_representative(tctx, env, v1.ty, v2.ty, true);
+                    preserve_alias_unify_representative(tctx, env, v1.ty, v2.ty, true, None);
                     unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
                     // Match OCaml alpha_pat: rename branch-2 ids onto branch-1 ids.
                     result.push((v2.id.clone(), v1.id.clone()));
@@ -6204,7 +6253,9 @@ pub fn type_expect<'a>(
             // unification so an expected application type does not relink a
             // selected component path such as `Web.MediaStream.t` back to its
             // flattened backing unit.
-            preserve_alias_unify_representative(tctx, env, ty, expected_ty, false);
+            if matches!(path, Path::Pdot(..)) {
+                preserve_alias_unify_representative(tctx, env, ty, expected_ty, false, Some(&path));
+            }
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
@@ -8803,6 +8854,60 @@ fn type_application(
         }
     }
 
+    fn skip_selected_value_alias_post_unify(
+        ctx: &TypeContext,
+        env: &Env,
+        parameter_ty: TypeExprRef,
+        argument_ty: TypeExprRef,
+        selected_value_path: Option<&Path>,
+    ) -> bool {
+        fn constr_path_and_arity(ctx: &TypeContext, ty: TypeExprRef) -> Option<(Path, usize)> {
+            let ty = ctx.repr(ty);
+            let desc = ctx.get_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. } => Some((path.clone(), args.len())),
+                _ => None,
+            }
+        }
+
+        let Some(Path::Pdot(selected_parent, _, _)) = selected_value_path else {
+            return false;
+        };
+        if !selected_parent.head().name().contains("__") {
+            return false;
+        }
+        let Some((parameter_path, parameter_arity)) = constr_path_and_arity(ctx, parameter_ty)
+        else {
+            return false;
+        };
+        let Some((argument_path, argument_arity)) = constr_path_and_arity(ctx, argument_ty) else {
+            return false;
+        };
+        if parameter_arity != argument_arity {
+            return false;
+        }
+        let Path::Pdot(parameter_parent, parameter_name, _) = &parameter_path else {
+            return false;
+        };
+        if parameter_name != "t" || !parameter_parent.same(selected_parent) {
+            return false;
+        }
+        // OCaml compiler/ml/typecore.ml:3771-3773 runs `type_expect`
+        // followed by `unify_exp`, but the selected function expression was
+        // already built by typecore.ml:2421-2457 from
+        // `instance env desc.val_type`. When env.ml:1091-1100 selected an
+        // explicit backing-unit value such as `Webapi__Dom.Event.target`, that
+        // function instance keeps `Webapi__Dom.Event.t` even if the argument
+        // expression has the namespace alias `Webapi.Dom.Event.t`.
+        crate::types::ctype::flattened_alias_paths_equivalent(
+            ctx,
+            env,
+            &parameter_path,
+            &argument_path,
+            parameter_arity,
+        )
+    }
+
     let ctx = tctx.type_ctx;
     let total_app = !partial;
 
@@ -8813,6 +8918,10 @@ fn type_application(
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
+    let typed_funct_value_path = match &typed_funct.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => Some(path.clone()),
+        _ => None,
+    };
 
     // Backport of upstream #8359:
     // Lowered syntax like `dict{...}` and async wrappers becomes a regular
@@ -8925,20 +9034,42 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
-                preserve_alias_unify_representative(tctx, env, arg_ty, typed_arg.exp_type, true);
+                preserve_alias_unify_representative(
+                    tctx,
+                    env,
+                    arg_ty,
+                    typed_arg.exp_type,
+                    true,
+                    typed_funct_value_path.as_ref(),
+                );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
                     tctx.set_unify_env(env);
                 }
-                unify_expression_types(
-                    tctx,
-                    typed_arg.exp_loc,
-                    typed_arg.exp_type,
+                if !skip_selected_value_alias_post_unify(
+                    ctx,
+                    env,
                     arg_ty0,
-                    Some(TypeClashContext::FunctionCall),
-                )?;
-                preserve_alias_unify_representative(tctx, env, arg_ty0, typed_arg.exp_type, true);
+                    typed_arg.exp_type,
+                    typed_funct_value_path.as_ref(),
+                ) {
+                    unify_expression_types(
+                        tctx,
+                        typed_arg.exp_loc,
+                        typed_arg.exp_type,
+                        arg_ty0,
+                        Some(TypeClashContext::FunctionCall),
+                    )?;
+                    preserve_alias_unify_representative(
+                        tctx,
+                        env,
+                        arg_ty0,
+                        typed_arg.exp_type,
+                        true,
+                        typed_funct_value_path.as_ref(),
+                    );
+                }
 
                 ctx.end_def();
                 unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
@@ -9195,6 +9326,7 @@ fn type_application(
                     arg_expected_ty,
                     typed_arg.exp_type,
                     true,
+                    typed_funct_value_path.as_ref(),
                 );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
@@ -9204,7 +9336,14 @@ fn type_application(
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
-                if !skip_post_unify {
+                let skip_selected_value_alias_unify = skip_selected_value_alias_post_unify(
+                    ctx,
+                    env,
+                    unify_ty,
+                    typed_arg.exp_type,
+                    typed_funct_value_path.as_ref(),
+                );
+                if !skip_post_unify && !skip_selected_value_alias_unify {
                     // OCaml compiler/ml/typecore.ml:3771-3773 types the
                     // source argument against `ty_expected'`, then unifies the
                     // resulting expression type with the instantiated
@@ -9218,6 +9357,7 @@ fn type_application(
                         typed_arg.exp_type,
                         unify_ty,
                         false,
+                        None,
                     );
                     unify_expression_types(
                         tctx,
@@ -9232,6 +9372,7 @@ fn type_application(
                         unify_ty,
                         typed_arg.exp_type,
                         true,
+                        typed_funct_value_path.as_ref(),
                     );
                 }
                 let typed_arg = if enforce_optional {
@@ -10632,6 +10773,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                     pending.typed_pat.pat_type,
                     ty_arg_prime,
                     true,
+                    None,
                 );
                 unify_pattern_types(
                     tctx,
@@ -10677,6 +10819,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                         pending.typed_pat.pat_type,
                         propagated_ty,
                         true,
+                        None,
                     );
                     unify_pattern_types(
                         tctx,
