@@ -459,6 +459,16 @@ fn path_root_ident(path: &Path) -> Option<&Ident> {
     }
 }
 
+fn path_root_is_local_module_alias(env: &Env, path: &Path) -> bool {
+    let Some(root) = path_root_ident(path) else {
+        return false;
+    };
+    !root.is_persistent()
+        && env.find_module_same(root).ok().is_some_and(|md| {
+            matches!(md.md_type, super::decl::ModuleType::MtyAlias(..))
+        })
+}
+
 pub(crate) fn decl_manifest_aliases_path(
     ctx: &TypeContext,
     decl: &super::decl::TypeDeclaration,
@@ -4174,6 +4184,8 @@ fn unify_types<'a>(
                         .collect();
                     let p1_persistent = path_root_is_persistent(path1);
                     let p2_persistent = path_root_is_persistent(path2);
+                    let p1_local_alias = path_root_is_local_module_alias(env, path1);
+                    let p2_local_alias = path_root_is_local_module_alias(env, path2);
                     let flat_persistent_parent = |path: &Path| {
                         matches!(
                             path,
@@ -4183,23 +4195,35 @@ fn unify_types<'a>(
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
                     let p2_flat_persistent = flat_persistent_parent(path2);
-                    let p1_flat_decl = if p1_flat_persistent && !p2_flat_persistent {
+                    let p1_selected_alias_candidate =
+                        p1_flat_persistent || (p1_persistent && p2_local_alias);
+                    let p2_selected_alias_candidate =
+                        p2_flat_persistent || (p2_persistent && p1_local_alias);
+                    let p1_flat_decl = if p1_selected_alias_candidate
+                        && !p2_selected_alias_candidate
+                    {
                         lookup_type_decl_for_path(ctx, env, path1)
                     } else {
                         None
                     };
-                    let p2_flat_decl = if p2_flat_persistent && !p1_flat_persistent {
+                    let p2_flat_decl = if p2_selected_alias_candidate
+                        && !p1_selected_alias_candidate
+                    {
                         lookup_type_decl_for_path(ctx, env, path2)
                     } else {
                         None
                     };
-                    let p1_selected_decl = if p1_flat_persistent && !p2_flat_persistent {
+                    let p1_selected_decl = if p1_selected_alias_candidate
+                        && !p2_selected_alias_candidate
+                    {
                         resolve_type_item_through_env(ctx, env, path2, false)
                             .map(|(_, decl)| decl)
                     } else {
                         None
                     };
-                    let p2_selected_decl = if p2_flat_persistent && !p1_flat_persistent {
+                    let p2_selected_decl = if p2_selected_alias_candidate
+                        && !p1_selected_alias_candidate
+                    {
                         resolve_type_item_through_env(ctx, env, path1, false)
                             .map(|(_, decl)| decl)
                     } else {
@@ -4207,13 +4231,13 @@ fn unify_types<'a>(
                     };
                     let p1_alias_decl = p1_selected_decl.as_ref().or(p1_flat_decl.as_ref());
                     let p2_alias_decl = p2_selected_decl.as_ref().or(p2_flat_decl.as_ref());
-                    let p1_should_link_flat_alias = p1_flat_persistent
-                        && !p2_flat_persistent
+                    let p1_should_link_flat_alias = p1_selected_alias_candidate
+                        && !p2_selected_alias_candidate
                         && p1_alias_decl.is_none_or(|decl| {
                             type_decl_preserves_strengthened_alias_path(ctx, decl, path1)
                         });
-                    let p2_should_link_flat_alias = p2_flat_persistent
-                        && !p1_flat_persistent
+                    let p2_should_link_flat_alias = p2_selected_alias_candidate
+                        && !p1_selected_alias_candidate
                         && p2_alias_decl.is_none_or(|decl| {
                             type_decl_preserves_strengthened_alias_path(ctx, decl, path2)
                         });
@@ -4234,9 +4258,17 @@ fn unify_types<'a>(
                     // compiler/ml/env.ml:1530-1538 plus
                     // compiler/ml/subst.ml:87-95 have already substituted
                     // selected module components. Only move a flattened
-                    // persistent module identifier onto the visible local alias;
-                    // nested selected paths such as `Js.Dict.t` or
-                    // `Belt.Id.cmp` are already in OCaml's spelling.
+                    // persistent module identifier, or a nested persistent
+                    // backing path paired with a source-selected local alias,
+                    // onto that visible alias. Nested selected paths such as
+                    // `Js.Dict.t` or `Belt.Id.cmp` are already in OCaml's spelling.
+                    //
+                    // OCaml compiler/ml/ctype.ml:2393-2397 links the expanded
+                    // constructor representative to the original other side in
+                    // expression mode before ctype.ml:2412-2414 unifies
+                    // constructor arguments. For local aliases such as
+                    // `Types = Layout__Types`, that shared ref makes
+                    // `Types.Component.t` win over `Layout__Types.Component.t`.
                     //
                     // OCaml compiler/ml/mtype.ml:55-70 controls which alias
                     // components get a strengthened self-manifest. If the flat

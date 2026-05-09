@@ -13517,16 +13517,32 @@ fn type_record(
     let mut all_label_descriptions_info = if has_dotdotdot_field {
         None
     } else {
-        build_record_label_descriptions_info(record_ty, env, &mut tctx.persistent_env, ctx).or_else(
-            || {
+        // OCaml compiler/ml/typecore.ml:2802-2842 and typecore.ml:2953-2978
+        // build record definitions from the first typed label's `lbl_all`
+        // array. Prefer that selected label family before rediscovering labels
+        // from the record expression type, because the selected family carries
+        // source-visible module aliases such as `Layout.Types`.
+        first_disambiguated_label
+            .as_ref()
+            .and_then(|lbl| {
+                build_record_label_descriptions_info(
+                    lbl.lbl_res,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            })
+            .or_else(|| {
+                build_record_label_descriptions_info(record_ty, env, &mut tctx.persistent_env, ctx)
+            })
+            .or_else(|| {
                 build_record_label_descriptions_info(
                     disambiguation_ty,
                     env,
                     &mut tctx.persistent_env,
                     ctx,
                 )
-            },
-        )
+            })
     };
     if all_label_descriptions_info.is_none() {
         if let Some(base_expr) = typed_base.as_ref() {
@@ -21213,29 +21229,34 @@ fn build_record_label_descriptions_info<'a>(
     // (compiler/ml/typecore.ml:2802,2840-2842). This fallback reconstructs
     // descriptions for paths that did not come through the label environment;
     // do not register a fresh array for every record literal.
-    let descriptions = std::sync::Arc::new(
-        labels
-            .iter()
-            .enumerate()
-            .map(|(pos, ld)| crate::types::LabelDescription {
-                lbl_name: ld.ld_id.name().to_string(),
-                lbl_res: shared_res,
-                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                    ctx,
-                    ld.ld_type,
-                    &decl.type_params,
-                ),
-                lbl_mut: ld.ld_mutable,
-                lbl_optional: ld.ld_optional,
-                lbl_pos: pos as i32,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: repr.clone(),
-                lbl_private: decl.type_private,
-                lbl_loc: ld.ld_loc.clone(),
-                lbl_attributes: ld.ld_attributes.clone(),
-            })
-            .collect::<Vec<_>>(),
-    );
+    let mut descriptions = labels
+        .iter()
+        .enumerate()
+        .map(|(pos, ld)| crate::types::LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: shared_res,
+            lbl_arg: crate::types::ctype::remap_label_type_to_params(
+                ctx,
+                ld.ld_type,
+                &decl.type_params,
+            ),
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: crate::types::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: decl.type_private,
+            lbl_loc: ld.ld_loc.clone(),
+            lbl_attributes: ld.ld_attributes.clone(),
+        })
+        .collect::<Vec<_>>();
+    // OCaml compiler/ml/env.ml:1542-1549 installs labels from
+    // `Subst.type_declaration sub decl`; compiler/ml/subst.ml:173-177 rewrites
+    // field argument paths while building the selected `lbl_all` array.
+    for label in &mut descriptions {
+        qualify_label_description_paths(label, env, pers_env, ctx);
+    }
+    let descriptions = std::sync::Arc::new(descriptions);
     ctx.register_record_label_descriptions(&record_path, descriptions.clone());
     let summary = ctx.get_record_label_description_summary(&record_path)?;
     Some(RecordLabelDescriptionsInfo {
