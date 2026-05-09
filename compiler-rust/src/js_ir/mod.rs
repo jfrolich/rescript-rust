@@ -1959,7 +1959,7 @@ fn preserves_positive_literal_dispatch_return_tail(
 }
 
 fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Block) -> bool {
-    if !is_nullish_refinement_guard(cond) || is_strict_null_unit_success_tail(cond, then_, else_) {
+    if !is_nullish_refinement_guard(cond) || is_nullish_unit_success_tail(then_, else_) {
         return false;
     }
 
@@ -1979,6 +1979,39 @@ fn preserves_nullish_success_guard(cond: &Expression, then_: &Block, else_: &Blo
 
     (then_nontrivial_terminal && else_simple_fallback)
         || (else_nontrivial_terminal && then_simple_fallback)
+}
+
+fn is_unit_return_expr(expr: &Expression) -> bool {
+    match &expr.desc {
+        ExpressionDesc::Undefined { .. } => true,
+        ExpressionDesc::Seq(_, suffix) => is_unit_return_expr(suffix),
+        ExpressionDesc::Cond(_, consequent, alternate) => {
+            is_unit_return_expr(consequent) && is_unit_return_expr(alternate)
+        }
+        _ => false,
+    }
+}
+
+fn is_nullish_unit_success_tail(then_: &Block, else_: &Block) -> bool {
+    // OCaml reference: compiler/core/js_stmt_make.ml:237-250 applies the
+    // generic `S.if_` rule-5/rule-7 rewrites when both branch return values
+    // are unit, including `Cond`/`Seq` expressions whose suffix is unit.
+    let Some(else_ret) = single_return_expr(else_) else {
+        return false;
+    };
+    if !is_unit_return_expr(else_ret) {
+        return false;
+    }
+
+    let Some(Statement {
+        desc: StatementDesc::Return(then_ret),
+        ..
+    }) = last_statement(then_)
+    else {
+        return false;
+    };
+
+    is_unit_return_expr(then_ret)
 }
 
 fn nullish_guard_fallback_returns_guard_target(cond: &Expression, expr: &Expression) -> bool {
@@ -2074,29 +2107,6 @@ fn is_loose_nullish_refinement_guard(expr: &Expression) -> bool {
         ),
         _ => false,
     }
-}
-
-fn is_strict_null_unit_success_tail(cond: &Expression, then_: &Block, else_: &Block) -> bool {
-    let Some((_, _, literal)) = strict_var_literal_comparison(cond) else {
-        return false;
-    };
-    if !matches!(literal.desc, ExpressionDesc::Null) {
-        return false;
-    }
-
-    matches!(
-        single_return_expr(else_),
-        Some(Expression {
-            desc: ExpressionDesc::Undefined { .. },
-            ..
-        })
-    ) && matches!(
-        last_statement(then_).map(|stmt| &stmt.desc),
-        Some(StatementDesc::Return(Expression {
-            desc: ExpressionDesc::Undefined { .. },
-            ..
-        }))
-    )
 }
 
 fn statement_contains_await(stmt: &Statement) -> bool {
@@ -4434,6 +4444,75 @@ mod tests {
         );
         assert!(ocaml_eq_block(kept_then, &then_block));
         assert!(ocaml_eq_block(kept_else, &else_block));
+    }
+
+    #[test]
+    fn test_if_statement_rewrites_loose_nullish_conditional_unit_success_tail_like_ocaml() {
+        let value = Ident::create_local("value");
+        let flag = Ident::create_local("flag");
+        let cond = Expression::is_null_or_undefined(Expression::var(value.clone()));
+        let unit_effect = Expression::new(ExpressionDesc::Seq(
+            Box::new(Expression::call(
+                Expression::var(Ident::create_local("seen")),
+                vec![Expression::var(value.clone())],
+                CallInfo::default(),
+            )),
+            Box::new(Expression::undefined(true)),
+        ));
+        let then_block = vec![
+            Statement::exp(Expression::call(
+                Expression::var(Ident::create_local("setup")),
+                vec![],
+                CallInfo::default(),
+            )),
+            Statement::return_(Expression::cond(
+                Expression::var(flag),
+                unit_effect,
+                Expression::undefined(true),
+            )),
+        ];
+        let else_block = vec![Statement::return_(Expression::undefined(true))];
+
+        let stmt = Statement::if_(cond.clone(), then_block.clone(), else_block.clone());
+
+        let StatementDesc::Block(block) = &stmt.desc else {
+            panic!("expected loose nullish unit tail to become a negative guard: {stmt:#?}");
+        };
+        let [guard, fallthrough, return_stmt] = block.as_slice() else {
+            panic!("expected negative guard + fallthrough effect + trailing return");
+        };
+        assert!(matches!(
+            &guard.desc,
+            StatementDesc::If(test, then_block, else_block)
+                if matches!(
+                    &test.desc,
+                    ExpressionDesc::JsNot(inner)
+                        if matches!(
+                            inner.as_ref(),
+                            Expression {
+                                desc: ExpressionDesc::IsNullOrUndefined(target),
+                                ..
+                            } if matches!(
+                                target.as_ref(),
+                                Expression {
+                                    desc: ExpressionDesc::Var(VIdent::Id(id)),
+                                    ..
+                                } if id.same(&value)
+                            )
+                        )
+                ) && matches!(
+                    then_block.as_slice(),
+                    [Statement {
+                        desc: StatementDesc::Return(Expression {
+                            desc: ExpressionDesc::Undefined { .. },
+                            ..
+                        }),
+                        ..
+                    }]
+                ) && else_block.is_empty()
+        ));
+        assert!(matches!(fallthrough.desc, StatementDesc::Exp(_)));
+        assert!(matches!(return_stmt.desc, StatementDesc::Return(_)));
     }
 
     #[test]
