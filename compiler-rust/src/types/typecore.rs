@@ -18510,37 +18510,79 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) {
-    let mut flat_heads = pers_env
-        .map(|pers| pers.flattened_alias_heads_for_path(qualified_alias_path))
-        .unwrap_or_default();
+    let mut source_prefixes = Vec::new();
+    let mut add_source_prefix = |source_prefix: Path| {
+        if !source_prefix.same(qualified_alias_path)
+            && !source_prefixes
+                .iter()
+                .any(|existing: &Path| existing.same(&source_prefix))
+        {
+            source_prefixes.push(source_prefix);
+        }
+    };
 
     if let Ok((head, components)) = qualified_alias_path.flatten() {
-        if !components.is_empty() {
+        for split in 1..=components.len() {
+            let prefix_components = &components[..split];
+            let remaining_components = &components[split..];
+            let mut qualified_prefix = Path::pident(head.clone());
+            for component in prefix_components {
+                qualified_prefix = Path::pdot(qualified_prefix, *component);
+            }
+
+            let mut flat_heads = pers_env
+                .map(|pers| pers.flattened_alias_heads_for_path(&qualified_prefix))
+                .unwrap_or_default();
             let mut flat_name = head.name().to_string();
-            for component in components {
+            for component in prefix_components {
                 flat_name.push('_');
                 flat_name.push_str(component);
             }
             if !flat_heads.iter().any(|item| item == &flat_name) {
                 flat_heads.push(flat_name);
             }
+            let double_underscore_flat_name =
+                format!("{}__{}", head.name(), prefix_components.join("__"));
+            let known_double_underscore_head = pers_env
+                .and_then(|pers| {
+                    pers.qualified_alias_path_for_flattened_head(&double_underscore_flat_name)
+                })
+                .or_else(|| ctx.find_flattened_alias_component_path(&double_underscore_flat_name))
+                .is_some();
+            if known_double_underscore_head
+                && !flat_heads
+                    .iter()
+                    .any(|item| item == &double_underscore_flat_name)
+            {
+                flat_heads.push(double_underscore_flat_name);
+            }
+
+            for flat_head in flat_heads {
+                let mut source_prefix = Path::pident(Ident::create_persistent(&flat_head));
+                for component in remaining_components {
+                    source_prefix = Path::pdot(source_prefix, *component);
+                }
+                add_source_prefix(source_prefix);
+            }
         }
     }
 
-    for flat_head in flat_heads {
-        let flattened_path = Path::pident(Ident::create_persistent(&flat_head));
-        if flattened_path.same(qualified_alias_path) {
-            continue;
-        }
+    for source_prefix in source_prefixes {
+        // OCaml compiler/ml/env.ml:1517 scrapes aliases before
+        // env.ml:1530-1538 `prefix_idents`, then compiler/ml/subst.ml:303-309
+        // rewrites value descriptions through the selected path. ReScript CMI
+        // files can save a nested alias target like `Webapi.Fetch.Response`
+        // under the flattened parent prefix `Webapi__Fetch.Response`; rewrite
+        // those flattened-prefix-plus-tail paths to the same selected path.
         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
             sig,
-            &flattened_path,
+            &source_prefix,
             access_path,
             ctx,
         );
         crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
             sig,
-            &flattened_path,
+            &source_prefix,
             access_path,
         );
     }
