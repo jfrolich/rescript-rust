@@ -2442,6 +2442,40 @@ fn find_type_decl_for_path(
     ctx.find_type_decl(short_name).map(|decl| (*decl).clone())
 }
 
+fn extract_concrete_type_decl_for_record_spread(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<(Path, Vec<TypeExprRef>, crate::types::TypeDeclaration)> {
+    let mut current = unwrap_poly_type(ctx, ty);
+    let mut seen = HashSet::new();
+
+    loop {
+        let current_repr = ctx.repr(current);
+        let (path, args) = match &*ctx.get_desc(current_repr) {
+            crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+            _ => return None,
+        };
+
+        let decl = find_type_decl_for_path(env, ctx, &path)?;
+        if !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
+            return Some((path, args, decl));
+        }
+
+        if !seen.insert(path.name()) {
+            return None;
+        }
+
+        // OCaml compiler/ml/record_type_spread.ml:121-125 delegates spreads to
+        // Ctype.extract_concrete_typedecl, whose ctype.ml:1449-1460 first calls
+        // Env.find_type and only expands when that declaration is abstract.
+        // Avoid expanding concrete records up front, because expand_head's
+        // normalize_path fallback forces persistent signatures earlier than OCaml.
+        current = crate::types::ctype::expand_head_once(ctx, env, current_repr)?;
+        current = unwrap_poly_type(ctx, current);
+    }
+}
+
 fn expand_record_spread_label(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -2775,79 +2809,40 @@ fn expand_record_spread_label(
         return Some(vec![label.clone()]);
     }
 
-    // Match OCaml record_type_spread.extract + Ctype.extract_concrete_typedecl:
-    // unwrap top-level Tpoly([], ..), then expand type aliases to the concrete
-    // head before reading the spread path/type args.
+    // Match OCaml record_type_spread.ml:121-125 plus ctype.ml:1449-1460:
+    // unwrap top-level Tpoly([], ..), then read the declaration before
+    // expanding aliases, so concrete record spreads keep OCaml's lazy order.
     let spread_ty = unwrap_poly_type(ctx, label.ld_type);
-    let spread_ty = crate::types::ctype::expand_head(ctx, env, spread_ty);
-    let spread_ty = unwrap_poly_type(ctx, spread_ty);
-    let (spread_path, spread_args) = match &*ctx.get_desc(spread_ty) {
-        crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
-        _ => return None,
-    };
+    let (spread_path, spread_args, source_decl) =
+        extract_concrete_type_decl_for_record_spread(ctx, env, spread_ty)?;
     let path_name = spread_path.name();
     if !visited.insert(path_name.clone()) {
         return None;
     }
-    let result = if let Some(mut source_decl) = find_type_decl_for_path(env, ctx, &spread_path) {
-        // Follow manifest aliases until we reach a concrete record declaration,
-        // matching OCaml Ctype.extract_concrete_typedecl behavior.
-        let mut source_args = spread_args.clone();
-        let mut resolution_seen = HashSet::new();
-        resolution_seen.insert(path_name.clone());
-        let source_record = loop {
-            if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind {
-                break Some((
-                    inner_fields.clone(),
-                    source_decl.type_params.clone(),
-                    source_args.clone(),
-                ));
-            }
-            let manifest = match source_decl.type_manifest {
-                Some(manifest) => manifest,
-                None => break None,
-            };
-            let manifest =
-                unwrap_poly_type(ctx, crate::types::ctype::expand_head(ctx, env, manifest));
-            let (next_path, next_args) = match &*ctx.get_desc(manifest) {
-                crate::types::TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
-                _ => break None,
-            };
-            let next_name = next_path.name();
-            if !resolution_seen.insert(next_name) {
-                break None;
-            }
-            source_decl = match find_type_decl_for_path(env, ctx, &next_path) {
-                Some(decl) => decl,
-                None => break None,
-            };
-            source_args = next_args;
-        };
-        if let Some((inner_fields, source_params, source_args)) = source_record {
-            let mut expanded = Vec::new();
-            // Share the substitution cache across all fields so that shared type
-            // nodes (e.g., the same type parameter used in multiple fields) get
-            // the same substituted result, matching OCaml's node sharing.
-            let mut cache = HashMap::new();
-            for inner_field in &inner_fields {
-                let resolved_inner = expand_record_spread_label(ctx, env, inner_field, visited)?;
-                for mut field in resolved_inner {
-                    if source_params.len() == source_args.len() && !source_params.is_empty() {
-                        field.ld_type = substitute_type_params(
-                            ctx,
-                            field.ld_type,
-                            &source_params,
-                            &source_args,
-                            &mut cache,
-                        );
-                    }
-                    expanded.push(field);
+    let source_params = source_decl.type_params.clone();
+    let result = if let crate::types::TypeKind::TypeRecord(inner_fields, _) = &source_decl.type_kind
+    {
+        let mut expanded = Vec::new();
+        // Share the substitution cache across all fields so that shared type
+        // nodes (e.g., the same type parameter used in multiple fields) get
+        // the same substituted result, matching OCaml's node sharing.
+        let mut cache = HashMap::new();
+        for inner_field in inner_fields {
+            let resolved_inner = expand_record_spread_label(ctx, env, inner_field, visited)?;
+            for mut field in resolved_inner {
+                if source_params.len() == spread_args.len() && !source_params.is_empty() {
+                    field.ld_type = substitute_type_params(
+                        ctx,
+                        field.ld_type,
+                        &source_params,
+                        &spread_args,
+                        &mut cache,
+                    );
                 }
+                expanded.push(field);
             }
-            Some(expanded)
-        } else {
-            None
         }
+        Some(expanded)
     } else {
         None
     };
