@@ -1776,6 +1776,38 @@ fn close_matching_variant_rows_from_expected<'a>(
                     );
                 }
             }
+            (
+                TypeDesc::Tconstr {
+                    args: impl_args, ..
+                },
+                TypeDesc::Tconstr {
+                    args: expected_args, ..
+                },
+            ) if impl_args.is_empty() && expected_args.is_empty() => {
+                // OCaml compiler/ml/includemod.ml:56-60 delegates value
+                // inclusion to compiler/ml/includecore.ml:43-48, where
+                // compiler/ml/ctype.ml:2958-3016 `moregen` has already made
+                // the semantic decision. This Rust-only row-sharing follow-up
+                // must not force abstract zero-argument constructors just to
+                // discover that there are no rows to align.
+            }
+            (
+                TypeDesc::Tconstr {
+                    args: impl_args, ..
+                },
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_),
+            )
+            | (
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_),
+                TypeDesc::Tconstr {
+                    args: impl_args, ..
+                },
+            ) if impl_args.is_empty() => {
+                // Same OCaml reference as above: after `moregen` accepts a
+                // variable/constructor pair, this row-sharing pass has no row
+                // on the variable side to close. Expanding the constructor here
+                // would introduce Rust-only `Env.normalize_path` side effects.
+            }
             (TypeDesc::Tvariant(impl_row0), TypeDesc::Tvariant(expected_row0)) => {
                 let impl_row = btype::row_repr(type_ctx, impl_row0);
                 let expected_row = btype::row_repr(type_ctx, expected_row0);

@@ -3149,7 +3149,13 @@ fn touch_type_constraint_path(
             crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
         }
 
-        if constraint_path_needs_primitive_js_match_force(ctx, env, pers_env, &path) {
+        // OCaml compiler/ml/typedecl.ml:773-781 reaches
+        // compiler/ml/ctype.ml:2338-2344 head expansion only when
+        // `Ctype.matches` needs to compare constructor arguments. For a
+        // zero-argument alias such as `M.t`, the match can return before
+        // env.ml:1516-1585 scrapes the alias target and forces nested component
+        // modtype declarations.
+        if has_args && constraint_path_needs_primitive_js_match_force(ctx, env, pers_env, &path) {
             crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
         }
         // OCaml compiler/ml/typedecl.ml:767-785 checks each declaration
