@@ -1038,7 +1038,7 @@ impl QualifiedModuleComponents {
             SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
             _ => return None,
         };
-        if let Some((raw_id, raw_md, raw_parent_sig)) =
+        if let Some((raw_id, raw_md, raw_parent_sig, raw_parent_path)) =
             self_alias_raw_parent_module_item(&self.access_path, name, runtime_pos, &md, ctx)
         {
             // OCaml compiler/ml/env.ml:1568 stores component module
@@ -1064,6 +1064,22 @@ impl QualifiedModuleComponents {
                 raw_id.clone(),
                 md.clone(),
             );
+            // OCaml compiler/ml/env.ml:1568 stores one lazy module-declaration
+            // thunk for the raw component item, and env.ml:1517-1519 can reach
+            // that same thunk through a strengthened alias path after
+            // env.ml:1435-1449 `scrape_alias`. Rust has separate component
+            // views for paths such as `Webapi.Fetch` and `Webapi__Fetch`; cache
+            // the forced declaration under the raw parent too so a later direct
+            // raw lookup observes the already-forced OCaml thunk instead of
+            // running compiler/ml/subst.ml:351-400 a second time.
+            if !raw_parent_path.same(self.access_path.as_ref()) {
+                ctx.register_qualified_module_decl(
+                    &raw_parent_path,
+                    name,
+                    raw_id.clone(),
+                    md.clone(),
+                );
+            }
             return Some((runtime_pos, raw_id, md));
         }
         // OCaml compiler/ml/env.ml:1568 stores component modules as
@@ -1172,7 +1188,7 @@ fn self_alias_raw_parent_module_item(
     runtime_pos: usize,
     md: &ModuleDeclaration,
     ctx: &super::context::TypeContext,
-) -> Option<(Ident, ModuleDeclaration, Signature)> {
+) -> Option<(Ident, ModuleDeclaration, Signature, Path)> {
     let selected_path = qualified_submodule_access_path(access_path, module_name, runtime_pos, md);
     let is_self_alias = matches!(
         &md.md_type,
@@ -1186,12 +1202,19 @@ fn self_alias_raw_parent_module_item(
 
     raw_sig_candidate_names_for_access_path(access_path)
         .into_iter()
-        .filter_map(|name| ctx.find_raw_module_sig(&name))
-        .find_map(|raw_parent_sig| {
+        .filter_map(|name| {
+            let raw_parent_sig = ctx.find_raw_module_sig(&name)?;
+            let raw_parent_path = Path::pident(Ident::create_persistent(&name));
+            Some((raw_parent_sig, raw_parent_path))
+        })
+        .find_map(|(raw_parent_sig, raw_parent_path)| {
             raw_parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, raw_md, _) if id.name() == module_name => {
-                    Some((id.clone(), raw_md.clone(), raw_parent_sig.clone()))
-                }
+                SignatureItem::SigModule(id, raw_md, _) if id.name() == module_name => Some((
+                    id.clone(),
+                    raw_md.clone(),
+                    raw_parent_sig.clone(),
+                    raw_parent_path.clone(),
+                )),
                 _ => None,
             })
         })
