@@ -3161,10 +3161,20 @@ fn preserve_alias_unify_representative(
             // unpack/package manifest case identified below.
             return;
         }
-        let shares_identity = shares_direct_identity
-            || shares_ctype_identity
-            || selected_local_parameter_alias
-            || flattened_alias_equiv;
+        let shares_item_identity = shares_direct_identity || shares_ctype_identity;
+        let preserve_flattened_alias =
+            flattened_alias_equiv && (arity == 0 || !shares_item_identity);
+        // OCaml compiler/ml/ctype.ml:2412-2414 unifies arguments after
+        // same-constructor identity is known. This pre-unify representative
+        // pass must not link argful constructors on identity alone, or the
+        // later unifier can return early before phantom parameters are forced.
+        // Keep the explicit pre-link for nullary aliases and for flattened
+        // aliases where Rust has no same-item proof for the normal ctype path,
+        // plus the local package cases below where Rust is compensating for
+        // OCaml ref sharing.
+        let shares_identity = selected_local_parameter_alias
+            || preserve_flattened_alias
+            || (arity == 0 && shares_item_identity);
         if !shares_identity {
             return;
         }

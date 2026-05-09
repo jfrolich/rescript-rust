@@ -335,6 +335,36 @@ fn type_decl_would_get_strengthened_manifest(decl: &super::decl::TypeDeclaration
     )
 }
 
+fn type_decl_has_manifest_path(
+    ctx: &TypeContext,
+    decl: &super::decl::TypeDeclaration,
+    path: &Path,
+) -> bool {
+    decl.type_manifest.is_some_and(|manifest| {
+        let manifest = ctx.repr(manifest);
+        matches!(
+            &*ctx.get_desc(manifest),
+            TypeDesc::Tconstr {
+                path: manifest_path,
+                ..
+            } if manifest_path.same(path)
+        )
+    })
+}
+
+fn type_decl_preserves_strengthened_alias_path(
+    ctx: &TypeContext,
+    decl: &super::decl::TypeDeclaration,
+    flat_path: &Path,
+) -> bool {
+    // OCaml compiler/ml/mtype.ml:55-70 creates self-manifests for abstract
+    // signature types during strengthening. Rust can later see the already
+    // strengthened flat component, so treat an existing self-manifest the same
+    // as a declaration that would still receive one.
+    type_decl_would_get_strengthened_manifest(decl)
+        || type_decl_has_manifest_path(ctx, decl, flat_path)
+}
+
 pub(crate) fn lookup_type_decl_for_path_pub(
     ctx: &TypeContext,
     env: &Env,
@@ -2188,8 +2218,24 @@ pub(crate) fn resolved_type_items_share_identity(
                     )
                     .unwrap_or_else(|| parent2.as_ref().clone())
                 };
-                let raw1 = lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str());
-                let raw2 = lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str());
+                let raw_path1 = Path::pdot(raw_parent1.clone(), name1.to_string());
+                let raw_path2 = Path::pdot(raw_parent2.clone(), name2.to_string());
+                // OCaml compiler/ml/env.ml:781-793 follows module aliases in
+                // `lookup_module_descr`, then compiler/ml/env.ml:800-813
+                // returns the selected `Sig_type` item before
+                // compiler/ml/ctype.ml:2412-2414 unifies constructor
+                // arguments. Use the resolved target paths here too; otherwise
+                // Rust expands phantom-parameter manifests such as
+                // Webapi__Iterator.next before the alias-path arguments have
+                // been unified.
+                let raw1 =
+                    resolve_type_item_through_env(ctx, env, &raw_path1, false).or_else(|| {
+                        lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str())
+                    });
+                let raw2 =
+                    resolve_type_item_through_env(ctx, env, &raw_path2, false).or_else(|| {
+                        lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str())
+                    });
                 matches!(
                     (raw1, raw2),
                     (
@@ -4137,22 +4183,40 @@ fn unify_types<'a>(
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
                     let p2_flat_persistent = flat_persistent_parent(path2);
-                    let implicit_namespace_alias = |path: &Path| {
-                        path_root_ident(path).is_some_and(|root| {
-                            root.is_persistent()
-                                && matches!(root.name(), "Js" | "Stdlib" | "Pervasives")
-                        })
+                    let p1_flat_decl = if p1_flat_persistent && !p2_flat_persistent {
+                        lookup_type_decl_for_path(ctx, env, path1)
+                    } else {
+                        None
                     };
-                    let p1_implicit_namespace_alias = implicit_namespace_alias(path1);
-                    let p2_implicit_namespace_alias = implicit_namespace_alias(path2);
-                    let p1_strengthened_flat_alias = p1_flat_persistent
+                    let p2_flat_decl = if p2_flat_persistent && !p1_flat_persistent {
+                        lookup_type_decl_for_path(ctx, env, path2)
+                    } else {
+                        None
+                    };
+                    let p1_selected_decl = if p1_flat_persistent && !p2_flat_persistent {
+                        resolve_type_item_through_env(ctx, env, path2, false)
+                            .map(|(_, decl)| decl)
+                    } else {
+                        None
+                    };
+                    let p2_selected_decl = if p2_flat_persistent && !p1_flat_persistent {
+                        resolve_type_item_through_env(ctx, env, path1, false)
+                            .map(|(_, decl)| decl)
+                    } else {
+                        None
+                    };
+                    let p1_alias_decl = p1_selected_decl.as_ref().or(p1_flat_decl.as_ref());
+                    let p2_alias_decl = p2_selected_decl.as_ref().or(p2_flat_decl.as_ref());
+                    let p1_should_link_flat_alias = p1_flat_persistent
                         && !p2_flat_persistent
-                        && lookup_type_decl_for_path(ctx, env, path1)
-                            .is_some_and(|decl| type_decl_would_get_strengthened_manifest(&decl));
-                    let p2_strengthened_flat_alias = p2_flat_persistent
+                        && p1_alias_decl.is_none_or(|decl| {
+                            type_decl_preserves_strengthened_alias_path(ctx, decl, path1)
+                        });
+                    let p2_should_link_flat_alias = p2_flat_persistent
                         && !p1_flat_persistent
-                        && lookup_type_decl_for_path(ctx, env, path2)
-                            .is_some_and(|decl| type_decl_would_get_strengthened_manifest(&decl));
+                        && p2_alias_decl.is_none_or(|decl| {
+                            type_decl_preserves_strengthened_alias_path(ctx, decl, path2)
+                        });
                     drop(desc1);
                     drop(desc2);
                     // OCaml compiler/ml/ctype.ml:2341-2344 expands
@@ -4176,39 +4240,14 @@ fn unify_types<'a>(
                     //
                     // OCaml compiler/ml/mtype.ml:55-70 controls which alias
                     // components get a strengthened self-manifest. If the flat
-                    // persistent declaration would be strengthened, unification
-                    // observes that visible alias path; public manifest aliases
-                    // such as Stdlib_Error.t keep the original target path.
-                    if p1_strengthened_flat_alias {
+                    // persistent declaration would be strengthened, or already
+                    // carries that self-manifest from an earlier component
+                    // view, unification observes the visible alias path; public
+                    // manifests to other targets such as Stdlib_Error.t keep
+                    // the original target path.
+                    if p1_should_link_flat_alias {
                         link_type(ctx, t1, t2);
-                    } else if p2_strengthened_flat_alias {
-                        link_type(ctx, t2, t1);
-                    } else if p1_flat_persistent
-                        && !p2_flat_persistent
-                        && !p2_implicit_namespace_alias
-                    {
-                        // OCaml compiler/ml/typecore.ml:3771-3773 types an
-                        // argument against the constructor parameter and then
-                        // unifies the typed expression with the second parameter
-                        // instance. When compiler/ml/ctype.ml:2361-2364 enters
-                        // unify3 and ctype.ml:2393-2397 links expression-mode
-                        // representatives, a direct flattened persistent path
-                        // that shares env.ml:800-813 component identity with a
-                        // selected module-alias path is relinked to that visible
-                        // alias, e.g. `Transcript__EditedWord.t` to
-                        // `Transcript__Edit.EditedWord.t`.
-                        //
-                        // Keep implicit namespace opens out of this compensation:
-                        // compiler/core/res_compmisc.ml:58-62 opens Stdlib and
-                        // Pervasives implicitly, and compiler/ml/env.ml:1874-1877
-                        // adds their components without making selected namespace
-                        // paths like `Stdlib.Date.t` the representative.
-                        link_type(ctx, t1, t2);
-                    } else if p2_flat_persistent
-                        && !p1_flat_persistent
-                        && !p1_implicit_namespace_alias
-                    {
-                        // See the symmetric OCaml reference above.
+                    } else if p2_should_link_flat_alias {
                         link_type(ctx, t2, t1);
                     } else if p1_persistent != p2_persistent {
                         if p1_flat_persistent {
