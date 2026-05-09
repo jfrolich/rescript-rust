@@ -5520,6 +5520,151 @@ fn force_qualified_value_type_paths<'a>(
         })
     }
 
+    fn path_is_promise_constructor(path: &Path) -> bool {
+        if path.same(&crate::types::predef::path_promise()) {
+            return true;
+        }
+        path.flatten().is_ok_and(|(root, components)| {
+            root.is_persistent() && root.name() == "Stdlib" && components == ["Promise", "t"]
+        })
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct FinalResultPathFlags {
+        has_qualified_component_path: bool,
+        has_promise_constructor_path: bool,
+    }
+
+    impl FinalResultPathFlags {
+        fn for_path(path: &Path) -> Self {
+            Self {
+                has_qualified_component_path: matches!(path, Path::Pdot(..)),
+                has_promise_constructor_path: path_is_promise_constructor(path),
+            }
+        }
+
+        fn merge(&mut self, other: Self) {
+            self.has_qualified_component_path |= other.has_qualified_component_path;
+            self.has_promise_constructor_path |= other.has_promise_constructor_path;
+        }
+    }
+
+    fn final_result_path_flags(
+        ctx: &crate::types::context::TypeContext,
+        ty: TypeExprRef,
+        seen: &mut TypeExprRefSet,
+    ) -> FinalResultPathFlags {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return FinalResultPathFlags::default();
+        }
+
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+                FinalResultPathFlags::default()
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                let arg_ty = arg.typ;
+                let ret_ty = *ret;
+                drop(desc);
+                let mut flags = final_result_path_flags(ctx, arg_ty, seen);
+                flags.merge(final_result_path_flags(ctx, ret_ty, seen));
+                flags
+            }
+            TypeDesc::Ttuple(items) => {
+                let items = items.clone();
+                drop(desc);
+                let mut flags = FinalResultPathFlags::default();
+                for item in items {
+                    flags.merge(final_result_path_flags(ctx, item, seen));
+                }
+                flags
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let mut flags = FinalResultPathFlags::for_path(path);
+                let args = args.clone();
+                drop(desc);
+                for arg in args {
+                    flags.merge(final_result_path_flags(ctx, arg, seen));
+                }
+                flags
+            }
+            TypeDesc::Tobject { fields, name } => {
+                let fields = *fields;
+                let name = name.clone();
+                drop(desc);
+                let mut flags = FinalResultPathFlags::default();
+                if let Some((path, args)) = name.as_ref() {
+                    flags.merge(FinalResultPathFlags::for_path(path));
+                    for arg in args.iter().copied() {
+                        flags.merge(final_result_path_flags(ctx, arg, seen));
+                    }
+                }
+                flags.merge(final_result_path_flags(ctx, fields, seen));
+                flags
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                let typ = *typ;
+                let rest = *rest;
+                drop(desc);
+                let mut flags = final_result_path_flags(ctx, typ, seen);
+                flags.merge(final_result_path_flags(ctx, rest, seen));
+                flags
+            }
+            TypeDesc::Tlink(link) | TypeDesc::Tsubst(link) => {
+                let link = *link;
+                drop(desc);
+                final_result_path_flags(ctx, link, seen)
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = row.clone();
+                drop(desc);
+                let mut flags = FinalResultPathFlags::default();
+                if let Some((path, args)) = row.row_name.as_ref() {
+                    flags.merge(FinalResultPathFlags::for_path(path));
+                    for arg in args.iter().copied() {
+                        flags.merge(final_result_path_flags(ctx, arg, seen));
+                    }
+                }
+                flags.merge(final_result_path_flags(ctx, row.row_more, seen));
+                for (_, field) in row.row_fields.iter() {
+                    match field {
+                        RowField::Rpresent(Some(ty)) => {
+                            flags.merge(final_result_path_flags(ctx, *ty, seen))
+                        }
+                        RowField::Reither { types, .. } => {
+                            for ty in types.iter().copied() {
+                                flags.merge(final_result_path_flags(ctx, ty, seen));
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
+                flags
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                let body = *body;
+                let vars = vars.clone();
+                drop(desc);
+                let mut flags = final_result_path_flags(ctx, body, seen);
+                for var in vars {
+                    flags.merge(final_result_path_flags(ctx, var, seen));
+                }
+                flags
+            }
+            TypeDesc::Tpackage { path, args, .. } => {
+                let mut flags = FinalResultPathFlags::for_path(path);
+                let args = args.clone();
+                drop(desc);
+                for arg in args {
+                    flags.merge(final_result_path_flags(ctx, arg, seen));
+                }
+                flags
+            }
+        }
+    }
+
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
@@ -5604,26 +5749,43 @@ fn force_qualified_value_type_paths<'a>(
                     seen,
                 );
                 if defer_selected_value_final_result && !ret_is_arrow {
-                    // OCaml compiler/ml/typecore.ml:4219-4224 leaves the final
-                    // application result to the caller, but env.ml:1530-1538 and
-                    // compiler/ml/subst.ml:303-309 have already substituted the
-                    // selected component path into the value description. Keep
-                    // those component-table side effects visible while still
-                    // leaving the final result to the caller.
-                    visit(
-                        tctx,
-                        env,
-                        ret_ty,
-                        value_access_root_is_local,
-                        value_access_root,
-                        selected_module_path,
-                        selected_alias_targets,
-                        ret_allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
-                        false,
-                        false,
-                        seen,
-                    );
+                    let final_result_flags =
+                        final_result_path_flags(ctx, ret_ty, &mut TypeExprRefSet::new());
+                    if final_result_flags.has_qualified_component_path
+                        && final_result_flags.has_promise_constructor_path
+                    {
+                        // OCaml compiler/ml/typecore.ml:2335-2343 `lower_args`
+                        // walks arrow argument types and stops when the return
+                        // is no longer an arrow. typecore.ml:4219-4224 then
+                        // leaves that final application result for the caller's
+                        // unification/expansion. Async lowering threads
+                        // promise result types through typecore.ml:2568-2588
+                        // before argument typing, so Rust must not eagerly
+                        // force qualified component aliases that appear only
+                        // under that final promise result.
+                    } else {
+                        // OCaml compiler/ml/typecore.ml:4219-4224 leaves the
+                        // final application result to the caller, but
+                        // env.ml:1530-1538 and compiler/ml/subst.ml:303-309
+                        // have already substituted the selected component path
+                        // into the value description. Keep those component-table
+                        // side effects visible while still leaving the final
+                        // result to the caller.
+                        visit(
+                            tctx,
+                            env,
+                            ret_ty,
+                            value_access_root_is_local,
+                            value_access_root,
+                            selected_module_path,
+                            selected_alias_targets,
+                            ret_allow_stdlib_flat_parent_inference,
+                            allow_non_stdlib_implicit_stdlib_inference,
+                            false,
+                            false,
+                            seen,
+                        );
+                    }
                 } else {
                     // OCaml compiler/ml/typecore.ml:4171-4192 advances through
                     // curried source arguments, but typecore.ml:4219-4224 leaves
@@ -22257,6 +22419,23 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         }
     }
 
+    fn lookup_type_decl_for_qualification_probe<'a>(
+        type_path: &Path,
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'a crate::types::context::TypeContext,
+    ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+        // OCaml compiler/ml/subst.ml:87-95 rewrites paths from the explicit
+        // substitution map while env.ml:800-813 qualified type lookup reads
+        // component type tables through `find_module_descr`. These
+        // qualification probes only check whether a rewritten path exists; they
+        // must not force env.ml:1568 module-declaration thunks or populate the
+        // normal Rust lookup caches before the later real lookup reaches them.
+        ctx.with_component_alias_probe_caches_suppressed(|| {
+            lookup_type_decl_for_path(type_path, env, pers_env, ctx)
+        })
+    }
+
     let repr = ctx.repr(ty);
     if !visited.insert(repr) {
         return;
@@ -22371,7 +22550,10 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     if path_has_suffix(parent, module_access_path) {
                         let candidate = Path::pdot(module_access_path.clone(), type_name.as_str());
                         if !candidate.same(&path)
-                            && lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some()
+                            && lookup_type_decl_for_qualification_probe(
+                                &candidate, env, pers_env, ctx,
+                            )
+                            .is_some()
                         {
                             rewritten_path = Some(candidate);
                         }
@@ -22382,7 +22564,9 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             if rewritten_path.is_none() {
                 if let Path::Pident(id) = &path {
                     let candidate = Path::pdot(module_access_path.clone(), id.name());
-                    if lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some() {
+                    if lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
+                        .is_some()
+                    {
                         rewritten_path = Some(candidate);
                     }
                 }
@@ -22402,7 +22586,8 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                     && let Some(candidate) = prepend_module_prefix(&path, module_access_path)
                 {
                     if !candidate.same(&path)
-                        && lookup_type_decl_for_path(&candidate, env, pers_env, ctx).is_some()
+                        && lookup_type_decl_for_qualification_probe(&candidate, env, pers_env, ctx)
+                            .is_some()
                     {
                         rewritten_path = Some(candidate);
                     }
@@ -24230,10 +24415,13 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             access_path,
         );
     }
-    let alias_access_is_persistent_child = matches!((mty, access_path), (
-        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id)),
-        Path::Pdot(parent, _, _),
-    ) if alias_id.is_persistent() && parent.head().is_persistent());
+    let alias_access_is_persistent_child = matches!(
+        (mty, access_path),
+        (
+            crate::types::decl::ModuleType::MtyAlias(_, _),
+            Path::Pdot(parent, _, _),
+        ) if parent.head().is_persistent()
+    );
     if let crate::types::decl::ModuleType::MtyAlias(_, target) = mty
         && !target.same(access_path)
         && (!access_path_has_persistent_root || alias_access_is_persistent_child)

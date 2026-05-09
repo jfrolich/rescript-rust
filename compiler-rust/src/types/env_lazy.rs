@@ -1414,13 +1414,23 @@ fn build_local_module_components<'a>(
         // the module type whose signature is used below.
         match alias_path {
             Path::Pdot(parent, name, _) => {
-                let _ = crate::types::typecore::lookup_module_in_resolved_path(
-                    parent,
-                    name.as_str(),
-                    env,
-                    pers_env,
-                    ctx,
-                );
+                if !ctx.suppresses_component_alias_sig_force() {
+                    // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
+                    // real component-table construction, and scrape_alias
+                    // reaches env.ml:865-882 `find_module`, which forces
+                    // env.ml:1568's module-declaration thunk. Callers under
+                    // the probe guard mirror env.ml:781-793
+                    // `find_module_descr`/env.ml:800-813 type lookup: they
+                    // read component descriptors without forcing the alias
+                    // target module declaration.
+                    let _ = crate::types::typecore::lookup_module_in_resolved_path(
+                        parent,
+                        name.as_str(),
+                        env,
+                        pers_env,
+                        ctx,
+                    );
+                }
             }
             Path::Pident(id) if id.is_persistent() => {
                 // OCaml compiler/ml/env.ml:800-813 can read qualified type
