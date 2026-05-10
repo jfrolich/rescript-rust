@@ -15460,21 +15460,10 @@ fn type_field(
         )
     };
 
-    // Match OCaml Pexp_field: unify record expression type against label result.
-    unify_expression_types(tctx, loc, ty_exp, ty_res, None)?;
     // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
-    // `type_label_access`, `instance_label`, then `unify_exp` before returning
-    // the field expression with `exp_type = ty_arg`. Its label descriptors come
-    // from component tables built at compiler/ml/env.ml:1542-1559, so nested
-    // field argument paths are forced before the next enclosing `let` binder.
-    force_type_paths_for_lookup_from_type(
-        tctx.type_ctx,
-        env,
-        &mut tctx.persistent_env,
-        field_ty,
-        &mut HashSet::new(),
-    );
-
+    // `type_label_access`, `instance_label`, and `unify_exp`, then returns
+    // `ty_arg` without recursively forcing paths inside the field argument type.
+    unify_expression_types(tctx, loc, ty_exp, ty_res, None)?;
     Ok(Expression::new(
         ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
         loc,
