@@ -2546,7 +2546,10 @@ fn normalize_path_full_inner<'a>(
         }
     }
 
-    // First, recursively normalize the prefix for Pdot paths
+    // First, recursively normalize module-path structure. OCaml
+    // compiler/ml/env.ml:903-910 handles both `Pdot` prefixes and both sides
+    // of `Papply`; functor arguments use lax normalization but still force
+    // local module-declaration thunks through env.ml:865-875.
     let path = match path {
         Path::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
@@ -2568,6 +2571,31 @@ fn normalize_path_full_inner<'a>(
                 path.clone()
             } else {
                 Path::Pdot(std::sync::Arc::new(p_norm), s.clone(), *pos)
+            }
+        }
+        Path::Papply(p1, p2) => {
+            let p1_norm = normalize_path_full_inner(
+                ctx,
+                env,
+                p1,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+                None,
+            );
+            let p2_norm = normalize_path_full_inner(
+                ctx,
+                env,
+                p2,
+                depth + 1,
+                visiting,
+                allow_reverse_local_aliases,
+                None,
+            );
+            if p1_norm == **p1 && p2_norm == **p2 {
+                path.clone()
+            } else {
+                Path::Papply(std::sync::Arc::new(p1_norm), std::sync::Arc::new(p2_norm))
             }
         }
         _ => path.clone(),

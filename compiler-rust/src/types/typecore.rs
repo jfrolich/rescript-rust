@@ -20775,11 +20775,11 @@ fn expand_type_path_for_compare<'a>(
     let normalized = if force_env_normalize {
         // OCaml compiler/ml/typecore.ml:776-784 `expand_path` falls back to
         // `Env.normalize_path`; compiler/ml/env.ml:903-914 then reaches
-        // env.ml:865-875, forcing persistent `ps_sig` lazies at that exact
-        // compare point. Use ctype's side-effectful normalization for the
-        // direct Label.disambiguate-by-type path, while callers that mirror
-        // component-only lookup keep the pure alias rewrite below.
-        crate::types::ctype::normalize_path_full(ctx, env, path)
+        // env.ml:865-880, forcing local module-declaration and persistent
+        // `ps_sig` lazies at that exact compare point. Bypass Rust's structural
+        // normalized-path cache here: an earlier component-table probe may have
+        // cached the same path before the OCaml-equivalent lazy force.
+        crate::types::ctype::force_normalize_path_full_side_effects(ctx, env, path)
     } else {
         env.normalize_path(path)
     };
