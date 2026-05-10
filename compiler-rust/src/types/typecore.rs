@@ -21656,23 +21656,14 @@ fn qualify_label_description_paths<'a>(
                     module_access_paths.push(parent.clone());
                 }
 
-                // OCaml compiler/ml/env.ml:1542-1548 builds labels from
-                // `decl' = Subst.type_declaration sub decl`; compiler/ml/subst.ml:87-95
-                // rewrites every dotted module prefix through `module_path`.
-                // If the record result path is `Layout.Types.Component.t`, a
-                // field type copied from the scraped alias may still mention
-                // `Layout__Types.Component.kind`. Include alias-bearing
-                // ancestors such as `Layout.Types` so the same prefix
-                // substitution is visible in the selected label descriptor.
-                let mut ancestor = parent.parent();
-                while let Some(path) = ancestor {
-                    let has_alias_target =
-                        raw_alias_target_for_module_path(&path, env, pers_env, ctx).is_some();
-                    if has_alias_target && !module_access_paths.iter().any(|p| p.same(&path)) {
-                        module_access_paths.push(path.clone());
-                    }
-                    ancestor = path.parent();
-                }
+                // OCaml compiler/ml/env.ml:1435-1446 strengthens scraped
+                // aliases at the alias target, then compiler/ml/env.ml:1530
+                // and compiler/ml/subst.ml:87-95 apply only the substitution
+                // for the current component table. Do not re-run that
+                // substitution for alias-bearing ancestors: explicit target
+                // paths inside a child declaration, such as
+                // `Mistakes__Types.storyID` in `Types.Request.t`, are not
+                // rewritten to the selected root by the reference compiler.
             }
             let root = path_root_module(&res_path);
             let root_has_alias_target =
@@ -23448,9 +23439,30 @@ fn strengthen_sig_for_module_access_path<'a>(
                 runtime_pos += 1;
             }
             crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
+                // OCaml compiler/ml/mtype.ml:76-80 calls
+                // `strengthen_decl ~aliasable` while walking the signature, and
+                // compiler/ml/mtype.ml:98-102 replaces non-alias child modules
+                // with `Mty_alias(Mta_present, Pdot(p, id, pos))` immediately.
+                // Do this before any component substitution so parent-level
+                // rewrites cannot descend into nested signatures that OCaml has
+                // already hidden behind the child alias thunk.
+                let mut strengthened_md = md.clone();
+                if !matches!(
+                    strengthened_md.md_type,
+                    crate::types::decl::ModuleType::MtyAlias(..)
+                ) {
+                    strengthened_md.md_type = crate::types::decl::ModuleType::MtyAlias(
+                        crate::types::decl::AliasPresence::MtaPresent,
+                        Path::pdot_pos(
+                            module_access_path.clone(),
+                            id.name().to_string(),
+                            runtime_pos,
+                        ),
+                    );
+                }
                 strengthened.push(crate::types::decl::SignatureItem::SigModule(
                     id.clone(),
-                    md.clone(),
+                    strengthened_md,
                     *rec_status,
                 ));
                 runtime_pos += 1;
@@ -24692,12 +24704,44 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         );
     }
     if let Some(old_name) = resolved_name {
-        crate::cmi::persistent_env::rewrite_module_prefix_in_sig(&sig, old_name, access_path, ctx);
-        crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
-            &mut sig,
-            old_name,
-            access_path,
+        let resolved_alias_to_persistent_root = matches!(
+            mty,
+            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+                | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+                if alias_id.is_persistent() && alias_id.name() == old_name
         );
+        if resolved_alias_to_persistent_root {
+            // OCaml compiler/ml/env.ml:1516-1518 scrapes aliases before
+            // env.ml:1530-1578 builds component tables. For a persistent-root
+            // alias, compiler/ml/mtype.ml:98-102 strengthens child modules into
+            // Mty_alias entries at the persistent target, and the current
+            // compiler/ml/subst.ml:303-309 value-description substitution only
+            // sees this component level. Leave nested module signatures for
+            // their own env.ml:1568/1573 lazy component thunks.
+            crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
+                &sig,
+                old_name,
+                access_path,
+                ctx,
+            );
+            crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
+                &mut sig,
+                old_name,
+                access_path,
+            );
+        } else {
+            crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                &sig,
+                old_name,
+                access_path,
+                ctx,
+            );
+            crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+                &mut sig,
+                old_name,
+                access_path,
+            );
+        }
     }
     let alias_access_is_persistent_child = matches!(
         (mty, access_path),
@@ -24721,13 +24765,21 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         // selected path rather than the flattened backing unit.
         match target {
             Path::Pident(alias_id) => {
-                crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                // OCaml compiler/ml/env.ml:1567-1579 stores child module
+                // declarations/components as separate lazy thunks, and
+                // compiler/ml/subst.ml:69-95,303-309,350-377 only rewrites
+                // paths reached through the `prefix_idents` substitution when
+                // those thunks are forced. Keep this alias-target root rewrite
+                // at the current signature level so nested module value types
+                // preserve explicit persistent paths until their own component
+                // thunk runs.
+                crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                     &sig,
                     alias_id.name(),
                     access_path,
                     ctx,
                 );
-                crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+                crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
                     &mut sig,
                     alias_id.name(),
                     access_path,
@@ -24740,7 +24792,14 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
                     access_path,
                     ctx,
                 );
-                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                // OCaml compiler/ml/env.ml:1567-1579 keeps child module
+                // declarations/components as separate lazy thunks. For an
+                // alias such as `module J = Js.Json`, compiler/ml/mtype.ml:98-102
+                // strengthens `Kind` to the scraped target `Js.Json.Kind`,
+                // while compiler/ml/env.ml:1530 and compiler/ml/subst.ml:87-95
+                // expose the selected component path as `J.Kind`. Do not
+                // rewrite the child module declaration alias itself here.
+                crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
                     &mut sig,
                     target,
                     access_path,
@@ -24774,7 +24833,14 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
                         access_path,
                         ctx,
                     );
-                    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+                    // OCaml compiler/ml/env.ml:1567-1579 keeps child module
+                    // declarations/components as separate lazy thunks. For an
+                    // alias such as `module J = Js.Json`, compiler/ml/mtype.ml:98-102
+                    // strengthens `Kind` to the scraped target `Js.Json.Kind`,
+                    // while compiler/ml/env.ml:1530 and compiler/ml/subst.ml:87-95
+                    // expose the selected component path as `J.Kind`. Do not
+                    // rewrite the child module declaration alias itself here.
+                    crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix_shallow(
                         &mut sig,
                         target,
                         access_path,
@@ -24788,13 +24854,22 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
                     );
                 }
                 Path::Pident(alias_id) => {
-                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
+                    // OCaml compiler/ml/env.ml:1567-1579 stores child
+                    // module declarations/components as lazy thunks;
+                    // compiler/ml/subst.ml:69-95,303-309,350-377
+                    // rewrites only paths reached through the
+                    // `prefix_idents` substitution when those thunks
+                    // are forced. Keep this alias-target root rewrite
+                    // to the current signature level so nested module
+                    // value types keep explicit persistent paths until
+                    // their own component thunk runs.
+                    crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                         &sig,
                         alias_id.name(),
                         access_path,
                         ctx,
                     );
-                    crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig(
+                    crate::cmi::persistent_env::rewrite_module_prefix_paths_in_sig_shallow(
                         &mut sig,
                         alias_id.name(),
                         access_path,

@@ -1439,20 +1439,33 @@ fn build_local_module_components<'a>(
         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
         && alias_id.is_persistent()
     {
-        let pers = pers_env.as_mut()?;
-        if let Some(renamed_sig) = pers.get_renamed_sig_shared(alias_id.name(), ctx) {
+        let renamed_sig = {
+            let pers = pers_env.as_mut()?;
+            pers.get_renamed_sig_shared(alias_id.name(), ctx)
+        };
+        if let Some(renamed_sig) = renamed_sig {
             let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
             // OCaml compiler/ml/env.ml:1516-1518 calls `scrape_alias` before
             // component-table construction; scrape_alias at env.ml:1435-1446
             // reaches `find_module`, whose persistent Pident branch at
             // env.ml:872-875 forces `ps_sig = Subst.signature identity sign`
-            // from env.ml:677. Do not reuse Rust's raw ps_comps signature here:
-            // strengthened Mta_present child aliases such as `Js_json.Kind`
-            // need the same ps_sig force to expose their concrete signature.
+            // from env.ml:677. mtype.ml:30-80 then strengthens the alias target
+            // path, and mtype.ml:98-102 keeps child modules as aliases to that
+            // target before env.ml:1530-1578 builds the selected component
+            // table. Run the same qualification here instead of reusing the
+            // raw Rust component signature directly.
+            let qualified_sig = super::typecore::qualify_resolved_signature_for_local_components(
+                access_path,
+                &md.md_type,
+                renamed_sig.as_ref(),
+                Some(alias_id.name()),
+                pers_env,
+                ctx,
+            );
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
-                    renamed_sig,
+                    Arc::new(qualified_sig),
                     HashMap::new(),
                     Some(source_prefix),
                     ctx,

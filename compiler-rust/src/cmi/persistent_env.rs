@@ -4420,6 +4420,46 @@ pub fn rewrite_module_prefix_paths_in_sig(
     }
 }
 
+// OCaml compiler/ml/env.ml:1530-1578 builds one component-table level at a
+// time; child module declarations remain lazy component thunks at env.ml:1568
+// and env.ml:1573. This path-metadata rewrite therefore intentionally stops at
+// the current signature level instead of descending into child modules.
+pub fn rewrite_module_prefix_paths_in_sig_shallow(
+    sig_items: &mut [SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+) {
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if let Some(path) = desc.val_path.as_mut()
+                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
+                {
+                    *path = rewritten;
+                }
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                if let Some(path) = decl.type_path.as_mut()
+                    && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
+                {
+                    *path = rewritten;
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                if let Some(rewritten) =
+                    rewrite_path_prefix(&ext.ext_type_path, old_name, new_prefix)
+                {
+                    ext.ext_type_path = rewritten;
+                }
+            }
+            SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 /// Rewrite all type paths in a signature from one module prefix to another.
 /// Used when resolving module aliases: e.g., Belt.Array is aliased to Belt_Array,
 /// so types from Belt_Array.cmi need their paths rewritten from
@@ -4432,6 +4472,115 @@ pub fn rewrite_module_prefix_in_sig(
 ) {
     let mut visited = HashSet::new();
     rewrite_module_prefix_in_sig_with_visited(sig_items, old_name, new_prefix, ctx, &mut visited);
+}
+
+// OCaml compiler/ml/env.ml:1530-1578 applies prefix_idents substitution only to
+// the component table currently being built. Child module bodies are represented
+// by env.ml:1568/env.ml:1573 lazy thunks, so their type expressions are rewritten
+// only when those component thunks are forced.
+pub fn rewrite_module_prefix_in_sig_shallow(
+    sig_items: &[SignatureItem],
+    old_name: &str,
+    new_prefix: &Path,
+    ctx: &TypeContext,
+) {
+    let mut visited = HashSet::new();
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_type_expr_prefix(desc.val_type, old_name, new_prefix, ctx, &mut visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_type_expr_prefix(
+                                            arg,
+                                            old_name,
+                                            new_prefix,
+                                            ctx,
+                                            &mut visited,
+                                        );
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_type_expr_prefix(
+                                            lbl.ld_type,
+                                            old_name,
+                                            new_prefix,
+                                            ctx,
+                                            &mut visited,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_type_expr_prefix(
+                                    res,
+                                    old_name,
+                                    new_prefix,
+                                    ctx,
+                                    &mut visited,
+                                );
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                &mut visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigTypext(_id, ext, _) => {
+                for &param in &ext.ext_type_params {
+                    rewrite_type_expr_prefix(param, old_name, new_prefix, ctx, &mut visited);
+                }
+                match &ext.ext_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        for &arg in args {
+                            rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, &mut visited);
+                        }
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        for lbl in labels {
+                            rewrite_type_expr_prefix(
+                                lbl.ld_type,
+                                old_name,
+                                new_prefix,
+                                ctx,
+                                &mut visited,
+                            );
+                        }
+                    }
+                }
+                if let Some(ret) = ext.ext_ret_type {
+                    rewrite_type_expr_prefix(ret, old_name, new_prefix, ctx, &mut visited);
+                }
+            }
+            SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
 }
 
 fn rewrite_module_type_prefix_in_module_type(
@@ -4673,6 +4822,48 @@ pub fn rewrite_sig_paths_by_path_prefix(
                 }
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
+// OCaml compiler/ml/env.ml:1530-1578 exposes selected component paths for the
+// current table, while mtype.ml:98-102 keeps child modules strengthened as
+// aliases to the scraped target. Keep this rewrite shallow so child module
+// aliases are left for their env.ml:1568/env.ml:1573 component thunks.
+pub fn rewrite_sig_paths_by_path_prefix_shallow(
+    sig_items: &mut [SignatureItem],
+    old_prefix: &Path,
+    new_prefix: &Path,
+) {
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if let Some(path) = desc.val_path.as_mut()
+                    && let Some(rewritten) =
+                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                {
+                    *path = rewritten;
+                }
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                if let Some(path) = decl.type_path.as_mut()
+                    && let Some(rewritten) =
+                        rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+                {
+                    *path = rewritten;
+                }
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                if let Some(rewritten) =
+                    rewrite_path_by_path_prefix(&ext.ext_type_path, old_prefix, new_prefix)
+                {
+                    ext.ext_type_path = rewritten;
+                }
+            }
+            SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
         }
     }
 }
