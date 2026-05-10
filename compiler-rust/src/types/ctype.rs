@@ -2217,10 +2217,27 @@ pub(crate) fn resolved_type_items_share_identity(
 
     let path1 = canonicalize_local_direct_family(path1);
     let path2 = canonicalize_local_direct_family(path2);
-    let Some((id1, decl1)) = resolve_type_item_through_env(ctx, env, &path1, false) else {
+    let resolve_identity_type_item =
+        |path: &Path| -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+            if let Path::Pdot(parent, name, _) = path
+                && let Some(found) =
+                    lookup_component_module_sig_type(ctx, env, parent.as_ref(), name.as_str())
+            {
+                // This helper is a Rust-only identity shortcut used while unifying
+                // constructors. OCaml compiler/ml/ctype.ml:2412-2426 asks
+                // compiler/ml/env.ml:800-813 `Env.find_type`, whose dotted parent
+                // lookup descends through env.ml:781-793 `find_module_descr` and
+                // `comp_components`; it does not force env.ml:865-882
+                // `find_module`/env.ml:1568 `comp_modules` just to compare two
+                // type items.
+                return Some(found);
+            }
+            resolve_type_item_through_env(ctx, env, path, false)
+        };
+    let Some((id1, decl1)) = resolve_identity_type_item(&path1) else {
         return false;
     };
-    let Some((id2, decl2)) = resolve_type_item_through_env(ctx, env, &path2, false) else {
+    let Some((id2, decl2)) = resolve_identity_type_item(&path2) else {
         return false;
     };
 
@@ -2260,14 +2277,10 @@ pub(crate) fn resolved_type_items_share_identity(
                 // Rust expands phantom-parameter manifests such as
                 // Webapi__Iterator.next before the alias-path arguments have
                 // been unified.
-                let raw1 =
-                    resolve_type_item_through_env(ctx, env, &raw_path1, false).or_else(|| {
-                        lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str())
-                    });
-                let raw2 =
-                    resolve_type_item_through_env(ctx, env, &raw_path2, false).or_else(|| {
-                        lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str())
-                    });
+                let raw1 = lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str())
+                    .or_else(|| resolve_type_item_through_env(ctx, env, &raw_path1, false));
+                let raw2 = lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str())
+                    .or_else(|| resolve_type_item_through_env(ctx, env, &raw_path2, false));
                 matches!(
                     (raw1, raw2),
                     (

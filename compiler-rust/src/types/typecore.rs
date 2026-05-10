@@ -5861,6 +5861,17 @@ fn force_qualified_value_type_paths<'a>(
                         || selected_alias_targets
                             .iter()
                             .any(|target| parent.same(target));
+                    let type_parent_is_selected_alias_sibling = selected_alias_targets
+                        .iter()
+                        .any(|target| {
+                            let Some(target_parent) = target.parent() else {
+                                return false;
+                            };
+                            let Some(type_parent_parent) = parent.parent() else {
+                                return false;
+                            };
+                            type_parent_parent.same(&target_parent) && !parent.same(target)
+                        });
                     let type_parent_root_is_implicit_stdlib =
                         path_root_ident(parent).is_some_and(|root| {
                             root.is_persistent()
@@ -5875,6 +5886,7 @@ fn force_qualified_value_type_paths<'a>(
                     let resolved = if suppress_selected_value_forces
                         || (nested_inside_selected_module
                             && !selected_module_is_implicit_stdlib_path)
+                        || type_parent_is_selected_alias_sibling
                         || type_parent_is_implicit_stdlib_for_non_stdlib_value
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
@@ -5882,10 +5894,11 @@ fn force_qualified_value_type_paths<'a>(
                         // compiler/ml/env.ml:1091-1100's component value
                         // table. It does not force env.ml:1568 child module
                         // declarations for nested type paths in that value
-                        // type, nor unrelated implicit Stdlib/Pervasives
-                        // component roots mentioned by a non-Stdlib value
-                        // scheme; compiler/ml/ctype.ml:666-695 reaches those
-                        // later through `get_level` while lowering arguments.
+                        // type, sibling modules under the selected alias target,
+                        // nor unrelated implicit Stdlib/Pervasives component roots
+                        // mentioned by a non-Stdlib value scheme;
+                        // compiler/ml/ctype.ml:666-695 reaches those later through
+                        // `get_level` while lowering arguments.
                         None
                     } else {
                         lookup_type_decl_in_resolved_path(
@@ -20054,8 +20067,15 @@ pub(crate) fn force_module_aliases_for_type_lookup<'a>(
                     ctx.trigger_module_sig_rename(id.name());
                 }
             }
-            Path::Pdot(parent, name, _) => {
-                let _ = lookup_module_in_resolved_path(parent, name.as_str(), env, pers_env, ctx);
+            Path::Pdot(_, _, _) => {
+                // OCaml compiler/ml/ctype.ml:666-673 calls `Env.find_type`,
+                // whose dotted lookup goes through compiler/ml/env.ml:781-793
+                // `find_module_descr` and the component table's
+                // `comp_components`. It does not force env.ml:865-882
+                // `find_module`/env.ml:1568 `comp_modules` for the same
+                // dotted alias target. Keep the module-declaration thunk lazy
+                // here; callers that actually need `find_module` still use
+                // `lookup_module_in_resolved_path` explicitly.
             }
             Path::Pident(_) | Path::Papply(_, _) => {}
         }
