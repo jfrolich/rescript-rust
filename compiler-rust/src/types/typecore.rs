@@ -20441,9 +20441,20 @@ pub(crate) fn lookup_constructor_in_module<'b>(
                 }
             }
 
-            // Fallback to the most recently introduced constructor, matching
-            // OCaml's component-table order for qualified constructor names.
-            candidates.into_iter().next()
+            // OCaml compiler/ml/typecore.ml:990-1008 `NameChoice.disambiguate`
+            // still calls `ambiguous_types` when `opath = None`; that reaches
+            // compare_type_path at typecore.ml:978/786-787 and may force
+            // Env.normalize_path through compiler/ml/env.ml:903-914 before any
+            // nested pattern binders are allocated.
+            let selected = candidates.first().cloned()?;
+            force_constructor_ambiguous_type_side_effects(
+                &selected.1,
+                candidates.iter().skip(1).map(|(_, desc)| desc),
+                env,
+                pers_env,
+                ctx,
+            );
+            Some(selected)
         }
         _ => None,
     }
@@ -21788,8 +21799,18 @@ fn disambiguate_constructor<'a>(
         }
     }
 
-    // Step 4: Fall back to the most recent constructor (last in the list = most recently added)
+    // Step 4: Fall back to the most recent constructor (last in the list =
+    // most recently added). OCaml compiler/ml/typecore.ml:990-1008 still runs
+    // `ambiguous_types` for this `opath = None` branch, so preserve those
+    // compare_type_path/env-normalize side effects before returning.
     let cstr = all_constrs.last().unwrap();
+    force_constructor_ambiguous_type_side_effects(
+        cstr,
+        all_constrs.iter().rev().skip(1).copied(),
+        env,
+        pers_env,
+        ctx,
+    );
     let path = Path::pident(Ident::create_persistent(cstr_name));
     Some((path, (*cstr).clone()))
 }
@@ -21825,6 +21846,32 @@ fn constructor_result_path<'a>(
     match &*desc {
         TypeDesc::Tconstr { path, .. } => Some(path.clone()),
         _ => None,
+    }
+}
+
+fn force_constructor_ambiguous_type_side_effects<'a, 'b, I>(
+    selected: &crate::types::decl::ConstructorDescription,
+    others: I,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) where
+    I: IntoIterator<Item = &'b crate::types::decl::ConstructorDescription>,
+{
+    let Some(selected_path) = constructor_result_path(ctx, selected) else {
+        return;
+    };
+    for other in others {
+        let Some(other_path) = constructor_result_path(ctx, other) else {
+            continue;
+        };
+        let _ = compare_type_paths_for_constructor_disambiguation(
+            &selected_path,
+            &other_path,
+            env,
+            pers_env,
+            ctx,
+        );
     }
 }
 
