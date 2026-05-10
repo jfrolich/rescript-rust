@@ -732,6 +732,84 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     occurs_rec(ctx, needle, haystack, &mut visited)
 }
 
+/// Match OCaml's `occur_univar` pass before linking a type variable.
+///
+/// OCaml compiler/ml/ctype.ml:1688-1724 walks the candidate type after the
+/// regular occurs check. For parameterized constructors it calls
+/// `Env.find_type` to read variance before deciding which arguments to visit;
+/// that lookup is observable because env.ml:800-813 reaches lazy component
+/// tables. Keep this as part of variable unification instead of forcing module
+/// signatures from typecore call sites.
+fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()> {
+    fn occur_rec(
+        ctx: &TypeContext,
+        env: &Env,
+        bound: &mut HashSet<TypeExprRef>,
+        visited: &mut TypeExprRefSet,
+        ty: TypeExprRef,
+    ) -> TypeResult<()> {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return Ok(());
+        }
+
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tunivar(_) => {
+                if !bound.contains(&ty) {
+                    return Err(TypeError::Unify(vec![(ty, ctx.new_var(None))]));
+                }
+                Ok(())
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                let body = *body;
+                let vars = vars.clone();
+                drop(desc);
+                let old_bound = bound.clone();
+                for var in vars {
+                    bound.insert(ctx.repr(var));
+                }
+                let result = occur_rec(ctx, env, bound, visited, body);
+                *bound = old_bound;
+                result
+            }
+            TypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
+            TypeDesc::Tconstr { path, args, .. } => {
+                let path = path.clone();
+                let args = args.clone();
+                drop(desc);
+                if let Some(decl) = lookup_type_decl_for_path(ctx, env, &path) {
+                    for (arg, variance) in args.iter().zip(decl.type_variance.iter()) {
+                        if variance.mem(VarianceFlag::MayPos) || variance.mem(VarianceFlag::MayNeg)
+                        {
+                            occur_rec(ctx, env, bound, visited, *arg)?;
+                        }
+                    }
+                    Ok(())
+                } else {
+                    for arg in args {
+                        occur_rec(ctx, env, bound, visited, arg)?;
+                    }
+                    Ok(())
+                }
+            }
+            _ => {
+                drop(desc);
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                for child in children {
+                    occur_rec(ctx, env, bound, visited, child)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    let mut bound = HashSet::default();
+    let mut visited = TypeExprRefSet::new();
+    occur_rec(ctx, env, &mut bound, &mut visited, ty)
+}
+
 /// Deep occur check - follows type constructors.
 pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
     fn deep_occur_rec(
@@ -3736,6 +3814,9 @@ pub fn unify_var<'a>(
             if occurs(ctx, t1, t2) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
+            if let Some(env) = state.env() {
+                occur_univar(ctx, env, t2)?;
+            }
             let level = ctx.get_level(t1);
             let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
             let mut pending_type_lookup_paths = Vec::new();
@@ -4147,6 +4228,9 @@ fn unify_types<'a>(
             if occurs(ctx, t1, t2) {
                 return Err(TypeError::RecursiveType(t1));
             }
+            if let Some(env) = state.env() {
+                occur_univar(ctx, env, t2)?;
+            }
 
             let t1_level = ctx.get_level(t1);
             update_level(ctx, t1_level, t2);
@@ -4161,6 +4245,9 @@ fn unify_types<'a>(
 
             if occurs(ctx, t2, t1) {
                 return Err(TypeError::RecursiveType(t2));
+            }
+            if let Some(env) = state.env() {
+                occur_univar(ctx, env, t1)?;
             }
 
             let t2_level = ctx.get_level(t2);

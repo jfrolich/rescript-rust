@@ -12834,11 +12834,14 @@ fn type_function(
             }
         };
 
-        // Match OCaml's filter_arrow path: if expected type already expands to an
-        // arrow with matching label, reuse its argument/result types directly.
-        // Otherwise introduce a fresh arrow and unify against expected type.
+        // Match OCaml's filter_arrow path: compiler/ml/typecore.ml:3601-3603
+        // calls compiler/ml/ctype.ml:2862-2864 `filter_arrow`, whose first step
+        // is `expand_head_trace`/`expand_head_unif` (ctype.ml:2849-2852).
+        // If the expected type expands to an arrow with matching label, reuse
+        // its argument/result types directly; otherwise introduce a fresh arrow
+        // and unify against expected type.
         let expected_inst = crate::types::instance(ctx, expected_ty);
-        let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_inst);
+        let expanded_expected = crate::types::ctype::expand_head_unif(ctx, env, expected_inst);
         let expanded_desc = ctx.get_desc(expanded_expected);
         let mut expected_arrow = match &*expanded_desc {
             TypeDesc::Tarrow { arg, ret, .. } if arg.lbl == ctx_label => Some((arg.typ, *ret)),
