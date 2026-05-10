@@ -1749,27 +1749,33 @@ impl StoredModuleComponents {
             if let Some((parent_access_path, parent_sig)) = &self.parent_context {
                 let sibling_alias = match &module_decl.md_type {
                     super::decl::ModuleType::MtyAlias(_, Path::Pdot(parent, name, _))
-                        if !parent_access_path.head().is_persistent()
-                            && parent_access_path.head().stamp() != 0
-                            && parent.same(parent_access_path) =>
+                        if parent_matches_component_context(parent, parent_access_path, ctx) =>
                     {
-                        parent_sig.iter().find_map(|item| match item {
-                            SignatureItem::SigModule(id, md, _) if id.name() == name.as_str() => {
-                                Some(md.md_type.clone())
-                            }
-                            _ => None,
-                        })
+                        raw_component_module_type(parent_access_path, name.as_str(), ctx).or_else(
+                            || {
+                                parent_sig.iter().find_map(|item| match item {
+                                    SignatureItem::SigModule(id, md, _)
+                                        if id.name() == name.as_str() =>
+                                    {
+                                        Some(md.md_type.clone())
+                                    }
+                                    _ => None,
+                                })
+                            },
+                        )
                     }
                     _ => None,
                 };
                 if let Some(md_type) = sibling_alias {
                     // OCaml compiler/ml/env.ml:1516-1578 runs
-                    // `scrape_alias` on local child module types before
-                    // `prefix_idents` applies the selected component path.
-                    // Resolve local sibling aliases from the parent signature
-                    // here instead of substituting the alias path first;
-                    // otherwise Rust forces env.ml:1568's `Subst.modtype`
-                    // thunk and freshens child binders before OCaml does.
+                    // `scrape_alias` on child module types before `prefix_idents`
+                    // applies the selected component path.
+                    // Resolve sibling aliases from the parent signature here
+                    // instead of substituting the alias path first. The same
+                    // env.ml:1573-1578 `comp_components` path is used for
+                    // persistent parents; otherwise Rust forces env.ml:1568's
+                    // `Subst.modtype` thunk and freshens child binders before
+                    // OCaml does.
                     module_decl.md_type = md_type;
                 } else {
                     let keep_alias_target_for_scrape = matches!(
@@ -1813,4 +1819,54 @@ impl StoredModuleComponents {
         let components = cached.as_ref()?;
         Some(f(components))
     }
+}
+
+fn parent_matches_component_context(
+    parent: &Path,
+    parent_access_path: &Path,
+    ctx: &super::context::TypeContext,
+) -> bool {
+    if parent.same(parent_access_path) {
+        return true;
+    }
+    let head = parent_access_path.head();
+    if (head.is_persistent() || head.stamp() == 0)
+        && let Some(alias_path) = ctx.find_flattened_alias_component_path(head.name())
+    {
+        return parent.same(&alias_path);
+    }
+    if let Path::Pident(access_id) = parent_access_path
+        && (access_id.is_persistent() || access_id.stamp() == 0)
+        && let Ok((parent_head, parent_components)) = parent.flatten()
+        && !parent_components.is_empty()
+    {
+        // OCaml compiler/ml/env.ml:1573-1578 stores child `comp_components`
+        // under the selected component table. Rust can see the same table via a
+        // ReScript flattened backing unit (`Webapi__Fetch`) while the alias
+        // still names the source parent (`Webapi.Fetch`).
+        let double_underscore = format!("{}__{}", parent_head.name(), parent_components.join("__"));
+        let single_underscore = format!("{}_{}", parent_head.name(), parent_components.join("_"));
+        if access_id.name() == double_underscore || access_id.name() == single_underscore {
+            return true;
+        }
+    }
+    false
+}
+
+fn raw_component_module_type(
+    parent_access_path: &Path,
+    module_name: &str,
+    ctx: &super::context::TypeContext,
+) -> Option<super::decl::ModuleType> {
+    raw_sig_candidate_names_for_access_path(parent_access_path)
+        .into_iter()
+        .find_map(|name| {
+            let raw_parent_sig = ctx.find_raw_module_sig(&name)?;
+            raw_parent_sig.iter().find_map(|item| match item {
+                SignatureItem::SigModule(id, md, _) if id.name() == module_name => {
+                    Some(md.md_type.clone())
+                }
+                _ => None,
+            })
+        })
 }
