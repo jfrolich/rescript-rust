@@ -2991,6 +2991,25 @@ pub(crate) fn substitute_functor_result_module_path(
     copied
 }
 
+pub(crate) fn freshen_functor_component_module_type(
+    module_type: &ModuleType,
+    parent_context: Option<(&Path, &[SignatureItem])>,
+    ctx: &TypeContext,
+) -> ModuleType {
+    // OCaml compiler/ml/env.ml:1595-1602 builds `Functor_comps` by applying
+    // `Subst.modtype sub` to the functor argument/result module types, without
+    // applying `Subst.modtype` to the outer `Mty_functor` itself. That means
+    // the result signature binders are freshened here, while the functor
+    // parameter binder is not renamed until a full module declaration thunk is
+    // forced through env.ml:865-882.
+    let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    let maps = parent_context
+        .map(|(parent_module_path, parent_sig)| build_subst_maps(parent_sig, parent_module_path))
+        .unwrap_or_default();
+    freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
+    copied
+}
+
 pub(crate) fn freshen_component_modtype_declaration_bound_idents(
     mtd: &mut ModtypeDeclaration,
     parent_sig: &[SignatureItem],

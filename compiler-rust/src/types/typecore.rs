@@ -1254,29 +1254,10 @@ fn resolve_type_constructor_path(
                 }
             }
 
-            if let Some(module_path) = env.resolve_module_access_path_for_lid(
-                prefix,
-                tctx.arena,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            ) {
-                if let Some((resolved_module_path, _, decl)) = lookup_type_in_resolved_path(
-                    &module_path,
-                    type_name,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
-                    // OCaml typetexp.ml:116-123 dispatches constructors through
-                    // Env.lookup_type, whose Ldot case in env.ml:1091-1099 looks
-                    // up the type table after resolving module components.
-                    return (
-                        Path::pdot(resolved_module_path, type_name.to_string()),
-                        Some((*decl).clone()),
-                    );
-                }
-            }
-
+            // OCaml compiler/ml/typetexp.ml:116-123 dispatches constructors
+            // through Env.lookup_type; its Ldot case in
+            // compiler/ml/env.ml:1091-1099 resolves the parent module
+            // descriptor and reads the type table from that component view.
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
                 prefix,
                 tctx.arena,
@@ -1305,6 +1286,28 @@ fn resolve_type_constructor_path(
                 },
             ) {
                 return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
+            }
+            if let Some(module_path) = env.resolve_module_access_path_for_lid(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            ) {
+                if let Some((resolved_module_path, _, decl)) = lookup_type_in_resolved_path(
+                    &module_path,
+                    type_name,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
+                    // OCaml typetexp.ml:116-123 dispatches constructors through
+                    // Env.lookup_type, whose Ldot case in env.ml:1091-1099 looks
+                    // up the type table after resolving module components.
+                    return (
+                        Path::pdot(resolved_module_path, type_name.to_string()),
+                        Some((*decl).clone()),
+                    );
+                }
             }
             if let Some(mod_path) = env.resolve_module_access_path_for_lid(
                 prefix,
@@ -23955,6 +23958,19 @@ fn module_components_cache_key(
     module_path: &Path,
     env: &Env,
 ) -> Option<crate::types::context::QualifiedModuleComponentsCacheKey> {
+    if matches!(module_path, Path::Papply(_, _)) {
+        // OCaml compiler/ml/env.ml:1744-1756 caches
+        // `components_of_functor_appl` per argument path in `fcomp_cache`.
+        // A Papply has no stable flattened head, but the full path is still
+        // the cache identity; the cache belongs to the functor components, so
+        // cloned Rust Env values must not allocate a second application view.
+        return Some(
+            crate::types::context::QualifiedModuleComponentsCacheKey::new(
+                module_path.clone(),
+                None,
+            ),
+        );
+    }
     // Match `Path.flatten` in compiler/ml/path.ml:63-69: dotted paths whose
     // parent is a functor application have no single stable cache head.
     if module_path.flatten().is_err() {
@@ -24301,6 +24317,64 @@ fn build_module_components_from_parent_path<'a>(
     .flatten()
 }
 
+fn build_functor_application_components<'a>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
+    let Path::Papply(functor_path, arg_path) = module_path else {
+        return None;
+    };
+
+    let applied_mty = match functor_path.as_ref() {
+        Path::Pident(_) => {
+            let stored = env.local_module_components_arc(functor_path.as_ref())?;
+            stored.instantiate_functor_result_for_application(arg_path.as_ref(), ctx)?
+        }
+        Path::Pdot(parent, module_name, _) => {
+            // OCaml compiler/ml/env.ml:781-793 resolves the functor path with
+            // `find_module_descr`, and env.ml:1744-1756 then runs
+            // `components_of_functor_appl`. This must use the child
+            // `comp_components` thunk, not the module-declaration thunk from
+            // env.ml:1568, because env.ml:1595-1602 freshens only the functor
+            // argument/result module types at this point.
+            let stored = with_resolved_module_components_for_path(
+                parent,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    components
+                        .lookup_child_components(module_name.as_str())
+                        .map(|(_, stored)| stored)
+                },
+            )
+            .flatten()?;
+            stored.instantiate_functor_result_for_application(arg_path.as_ref(), ctx)?
+        }
+        Path::Papply(_, _) => return None,
+    };
+
+    let (raw_sig, resolved_name) = match &applied_mty {
+        crate::types::decl::ModuleType::MtySignature(sig) => (sig.clone(), None),
+        _ => env.resolve_module_type(&applied_mty, pers_env, ctx)?,
+    };
+    let sig = qualify_resolved_signature_for_local_components(
+        module_path,
+        &applied_mty,
+        &raw_sig,
+        resolved_name.as_deref(),
+        pers_env,
+        ctx,
+    );
+    Some(crate::types::env_lazy::QualifiedModuleComponents::new(
+        module_path.clone(),
+        sig,
+        ctx,
+    ))
+}
+
 fn flattened_alias_component_parent<'a>(
     parent: &Path,
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
@@ -24403,6 +24477,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     }
 
     let components = build_module_components_from_parent_path(module_path, env, pers_env, ctx)
+        .or_else(|| build_functor_application_components(module_path, env, pers_env, ctx))
         .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
         .or_else(|| {
             let (access_path, sig) =

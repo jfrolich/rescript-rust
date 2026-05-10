@@ -14,7 +14,8 @@ use crate::ident::Ident;
 
 use super::decl::{
     ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
-    ModuleDeclaration, Signature, SignatureItem, TypeDeclaration, ValueDescription, ValueKind,
+    ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration, ValueDescription,
+    ValueKind,
 };
 use super::path::Path;
 
@@ -31,6 +32,12 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     }
 
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
+}
+
+fn flattened_component_head(path: &Path) -> Option<&Ident> {
+    // OCaml compiler/ml/path.ml:63-69 refuses to flatten `Papply`; flattened
+    // alias sharing only applies to paths with a stable selected module head.
+    path.flatten().ok().map(|(head, _)| head)
 }
 
 fn build_matching_type_constructors(
@@ -504,11 +511,13 @@ impl QualifiedModuleComponents {
         // compilation.
         let share_modtype_force = !ctx.preserve_canonical_typedtree()
             && (!source_prefixes.is_empty()
-                || (access_path.head().is_persistent()
-                    && access_path.head().name().contains("__")
-                    && ctx
-                        .find_flattened_alias_component_path(access_path.head().name())
-                        .is_some()));
+                || flattened_component_head(&access_path).is_some_and(|head| {
+                    head.is_persistent()
+                        && head.name().contains("__")
+                        && ctx
+                            .find_flattened_alias_component_path(head.name())
+                            .is_some()
+                }));
 
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
@@ -1176,9 +1185,9 @@ impl QualifiedModuleComponents {
                 return Some((runtime_pos, id, md));
             }
         }
-        if self.access_path.head().is_persistent()
-            && let Some(component_path) =
-                ctx.find_flattened_alias_component_path(self.access_path.head().name())
+        if let Some(head) = flattened_component_head(self.access_path.as_ref())
+            && head.is_persistent()
+            && let Some(component_path) = ctx.find_flattened_alias_component_path(head.name())
             && let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name)
         {
             // Same sharing as above, but reached from the flattened backing
@@ -1833,6 +1842,33 @@ impl StoredModuleComponents {
         let components = cached.as_ref()?;
         Some(f(components))
     }
+
+    pub(crate) fn instantiate_functor_result_for_application(
+        &self,
+        arg_path: &Path,
+        ctx: &super::context::TypeContext,
+    ) -> Option<ModuleType> {
+        let ModuleType::MtyFunctor { param, result, .. } = &self.module_decl.md_type else {
+            return None;
+        };
+        let parent_context = self
+            .parent_context
+            .as_ref()
+            .map(|(path, sig)| (path, sig.as_ref().as_slice()));
+        let component_result = crate::cmi::persistent_env::freshen_functor_component_module_type(
+            result.as_ref(),
+            parent_context,
+            ctx,
+        );
+        Some(
+            crate::cmi::persistent_env::substitute_functor_result_module_path(
+                &component_result,
+                param,
+                arg_path,
+                ctx,
+            ),
+        )
+    }
 }
 
 fn parent_matches_component_context(
@@ -1843,8 +1879,8 @@ fn parent_matches_component_context(
     if parent.same(parent_access_path) {
         return true;
     }
-    let head = parent_access_path.head();
-    if (head.is_persistent() || head.stamp() == 0)
+    if let Some(head) = flattened_component_head(parent_access_path)
+        && (head.is_persistent() || head.stamp() == 0)
         && let Some(alias_path) = ctx.find_flattened_alias_component_path(head.name())
     {
         return parent.same(&alias_path);
