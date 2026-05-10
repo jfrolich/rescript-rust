@@ -8232,6 +8232,76 @@ pub fn type_expect<'a>(
 }
 
 /// Unify expression types, raising ExprTypeClash on error.
+fn force_env_find_type_side_effects_for_path(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    path: &Path,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    if let Path::Pdot(parent, type_name, _) = path {
+        // OCaml compiler/ml/ctype.ml:666-673 `get_level` calls
+        // `Env.find_type`; for `Pdot`, compiler/ml/env.ml:800-813 reaches
+        // `find_module_descr` before reading `comp_types`, which forces
+        // env.ml:1513-1552 component tables even when the type declaration is
+        // otherwise already present in the environment. Keep that lazy force
+        // point separate from abbreviation expansion.
+        let _ = lookup_type_in_resolved_path(
+            parent.as_ref(),
+            type_name.as_str(),
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        );
+    }
+    lookup_type_decl_for_path(path, env, &mut tctx.persistent_env, tctx.type_ctx)
+}
+
+fn path_depth_without_apply(path: &Path) -> usize {
+    match path {
+        Path::Pident(_) => 1,
+        Path::Pdot(parent, _, _) => path_depth_without_apply(parent) + 1,
+        Path::Papply(_, _) => 0,
+    }
+}
+
+fn lower_args_manifest_needs_component_force(
+    ctx: &TypeContext,
+    pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+    lookup_path: &Path,
+    manifest: TypeExprRef,
+) -> bool {
+    let manifest = ctx.repr(manifest);
+    let desc = ctx.borrow_desc(manifest);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let root = path_non_apply_root_ident(path);
+            let pers_flat_hit = root.is_some_and(|head| {
+                pers_env
+                    .as_ref()
+                    .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
+                    .is_some()
+            });
+            let pers_namespace_hit = root.is_some_and(|head| {
+                pers_env.as_ref().is_some_and(|pers| {
+                    pers.path_head_is_namespace_alias(path)
+                        || pers.module_is_namespace_backing_head(head.name())
+                })
+            });
+            let ctx_flat_hit = root.is_some_and(|head| {
+                ctx.find_flattened_alias_component_path(head.name())
+                    .is_some()
+            });
+            let parent_depth = path
+                .parent()
+                .map(|parent| path_depth_without_apply(&parent));
+            !args.is_empty()
+                && !path.same(lookup_path)
+                && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit)
+                && parent_depth.is_some_and(|depth| depth >= 2)
+        }
+        _ => false,
+    }
+}
+
 fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Path>) {
     if paths.is_empty() {
         return;
@@ -8251,7 +8321,169 @@ fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Pat
         // `Env.find_type`; for dotted paths env.ml:800-813 forces parent
         // module components. Rust ctype records those exact lookup points
         // because persistent component forcing lives in typecore.
-        let _ = lookup_type_decl_for_path(&path, &env, &mut tctx.persistent_env, tctx.type_ctx);
+        let _ = force_env_find_type_side_effects_for_path(tctx, &env, &path);
+    }
+}
+
+fn force_lower_args_type_lookup_paths(
+    tctx: &mut TypeCheckContext<'_>,
+    lookup_paths: Vec<Path>,
+    expansion_paths: Vec<Path>,
+) {
+    fn visit_manifest(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        ty: TypeExprRef,
+        seen: &mut TypeExprRefSet,
+    ) {
+        let ctx = tctx.type_ctx;
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                let path = path.clone();
+                let args = args.clone();
+                drop(desc);
+                if let Some(decl) =
+                    lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)
+                    && let Some(manifest) = decl.type_manifest
+                {
+                    visit_manifest(tctx, env, manifest, seen);
+                }
+                for arg in args {
+                    visit_manifest(tctx, env, arg, seen);
+                }
+            }
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                let arg_ty = arg.typ;
+                let ret_ty = *ret;
+                drop(desc);
+                visit_manifest(tctx, env, arg_ty, seen);
+                visit_manifest(tctx, env, ret_ty, seen);
+            }
+            TypeDesc::Ttuple(items) => {
+                let items = items.clone();
+                drop(desc);
+                for item in items {
+                    visit_manifest(tctx, env, item, seen);
+                }
+            }
+            TypeDesc::Tobject { fields, name } => {
+                let fields = *fields;
+                let name_args = name.as_ref().map(|(_, args)| args.clone());
+                drop(desc);
+                visit_manifest(tctx, env, fields, seen);
+                if let Some(args) = name_args {
+                    for arg in args {
+                        visit_manifest(tctx, env, arg, seen);
+                    }
+                }
+            }
+            TypeDesc::Tfield { typ, rest, .. } => {
+                let typ = *typ;
+                let rest = *rest;
+                drop(desc);
+                visit_manifest(tctx, env, typ, seen);
+                visit_manifest(tctx, env, rest, seen);
+            }
+            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
+                let inner = *inner;
+                drop(desc);
+                visit_manifest(tctx, env, inner, seen);
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = row.clone();
+                drop(desc);
+                if let Some((_, args)) = &row.row_name {
+                    for arg in args {
+                        visit_manifest(tctx, env, *arg, seen);
+                    }
+                }
+                visit_manifest(tctx, env, row.row_more, seen);
+                for (_, field) in row.row_fields.iter() {
+                    match field {
+                        RowField::Rpresent(Some(arg)) => visit_manifest(tctx, env, *arg, seen),
+                        RowField::Reither { types, .. } => {
+                            for arg in types {
+                                visit_manifest(tctx, env, *arg, seen);
+                            }
+                        }
+                        RowField::Rpresent(None) | RowField::Rabsent => {}
+                    }
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                let body = *body;
+                let vars = vars.clone();
+                drop(desc);
+                visit_manifest(tctx, env, body, seen);
+                for var in vars {
+                    visit_manifest(tctx, env, var, seen);
+                }
+            }
+            TypeDesc::Tpackage { args, .. } => {
+                let args = args.clone();
+                drop(desc);
+                for arg in args {
+                    visit_manifest(tctx, env, arg, seen);
+                }
+            }
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+    }
+
+    if lookup_paths.is_empty() && expansion_paths.is_empty() {
+        return;
+    }
+
+    let Some(env) = tctx
+        .unify_state
+        .env()
+        .map(crate::types::env::Env::clone_preserve_id)
+    else {
+        return;
+    };
+
+    let mut seen = TypeExprRefSet::new();
+    for path in lookup_paths {
+        // OCaml compiler/ml/typecore.ml:2335-2342 `lower_args` calls
+        // ctype.ml:2820-2837 `unify_var`; its ctype.ml:666-673
+        // `get_level` path reaches Env.find_type before local binders that
+        // follow the application are stamped.
+        let decl = force_env_find_type_side_effects_for_path(tctx, &env, &path);
+        if let Some(decl) = decl
+            && let Some(manifest) = decl.type_manifest
+            && lower_args_manifest_needs_component_force(
+                tctx.type_ctx,
+                &tctx.persistent_env,
+                &path,
+                manifest,
+            )
+        {
+            // OCaml compiler/ml/env.ml:1513-1552 builds component types from
+            // `decl' = Subst.type_declaration sub decl`. For nested component
+            // aliases, that copied manifest is where later Env.find_type calls
+            // are forced. Rust keeps signatures shared, so force the same
+            // manifest component path before stamping the next local binder.
+            visit_manifest(tctx, &env, manifest, &mut seen);
+        }
+    }
+    for path in expansion_paths {
+        // Only ctype.ml:688-749 paths that pass the `level < path_level`
+        // expansion branch should walk manifests; plain `get_level` lookups
+        // above are not enough. When that expansion branch runs,
+        // ctype.ml:1367-1372 `expand_head` can force manifest aliases in the
+        // same phase.
+        if let Some(decl) =
+            lookup_type_decl_for_path(&path, &env, &mut tctx.persistent_env, tctx.type_ctx)
+            && let Some(manifest) = decl.type_manifest
+        {
+            visit_manifest(tctx, &env, manifest, &mut seen);
+        }
     }
 }
 
@@ -8266,7 +8498,7 @@ fn unify_expression_types(
 
     let previous_capture = tctx.unify_state.begin_type_lookup_capture();
     let result = unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2);
-    let pending_type_lookup_paths = tctx
+    let (pending_type_lookup_paths, _) = tctx
         .unify_state
         .finish_type_lookup_capture(previous_capture);
     force_unify_type_lookup_paths(tctx, pending_type_lookup_paths);
@@ -9171,7 +9403,18 @@ fn type_application(
 
     let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
     ctx.end_def();
-    crate::types::ctype::lower_args(ctx, env, lowered_ty);
+    // OCaml compiler/ml/typecore.ml:2579-2582 instances the function type and
+    // immediately runs `lower_args`; typecore.ml:2335-2342 then calls
+    // `unify_var`, whose ctype.ml:666-673 `get_level` reaches Env.find_type.
+    // Rust ctype returns those lookup points so typecore can force persistent
+    // components in the same phase.
+    let (pending_type_lookup_paths, pending_type_expansion_paths) =
+        crate::types::ctype::lower_args(ctx, env, lowered_ty);
+    force_lower_args_type_lookup_paths(
+        tctx,
+        pending_type_lookup_paths,
+        pending_type_expansion_paths,
+    );
 
     ctx.begin_def();
 

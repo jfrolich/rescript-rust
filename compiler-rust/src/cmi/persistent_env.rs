@@ -855,6 +855,64 @@ impl PersistentEnv {
         })
     }
 
+    pub fn module_is_namespace_backing_head(&self, name: &str) -> bool {
+        let Some((module_name, namespace_name)) = name.rsplit_once('-') else {
+            return false;
+        };
+
+        fn signature_has_namespace_backing_alias(
+            namespace_name: &str,
+            module_name: &str,
+            backing_name: &str,
+            sig: &[SignatureItem],
+        ) -> bool {
+            let namespace_suffix = format!("-{namespace_name}");
+            sig.iter().any(|item| {
+                matches!(
+                    item,
+                    SignatureItem::SigModule(
+                        id,
+                        ModuleDeclaration {
+                            md_type: ModuleType::MtyAlias(_, Path::Pident(target)),
+                            ..
+                        },
+                        _
+                    ) if id.name() == module_name
+                        && target.is_persistent()
+                        && target.name() == backing_name
+                        && target.name().ends_with(&namespace_suffix)
+                )
+            })
+        }
+
+        // OCaml compiler/ml/env.ml:1513-1519 runs `scrape_alias` before
+        // building component tables, so a ReScript namespace module such as
+        // `NodeJs` can select the backing persistent unit `Fs-NodeJs` through
+        // its alias-only `.mlmap` signature without forcing unrelated modules.
+        if let Some((_, Some(ps))) = self.cache_lookup_entry(namespace_name) {
+            return (ps.ps_filename.ends_with(".mlmap")
+                || self.path_head_is_namespace_alias(&Path::pident(Ident::create_persistent(
+                    namespace_name,
+                ))))
+                && signature_has_namespace_backing_alias(
+                    namespace_name,
+                    module_name,
+                    name,
+                    ps.ps_sig.as_ref(),
+                );
+        }
+        self.portable_cache_entry(namespace_name)
+            .is_some_and(|(_, ps)| {
+                ps.ps_filename.ends_with(".mlmap")
+                    && signature_has_namespace_backing_alias(
+                        namespace_name,
+                        module_name,
+                        name,
+                        &ps.ps_sig,
+                    )
+            })
+    }
+
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
         // OCaml compiler/ml/env.ml:1058-1062 checks a persistent unit without
         // forcing its signature when `lookup_module ~load:false` only needs to

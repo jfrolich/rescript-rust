@@ -143,6 +143,10 @@ pub struct UnifyState {
     /// persistent module components while lowering levels.
     pending_type_lookup_paths: Vec<Path>,
 
+    /// Type constructor paths whose level check proceeds to alias expansion
+    /// after the `Env.find_type` lookup.
+    pending_type_expansion_paths: Vec<Path>,
+
     /// Whether the current caller wants to collect those lookup side effects.
     capture_type_lookup_paths: bool,
 
@@ -160,6 +164,7 @@ impl UnifyState {
             assume_injective: false,
             env: None,
             pending_type_lookup_paths: Vec::new(),
+            pending_type_expansion_paths: Vec::new(),
             capture_type_lookup_paths: false,
             recursion_depth: 0,
         }
@@ -174,6 +179,7 @@ impl UnifyState {
             assume_injective: false,
             env: None,
             pending_type_lookup_paths: Vec::new(),
+            pending_type_expansion_paths: Vec::new(),
             capture_type_lookup_paths: false,
             recursion_depth: 0,
         }
@@ -211,9 +217,12 @@ impl UnifyState {
 
     /// Restore the previous capture state and return paths collected while it
     /// was active.
-    pub fn finish_type_lookup_capture(&mut self, previous: bool) -> Vec<Path> {
+    pub fn finish_type_lookup_capture(&mut self, previous: bool) -> (Vec<Path>, Vec<Path>) {
         self.capture_type_lookup_paths = previous;
-        std::mem::take(&mut self.pending_type_lookup_paths)
+        (
+            std::mem::take(&mut self.pending_type_lookup_paths),
+            std::mem::take(&mut self.pending_type_expansion_paths),
+        )
     }
 
     fn should_capture_type_lookup_paths(&self) -> bool {
@@ -222,6 +231,10 @@ impl UnifyState {
 
     fn extend_type_lookup_paths(&mut self, paths: Vec<Path>) {
         self.pending_type_lookup_paths.extend(paths);
+    }
+
+    fn extend_type_expansion_paths(&mut self, paths: Vec<Path>) {
+        self.pending_type_expansion_paths.extend(paths);
     }
 
     /// Check if two types have already been unified.
@@ -849,7 +862,15 @@ pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
 /// `Pdot(Pident("U"), "t")` → `Pident("list")`).
 pub fn update_level_expand<'a>(ctx: &'a TypeContext, env: &Env, level: i32, ty: TypeExprRef) {
     let mut pending_type_lookup_paths = None;
-    update_level_expand_with_lookup_capture(ctx, env, level, ty, &mut pending_type_lookup_paths);
+    let mut pending_type_expansion_paths = None;
+    update_level_expand_with_lookup_capture(
+        ctx,
+        env,
+        level,
+        ty,
+        &mut pending_type_lookup_paths,
+        &mut pending_type_expansion_paths,
+    );
 }
 
 fn update_level_expand_with_lookup_capture<'a>(
@@ -858,6 +879,7 @@ fn update_level_expand_with_lookup_capture<'a>(
     level: i32,
     ty: TypeExprRef,
     pending_type_lookup_paths: &mut Option<&mut Vec<Path>>,
+    pending_type_expansion_paths: &mut Option<&mut Vec<Path>>,
 ) {
     let ty = ctx.repr(ty);
     let current = ctx.get_level(ty);
@@ -901,6 +923,9 @@ fn update_level_expand_with_lookup_capture<'a>(
                         })
                     });
                 if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
+                    if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
+                        paths.push(path.clone());
+                    }
                     if let Some(expanded) = try_expand_head(ctx, env, ty) {
                         let expanded = ctx.repr(expanded);
                         if should_preserve_local_t_alias_during_level_update(
@@ -914,6 +939,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                                     level,
                                     child,
                                     pending_type_lookup_paths,
+                                    pending_type_expansion_paths,
                                 );
                             });
                             return;
@@ -927,6 +953,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                                 level,
                                 expanded,
                                 pending_type_lookup_paths,
+                                pending_type_expansion_paths,
                             );
                             return;
                         }
@@ -941,6 +968,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         level,
                         child,
                         pending_type_lookup_paths,
+                        pending_type_expansion_paths,
                     );
                 });
             }
@@ -966,6 +994,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         level,
                         ty,
                         pending_type_lookup_paths,
+                        pending_type_expansion_paths,
                     );
                     return;
                 }
@@ -977,6 +1006,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         level,
                         child,
                         pending_type_lookup_paths,
+                        pending_type_expansion_paths,
                     );
                 });
             }
@@ -1004,6 +1034,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         level,
                         child,
                         pending_type_lookup_paths,
+                        pending_type_expansion_paths,
                     );
                 });
             }
@@ -1017,6 +1048,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                         level,
                         child,
                         pending_type_lookup_paths,
+                        pending_type_expansion_paths,
                     );
                 });
             }
@@ -3707,10 +3739,19 @@ pub fn unify_var<'a>(
             let level = ctx.get_level(t1);
             let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
             let mut pending_type_lookup_paths = Vec::new();
+            let mut pending_type_expansion_paths = Vec::new();
             if let Some(env) = state.env() {
                 if capture_type_lookup_paths {
                     let mut capture = Some(&mut pending_type_lookup_paths);
-                    update_level_expand_with_lookup_capture(ctx, env, level, t2, &mut capture);
+                    let mut expansion_capture = Some(&mut pending_type_expansion_paths);
+                    update_level_expand_with_lookup_capture(
+                        ctx,
+                        env,
+                        level,
+                        t2,
+                        &mut capture,
+                        &mut expansion_capture,
+                    );
                 } else {
                     update_level_expand(ctx, env, level, t2);
                 }
@@ -3718,6 +3759,7 @@ pub fn unify_var<'a>(
                 update_level(ctx, level, t2);
             }
             state.extend_type_lookup_paths(pending_type_lookup_paths);
+            state.extend_type_expansion_paths(pending_type_expansion_paths);
             link_type(ctx, t1, t2);
             Ok(())
         }
@@ -4027,15 +4069,32 @@ fn unify_types<'a>(
         let lv = std::cmp::min(lv1, lv2);
         let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
         let mut pending_type_lookup_paths = Vec::new();
+        let mut pending_type_expansion_paths = Vec::new();
         if capture_type_lookup_paths {
             let mut capture = Some(&mut pending_type_lookup_paths);
-            update_level_expand_with_lookup_capture(ctx, env, lv, t2, &mut capture);
-            update_level_expand_with_lookup_capture(ctx, env, lv, t1, &mut capture);
+            let mut expansion_capture = Some(&mut pending_type_expansion_paths);
+            update_level_expand_with_lookup_capture(
+                ctx,
+                env,
+                lv,
+                t2,
+                &mut capture,
+                &mut expansion_capture,
+            );
+            update_level_expand_with_lookup_capture(
+                ctx,
+                env,
+                lv,
+                t1,
+                &mut capture,
+                &mut expansion_capture,
+            );
         } else {
             update_level_expand(ctx, env, lv, t2);
             update_level_expand(ctx, env, lv, t1);
         }
         state.extend_type_lookup_paths(pending_type_lookup_paths);
+        state.extend_type_expansion_paths(pending_type_expansion_paths);
     }
 
     // Re-repr after update_level_expand may have linked types.
@@ -7033,13 +7092,15 @@ fn compute_variance_rec(
 /// OCaml's lower_args: walk an arrow type, expanding each component with
 /// expand_head. This triggers type alias expansion for function argument/return
 /// types, matching OCaml's behavior during Pexp_apply processing.
-pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) {
+pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<Path>, Vec<Path>) {
     let mut seen = Vec::new();
     let mut current = ty;
+    let mut pending_type_lookup_paths = Vec::new();
+    let mut pending_type_expansion_paths = Vec::new();
     loop {
         let expanded = expand_head(ctx, env, current);
         if seen.iter().any(|&s| s == expanded) {
-            return;
+            return (pending_type_lookup_paths, pending_type_expansion_paths);
         }
         let arrow = {
             let desc = ctx.get_desc(expanded);
@@ -7050,17 +7111,24 @@ pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) {
             }
         };
         let Some((arg_ty, ret_ty)) = arrow else {
-            return;
+            return (pending_type_lookup_paths, pending_type_expansion_paths);
         };
 
         // OCaml compiler/ml/typecore.ml:2341 calls
         // `unify_var env (newvar ()) arg.typ`; keep the Rust structure on the
         // same ctype.ml:2820-2837 path instead of inlining a second copy here.
+        // Its ctype.ml:666-673 `get_level` path reaches Env.find_type, so
+        // return those dotted lookup points for typecore to force through the
+        // persistent component environment.
         let mut state = UnifyState::new();
         state.set_env(env);
+        let previous_capture = state.begin_type_lookup_capture();
         if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
             unreachable!("lower_args failed unify_var")
         }
+        let (lookup_paths, expansion_paths) = state.finish_type_lookup_capture(previous_capture);
+        pending_type_lookup_paths.extend(lookup_paths);
+        pending_type_expansion_paths.extend(expansion_paths);
 
         seen.push(expanded);
         current = ret_ty;
