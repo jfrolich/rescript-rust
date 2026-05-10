@@ -14132,6 +14132,8 @@ fn type_record(
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
+        let unqualified_with_opath =
+            record_opath_ty.is_some() && matches!(resolved_lid, Longident::Lident(_));
         let prefer_known_record_label = !ctx.preserve_canonical_typedtree();
         if !prefer_known_record_label && matches!(resolved_lid, Longident::Lident(_)) {
             force_unqualified_record_label_disambiguate_by_type_compare(
@@ -14142,7 +14144,22 @@ fn type_record(
                 ctx,
             );
         }
-        let disambiguated = if prefer_known_record_label {
+        let disambiguated = if unqualified_with_opath {
+            // OCaml compiler/ml/typecore.ml:2745-2752 computes `opath` from
+            // the expected record type, then typecore.ml:1098-1125 passes the
+            // full unqualified label scope to `Label.disambiguate`. That
+            // reaches typecore.ml:983-988 `disambiguate_by_type`, so aliases
+            // such as `type view = t = {...}` can select the later `view`
+            // label family even when the expected type is `t`.
+            disambiguate_label(
+                field_name,
+                record_opath_ty.expect("checked above"),
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                false,
+            )
+        } else if prefer_known_record_label {
             qualified_record_label_from_info(
                 disambiguation_label_descriptions.as_ref(),
                 field_name,
