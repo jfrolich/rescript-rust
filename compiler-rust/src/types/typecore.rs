@@ -5833,6 +5833,15 @@ fn force_qualified_value_type_paths<'a>(
                 let args = args.clone();
                 let abbrev = abbrev.clone();
                 drop(desc);
+                if defer_selected_value_final_result {
+                    // OCaml compiler/ml/typecore.ml:2421-2457 handles
+                    // `Pexp_ident` by instancing `desc.val_type` and immediately
+                    // passing that result to `rue`; it does not walk constructor
+                    // arguments of a non-arrow value scheme here. Application
+                    // typing runs the eager argument path separately through
+                    // compiler/ml/typecore.ml:2579-2582 `lower_args`.
+                    return;
+                }
                 // OCaml compiler/ml/typecore.ml:2421-2457 instances the
                 // selected value scheme after Env.find_value, and env.ml:781-813
                 // then reaches component tables for non-local type paths in that
