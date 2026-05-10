@@ -16043,32 +16043,10 @@ fn type_letexception(
     };
 
     let mut new_env = env.clone();
-    if let Some(ref inlined_decl) = cstr_inlined {
-        if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) = inlined_decl.type_kind {
-            let ty_res =
-                ctx.new_generic_constr(Path::pident(id.clone()), inlined_decl.type_params.clone());
-            for (pos, ld) in labels.iter().enumerate() {
-                let lbl_desc = crate::types::LabelDescription {
-                    lbl_name: ld.ld_id.name().to_string(),
-                    lbl_res: ty_res,
-                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                        ctx,
-                        ld.ld_type,
-                        &inlined_decl.type_params,
-                    ),
-                    lbl_mut: ld.ld_mutable,
-                    lbl_optional: ld.ld_optional,
-                    lbl_pos: pos as i32,
-                    lbl_all: crate::types::LabelArrayRef(0),
-                    lbl_repres: repres.clone(),
-                    lbl_private: inlined_decl.type_private,
-                    lbl_loc: ld.ld_loc.clone(),
-                    lbl_attributes: ld.ld_attributes.clone(),
-                };
-                new_env.add_label(ld.ld_id.clone(), lbl_desc);
-            }
-        }
-    }
+    // OCaml compiler/ml/env.ml:1693-1716 registers extension/exception
+    // constructors through compiler/ml/datarepr.ml:190-214
+    // `extension_descr`; inline-record labels stay in `cstr_inlined` and are
+    // not inserted into `env.labels`.
     new_env.add_constructor(id.clone(), cstr_desc);
 
     let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;

@@ -12997,41 +12997,13 @@ fn type_structure_item<'a>(
                     ctx.register_type_decl_by_stamp(type_id.stamp(), internal_decl.clone());
                 }
 
-                // Add constructors to environment, and add inline record labels
+                // Add constructors to environment. OCaml
+                // compiler/ml/datarepr.ml:273-284 exposes env labels only for
+                // `Type_record`; inline-record labels on `Type_variant`
+                // constructors remain inside `cstr_inlined`, and
+                // compiler/ml/env.ml:1668-1676 therefore installs no labels for
+                // them.
                 for (cstr_id, cstr_desc) in constructors {
-                    // For inline records, add the labels to the environment
-                    if let Some(ref inlined_decl) = cstr_desc.cstr_inlined {
-                        if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
-                            inlined_decl.type_kind
-                        {
-                            // Build the inline record type path: Pdot(type_path, cstr_name)
-                            let inline_path =
-                                Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
-                            let ty_res =
-                                ctx.new_constr(inline_path, inlined_decl.type_params.clone());
-                            env_desc_types_for_generalize.push(ty_res);
-                            for (pos, ld) in labels.iter().enumerate() {
-                                let lbl_desc = crate::types::LabelDescription {
-                                    lbl_name: ld.ld_id.name().to_string(),
-                                    lbl_res: ty_res,
-                                    lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                                        ctx,
-                                        ld.ld_type,
-                                        &inlined_decl.type_params,
-                                    ),
-                                    lbl_mut: ld.ld_mutable.clone(),
-                                    lbl_optional: ld.ld_optional,
-                                    lbl_pos: pos as i32,
-                                    lbl_all: crate::types::LabelArrayRef(0),
-                                    lbl_repres: repres.clone(),
-                                    lbl_private: crate::types::PrivateFlag::Public,
-                                    lbl_loc: ld.ld_loc.clone(),
-                                    lbl_attributes: ld.ld_attributes.clone(),
-                                };
-                                new_env.add_label(ld.ld_id.clone(), lbl_desc);
-                            }
-                        }
-                    }
                     new_env.add_constructor(cstr_id, cstr_desc);
                 }
 
@@ -13402,36 +13374,10 @@ fn type_structure_item<'a>(
                     cstr_attributes: vec![],
                     cstr_inlined: cstr_inlined.clone(),
                 };
-                if let Some(ref inlined_decl) = cstr_inlined {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
-                        inlined_decl.type_kind
-                    {
-                        let ty_res = ctx.new_generic_constr(
-                            Path::pident(id.clone()),
-                            inlined_decl.type_params.clone(),
-                        );
-                        for (pos, ld) in labels.iter().enumerate() {
-                            let lbl_desc = crate::types::LabelDescription {
-                                lbl_name: ld.ld_id.name().to_string(),
-                                lbl_res: ty_res,
-                                lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                                    ctx,
-                                    ld.ld_type,
-                                    &inlined_decl.type_params,
-                                ),
-                                lbl_mut: ld.ld_mutable,
-                                lbl_optional: ld.ld_optional,
-                                lbl_pos: pos as i32,
-                                lbl_all: crate::types::LabelArrayRef(0),
-                                lbl_repres: repres.clone(),
-                                lbl_private: inlined_decl.type_private,
-                                lbl_loc: ld.ld_loc.clone(),
-                                lbl_attributes: ld.ld_attributes.clone(),
-                            };
-                            new_env.add_label(ld.ld_id.clone(), lbl_desc);
-                        }
-                    }
-                }
+                // OCaml compiler/ml/env.ml:1693-1716 registers extension
+                // constructors through `Datarepr.extension_descr` only; inline
+                // record labels produced at compiler/ml/datarepr.ml:190-214 are
+                // not added to `env.labels`.
                 new_env.add_constructor(id.clone(), cstr_desc);
 
                 typed_constructors.push(crate::types::typedtree::ExtensionConstructor {
@@ -13719,36 +13665,10 @@ fn type_structure_item<'a>(
                 cstr_inlined: cstr_inlined.clone(),
             };
             let mut new_env = env.clone();
-            if let Some(ref inlined_decl) = cstr_inlined {
-                if let crate::types::TypeKind::TypeRecord(ref labels, ref repres) =
-                    inlined_decl.type_kind
-                {
-                    let ty_res = ctx.new_generic_constr(
-                        Path::pident(id.clone()),
-                        inlined_decl.type_params.clone(),
-                    );
-                    for (pos, ld) in labels.iter().enumerate() {
-                        let lbl_desc = crate::types::LabelDescription {
-                            lbl_name: ld.ld_id.name().to_string(),
-                            lbl_res: ty_res,
-                            lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                                ctx,
-                                ld.ld_type,
-                                &inlined_decl.type_params,
-                            ),
-                            lbl_mut: ld.ld_mutable,
-                            lbl_optional: ld.ld_optional,
-                            lbl_pos: pos as i32,
-                            lbl_all: crate::types::LabelArrayRef(0),
-                            lbl_repres: repres.clone(),
-                            lbl_private: inlined_decl.type_private,
-                            lbl_loc: ld.ld_loc.clone(),
-                            lbl_attributes: ld.ld_attributes.clone(),
-                        };
-                        new_env.add_label(ld.ld_id.clone(), lbl_desc);
-                    }
-                }
-            }
+            // Exceptions use the same OCaml path as extensions:
+            // compiler/ml/env.ml:1693-1716 adds only the constructor, while
+            // compiler/ml/datarepr.ml:190-214 keeps inline-record labels under
+            // `cstr_inlined`.
             new_env.add_constructor(id.clone(), cstr_desc);
 
             let ext_type = crate::types::ExtensionConstructor {
