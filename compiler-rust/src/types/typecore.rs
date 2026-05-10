@@ -25086,8 +25086,15 @@ pub(crate) fn alias_target_for_module_path<'a>(
         }
         Path::Pdot(parent, module_name, _) => {
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+                // OCaml compiler/ml/typecore.ml:776-787 `expand_path` asks
+                // compiler/ml/env.ml:800-813 `Env.find_type` before falling
+                // back to `Env.normalize_path`. For a dotted type path, that
+                // first step descends through env.ml:781-793
+                // `find_module_descr` and the component table; it does not
+                // force env.ml:1568's `comp_modules` thunk just to inspect a
+                // module alias while comparing constructor result paths.
                 components
-                    .lookup_qualified_module_shared(module_name.as_str(), ctx)
+                    .lookup_module(module_name.as_str())
                     .and_then(|(_, _, md)| match &md.md_type {
                         crate::types::decl::ModuleType::MtyAlias(_, target)
                         | crate::types::decl::ModuleType::MtyIdent(target) => Some(target.clone()),
