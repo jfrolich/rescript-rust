@@ -495,19 +495,20 @@ impl QualifiedModuleComponents {
                 }
             }
         }
-        // Registered namespace backing units such as `Webapi__Dom` are the
-        // persistent side of the same OCaml env.ml:1513-1519 component force
-        // reached after `scrape_alias`; share their env.ml:1581-1585 modtype
-        // declarations with the selected component path. Single-underscore
-        // stdlib backing units such as `Belt_Map` still use the ordinary
-        // component force path here, matching env.ml:1513-1519's separate
-        // memoization point.
-        let share_modtype_force = !source_prefixes.is_empty()
-            || (access_path.head().is_persistent()
-                && access_path.head().name().contains("__")
-                && ctx
-                    .find_flattened_alias_component_path(access_path.head().name())
-                    .is_some());
+        // OCaml compiler/ml/env.ml:781-813 can later select the flattened
+        // persistent unit directly (`Pident Webapi__Dom`) after an earlier
+        // selected alias force (`Webapi.Dom`). That direct persistent path uses
+        // its own env.ml:1513-1519 component table, so env.ml:1581-1585 freshens
+        // module-type declarations again. Preserve that per-table stamp stream
+        // for typedtree output; keep the cross-path sharing only for normal
+        // compilation.
+        let share_modtype_force = !ctx.preserve_canonical_typedtree()
+            && (!source_prefixes.is_empty()
+                || (access_path.head().is_persistent()
+                    && access_path.head().name().contains("__")
+                    && ctx
+                        .find_flattened_alias_component_path(access_path.head().name())
+                        .is_some()));
 
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
