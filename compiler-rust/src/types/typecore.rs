@@ -8273,9 +8273,78 @@ fn path_depth_without_apply(path: &Path) -> usize {
     }
 }
 
+fn signature_has_persistent_alias_child(
+    sig: &[crate::types::decl::SignatureItem],
+    child_name: &str,
+) -> bool {
+    sig.iter().any(|item| match item {
+        crate::types::decl::SignatureItem::SigModule(id, md, _) if id.name() == child_name => {
+            match &md.md_type {
+                crate::types::decl::ModuleType::MtyAlias(_, target)
+                | crate::types::decl::ModuleType::MtyIdent(target) => {
+                    path_non_apply_root_ident(target)
+                        .is_some_and(|target_id| target_id.is_persistent())
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    })
+}
+
+fn manifest_parent_is_persistent_alias_child(
+    ctx: &TypeContext,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+) -> bool {
+    let Path::Pdot(parent, _, _) = path else {
+        return false;
+    };
+    let Path::Pdot(root, child_name, _) = parent.as_ref() else {
+        return false;
+    };
+    let Path::Pident(root_id) = root.as_ref() else {
+        return false;
+    };
+    if !(root_id.is_persistent() || root_id.stamp() == 0) {
+        return false;
+    }
+    if root_id.name().contains("__") {
+        return false;
+    }
+
+    if ctx
+        .with_raw_module_sig(root_id.name(), |raw_sig| {
+            signature_has_persistent_alias_child(raw_sig, child_name.as_str())
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    pers_env
+        .as_mut()
+        .and_then(|pers| pers.read_raw_sig_shared(root_id.name(), ctx))
+        .is_some_and(|raw_sig| signature_has_persistent_alias_child(&raw_sig, child_name.as_str()))
+}
+
+fn lookup_parent_signature_already_forced(ctx: &TypeContext, lookup_path: &Path) -> bool {
+    let Path::Pdot(parent, _, _) = lookup_path else {
+        return false;
+    };
+    let Path::Pident(parent_id) = parent.as_ref() else {
+        return false;
+    };
+    parent_id.is_persistent()
+        && ctx
+            .renamed_module_sigs
+            .borrow()
+            .contains_key(parent_id.name())
+}
+
 fn lower_args_manifest_needs_component_force(
     ctx: &TypeContext,
-    pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     lookup_path: &Path,
     manifest: TypeExprRef,
 ) -> bool {
@@ -8283,7 +8352,11 @@ fn lower_args_manifest_needs_component_force(
     let desc = ctx.borrow_desc(manifest);
     match &*desc {
         TypeDesc::Tconstr { path, args, .. } => {
-            let root = path_non_apply_root_ident(path);
+            let path = path.clone();
+            let has_args = !args.is_empty();
+            drop(desc);
+
+            let root = path_non_apply_root_ident(&path);
             let pers_flat_hit = root.is_some_and(|head| {
                 pers_env
                     .as_ref()
@@ -8292,7 +8365,7 @@ fn lower_args_manifest_needs_component_force(
             });
             let pers_namespace_hit = root.is_some_and(|head| {
                 pers_env.as_ref().is_some_and(|pers| {
-                    pers.path_head_is_namespace_alias(path)
+                    pers.path_head_is_namespace_alias(&path)
                         || pers.module_is_namespace_backing_head(head.name())
                 })
             });
@@ -8300,12 +8373,27 @@ fn lower_args_manifest_needs_component_force(
                 ctx.find_flattened_alias_component_path(head.name())
                     .is_some()
             });
+            let alias_child_hit = lookup_parent_signature_already_forced(ctx, lookup_path)
+                && manifest_parent_is_persistent_alias_child(ctx, pers_env, &path);
             let parent_depth = path
                 .parent()
                 .map(|parent| path_depth_without_apply(&parent));
-            !args.is_empty()
-                && !path.same(lookup_path)
-                && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit)
+            // OCaml compiler/ml/typecore.ml:2335-2342 lowers each application
+            // argument through ctype.ml:2820-2837 `unify_var`. Its
+            // ctype.ml:666-673 `get_level` calls env.ml:800-813 `find_type`,
+            // whose env.ml:1513-1552 component-table construction applies
+            // `Subst.type_declaration` to type manifests regardless of arity.
+            // For nullary manifests such as `Web__File.t = Webapi.File.t`,
+            // env.ml:1516-1518's `scrape_alias` reaches the persistent child
+            // alias `Webapi__File` only after the source alias module's
+            // ps_sig has already been forced. Preserve that force without
+            // turning flattened backing-unit manifests such as
+            // `Webapi__Fetch.signal = Webapi__Fetch.AbortController.signal` into
+            // eager child-module walks; compiler/ml/subst.ml:87-95 only rewrites
+            // paths through the component substitution it was given.
+            !path.same(lookup_path)
+                && ((has_args && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit))
+                    || alias_child_hit)
                 && parent_depth.is_some_and(|depth| depth >= 2)
         }
         _ => false,
@@ -8469,7 +8557,7 @@ fn force_lower_args_type_lookup_paths(
             && let Some(manifest) = decl.type_manifest
             && lower_args_manifest_needs_component_force(
                 tctx.type_ctx,
-                &tctx.persistent_env,
+                &mut tctx.persistent_env,
                 &path,
                 manifest,
             )
