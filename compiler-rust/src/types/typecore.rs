@@ -5903,8 +5903,8 @@ fn force_qualified_value_type_paths<'a>(
                         // table. It does not force env.ml:1568 child module
                         // declarations for nested type paths in that value
                         // type, sibling modules under the selected alias target,
-                        // nor unrelated implicit Stdlib/Pervasives component roots
-                        // mentioned by a non-Stdlib value scheme;
+                        // nor unrelated implicit Stdlib/Pervasives component
+                        // roots mentioned by a non-Stdlib value scheme;
                         // compiler/ml/ctype.ml:666-695 reaches those later through
                         // `get_level` while lowering arguments.
                         None
@@ -5989,6 +5989,16 @@ fn force_qualified_value_type_paths<'a>(
                 })
                 .or_else(|| {
                     if suppress_selected_value_forces {
+                        return None;
+                    }
+                    if value_access_root_is_local {
+                        // OCaml compiler/ml/typecore.ml:2421-2457 only
+                        // instances the value description returned by
+                        // compiler/ml/env.ml:1091-1100. It does not run the
+                        // compiler/ml/ctype.ml:1367-1372 normalize-path
+                        // fallback for nested local-alias children such as
+                        // `Functions.Types.ZoomGenerator` until a later
+                        // expansion/unification actually requests it.
                         return None;
                     }
                     let Path::Pdot(parent, _, _) = &path else {
@@ -20969,7 +20979,17 @@ fn type_contains_unresolved_local_path<'a>(
         TypeDesc::Tconstr { path, args, .. } => {
             let has_local_head =
                 matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent());
-            if has_local_head && lookup_type_decl_for_path(path, env, pers_env, ctx).is_none() {
+            let local_path_is_unresolved = has_local_head
+                && ctx.with_component_alias_probe_caches_suppressed(|| {
+                    // OCaml compiler/ml/env.ml:781-813 reads component
+                    // descriptors for type lookup without forcing
+                    // env.ml:1568's module-declaration thunk. This Rust-only
+                    // unresolved-path probe is used while qualifying record
+                    // labels, so it must not make alias children such as
+                    // `Functions.Types` earlier than OCaml would.
+                    lookup_type_decl_for_path(path, env, pers_env, ctx).is_none()
+                });
+            if local_path_is_unresolved {
                 return true;
             }
             args.iter()
