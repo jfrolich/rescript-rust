@@ -415,18 +415,13 @@ fn get_level_with_lookup_capture(
         Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
         Path::Pdot(parent, type_name, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
-            // dotted path lookup reaches compiler/ml/env.ml:800-813 with the
-            // active persistent table available. In Rust's in-process mode the
-            // equivalent table lives on TypeContext, so use it here instead of
-            // a no-persistent probe; otherwise row-name get_level checks miss
-            // the env.ml:865-887 ps_sig force through alias scraping.
+            // dotted path lookup reaches compiler/ml/env.ml:800-813 through
+            // find_module_descr at env.ml:781-793. That path reads component
+            // tables; it does not perform the env.ml:865-887 find_module alias
+            // scrape used by normalize_path/module lookup. In Rust's
+            // in-process mode the active persistent table lives on TypeContext,
+            // so use it here with type-lookup component laziness preserved.
             let mut persistent_env = in_process_module_resolution_env(ctx);
-            crate::types::typecore::force_module_aliases_for_type_lookup(
-                parent,
-                env,
-                &mut persistent_env,
-                ctx,
-            );
             crate::types::typecore::lookup_type_in_resolved_path(
                 parent,
                 type_name.as_str(),
@@ -1968,17 +1963,18 @@ fn lookup_component_module_sig_type<'a>(
     use super::decl::SignatureItem;
 
     if matches!(module_path, Path::Pdot(..) | Path::Papply(..)) {
-        let mut no_persistent_env = None;
-        // OCaml compiler/ml/env.ml:800-813 resolves type lookup through
-        // component tables, and env.ml:1573-1578 keeps child component
-        // signatures separate from env.ml:1568's module-declaration thunks.
-        // Read the component signature directly here: this Rust-only identity
-        // fallback must not force `Subst.modtype` on a dotted parent just to
-        // prove alias identity during Ctype.unify.
+        let mut persistent_env = in_process_module_resolution_env(ctx);
+        // OCaml compiler/ml/env.ml:781-793 resolves dotted module descriptors
+        // through `comp_components`, and env.ml:800-813 then reads `comp_types`.
+        // That path may reach persistent `ps_comps` at env.ml:786-788, but it
+        // still does not force env.ml:865-882's `comp_modules` declaration
+        // thunk. Use the in-process persistent env so dotted persistent paths
+        // such as `Layout__Types.Name.t` can be found through component tables
+        // instead of falling back to module-declaration lookup.
         return crate::types::typecore::with_resolved_module_components_for_path(
             module_path,
             env,
-            &mut no_persistent_env,
+            &mut persistent_env,
             ctx,
             |components| {
                 components

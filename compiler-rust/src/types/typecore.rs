@@ -19834,9 +19834,16 @@ impl Env {
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut() {
-                        let sig = if ctx.preserve_canonical_typedtree()
-                            && !ctx.suppresses_component_alias_sig_force()
-                        {
+                        let sig = if !ctx.suppresses_component_alias_sig_force() {
+                            // OCaml compiler/ml/env.ml:1435-1446
+                            // `scrape_alias` resolves Mty_alias through
+                            // `find_module`; for persistent Pidents,
+                            // env.ml:872-875 returns an Mty_signature after
+                            // forcing ps_sig, which is initialized as
+                            // `Subst.signature Subst.identity sign` at
+                            // env.ml:677. Only Rust's explicit component
+                            // alias probes suppress this force to mirror
+                            // env.ml:781-813 type-component lookup.
                             let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
                             copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
                         } else {
@@ -19990,151 +19997,6 @@ impl Env {
         let mut visiting = HashSet::new();
         resolve_module_type_inner(self, mty, pers_env, ctx, &mut visiting)
     }
-}
-
-fn force_find_module_path_for_lookup<'a>(
-    module_path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) {
-    if !module_path.head().is_persistent() && module_path.head().stamp() != 0 {
-        return;
-    }
-
-    if let Path::Pdot(parent, module_name, _) = module_path {
-        // OCaml compiler/ml/env.ml:800-813 value/type lookup reads component
-        // tables, but compiler/ml/ctype.ml:666-704 `get_level` and
-        // `update_level` can reach env.ml:865-882 `find_module` for the same
-        // dotted module prefix while lowering application arguments. That
-        // forces env.ml:1568's module-declaration thunk and runs
-        // compiler/ml/subst.ml:377-382 `Subst.modtype` before later local
-        // binders are created. Force each persistent-root dotted prefix once,
-        // using the same memoized component-module path; local roots keep the
-        // component-only behavior from env.ml:781-793.
-        force_find_module_path_for_lookup(parent, env, pers_env, ctx);
-        let already_forced_by_component_descent =
-            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                component_descent_forces_module_declaration(components, module_name.as_str())
-            })
-            .unwrap_or(false);
-        if !already_forced_by_component_descent {
-            let _ =
-                lookup_module_in_resolved_path(parent, module_name.as_str(), env, pers_env, ctx);
-        }
-    }
-}
-
-pub(crate) fn force_module_aliases_for_type_lookup<'a>(
-    module_path: &Path,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) {
-    fn force_alias_target<'a>(
-        target: &Path,
-        env: &Env,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a crate::types::context::TypeContext,
-    ) {
-        match target {
-            Path::Pident(id) if id.is_persistent() && ctx.preserve_canonical_typedtree() => {
-                if let Some(pers) = pers_env.as_mut() {
-                    let _ = pers.force_lazy_signature_rename(id.name(), ctx);
-                } else {
-                    ctx.trigger_module_sig_rename(id.name());
-                }
-            }
-            Path::Pdot(_, _, _) => {
-                // OCaml compiler/ml/ctype.ml:666-673 calls `Env.find_type`,
-                // whose dotted lookup goes through compiler/ml/env.ml:781-793
-                // `find_module_descr` and the component table's
-                // `comp_components`. It does not force env.ml:865-882
-                // `find_module`/env.ml:1568 `comp_modules` for the same
-                // dotted alias target. Keep the module-declaration thunk lazy
-                // here; callers that actually need `find_module` still use
-                // `lookup_module_in_resolved_path` explicitly.
-            }
-            Path::Pident(_) | Path::Papply(_, _) => {}
-        }
-    }
-
-    let Path::Pdot(parent, module_name, _) = module_path else {
-        if let Path::Pident(id) = module_path
-            && let Ok(module_decl) = env.find_module_same(id)
-        {
-            match &module_decl.md_type {
-                crate::types::decl::ModuleType::MtyAlias(_, target)
-                | crate::types::decl::ModuleType::MtyIdent(target) => {
-                    // OCaml compiler/ml/env.ml:865-887 handles the Pident
-                    // case of Env.find_module before scrape_alias uses that
-                    // declaration at compiler/ml/env.ml:1435-1449. A type
-                    // lookup path may be rooted at a local alias introduced
-                    // while substituting a module signature, so force that
-                    // alias target before returning just as OCaml does.
-                    force_alias_target(target, env, pers_env, ctx);
-                }
-                _ => {}
-            }
-        }
-        return;
-    };
-
-    force_module_aliases_for_type_lookup(parent, env, pers_env, ctx);
-    let module_decl =
-        with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-            components
-                .lookup_module(module_name.as_str())
-                .map(|(_, _, md)| md.clone())
-        })
-        .flatten();
-
-    if let Some(module_decl) = module_decl {
-        match &module_decl.md_type {
-            crate::types::decl::ModuleType::MtyAlias(_, target)
-            | crate::types::decl::ModuleType::MtyIdent(target) => {
-                // OCaml compiler/ml/env.ml:800-813 resolves the parent module
-                // components for Env.find_type, and forcing a child component
-                // table runs env.ml:1517 `scrape_alias`. For aliases,
-                // scrape_alias reaches env.ml:1435-1449 and env.ml:865-887
-                // `find_module`, which forces the persistent ps_sig lazy even
-                // when Rust already cached the component view from an earlier
-                // non-forcing traversal.
-                force_alias_target(target, env, pers_env, ctx);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn component_descent_forces_module_declaration(
-    parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
-    child_name: &str,
-) -> bool {
-    let parent_head_name = parent_components.access_path().head().name();
-    let parent_is_implicit_stdlib_component_path =
-        matches!(parent_components.access_path(), Path::Pdot(_, _, _))
-            && (parent_head_name == "Stdlib" || parent_head_name == "Pervasives");
-    let child_module_has_only_values = parent_components
-        .lookup_module(child_name)
-        .is_some_and(|(_, _, md)| module_type_has_only_values(&md.md_type));
-    let child_module_has_manifest_type = parent_components
-        .lookup_module(child_name)
-        .is_some_and(|(_, _, md)| module_type_has_manifest_type(&md.md_type));
-    let child_module_is_alias =
-        parent_components
-            .lookup_module(child_name)
-            .is_some_and(|(_, _, md)| {
-                matches!(
-                    md.md_type,
-                    crate::types::decl::ModuleType::MtyAlias(..)
-                        | crate::types::decl::ModuleType::MtyIdent(..)
-                )
-            });
-
-    (parent_is_implicit_stdlib_component_path
-        && (child_module_has_only_values || child_module_has_manifest_type))
-        || child_module_is_alias
 }
 
 /// Look up a constructor in a module-qualified path (e.g., Nullable.Value).
@@ -24284,10 +24146,12 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
                 id.clone(),
                 Arc::new(decl.clone()),
             );
-            // OCaml compiler/ml/env.ml:800-813 qualified type lookup may be
-            // reached from typedecl.ml:767-779 constraint probes that suppress
-            // alias-target forcing. Do not let that probe's raw declaration
-            // satisfy the later real lookup, where OCaml would force ps_sig.
+            // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
+            // component tables through env.ml:781-793 `find_module_descr`, and
+            // env.ml:1516-1518 still scrapes aliases while those component
+            // tables are built. Only Rust's explicit typedecl.ml:767-779 probe
+            // walkers suppress alias forcing/cache population; real lookups
+            // must leave scrape_alias side effects visible.
             if !ctx.suppresses_component_alias_probe_caches() {
                 ctx.register_resolved_module_type(
                     parent_module_path,
@@ -24317,6 +24181,10 @@ fn lookup_type_decl_in_resolved_path<'a>(
     with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
         components.lookup_type(type_name).map(|(id, decl)| {
             let decl = Arc::new(decl.clone());
+            // OCaml compiler/ml/env.ml:800-813 type lookup uses component
+            // descriptors from env.ml:781-793; building those descriptors
+            // still runs env.ml:1516-1518 `scrape_alias` unless an explicit
+            // Rust probe guard is active.
             if !ctx.suppresses_component_alias_probe_caches() {
                 ctx.register_resolved_module_type(
                     parent_module_path,
