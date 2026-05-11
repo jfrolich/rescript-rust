@@ -2966,6 +2966,22 @@ pub enum TypeModError {
         loc: Location,
         reason: String,
     },
+    /// Duplicate constructor in a variant type declaration.
+    DuplicateConstructor {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Repeated constructor name.
+        name: String,
+    },
+    /// Duplicate record field label in a type declaration.
+    DuplicateLabel {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Repeated label name.
+        label: String,
+        /// Enclosing record name, when the label belongs to a named record type.
+        record_name: Option<String>,
+    },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
         /// Source location to report.
@@ -3034,6 +3050,43 @@ fn check_untagged_variant_constructor_arities(
         }
     }
 
+    Ok(())
+}
+
+fn check_duplicate_constructor_declarations(
+    arena: &ParseArena,
+    loc: LocIdx,
+    constructors: &[crate::parser::ast::ConstructorDeclaration],
+) -> TypeModResult<()> {
+    let mut seen = HashSet::default();
+    for constructor in constructors {
+        let name = arena.get_string(constructor.pcd_name.txt);
+        if !seen.insert(name.to_string()) {
+            return Err(TypeModError::DuplicateConstructor {
+                loc,
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_duplicate_label_declarations(
+    arena: &ParseArena,
+    labels: &[crate::parser::ast::LabelDeclaration],
+    record_name: Option<&str>,
+) -> TypeModResult<()> {
+    let mut seen = HashSet::default();
+    for label in labels {
+        let name = arena.get_string(label.pld_name.txt);
+        if !seen.insert(name.to_string()) {
+            return Err(TypeModError::DuplicateLabel {
+                loc: label.pld_name.loc,
+                label: name.to_string(),
+                record_name: record_name.map(str::to_string),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -7931,6 +7984,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     crate::types::TypeKind::TypeOpen
                                 }
                                 crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                                    check_duplicate_constructor_declarations(
+                                        arena,
+                                        decl.ptype_loc,
+                                        cstrs,
+                                    )?;
                                     let mut constructors = Vec::with_capacity(cstrs.len());
                                     for cstr in cstrs {
                                         let cstr_name = arena.get_string(cstr.pcd_name.txt);
@@ -7952,6 +8010,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                             crate::parser::ast::ConstructorArguments::Pcstr_record(
                                                 labels,
                                             ) => {
+                                                check_duplicate_label_declarations(
+                                                    arena, labels, None,
+                                                )?;
                                                 let mut record_labels =
                                                     Vec::with_capacity(labels.len());
                                                 for label in labels {
@@ -8011,6 +8072,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     crate::types::TypeKind::TypeVariant(constructors)
                                 }
                                 crate::parser::ast::TypeKind::Ptype_record(labels) => {
+                                    check_duplicate_label_declarations(
+                                        arena,
+                                        labels,
+                                        Some(arena.get_string(decl.ptype_name.txt)),
+                                    )?;
                                     let mut record_labels = Vec::with_capacity(labels.len());
                                     for label in labels {
                                         let lbl_name = arena.get_string(label.pld_name.txt);
@@ -12454,6 +12520,7 @@ fn type_structure_item<'a>(
                         vec![],
                     ),
                     crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                        check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
                         // OCaml copies @unboxed and @tag attributes from the type decl
                         // to each constructor (copy_tag_attr_from_decl in typedecl.ml)
                         let tag_attrs: Vec<_> = decl
@@ -12962,6 +13029,7 @@ fn type_structure_item<'a>(
                                     )
                                 }
                                 crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                                    check_duplicate_label_declarations(arena, labels, None)?;
                                     let mut typed_labels: Vec<TypedLabelDeclaration> = Vec::new();
                                     let mut internal_labels: Vec<crate::types::LabelDeclaration> =
                                         Vec::new();
@@ -13338,6 +13406,11 @@ fn type_structure_item<'a>(
                         )
                     }
                     crate::parser::ast::TypeKind::Ptype_record(labels) => {
+                        check_duplicate_label_declarations(
+                            arena,
+                            labels,
+                            Some(arena.get_string(decl.ptype_name.txt)),
+                        )?;
                         let mut internal_labels: Vec<crate::types::LabelDeclaration> = Vec::new();
                         let mut typed_tree_labels: Vec<TypedLabelDeclaration> = Vec::new();
                         for lbl in labels {
@@ -13810,6 +13883,7 @@ fn type_structure_item<'a>(
                                     )
                                 }
                                 crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                                    check_duplicate_label_declarations(arena, labels, None)?;
                                     let mut typed_labels = Vec::new();
                                     let mut decl_labels = Vec::new();
                                     for label in labels {
@@ -14081,6 +14155,7 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                            check_duplicate_label_declarations(arena, labels, None)?;
                             let mut typed_labels = Vec::new();
                             let mut decl_labels = Vec::new();
                             for label in labels {
@@ -15236,6 +15311,11 @@ fn transl_sig_type_declarations_with_ids<'a>(
                     (crate::types::TypeKind::TypeOpen, TypedTypeKind::Ttype_open)
                 }
                 crate::parser::ast::TypeKind::Ptype_record(labels) => {
+                    check_duplicate_label_declarations(
+                        arena,
+                        labels,
+                        Some(arena.get_string(decl.ptype_name.txt)),
+                    )?;
                     let mut internal_labels = Vec::with_capacity(labels.len());
                     let mut typed_tree_labels = Vec::with_capacity(labels.len());
 
@@ -15367,6 +15447,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                     )
                 }
                 crate::parser::ast::TypeKind::Ptype_variant(cstrs) => {
+                    check_duplicate_constructor_declarations(arena, decl.ptype_loc, cstrs)?;
                     let mut internal_cstrs = Vec::with_capacity(cstrs.len());
                     let mut typed_tree_cstrs = Vec::with_capacity(cstrs.len());
                     let tag_attrs: Vec<_> = decl
@@ -15399,6 +15480,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                                 )
                             }
                             crate::parser::ast::ConstructorArguments::Pcstr_record(labels) => {
+                                check_duplicate_label_declarations(arena, labels, None)?;
                                 let mut internal_record_labels = Vec::with_capacity(labels.len());
                                 let mut typed_record_labels = Vec::with_capacity(labels.len());
                                 for label in labels {

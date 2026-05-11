@@ -1625,6 +1625,26 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::DuplicateConstructor { loc, name } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Two constructors are named {name}"),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::DuplicateLabel {
+            loc,
+            label,
+            record_name,
+        } => UserDiagnostic::new(
+            format_duplicate_type_label_report(arena, source, filename, *loc, label, record_name),
+            2,
+        )
+        .into(),
         TypeModError::AstUntaggedVariantError { loc, error } => {
             let message = error.message_text();
             UserDiagnostic::new(
@@ -1635,6 +1655,29 @@ fn type_mod_error_to_anyhow(
         }
         _ => anyhow!("Type checking failed: {err:?}"),
     }
+}
+
+fn format_duplicate_type_label_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    record_name: &Option<String>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let message = if let Some(record_name) = record_name {
+        format!(
+            "The field {INFO}{label}{RESET} is defined several times in the record {INFO}{record_name}{RESET}. Fields can only be added once to a record."
+        )
+    } else {
+        format!(
+            "The field {INFO}{label}{RESET} is defined several times in this record. Fields can only be added once to a record."
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_compiler_error_report_from_location(
