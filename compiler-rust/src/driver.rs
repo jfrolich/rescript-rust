@@ -23,6 +23,7 @@ use crate::js_ir::{
     print_deps_program_with_directives_and_options,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
+use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
@@ -1459,8 +1460,46 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::InvalidUntaggedVariantDefinition { loc, reason } => UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                loc,
+                &format!("This untagged variant definition is invalid: {reason}"),
+            ),
+            2,
+        )
+        .into(),
         _ => anyhow!("Type checking failed: {err:?}"),
     }
+}
+
+fn format_compiler_error_report_from_location(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(
+        filename,
+        &loc.loc_start,
+        &loc.loc_end,
+    ));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+    output.push('\n');
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
 }
 
 fn format_compiler_error_report(
