@@ -18027,15 +18027,6 @@ fn copy_lookup_signature(
     ctx: &TypeContext,
     cache: &mut TypeExprRefMap<TypeExprRef>,
 ) -> crate::types::decl::Signature {
-    copy_lookup_signature_with_value_mode(sig_items, ctx, cache, true)
-}
-
-fn copy_lookup_signature_with_value_mode(
-    sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &TypeContext,
-    cache: &mut TypeExprRefMap<TypeExprRef>,
-    copy_values: bool,
-) -> crate::types::decl::Signature {
     sig_items
         .iter()
         .map(|item| match item {
@@ -18043,11 +18034,7 @@ fn copy_lookup_signature_with_value_mode(
                 crate::types::decl::SignatureItem::SigValue(
                     id.clone(),
                     crate::types::decl::ValueDescription {
-                        val_type: if copy_values {
-                            copy_lookup_type_expr(ctx, desc.val_type, cache)
-                        } else {
-                            desc.val_type
-                        },
+                        val_type: copy_lookup_type_expr(ctx, desc.val_type, cache),
                         val_kind: desc.val_kind.clone(),
                         val_loc: desc.val_loc.clone(),
                         val_attributes: desc.val_attributes.clone(),
@@ -18252,21 +18239,6 @@ pub(crate) fn copy_lookup_signature_for_subst(
     }
     let mut cache = TypeExprRefMap::new();
     copy_lookup_signature(sig_items, ctx, &mut cache)
-}
-
-#[track_caller]
-pub(crate) fn copy_lookup_signature_shallow_values_for_subst(
-    sig_items: &[crate::types::decl::SignatureItem],
-    ctx: &TypeContext,
-) -> crate::types::decl::Signature {
-    if ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_signature_copy(
-            std::panic::Location::caller(),
-            sig_items.len(),
-        );
-    }
-    let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature_with_value_mode(sig_items, ctx, &mut cache, false)
 }
 
 /// Deep-copy a module type, creating new type expression nodes.
