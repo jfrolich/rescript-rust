@@ -1637,6 +1637,10 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But this function argument is expecting: ",
         ),
+        Some(TypeClashContext::AssertCondition) => (
+            "This has type: ",
+            "But assertions must always be of type: ",
+        ),
         _ => ("This has type: ", "But it's expected to have type: "),
     };
 

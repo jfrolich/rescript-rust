@@ -569,6 +569,8 @@ pub enum TypeClashContext {
     Tuple,
     /// In an if expression.
     IfExpression,
+    /// In an assertion condition.
+    AssertCondition,
     /// In a switch expression.
     SwitchExpression,
 }
@@ -6188,7 +6190,13 @@ pub fn type_expect<'a>(
             let bool_ty = env.type_bool(ctx);
 
             let e = tctx.arena.get_expr(*e_idx);
-            let typed_e = type_expect(tctx, env, e, bool_ty, None)?;
+            let typed_e = type_expect(
+                tctx,
+                env,
+                e,
+                bool_ty,
+                Some(TypeClashContext::AssertCondition),
+            )?;
 
             // assert(false) has the expected type (polymorphic), others have type unit
             let exp_type = match &typed_e.exp_desc {
