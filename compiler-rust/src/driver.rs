@@ -2085,7 +2085,10 @@ impl<'a> TypeExprPrinter<'a> {
 
             match &*self.type_ctx.get_desc(repr) {
                 TypeDesc::Tarrow { arg, ret, .. } => {
-                    args.push(self.format_arrow_arg(&arg.lbl, arg.typ));
+                    args.push((
+                        self.format_arrow_arg(&arg.lbl, arg.typ),
+                        !matches!(arg.lbl, TypeArgLabel::Nolabel),
+                    ));
                     current = *ret;
                 }
                 TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -2094,10 +2097,17 @@ impl<'a> TypeExprPrinter<'a> {
         }
 
         let ret = self.format(current);
-        if args.len() == 1 {
-            format!("{} => {ret}", args[0])
+        if let [(arg, true)] = args.as_slice() {
+            format!("({arg}) => {ret}")
+        } else if let [(arg, false)] = args.as_slice() {
+            format!("{arg} => {ret}")
         } else {
-            format!("({}) => {ret}", args.join(", "))
+            let args = args
+                .into_iter()
+                .map(|(arg, _)| arg)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({args}) => {ret}")
         }
     }
 
@@ -2106,7 +2116,7 @@ impl<'a> TypeExprPrinter<'a> {
         match label {
             TypeArgLabel::Nolabel => ty,
             TypeArgLabel::Labelled(label) => format!("~{}: {ty}", label.txt),
-            TypeArgLabel::Optional(label) => format!("~{}?: {ty}", label.txt),
+            TypeArgLabel::Optional(label) => format!("?{}: {ty}", label.txt),
         }
     }
 
