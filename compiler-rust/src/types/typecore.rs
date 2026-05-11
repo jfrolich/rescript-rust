@@ -8639,28 +8639,6 @@ fn unify_expression_types(
             // representative. Do not infer `A.B`/`A__B` equivalence from path
             // spelling here; the ctype/env alias evidence path above must handle
             // real flattened component aliases.
-            let flatten_drop_outer_match = |lhs: &str, rhs: &str| -> bool {
-                let dropped = |name: &str| -> Option<String> {
-                    let mut segs: Vec<&str> = name.split('.').collect();
-                    if segs.is_empty() {
-                        return None;
-                    }
-                    let head = segs[0];
-                    let mut parts = head.split("__");
-                    let first = parts.next()?;
-                    let second = parts.next()?;
-                    if parts.next().is_some() || first.is_empty() || second.is_empty() {
-                        return None;
-                    }
-                    let mut expanded: Vec<String> = vec![first.to_string(), second.to_string()];
-                    expanded.extend(segs.drain(1..).map(|s| s.to_string()));
-                    if expanded.len() < 2 {
-                        return None;
-                    }
-                    Some(expanded[1..].join("."))
-                };
-                dropped(lhs).is_some_and(|d| d == rhs) || dropped(rhs).is_some_and(|d| d == lhs)
-            };
             let repeated_terminal_module_match = |lhs: &str, rhs: &str| -> bool {
                 let matches = |long: &str, short: &str| -> bool {
                     let long_segs: Vec<&str> = long.split('.').collect();
@@ -8702,14 +8680,6 @@ fn unify_expression_types(
                 },
             ) = (&*desc1, &*desc2)
             {
-                if args1.is_empty()
-                    && args2.is_empty()
-                    && flatten_drop_outer_match(&path1.name(), &path2.name())
-                {
-                    drop(desc1);
-                    drop(desc2);
-                    return Ok(());
-                }
                 if args1.is_empty()
                     && args2.is_empty()
                     && repeated_terminal_module_match(&path1.name(), &path2.name())
