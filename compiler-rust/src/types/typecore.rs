@@ -13422,8 +13422,7 @@ fn type_record(
         let field_name = arena.get_string(resolved_lid.last_idx());
         let unqualified_with_opath =
             record_opath_ty.is_some() && matches!(resolved_lid, Longident::Lident(_));
-        let prefer_known_record_label = !ctx.preserve_canonical_typedtree();
-        if !prefer_known_record_label && matches!(resolved_lid, Longident::Lident(_)) {
+        if matches!(resolved_lid, Longident::Lident(_)) {
             force_unqualified_record_label_disambiguate_by_type_compare(
                 field_name,
                 record_opath_ty,
@@ -13447,14 +13446,6 @@ fn type_record(
                 ctx,
                 false,
             )
-        } else if prefer_known_record_label {
-            qualified_record_label_from_info(
-                disambiguation_label_descriptions.as_ref(),
-                field_name,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-            )
         } else {
             None
         }
@@ -13470,17 +13461,19 @@ fn type_record(
             )
         })
         .or_else(|| {
-            if prefer_known_record_label {
-                None
-            } else {
-                qualified_record_label_from_info(
-                    disambiguation_label_descriptions.as_ref(),
-                    field_name,
-                    env,
-                    &mut tctx.persistent_env,
-                    ctx,
-                )
-            }
+            // OCaml compiler/ml/typecore.ml:1098-1126 first collects the visible
+            // label scope and runs `Label.disambiguate`; if that cannot select a
+            // label, typecore.ml:942-967 `lookup_from_type` falls back to the
+            // expected record type. Keep this fallback after the scope lookup in
+            // every mode so typedtree output and normal compilation share the same
+            // lazy force order.
+            qualified_record_label_from_info(
+                disambiguation_label_descriptions.as_ref(),
+                field_name,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            )
         })
         .or_else(|| {
             disambiguate_label(
