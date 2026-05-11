@@ -23385,8 +23385,10 @@ fn build_module_components_from_parent_path<'a>(
         return None;
     };
 
-    if !ctx.preserve_canonical_typedtree()
-        && ctx.persistent_env_is_in_process()
+    // OCaml compiler/ml/env.ml:1516-1518 always calls scrape_alias while
+    // building module components; env.ml:1440-1442 resolves Mty_alias through
+    // find_module, independent of typedtree output mode.
+    if ctx.persistent_env_is_in_process()
         && let Some(Some((runtime_pos, alias_target, parent_access_path))) =
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
                 components
