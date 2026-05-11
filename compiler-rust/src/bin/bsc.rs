@@ -488,15 +488,11 @@ fn write_outputs(
         return Ok(());
     }
 
-    let out = source_path.with_extension("js");
     let mut output_opts = compiler_opts.clone();
-    output_opts.output_path = Some(out.clone());
+    output_opts.output_path = None;
     output_opts.output_module_format = None;
     let js = compile_file_to_js_with_options(source_path, &output_opts)?;
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out, js)?;
+    print!("{js}");
     Ok(())
 }
 
