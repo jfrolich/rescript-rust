@@ -3978,18 +3978,12 @@ fn substitute_type_path(
     match path {
         Path::Pident(ident) => {
             if ident.stamp() != 0 {
+                // OCaml compiler/ml/subst.ml:87-100 `type_path` rewrites
+                // non-persistent ids through Ident.find_same only. It does not
+                // fall back to declaration names or flattened path spelling.
                 type_stamp_map
                     .get(&ident.stamp())
                     .cloned()
-                    .or_else(|| {
-                        // Flattened CMI heads like Stdlib_JSON often carry
-                        // non-zero stamps but still need name-based rewriting.
-                        ident
-                            .name()
-                            .contains('_')
-                            .then(|| type_name_map.get(ident.name()).cloned())
-                            .flatten()
-                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 type_name_map
@@ -4035,19 +4029,12 @@ fn substitute_module_path(
             if ident.stamp() != 0 {
                 let protected = protected_module_head
                     .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());
+                // OCaml compiler/ml/subst.ml:69-76 `module_path` rewrites
+                // non-persistent ids through Ident.find_same only. It does not
+                // fall back to declaration names or flattened path spelling.
                 module_stamp_map
                     .get(&ident.stamp())
                     .and_then(|(_, path)| (!protected).then(|| path.clone()))
-                    .or_else(|| {
-                        // Flattened module names (Stdlib_JSON, Stdlib_Intl_*)
-                        // may appear with non-zero stamps; allow a targeted
-                        // name fallback for those heads only.
-                        ident
-                            .name()
-                            .contains('_')
-                            .then(|| module_name_map.get(ident.name()).cloned())
-                            .flatten()
-                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 module_name_map
