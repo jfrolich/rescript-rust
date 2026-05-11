@@ -4499,12 +4499,11 @@ fn unify_types<'a>(
                         && args1.len() == args2.len()
                     {
                         let alias_matches = if let Some(env) = state.env() {
-                            let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
+                            let long_decl_exists =
+                                lookup_type_decl_for_path(ctx, env, long_path).is_some();
                             let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
-                            if short_decl.is_none() {
-                                long_decl.is_some()
-                            } else {
-                                short_decl.and_then(|decl| decl.type_manifest).is_some_and(
+                            long_decl_exists
+                                && short_decl.and_then(|decl| decl.type_manifest).is_some_and(
                                     |manifest| {
                                         let manifest = ctx.repr(manifest);
                                         let manifest_desc = ctx.get_desc(manifest);
@@ -4518,7 +4517,6 @@ fn unify_types<'a>(
                                         }
                                     },
                                 )
-                            }
                         } else {
                             false
                         };
