@@ -4287,15 +4287,16 @@ fn unify_types<'a>(
                         // OCaml compiler/ml/ctype.ml:2393-2414 can link an
                         // expanded backing-unit representative after
                         // env.ml:1530-1538 and subst.ml:87-95 have substituted
-                        // selected module components. Limit that compensation to
-                        // ReScript's flattened persistent backing units; ordinary
-                        // persistent source modules such as `ZoomGenerator.t`
-                        // keep their explicit annotation path.
+                        // selected module components. Limit that representative
+                        // choice to flattened backing units discovered through
+                        // env.ml:1517 alias scraping/component prefixing, not
+                        // to arbitrary persistent names containing underscores.
                         matches!(
                             path,
                             Path::Pdot(parent, _, _)
                                 if matches!(parent.as_ref(), Path::Pident(id)
-                                    if id.is_persistent() && id.name().contains('_'))
+                                    if id.is_persistent())
+                                    && registered_flattened_alias_rewrite(ctx, path).is_some()
                         )
                     };
                     let p1_flat_persistent = flat_persistent_parent(path1);
