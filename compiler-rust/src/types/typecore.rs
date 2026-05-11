@@ -9329,7 +9329,7 @@ fn type_application(
         let Some(Path::Pdot(selected_parent, _, _)) = selected_value_path else {
             return false;
         };
-        if !selected_parent.head().name().contains("__") {
+        if crate::types::ctype::registered_flattened_alias_rewrite(ctx, selected_parent).is_none() {
             return false;
         }
         let Some((parameter_path, parameter_arity)) = constr_path_and_arity(ctx, parameter_ty)
