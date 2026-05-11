@@ -1408,6 +1408,20 @@ fn ppx_error_to_anyhow(
     }
 }
 
+fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
+    let mut output = String::new();
+    for diagnostic in parser.diagnostics() {
+        output.push_str(&code_frame::format_error(
+            filename,
+            source,
+            &diagnostic.start_pos,
+            &diagnostic.end_pos,
+            &diagnostic.explain_with_source(Some(source)),
+        ));
+    }
+    UserDiagnostic::new(output, 1).into()
+}
+
 fn type_mod_error_to_anyhow(
     err: TypeModError,
     type_ctx: &TypeContext,
@@ -2479,10 +2493,7 @@ pub fn compile_source_to_js_with_options(
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
+        return Err(parser_error_to_anyhow(&parser, source, filename));
     }
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
     let debug = debug_for_structure(&structure, options, parser.arena());
@@ -3076,10 +3087,7 @@ pub fn typecheck_interface_source(
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
+        return Err(parser_error_to_anyhow(&parser, source, filename));
     }
     let experimental_let_unwrap =
         experimental_let_unwrap_for_signature(&signature, options, parser.arena());
