@@ -36,8 +36,8 @@ use crate::types::sexp_typedtree::{
 use crate::types::typecore::TypeCoreError;
 use crate::types::typemod::TypeModError;
 use crate::types::{
-    ArgLabel as TypeArgLabel, TypeCheckContext, TypeContext, TypeDesc, TypeExprRef, initial_env,
-    transl_signature, type_structure,
+    ArgLabel as TypeArgLabel, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
+    TypeExprRef, initial_env, transl_signature, type_structure,
 };
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
@@ -1439,6 +1439,15 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::ExprTypeClash {
+            loc,
+            trace,
+            context,
+        }) => UserDiagnostic::new(
+            format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context),
+            2,
+        )
+        .into(),
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
@@ -1504,6 +1513,107 @@ fn format_compiler_error_report_raw_message(
     }
     output.push('\n');
     output
+}
+
+fn format_expr_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    _context: &Option<TypeClashContext>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let missing_parameters = collect_expected_function_arguments(type_ctx, expected);
+    let mut message = String::new();
+
+    if !missing_parameters.is_empty() {
+        if missing_parameters.len() == 1 {
+            message.push_str("This value might need to be ");
+            message.push_str(INFO);
+            message.push_str("wrapped in a function that takes an extra\nparameter");
+            message.push_str(RESET);
+            message.push_str(" of type ");
+            message.push_str(&format_type_clash_arguments(type_ctx, &missing_parameters));
+            message.push_str("\n\n");
+        } else {
+            message.push_str("This value seems to ");
+            message.push_str(INFO);
+            message.push_str("need to be wrapped in a function that takes extra arguments");
+            message.push_str(RESET);
+            message.push_str(" of type: ");
+            message.push_str(&format_type_clash_arguments(type_ctx, &missing_parameters));
+            message.push_str("\n\n");
+        }
+        message.push_str(INFO);
+        message.push_str("Here's the original error message");
+        message.push_str(RESET);
+        message.push('\n');
+    }
+
+    message.push_str("This has type: ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(type_ctx, actual));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("But it's expected to have type: ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, expected));
+    message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn collect_expected_function_arguments(
+    type_ctx: &TypeContext,
+    expected: TypeExprRef,
+) -> Vec<(TypeArgLabel, TypeExprRef)> {
+    let mut args = Vec::new();
+    let mut current = expected;
+    let mut seen = AHashSet::new();
+
+    loop {
+        let repr = type_ctx.repr(current);
+        if !seen.insert(repr) {
+            break;
+        }
+
+        match &*type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                args.push((arg.lbl.clone(), arg.typ));
+                current = *ret;
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+            _ => break,
+        }
+    }
+
+    args
+}
+
+fn format_type_clash_arguments(
+    type_ctx: &TypeContext,
+    args: &[(TypeArgLabel, TypeExprRef)],
+) -> String {
+    args.iter()
+        .map(|(label, ty)| {
+            let ty = format_type_expr(type_ctx, *ty);
+            match label {
+                TypeArgLabel::Nolabel => ty,
+                TypeArgLabel::Labelled(label) => format!("(~{}: {ty})", label.txt),
+                TypeArgLabel::Optional(label) => format!("(?{}: {ty})", label.txt),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_uncurried_arity_mismatch_report(

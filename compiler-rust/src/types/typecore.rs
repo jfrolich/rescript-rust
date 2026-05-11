@@ -388,6 +388,7 @@ pub enum TypeCoreError {
 
     /// Expression type clash.
     ExprTypeClash {
+        loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
         context: Option<TypeClashContext>,
     },
@@ -8285,6 +8286,7 @@ fn unify_expression_types(
                 }
             }
             Err(TypeCoreError::ExprTypeClash {
+                loc,
                 trace: vec![(ty1, ty2)],
                 context,
             })
@@ -15005,6 +15007,7 @@ fn type_coerce(
     let inst_expected = instance_if_generic(ctx, expected_ty);
     if crate::types::unify(ctx, &mut tctx.unify_state, inst_expected, to_ty).is_err() {
         return Err(TypeCoreError::ExprTypeClash {
+            loc,
             trace: vec![(inst_expected, to_ty)],
             context: None,
         });
@@ -15027,6 +15030,7 @@ fn type_coerce(
             generalizable_at_level(ctx, ctx.get_level(scope_var), typed_inner.exp_type);
         crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, scope_var, typed_inner.exp_type)
             .map_err(|err| TypeCoreError::ExprTypeClash {
+                loc,
                 trace: match err {
                     TypeError::Unify(trace) => trace,
                     _ => vec![(scope_var, typed_inner.exp_type)],
