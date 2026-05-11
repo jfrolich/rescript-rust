@@ -2064,14 +2064,24 @@ fn format_expr_type_clash_report(
     };
 
     message.push_str(error_text);
-    message.push_str(ERROR);
-    message.push_str(&format_type_expr(type_ctx, actual));
-    message.push_str(RESET);
+    append_type_clash_type(
+        type_ctx,
+        trace,
+        true,
+        ERROR,
+        actual,
+        &mut message,
+    );
     message.push('\n');
     message.push_str(expected_text);
-    message.push_str(INFO);
-    message.push_str(&format_type_expr(type_ctx, expected));
-    message.push_str(RESET);
+    append_type_clash_type(
+        type_ctx,
+        trace,
+        false,
+        INFO,
+        expected,
+        &mut message,
+    );
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
@@ -2116,6 +2126,51 @@ fn format_pattern_type_clash_report(
     message.push_str(RESET);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn append_type_clash_type(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+) {
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    message.push_str(color);
+    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(RESET);
+
+    if let Some(expansion) = rendered_alias_expansion(type_ctx, trace, actual_side) {
+        message.push(' ');
+        message.push_str(DIM);
+        message.push_str("(defined as");
+        message.push_str(RESET);
+        message.push(' ');
+        message.push_str(color);
+        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(RESET);
+        message.push_str(DIM);
+        message.push(')');
+        message.push_str(RESET);
+    }
+}
+
+fn rendered_alias_expansion(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+) -> Option<TypeExprRef> {
+    let first = trace.first()?;
+    let top = if actual_side { first.0 } else { first.1 };
+    let top_text = format_type_expr(type_ctx, top);
+    trace.iter().skip(1).find_map(|pair| {
+        let ty = if actual_side { pair.0 } else { pair.1 };
+        (type_ctx.repr(ty) != type_ctx.repr(top) && format_type_expr(type_ctx, ty) == top_text)
+            .then_some(ty)
+    })
 }
 
 fn format_not_subtype_report(
@@ -2412,9 +2467,11 @@ fn nested_type_clash_pair(
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> Option<(TypeExprRef, TypeExprRef)> {
     let (top_actual, top_expected) = trace.first().copied()?;
+    let top_actual_text = format_type_expr(type_ctx, top_actual);
+    let top_expected_text = format_type_expr(type_ctx, top_expected);
     trace.iter().skip(1).rev().copied().find(|(actual, expected)| {
-        type_ctx.repr(*actual) != type_ctx.repr(top_actual)
-            || type_ctx.repr(*expected) != type_ctx.repr(top_expected)
+        format_type_expr(type_ctx, *actual) != top_actual_text
+            || format_type_expr(type_ctx, *expected) != top_expected_text
     })
 }
 
@@ -2862,7 +2919,7 @@ impl<'a> TypeExprPrinter<'a> {
                 format!("({})", parts.join(", "))
             }
             TypeDesc::Tconstr { path, args, .. } => {
-                let name = path.last().to_string();
+                let name = self.format_path_name(path);
                 if args.is_empty() {
                     name
                 } else {
@@ -2878,6 +2935,14 @@ impl<'a> TypeExprPrinter<'a> {
             TypeDesc::Tvariant(_) => "<variant>".to_string(),
             TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
         }
+    }
+
+    fn format_path_name(&self, path: &crate::types::Path) -> String {
+        let name = path.name();
+        name.strip_prefix("Stdlib.")
+            .or_else(|| name.strip_prefix("Stdlib_"))
+            .unwrap_or(&name)
+            .to_string()
     }
 
     fn format_object(&mut self, fields: TypeExprRef) -> String {
