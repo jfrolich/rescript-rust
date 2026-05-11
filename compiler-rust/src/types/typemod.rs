@@ -280,6 +280,44 @@ fn parser_attrs_to_decl_attrs(
         .collect()
 }
 
+fn parser_warning_attribute_payload(arena: &ParseArena, payload: &ParsedPayload) -> Option<String> {
+    let ParsedPayload::PStr(items) = payload else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let ParsedStructureItemDesc::Pstr_eval(eval_box) = item.pstr_desc.as_ref() else {
+        return None;
+    };
+    let (expr_idx, _attrs) = eval_box.as_ref();
+    let expr = arena.get_expr(*expr_idx);
+    let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = expr.pexp_desc.as_ref() else {
+        return None;
+    };
+    let crate::parser::ast::Constant::String(spec, _) = c.as_ref() else {
+        return None;
+    };
+    Some(spec.to_string())
+}
+
+fn apply_warning_attribute(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+) {
+    let (name, payload) = attr;
+    let attr_name = arena.get_string(name.txt);
+    let Some(spec) = parser_warning_attribute_payload(arena, payload) else {
+        return;
+    };
+    match attr_name {
+        "warning" | "ocaml.warning" => tctx.apply_warning_spec(&spec),
+        "warnerror" | "ocaml.warnerror" => tctx.apply_warning_error_spec(&spec),
+        _ => {}
+    }
+}
+
 fn parser_deprecated_payload_to_decl_payload(
     arena: &ParseArena,
     items: &[ParsedStructureItem],
@@ -15100,6 +15138,7 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_attribute(attr) => {
             // Attribute: @@attr
+            apply_warning_attribute(tctx, arena, attr);
             let desc = StructureItemDesc::Tstr_attribute((**attr).clone());
             Ok((
                 StructureItem {

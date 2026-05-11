@@ -26,7 +26,7 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
-use crate::diagnostics::Warning;
+use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
@@ -803,6 +803,8 @@ pub struct TypeCheckContext<'a> {
     pub diagnostics: Vec<TypeCoreDiagnostic>,
     /// Collected warnings.
     pub warnings: Vec<TypeCoreWarning>,
+    /// Current warning configuration.
+    pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
     pub loop_depth: usize,
     /// Used type variables within the current type expression (for sharing).
@@ -865,6 +867,8 @@ pub struct TypeCoreWarning {
     pub loc: LocIdx,
     /// The warning.
     pub warning: Warning,
+    /// Whether this warning is configured as an error.
+    pub is_error: bool,
 }
 
 impl<'a> TypeCheckContext<'a> {
@@ -877,6 +881,7 @@ impl<'a> TypeCheckContext<'a> {
             newtype_level: None,
             diagnostics: Vec::new(),
             warnings: Vec::new(),
+            warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
             type_variables: HashMap::new(),
@@ -922,7 +927,30 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Report a warning.
     pub fn report_warning(&mut self, loc: LocIdx, warning: Warning) {
-        self.warnings.push(TypeCoreWarning { loc, warning });
+        if !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let is_error = self.warning_config.is_error(&warning);
+        self.warnings.push(TypeCoreWarning {
+            loc,
+            warning,
+            is_error,
+        });
+    }
+
+    /// Apply a `@warning`/`@@warning` payload.
+    pub fn apply_warning_spec(&mut self, spec: &str) {
+        let _ = self.warning_config.parse(spec);
+    }
+
+    /// Apply a `@warnerror`/`@@warnerror` payload.
+    pub fn apply_warning_error_spec(&mut self, spec: &str) {
+        let normalized = match spec.chars().next() {
+            Some('@' | '+' | '-') => spec.to_string(),
+            Some(_) => format!("@{spec}"),
+            None => String::new(),
+        };
+        let _ = self.warning_config.parse(&normalized);
     }
 
     /// Get the newtype level.
@@ -1556,6 +1584,11 @@ fn transl_type_inner(
             }
 
             let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
+            if let Some(decl) = &type_decl {
+                if let Some(warning) = deprecated_warning_for_type(&path, decl) {
+                    tctx.report_warning(lid.loc, warning);
+                }
+            }
 
             let mut parsed_args: Vec<_> = args
                 .iter()
@@ -6076,8 +6109,11 @@ fn constructor_alias_rewrite_value_path(
     ))
 }
 
-fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<Warning> {
-    for attr in &desc.val_attributes {
+fn deprecated_warning_from_attrs(
+    name: &str,
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<Warning> {
+    for attr in attrs {
         if attr.attr_name.txt != "deprecated" && attr.attr_name.txt != "ocaml.deprecated" {
             continue;
         }
@@ -6091,9 +6127,9 @@ fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<
             _ => ("", false),
         };
         let message = if reason.is_empty() {
-            path.name()
+            name.to_string()
         } else {
-            format!("{}\n{}", path.name(), reason)
+            format!("{name}\n{reason}")
         };
         return Some(Warning::Deprecated {
             message,
@@ -6103,6 +6139,17 @@ fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<
         });
     }
     None
+}
+
+fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<Warning> {
+    deprecated_warning_from_attrs(&path.name(), &desc.val_attributes)
+}
+
+fn deprecated_warning_for_type(
+    path: &Path,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> Option<Warning> {
+    deprecated_warning_from_attrs(&path.name(), &decl.type_attributes)
 }
 
 /// Type check an expression against an expected type.

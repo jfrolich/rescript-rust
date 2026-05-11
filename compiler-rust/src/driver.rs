@@ -2002,6 +2002,9 @@ fn format_compiler_warning_report(
 
     output.push_str("\n  Warning number ");
     output.push_str(&warning.warning.number().to_string());
+    if warning.is_error {
+        output.push_str(" (configured as error) ");
+    }
     output.push('\n');
     output.push_str("  ");
     output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
@@ -2036,6 +2039,10 @@ fn emit_type_warnings(
         let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
     }
     let _ = std::io::Write::flush(&mut stderr);
+}
+
+fn type_warnings_have_errors(warnings: &[TypeCoreWarning]) -> bool {
+    warnings.iter().any(|warning| warning.is_error)
 }
 
 fn format_compiler_error_report_raw_message(
@@ -3677,6 +3684,9 @@ pub fn compile_source_to_js_with_options(
             }
         };
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    if type_warnings_have_errors(&tctx.warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
