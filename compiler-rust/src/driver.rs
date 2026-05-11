@@ -1487,6 +1487,33 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::WrongName {
+            loc,
+            kind,
+            ty,
+            expected,
+            path,
+            name,
+            alternatives,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_wrong_name_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                *ty,
+                expected,
+                path,
+                name,
+                alternatives,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnboundRecordField {
             loc,
             field_name,
@@ -1653,6 +1680,72 @@ fn format_compiler_error_report_raw_message(
     }
     output.push('\n');
     output
+}
+
+fn format_wrong_name_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    ty: TypeExprRef,
+    expected: &str,
+    path: &crate::types::Path,
+    name: &str,
+    _alternatives: &[String],
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some(jsx_component_info) = jsx_component_info {
+        let mut message = String::new();
+        if name == "children" {
+            message.push_str("This JSX component does not accept child elements. It has no ");
+            message.push_str(ERROR);
+            message.push_str("children");
+            message.push_str(RESET);
+            message.push_str(" prop ");
+        } else {
+            message.push_str("The prop ");
+            message.push_str(ERROR);
+            message.push_str(name);
+            message.push_str(RESET);
+            message.push_str(" does not belong to the JSX component ");
+        }
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+        message.push_str("\n\n\n");
+        return format_compiler_error_report(arena, source, filename, loc, &message);
+    }
+
+    let label = if kind == "record" { "field" } else { kind };
+    let mut message = String::new();
+    message.push_str("The ");
+    message.push_str(label);
+    message.push(' ');
+    message.push_str(ERROR);
+    message.push_str(name);
+    message.push_str(RESET);
+    message.push_str(" does not belong to type ");
+    message.push_str(INFO);
+    message.push_str(&path.to_string());
+    message.push_str(RESET);
+    message.push_str("\n\n");
+    message.push_str(expected);
+    message.push_str(" type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(RESET);
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_expr_type_clash_report(

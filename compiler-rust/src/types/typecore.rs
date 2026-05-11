@@ -417,12 +417,15 @@ pub enum TypeCoreError {
 
     /// Wrong name in expression.
     WrongName {
+        /// Location of the wrong name.
+        loc: LocIdx,
         kind: String,
         ty: TypeExprRef,
         expected: String,
         path: Path,
         name: String,
         alternatives: Vec<String>,
+        jsx_component_info: Option<JsxPropErrorInfo>,
     },
 
     /// Name/type mismatch.
@@ -590,7 +593,7 @@ pub enum TypeClashContext {
 #[derive(Debug, Clone)]
 pub struct JsxPropErrorInfo {
     /// Component name.
-    pub component_name: String,
+    pub component_name: Option<String>,
     /// Props.
     pub props: Vec<String>,
 }
@@ -13740,6 +13743,19 @@ fn type_record(
                 false,
             )
         });
+        if unqualified_with_opath && disambiguated.is_none() {
+            if let Some(record_opath_ty) = record_opath_ty {
+                if let Some(err) = wrong_record_field_name_error(
+                    tctx,
+                    env,
+                    field.lid.loc,
+                    record_opath_ty,
+                    field_name,
+                ) {
+                    return Err(err);
+                }
+            }
+        }
         explicit_fields.push(ExplicitField {
             original_index: idx,
             field,
@@ -14611,6 +14627,57 @@ fn type_record(
         EnvRef(0),
         attributes.to_vec().into(),
     ))
+}
+
+fn attributes_include_jsx_component_props(attrs: &[crate::types::decl::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.attr_name.txt == "res.jsxComponentProps")
+}
+
+fn jsx_component_name_from_props_path(path: &Path) -> Option<String> {
+    match path {
+        Path::Pdot(parent, name, _) if name == "props" => Some(parent.head_name().to_string()),
+        Path::Pdot(parent, name, _) if name == "fragmentProps" => {
+            Some(format!("{}.Fragment", parent.head_name()))
+        }
+        _ => None,
+    }
+}
+
+fn wrong_record_field_name_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    record_ty: TypeExprRef,
+    field_name: &str,
+) -> Option<TypeCoreError> {
+    let (path, _args, decl) =
+        extract_concrete_record_type_info(record_ty, env, &mut tctx.persistent_env, tctx.type_ctx)?;
+    let crate::types::TypeKind::TypeRecord(labels, _repr) = &decl.type_kind else {
+        return None;
+    };
+    let alternatives = labels
+        .iter()
+        .map(|label| label.ld_id.name().to_string())
+        .collect::<Vec<_>>();
+    let jsx_component_info = (path.head_name() == "props"
+        && attributes_include_jsx_component_props(&decl.type_attributes))
+    .then(|| JsxPropErrorInfo {
+        component_name: jsx_component_name_from_props_path(&path),
+        props: alternatives.clone(),
+    });
+
+    Some(TypeCoreError::WrongName {
+        loc,
+        kind: "record".to_string(),
+        ty: record_ty,
+        expected: "This record expression is expected to have".to_string(),
+        path,
+        name: field_name.to_string(),
+        alternatives,
+        jsx_component_info,
+    })
 }
 
 /// Create a ConstructorDescription for the `Some` constructor.
