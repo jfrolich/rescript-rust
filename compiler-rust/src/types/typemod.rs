@@ -2989,6 +2989,11 @@ pub enum TypeModError {
         /// Specific attribute validation error.
         error: AstUntaggedVariantError,
     },
+    /// GADT constructor result syntax requires `type rec`.
+    NonrecursiveGadt {
+        /// Whole type declaration location.
+        loc: LocIdx,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -12375,6 +12380,16 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
+            if matches!(rec_flag, RecFlag::Nonrecursive)
+                && decls.len() == 1
+                && matches!(
+                    &decls[0].ptype_kind,
+                    crate::parser::ast::TypeKind::Ptype_variant(cstrs)
+                        if cstrs.first().is_some_and(|cstr| cstr.pcd_res.is_some())
+                )
+            {
+                return Err(TypeModError::NonrecursiveGadt { loc });
+            }
             // Type declaration: type t = ...
             let ctx = tctx.type_ctx;
             let mut new_env = env.clone();
