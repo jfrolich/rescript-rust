@@ -495,6 +495,69 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
     (params, arity)
 }
 
+fn params_is_single_extern_unit(params: &Params) -> bool {
+    matches!(
+        params,
+        Params::Params(param_specs)
+            if matches!(
+                param_specs.as_slice(),
+                [Param {
+                    arg_type: Attr::ExternUnit,
+                    ..
+                }]
+            )
+    )
+}
+
+fn external_desc_is_plain_get(desc: &ExternalDesc) -> bool {
+    desc.get_name.is_some()
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+        && !desc.splice
+}
+
+fn validate_external_attribute_errors(
+    vd: &ValueDescription,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
+        return Ok(());
+    }
+
+    let Some(prim_name) = vd.pval_prim.first() else {
+        return Ok(());
+    };
+    let prim_name = arena.get_string(*prim_name).to_string();
+    let vd_type = arena.get_core_type(vd.pval_type).clone();
+    let (params, arity) = build_arg_type_specs(&vd_type, arena);
+    let (args, _) = list_of_arrow(&vd_type, arena);
+    let desc = parse_external_attrs(
+        &vd.pval_attributes,
+        prim_name.as_str(),
+        args.is_empty(),
+        vd.pval_loc,
+        arena,
+    );
+
+    // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
+    // externals with a single unit argument before emitting FFI metadata.
+    if external_desc_is_plain_get(&desc) && arity == 1 && params_is_single_extern_unit(&params) {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Ill defined attribute @get (unit argument is not allowed)",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Determine the arg type for a non-labeled argument type.
 /// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
 fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
@@ -11237,6 +11300,9 @@ fn try_rewrite_signature_items(
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
                 .map_err(PpxError::message)?;
         for expanded in expanded_items {
+            if let SignatureItemDesc::Psig_value(vd) = &*expanded.psig_desc {
+                validate_external_attribute_errors(vd, arena)?;
+            }
             let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
             rewritten.extend(expand_signature_deriving_items(
                 &expanded,
@@ -11300,6 +11366,9 @@ fn try_rewrite_structure_item(
     for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
         .map_err(PpxError::message)?
     {
+        if let StructureItemDesc::Pstr_primitive(vd) = &*expanded.pstr_desc {
+            validate_external_attribute_errors(vd, arena)?;
+        }
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
