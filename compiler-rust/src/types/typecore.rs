@@ -596,6 +596,8 @@ pub enum TypeCoreError {
 pub enum TypeClashContext {
     /// In a function call.
     FunctionCall,
+    /// In a statement that discards a function call result.
+    StatementFunctionCall,
     /// In a comparison operator.
     ComparisonOperator,
     /// In a braced identifier.
@@ -4469,8 +4471,18 @@ fn type_statement<'a>(
     let _ = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
 
     let expected_ty = env.type_unit(ctx);
-    unify_expression_types(tctx, typed.exp_loc, typed.exp_type, expected_ty, None)?;
+    let context = type_clash_context_in_statement(expr);
+    unify_expression_types(tctx, typed.exp_loc, typed.exp_type, expected_ty, context)?;
     Ok(typed)
+}
+
+fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<TypeClashContext> {
+    match &*expr.pexp_desc {
+        crate::parser::ast::ExpressionDesc::Pexp_apply(inner) if !inner.transformed_jsx => {
+            Some(TypeClashContext::StatementFunctionCall)
+        }
+        _ => None,
+    }
 }
 
 fn force_qualified_value_type_paths<'a>(

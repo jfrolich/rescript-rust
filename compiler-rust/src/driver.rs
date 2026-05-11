@@ -2360,6 +2360,10 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But this function argument is expecting: ",
         ),
+        Some(TypeClashContext::StatementFunctionCall) => (
+            "This function call returns: ",
+            "But it's expected to return: ",
+        ),
         Some(TypeClashContext::ComparisonOperator) => (
             "This has type: ",
             "But it's being compared to something of type: ",
@@ -2409,7 +2413,9 @@ fn format_expr_type_clash_report(
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
         context,
-        Some(TypeClashContext::ComparisonOperator) | Some(TypeClashContext::IfCondition)
+        Some(TypeClashContext::ComparisonOperator)
+            | Some(TypeClashContext::IfCondition)
+            | Some(TypeClashContext::StatementFunctionCall)
     ) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
@@ -2651,6 +2657,30 @@ fn append_extra_type_clash_help(
         message.push_str("bool");
         message.push_str(RESET);
         message.push('.');
+    }
+
+    if matches!(context, Some(TypeClashContext::StatementFunctionCall)) {
+        message.push_str("\n\n");
+        message.push_str("- Did you mean to assign this to a variable?\n");
+        message.push_str(
+            "- If you don't care about the result of this expression, you can assign it to ",
+        );
+        message.push_str(INFO);
+        message.push('_');
+        message.push_str(RESET);
+        message.push_str(" via ");
+        message.push_str(INFO);
+        message.push_str("let _ = ...");
+        message.push_str(RESET);
+        message.push_str(" or pipe it to ");
+        message.push_str(INFO);
+        message.push_str("ignore");
+        message.push_str(RESET);
+        message.push_str(" via ");
+        message.push_str(INFO);
+        message.push_str("expression->ignore");
+        message.push_str(RESET);
+        message.push_str("\n\n\n");
     }
 
     append_incompatible_type_parts(type_ctx, trace, message);
