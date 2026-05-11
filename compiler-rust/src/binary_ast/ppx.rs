@@ -56,6 +56,7 @@ const EXTERNAL_ATTRS: &[&str] = &[
 ];
 
 pub const ACCESSORS_VARIANT_RECORD_ARG_ERROR: &str = "@deriving(accessors) from a variant record argument is unsupported. Either define the record type separately from the variant type or use a positional argument.";
+pub const AWAIT_NOT_ASYNC_CONTEXT_ERROR: &str = "Await on expression not in an async context";
 
 #[derive(Debug, Clone)]
 pub struct PpxError {
@@ -9198,6 +9199,528 @@ fn validate_module_type_deriving_errors(
     }
 }
 
+fn validate_payload_await_errors(
+    payload: &Payload,
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    match payload {
+        Payload::PStr(items) => validate_structure_await_errors(items, arena, async_context),
+        Payload::PSig(items) => validate_signature_await_errors(items, arena, async_context),
+        Payload::PTyp(_) => Ok(()),
+        Payload::PPat(inner) => {
+            let (_pat, guard) = &**inner;
+            if let Some(guard_idx) = guard {
+                validate_expression_idx_await_context(*guard_idx, arena, async_context, false)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_structure_await_errors(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(inner) => {
+                let (expr, attrs) = &**inner;
+                validate_expression_idx_await_context(*expr, arena, async_context, false)?;
+                for attr in attrs.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_value(inner) => {
+                let (_rec_flag, bindings) = &**inner;
+                validate_value_bindings_await_context(bindings, arena, async_context)?;
+            }
+            StructureItemDesc::Pstr_primitive(vd) => {
+                for attr in vd.pval_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_type(inner) => {
+                let (_rec_flag, tdcls) = &**inner;
+                for tdcl in tdcls {
+                    for attr in tdcl.ptype_attributes.iter() {
+                        validate_payload_await_errors(&attr.1, arena, async_context)?;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_typext(te) => {
+                for attr in te.ptyext_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_exception(ext) => {
+                for attr in ext.pext_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_module(mb) => {
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                validate_module_expr_await_context(&mod_expr, arena, async_context)?;
+                for attr in mb.pmb_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(mbs) => {
+                for mb in mbs.iter() {
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    validate_module_expr_await_context(&mod_expr, arena, async_context)?;
+                    for attr in mb.pmb_attributes.iter() {
+                        validate_payload_await_errors(&attr.1, arena, async_context)?;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_await_context(&mod_type, arena, async_context)?;
+                }
+                for attr in mtd.pmtd_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_include(incl) => {
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                validate_module_expr_await_context(&mod_expr, arena, async_context)?;
+                for attr in incl.pincl_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_open(od) => {
+                for attr in od.popen_attributes.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            StructureItemDesc::Pstr_attribute(attr) => {
+                validate_payload_await_errors(&attr.1, arena, async_context)?;
+            }
+            StructureItemDesc::Pstr_extension(inner) => {
+                let (extension, attrs) = &**inner;
+                validate_payload_await_errors(&extension.1, arena, async_context)?;
+                for attr in attrs.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_signature_await_errors(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_module(md) => {
+                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                validate_module_type_await_context(&mod_type, arena, async_context)?;
+            }
+            SignatureItemDesc::Psig_recmodule(mds) => {
+                for md in mds.iter() {
+                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    validate_module_type_await_context(&mod_type, arena, async_context)?;
+                }
+            }
+            SignatureItemDesc::Psig_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_await_context(&mod_type, arena, async_context)?;
+                }
+            }
+            SignatureItemDesc::Psig_include(incl) => {
+                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                validate_module_type_await_context(&mod_type, arena, async_context)?;
+            }
+            SignatureItemDesc::Psig_attribute(attr) => {
+                validate_payload_await_errors(&attr.1, arena, async_context)?;
+            }
+            SignatureItemDesc::Psig_extension(inner) => {
+                let (extension, attrs) = &**inner;
+                validate_payload_await_errors(&extension.1, arena, async_context)?;
+                for attr in attrs.iter() {
+                    validate_payload_await_errors(&attr.1, arena, async_context)?;
+                }
+            }
+            SignatureItemDesc::Psig_value(_)
+            | SignatureItemDesc::Psig_type(_)
+            | SignatureItemDesc::Psig_typext(_)
+            | SignatureItemDesc::Psig_exception(_)
+            | SignatureItemDesc::Psig_open(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_module_expr_await_context(
+    mod_expr: &current::ModuleExpr,
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            validate_structure_await_errors(items, arena, async_context)
+        }
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_name, param_type, body) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let mod_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_await_context(&mod_type, arena, async_context)?;
+            }
+            let body_expr = arena.get_mod_expr(*body).clone();
+            validate_module_expr_await_context(&body_expr, arena, async_context)
+        }
+        ModuleExprDesc::Pmod_apply(left, right) => {
+            let left_expr = arena.get_mod_expr(*left).clone();
+            validate_module_expr_await_context(&left_expr, arena, async_context)?;
+            let right_expr = arena.get_mod_expr(*right).clone();
+            validate_module_expr_await_context(&right_expr, arena, async_context)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
+            let inner_expr = arena.get_mod_expr(*inner).clone();
+            validate_module_expr_await_context(&inner_expr, arena, async_context)?;
+            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_await_context(&mod_type, arena, async_context)
+        }
+        ModuleExprDesc::Pmod_unpack(expr_idx) => {
+            validate_expression_idx_await_context(*expr_idx, arena, async_context, false)
+        }
+        ModuleExprDesc::Pmod_extension(extension) => {
+            validate_payload_await_errors(&extension.1, arena, async_context)
+        }
+        ModuleExprDesc::Pmod_ident(_) => Ok(()),
+    }
+}
+
+fn validate_module_type_await_context(
+    mod_type: &ModuleType,
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    match &*mod_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(items) => {
+            validate_signature_await_errors(items, arena, async_context)
+        }
+        ModuleTypeDesc::Pmty_functor(inner) => {
+            let (_name, param_type, result_type) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let param_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_await_context(&param_type, arena, async_context)?;
+            }
+            let result_type = arena.get_mod_type(*result_type).clone();
+            validate_module_type_await_context(&result_type, arena, async_context)
+        }
+        ModuleTypeDesc::Pmty_with(inner) => {
+            let (mod_type_idx, _constraints) = &**inner;
+            let inner_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_await_context(&inner_type, arena, async_context)
+        }
+        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_await_context(&mod_expr, arena, async_context)
+        }
+        ModuleTypeDesc::Pmty_extension(extension) => {
+            validate_payload_await_errors(&extension.1, arena, async_context)
+        }
+        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
+    }
+}
+
+fn validate_value_bindings_await_context(
+    bindings: &[ValueBinding],
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    for vb in bindings {
+        validate_expression_idx_await_context(vb.pvb_expr, arena, async_context, false)?;
+        for attr in vb.pvb_attributes.iter() {
+            validate_payload_await_errors(&attr.1, arena, async_context)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_expression_idx_await_context(
+    expr_idx: ExprIdx,
+    arena: &mut ParseArena,
+    async_context: bool,
+    in_function_def: bool,
+) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx).clone();
+    validate_expression_await_context(&expr, arena, async_context, in_function_def)
+}
+
+fn validate_cases_await_context(
+    cases: &[Case],
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    for case in cases {
+        if let Some(guard) = case.pc_guard {
+            validate_expression_idx_await_context(guard, arena, async_context, false)?;
+        }
+        validate_expression_idx_await_context(case.pc_rhs, arena, async_context, false)?;
+    }
+    Ok(())
+}
+
+fn letmodule_expr_has_await_payload(mod_expr: &current::ModuleExpr, arena: &ParseArena) -> bool {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_ident(_) => has_await_attribute(&mod_expr.pmod_attributes, arena),
+        ModuleExprDesc::Pmod_constraint(inner_mod_idx, _mty_idx) => {
+            let inner_mod = arena.get_mod_expr(*inner_mod_idx);
+            matches!(&*inner_mod.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+                && (has_await_attribute(&inner_mod.pmod_attributes, arena)
+                    || has_await_attribute(&mod_expr.pmod_attributes, arena))
+        }
+        _ => false,
+    }
+}
+
+fn validate_jsx_element_await_context(
+    jsx: &JsxElement,
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    match jsx {
+        JsxElement::Fragment(fragment) => {
+            for child in &fragment.children {
+                validate_expression_idx_await_context(*child, arena, async_context, false)?;
+            }
+        }
+        JsxElement::Unary(elem) => {
+            validate_jsx_props_await_context(&elem.props, arena, async_context)?;
+        }
+        JsxElement::Container(elem) => {
+            validate_jsx_props_await_context(&elem.props, arena, async_context)?;
+            for child in &elem.children {
+                validate_expression_idx_await_context(*child, arena, async_context, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_jsx_props_await_context(
+    props: &[JsxProp],
+    arena: &mut ParseArena,
+    async_context: bool,
+) -> PpxResult<()> {
+    for prop in props {
+        match prop {
+            JsxProp::Value { value, .. } => {
+                validate_expression_idx_await_context(*value, arena, async_context, false)?;
+            }
+            JsxProp::Spreading { expr, .. } => {
+                validate_expression_idx_await_context(*expr, arena, async_context, false)?;
+            }
+            JsxProp::Punning { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_expression_await_context(
+    expr: &Expression,
+    arena: &mut ParseArena,
+    async_context: bool,
+    in_function_def: bool,
+) -> PpxResult<()> {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            validate_value_bindings_await_context(bindings, arena, async_context)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_fun(inner) => {
+            let child_async_context = if has_this_attr(&expr.pexp_attributes, arena) {
+                false
+            } else {
+                (in_function_def && async_context) || inner.is_async
+            };
+            if let Some(default) = inner.default {
+                validate_expression_idx_await_context(default, arena, child_async_context, false)?;
+            }
+            validate_expression_idx_await_context(inner.rhs, arena, child_async_context, true)?;
+        }
+        ExpressionDesc::Pexp_apply(inner) => {
+            validate_expression_idx_await_context(inner.funct, arena, async_context, false)?;
+            for (_label, arg) in &inner.args {
+                validate_expression_idx_await_context(*arg, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            let (scrutinee, cases) = &**inner;
+            validate_expression_idx_await_context(*scrutinee, arena, async_context, false)?;
+            validate_cases_await_context(cases, arena, async_context)?;
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            for item in items.iter() {
+                validate_expression_idx_await_context(*item, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_construct(_, Some(arg))
+        | ExpressionDesc::Pexp_assert(arg)
+        | ExpressionDesc::Pexp_comptime_compile_error(arg)
+        | ExpressionDesc::Pexp_comptime_build_variant(arg)
+        | ExpressionDesc::Pexp_comptime_variant_case(arg)
+        | ExpressionDesc::Pexp_comptime_build_record(arg)
+        | ExpressionDesc::Pexp_comptime_record_field(arg) => {
+            validate_expression_idx_await_context(*arg, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, spread) = &**inner;
+            if let Some(spread) = spread {
+                validate_expression_idx_await_context(*spread, arena, async_context, false)?;
+            }
+            for field in fields {
+                validate_expression_idx_await_context(field.expr, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_variant(inner) => {
+            let (_label, arg) = &**inner;
+            if let Some(arg) = arg {
+                validate_expression_idx_await_context(*arg, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_field(target, _) => {
+            validate_expression_idx_await_context(*target, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_send(inner) => {
+            let (target, _method) = &**inner;
+            validate_expression_idx_await_context(*target, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            let (target, _field, value) = &**inner;
+            validate_expression_idx_await_context(*target, arena, async_context, false)?;
+            validate_expression_idx_await_context(*value, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            let (cond, then_expr, else_expr) = &**inner;
+            validate_expression_idx_await_context(*cond, arena, async_context, false)?;
+            validate_expression_idx_await_context(*then_expr, arena, async_context, false)?;
+            if let Some(else_expr) = else_expr {
+                validate_expression_idx_await_context(*else_expr, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
+            validate_expression_idx_await_context(*left, arena, async_context, false)?;
+            validate_expression_idx_await_context(*right, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            let (_pat, start, finish, _dir, body) = &**inner;
+            validate_expression_idx_await_context(*start, arena, async_context, false)?;
+            validate_expression_idx_await_context(*finish, arena, async_context, false)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_for_of(inner) => {
+            let (_pat, iterable, body) = &**inner;
+            validate_expression_idx_await_context(*iterable, arena, async_context, false)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_for_await_of(inner) => {
+            let (_pat, iterable, body) = &**inner;
+            validate_expression_idx_await_context(*iterable, arena, async_context, false)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+            if !async_context {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+                ));
+            }
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (inner_expr, _typ) = &**inner;
+            validate_expression_idx_await_context(*inner_expr, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            let (inner_expr, _typ1, _typ2) = &**inner;
+            validate_expression_idx_await_context(*inner_expr, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            let (_name, mod_expr_idx, body) = &**inner;
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_await_context(&mod_expr, arena, async_context)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+            if letmodule_expr_has_await_payload(&mod_expr, arena) && !async_context {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+                ));
+            }
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            let (_ext, body) = &**inner;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let (_name, body) = &**inner;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_await_context(&mod_expr, arena, async_context)?;
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            let (_override, _mod_name, body) = &**inner;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_extension(extension) => {
+            validate_payload_await_errors(&extension.1, arena, async_context)?;
+        }
+        ExpressionDesc::Pexp_await(inner) => {
+            validate_expression_idx_await_context(*inner, arena, async_context, false)?;
+            if !async_context {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+                ));
+            }
+        }
+        ExpressionDesc::Pexp_jsx_element(jsx) => {
+            validate_jsx_element_await_context(jsx, arena, async_context)?;
+        }
+        ExpressionDesc::Pexp_inline_for(inner) => {
+            let (_pat, collection, body) = &**inner;
+            validate_expression_idx_await_context(*collection, arena, async_context, false)?;
+            validate_expression_idx_await_context(*body, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (value, field) = &**inner;
+            validate_expression_idx_await_context(*value, arena, async_context, false)?;
+            validate_expression_idx_await_context(*field, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (_typ, fields) = &**inner;
+            validate_expression_idx_await_context(*fields, arena, async_context, false)?;
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (_typ, name, payload) = &**inner;
+            validate_expression_idx_await_context(*name, arena, async_context, false)?;
+            if let Some(payload) = payload {
+                validate_expression_idx_await_context(*payload, arena, async_context, false)?;
+            }
+        }
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_construct(_, None)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue
+        | ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_typename(_) => {}
+    }
+
+    Ok(())
+}
+
 /// Handle @deriving(abstract) which transforms record types into abstract types with accessors
 ///
 /// For a type like:
@@ -10375,6 +10898,7 @@ pub fn rewrite_structure(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
     validate_structure_deriving_errors(structure, arena)?;
+    validate_structure_await_errors(structure, arena, true)?;
 
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
@@ -10698,6 +11222,7 @@ pub fn rewrite_signature(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
     validate_signature_deriving_errors(signature, arena)?;
+    validate_signature_await_errors(signature, arena, true)?;
     try_rewrite_signature_items(signature, arena)
 }
 
