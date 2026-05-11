@@ -3955,6 +3955,41 @@ fn type_pattern_record(
             }
             (env_label, ty_arg, vars, true)
         } else {
+            if !has_dict_pattern_attr {
+                if let Some(path) = extract_type_path_from_expected_with_persistent_env(
+                    record_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                ) {
+                    let alternatives = lookup_type_decl_for_path(
+                        &path,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    )
+                    .and_then(|decl| match &decl.type_kind {
+                        crate::types::TypeKind::TypeRecord(labels, _) => Some(
+                            labels
+                                .iter()
+                                .map(|label| label.ld_id.name().to_string())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                    return Err(TypeCoreError::WrongName {
+                        loc: field.lid.loc,
+                        kind: "record".to_string(),
+                        ty: expected_ty,
+                        expected: "This record pattern is expected to have".to_string(),
+                        path,
+                        name: field.field_name,
+                        alternatives,
+                        jsx_component_info: None,
+                    });
+                }
+            }
             let field_ty = ctx.new_var(None);
             let label_desc = crate::types::LabelDescription {
                 lbl_name: field.field_name,
