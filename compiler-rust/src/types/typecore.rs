@@ -26,6 +26,7 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
+use crate::diagnostics::Warning;
 use crate::ident::Ident;
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
@@ -756,6 +757,8 @@ pub struct TypeCheckContext<'a> {
     pub newtype_level: Option<i32>,
     /// Collected diagnostics.
     pub diagnostics: Vec<TypeCoreDiagnostic>,
+    /// Collected warnings.
+    pub warnings: Vec<TypeCoreWarning>,
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
@@ -809,6 +812,15 @@ pub struct TypeCoreDiagnostic {
     pub error: TypeCoreError,
 }
 
+/// A warning from type checking.
+#[derive(Debug, Clone)]
+pub struct TypeCoreWarning {
+    /// Location of the warning.
+    pub loc: LocIdx,
+    /// The warning.
+    pub warning: Warning,
+}
+
 impl<'a> TypeCheckContext<'a> {
     /// Create a new type check context.
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
@@ -818,6 +830,7 @@ impl<'a> TypeCheckContext<'a> {
             unify_state: UnifyState::new(),
             newtype_level: None,
             diagnostics: Vec::new(),
+            warnings: Vec::new(),
             used_variables: HashMap::new(),
             type_variables: HashMap::new(),
             recursive_let_depth: 0,
@@ -858,6 +871,11 @@ impl<'a> TypeCheckContext<'a> {
     /// Report an error.
     pub fn report_error(&mut self, loc: Location, error: TypeCoreError) {
         self.diagnostics.push(TypeCoreDiagnostic { loc, error });
+    }
+
+    /// Report a warning.
+    pub fn report_warning(&mut self, loc: LocIdx, warning: Warning) {
+        self.warnings.push(TypeCoreWarning { loc, warning });
     }
 
     /// Get the newtype level.
@@ -9593,6 +9611,86 @@ fn finish_non_gadt_type_cases<'a>(
     }
 }
 
+fn literal_pattern_constants(pat: &Pattern) -> Option<Vec<Constant>> {
+    fn collect(pat: &Pattern, constants: &mut Vec<Constant>) -> bool {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_constant(constant) => {
+                constants.push(constant.clone());
+                true
+            }
+            PatternDesc::Tpat_alias(inner, _, _) => collect(inner, constants),
+            PatternDesc::Tpat_or(left, right, _) => {
+                collect(left, constants) && collect(right, constants)
+            }
+            _ => false,
+        }
+    }
+
+    let mut constants = Vec::new();
+    if collect(pat, &mut constants) && !constants.is_empty() {
+        Some(constants)
+    } else {
+        None
+    }
+}
+
+fn pattern_is_simple_catch_all(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+        PatternDesc::Tpat_alias(inner, _, _) => pattern_is_simple_catch_all(inner),
+        PatternDesc::Tpat_or(left, right, _) => {
+            pattern_is_simple_catch_all(left) || pattern_is_simple_catch_all(right)
+        }
+        _ => false,
+    }
+}
+
+fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) {
+    if !covered_literals
+        .iter()
+        .any(|covered| constants_equal(covered, &literal))
+    {
+        covered_literals.push(literal);
+    }
+}
+
+fn report_unused_literal_match_cases(
+    tctx: &mut TypeCheckContext<'_>,
+    cases: &[crate::types::typedtree::Case],
+) {
+    let mut covered_literals: Vec<Constant> = Vec::new();
+    let mut covered_by_catch_all = false;
+
+    for case in cases {
+        let literal_constants = literal_pattern_constants(&case.c_lhs);
+        let is_unused = if covered_by_catch_all {
+            true
+        } else if let Some(constants) = &literal_constants {
+            constants.iter().all(|constant| {
+                covered_literals
+                    .iter()
+                    .any(|covered| constants_equal(covered, constant))
+            })
+        } else {
+            false
+        };
+
+        if is_unused {
+            tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
+        }
+
+        if case.c_guard.is_none() {
+            if let Some(constants) = literal_constants {
+                for constant in constants {
+                    add_covered_literal(&mut covered_literals, constant);
+                }
+            } else if pattern_is_simple_catch_all(&case.c_lhs) {
+                covered_by_catch_all = true;
+            }
+        }
+    }
+}
+
 /// Collect poly variant tag names from top-level patterns, handling or-patterns
 fn collect_variant_tags(pat: &Pattern, tags: &mut HashSet<String>, all_variant: &mut bool) {
     match &pat.pat_desc {
@@ -9789,7 +9887,7 @@ fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
             c1.cstr_tag == c2.cstr_tag
         }
         (PatternDesc::Tpat_variant(l1, _, _), PatternDesc::Tpat_variant(l2, _, _)) => l1 == l2,
-        (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => c1 == c2,
+        (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => constants_equal(c1, c2),
         (PatternDesc::Tpat_record(_, _), PatternDesc::Tpat_record(_, _)) => true,
         (PatternDesc::Tpat_tuple(a), PatternDesc::Tpat_tuple(b))
         | (PatternDesc::Tpat_array(a), PatternDesc::Tpat_array(b)) => a.len() == b.len(),
@@ -9880,6 +9978,59 @@ fn pressure_matrix_constant_kind(constant: &Constant) -> usize {
         Constant::Float(_) => 3,
         Constant::BigInt(_, _) => 4,
     }
+}
+
+fn normalize_bigint_digits(digits: &str) -> &str {
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }
+}
+
+fn compare_bigint_constants(
+    positive1: bool,
+    digits1: &str,
+    positive2: bool,
+    digits2: &str,
+) -> Ordering {
+    if positive1 != positive2 {
+        return if positive1 {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        };
+    }
+
+    let digits1 = normalize_bigint_digits(digits1);
+    let digits2 = normalize_bigint_digits(digits2);
+    let abs_cmp = digits1
+        .len()
+        .cmp(&digits2.len())
+        .then_with(|| digits1.cmp(digits2));
+    if positive1 {
+        abs_cmp
+    } else {
+        abs_cmp.reverse()
+    }
+}
+
+fn compare_constants(c1: &Constant, c2: &Constant) -> Option<Ordering> {
+    Some(match (c1, c2) {
+        (Constant::Float(f1), Constant::Float(f2)) => {
+            let v1: f64 = f1.parse().unwrap_or(0.0);
+            let v2: f64 = f2.parse().unwrap_or(0.0);
+            v1.partial_cmp(&v2).unwrap_or(Ordering::Equal)
+        }
+        (Constant::BigInt(s1, b1), Constant::BigInt(s2, b2)) => {
+            compare_bigint_constants(*s1, b1, *s2, b2)
+        }
+        (Constant::String(s1, _), Constant::String(s2, _)) => s1.cmp(s2),
+        (Constant::Int(i1), Constant::Int(i2)) => i1.cmp(i2),
+        (Constant::Char(c1), Constant::Char(c2)) => c1.cmp(c2),
+        _ => return None,
+    })
+}
+
+fn constants_equal(c1: &Constant, c2: &Constant) -> bool {
+    compare_constants(c1, c2).is_some_and(|order| order == Ordering::Equal)
 }
 
 fn pressure_matrix_coherent_heads(left: &Pattern, right: &Pattern) -> bool {
@@ -11063,6 +11214,8 @@ fn type_match(
             )?;
         }
     }
+
+    report_unused_literal_match_cases(tctx, &typed_val_cases);
 
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
     // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in

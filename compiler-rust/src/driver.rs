@@ -34,7 +34,7 @@ use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::typecore::TypeCoreError;
+use crate::types::typecore::{TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::TypeModError;
 use crate::types::{
     ArgLabel as TypeArgLabel, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
@@ -1546,6 +1546,52 @@ fn format_compiler_error_report(
     output
 }
 
+fn format_compiler_warning_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warning: &TypeCoreWarning,
+) -> String {
+    let start_pos = arena.loc_start(warning.loc);
+    let end_pos = arena.loc_end(warning.loc);
+    let mut output = String::new();
+
+    output.push_str("\n  Warning number ");
+    output.push_str(&warning.warning.number().to_string());
+    output.push('\n');
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
+    output.push('\n');
+
+    for line in warning.warning.message().lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn emit_type_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warnings: &[TypeCoreWarning],
+) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    let mut stderr = std::io::stderr();
+    for warning in warnings {
+        let output = format_compiler_warning_report(arena, source, filename, warning);
+        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    }
+    let _ = std::io::Write::flush(&mut stderr);
+}
+
 fn format_compiler_error_report_raw_message(
     arena: &ParseArena,
     source: &str,
@@ -2469,6 +2515,7 @@ pub fn compile_source_to_js_with_options(
 
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
         .map_err(|e| type_mod_error_to_anyhow(e, &type_ctx, parser.arena(), source, filename))?;
+    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
