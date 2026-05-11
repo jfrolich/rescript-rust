@@ -5276,6 +5276,7 @@ fn force_qualified_value_type_paths<'a>(
     fn persistent_nested_type_path(
         ctx: &TypeContext,
         env: &Env,
+        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
         arity: usize,
         value_access_root: Option<&Ident>,
@@ -5317,63 +5318,29 @@ fn force_qualified_value_type_paths<'a>(
             return None;
         }
 
-        let mut root_candidates = Vec::new();
+        // OCaml compiler/ml/env.ml:1513-1519 scrapes explicit aliases before
+        // compiler/ml/env.ml:1530-1538 prefixes component paths. Recover the
+        // visible parent path for flattened runtime units only from that
+        // registered alias relation, not from underscore spelling.
+        let registered_parent = pers_env
+            .as_ref()
+            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_parent.name()))
+            .or_else(|| ctx.find_flattened_alias_component_path(flat_parent.name()))?;
         if !infer_stdlib_root_from_flat_parent {
-            if let Some(root) = value_access_root {
-                if root.is_persistent() {
-                    root_candidates.push(root.clone());
-                } else {
-                    return None;
-                }
-            } else {
+            let root = value_access_root?;
+            if !root.is_persistent()
+                || !path_root_ident(&registered_parent)
+                    .is_some_and(|candidate| candidate.same(root))
+            {
                 return None;
             }
-        }
-        let flat_parent_name = flat_parent.name();
-        if infer_stdlib_root_from_flat_parent {
-            // OCaml compiler/ml/env.ml:1496-1524 builds persistent module
-            // component tables under the visible `Stdlib.*` access path, then
-            // compiler/ml/subst.ml:303-309 substitutes value descriptions as
-            // components are selected by env.ml:1090-1104. Rust can still see
-            // the flattened source module name (`Stdlib_ArrayBuffer.t`) from
-            // runtime signatures here, so only synthesize the `Stdlib` root for
-            // the argument-side compensation requested by the visitor below.
-            if let Some((root_name, _)) = flat_parent_name.split_once('_') {
-                if !root_candidates
-                    .iter()
-                    .any(|candidate: &Ident| candidate.name() == root_name)
-                    && root_name == "Stdlib"
-                {
-                    root_candidates.push(Ident::create_persistent(root_name));
-                }
-            }
+        } else if !path_root_ident(&registered_parent)
+            .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+        {
+            return None;
         }
 
-        for root in root_candidates {
-            let root_name = root.name();
-            let Some(suffix) = flat_parent
-                .name()
-                .strip_prefix(root_name)
-                .and_then(|suffix| suffix.strip_prefix('_'))
-            else {
-                continue;
-            };
-            if suffix.is_empty() || suffix.contains("__") {
-                continue;
-            }
-
-            let mut candidate_parent = Path::pident(root);
-            let mut valid_suffix = true;
-            for segment in suffix.split('_') {
-                if segment.is_empty() {
-                    valid_suffix = false;
-                    break;
-                }
-                candidate_parent = Path::pdot(candidate_parent, segment.to_string());
-            }
-            if !valid_suffix {
-                continue;
-            }
+        for candidate_parent in [registered_parent] {
             // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
             // exactly the selected component table, and compiler/ml/subst.ml:303-309
             // applies that substitution to value descriptions. Keep that
@@ -6053,6 +6020,7 @@ fn force_qualified_value_type_paths<'a>(
                             persistent_nested_type_path(
                                 ctx,
                                 env,
+                                &tctx.persistent_env,
                                 &path,
                                 args.len(),
                                 value_access_root,
@@ -6068,6 +6036,7 @@ fn force_qualified_value_type_paths<'a>(
                             persistent_nested_type_path(
                                 ctx,
                                 env,
+                                &tctx.persistent_env,
                                 &path,
                                 args.len(),
                                 value_access_root,
