@@ -4644,35 +4644,34 @@ fn unify_types<'a>(
                     }
                 }
 
-                // Narrow fallback for flattened nested-module aliases:
-                // `A.B.X.t` vs `A__B.X.t`.
-                // Only accept when env declarations prove they refer to the
-                // same alias family (manifest or identical canonical type_path).
-                let flatten_alias_candidate = if seg1.len() == seg2.len() + 1
-                    && seg1.len() >= 3
-                    && seg2.len() >= 2
-                    && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
-                    && seg1[2..] == seg2[1..]
-                {
-                    Some((t1, t2, path1, path2))
-                } else if seg2.len() == seg1.len() + 1
-                    && seg2.len() >= 3
-                    && seg1.len() >= 2
-                    && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
-                    && seg2[2..] == seg1[1..]
+                // Narrow fallback for flattened nested-module aliases. OCaml
+                // compiler/ml/env.ml:1517 scrapes module aliases before
+                // env.ml:1530-1538 prefixes component identifiers, so require
+                // Rust's registered component-alias rewrite to identify the flat
+                // backing path and selected qualified path before linking.
+                let flatten_alias_candidate = if registered_flattened_alias_rewrite(ctx, path1)
+                    .as_ref()
+                    .is_some_and(|rewritten| rewritten.same(path2))
                 {
                     Some((t2, t1, path2, path1))
+                } else if registered_flattened_alias_rewrite(ctx, path2)
+                    .as_ref()
+                    .is_some_and(|rewritten| rewritten.same(path1))
+                {
+                    Some((t1, t2, path1, path2))
                 } else {
                     None
                 };
-                if let Some((long_ty, short_ty, long_path, short_path)) = flatten_alias_candidate {
+                if let Some((qualified_ty, flat_ty, qualified_path, flat_path)) =
+                    flatten_alias_candidate
+                {
                     if args1.len() == args2.len() {
                         let alias_matches = if let Some(env) = state.env() {
                             flattened_alias_paths_equivalent(
                                 ctx,
                                 env,
-                                long_path,
-                                short_path,
+                                qualified_path,
+                                flat_path,
                                 args1.len(),
                             )
                         } else {
@@ -4686,8 +4685,8 @@ fn unify_types<'a>(
                                 .collect();
                             drop(desc1);
                             drop(desc2);
-                            // Keep the longer qualified path as the representative.
-                            link_type(ctx, short_ty, long_ty);
+                            // Keep the qualified component path as the representative.
+                            link_type(ctx, flat_ty, qualified_ty);
                             for (a, b) in pairs {
                                 unify(ctx, state, a, b)?;
                             }
