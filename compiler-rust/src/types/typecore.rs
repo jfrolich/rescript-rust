@@ -562,7 +562,9 @@ pub enum TypeCoreError {
     TypeParamsNotSupported(Longident),
 
     /// Field access on dict type.
-    FieldAccessOnDictType,
+    FieldAccessOnDictType {
+        loc: LocIdx,
+    },
 
     /// Unbound record field access.
     UnboundRecordField {
@@ -15118,6 +15120,18 @@ fn type_field(
     // Match OCaml type_label_access: type record first, then disambiguate.
     let typed_record = type_expect(tctx, env, record_expr, tctx.type_ctx.new_var(None), None)?;
     let ty_exp = typed_record.exp_type;
+    if extract_type_path_from_expected_with_persistent_env(
+        ty_exp,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
+    .is_some_and(|path| is_dict_type_path(&path))
+    {
+        return Err(TypeCoreError::FieldAccessOnDictType {
+            loc: field_lid.loc,
+        });
+    }
 
     // Disambiguate label: use the record expression's type to find the right label
     let env_label = lookup_label_by_lid(

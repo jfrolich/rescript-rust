@@ -1578,6 +1578,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::FieldAccessOnDictType { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Direct field access on a dict is not supported. Use Dict.get instead.",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
