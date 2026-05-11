@@ -3004,8 +3004,15 @@ fn preserve_alias_unify_representative(
         }
     }
 
-    fn selected_value_parent_is_flattened_backing_path(value_parent: &Path) -> bool {
-        value_parent.head().name().contains("__")
+    fn selected_value_parent_is_flattened_backing_path(
+        ctx: &TypeContext,
+        value_parent: &Path,
+    ) -> bool {
+        // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
+        // env.ml:1530-1538 prefixes component paths. Treat a selected value
+        // parent as a flattened backing path only when Rust recorded the same
+        // alias relationship, not from the spelling of the persistent unit.
+        crate::types::ctype::registered_flattened_alias_rewrite(ctx, value_parent).is_some()
     }
 
     fn selected_value_parent_for_type_path<'a>(
@@ -3137,7 +3144,7 @@ fn preserve_alias_unify_representative(
             if let Some(selected_parent) =
                 selected_value_parent_for_type_path(&parameter_path, selected_value_path)
             {
-                if selected_value_parent_is_flattened_backing_path(selected_parent) {
+                if selected_value_parent_is_flattened_backing_path(ctx, selected_parent) {
                     // OCaml compiler/ml/typecore.ml:2421-2457 constructs
                     // `Texp_ident` from `instance env desc.val_type` before
                     // `rue` unifies it with the expected type, and
