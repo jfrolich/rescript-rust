@@ -1569,22 +1569,16 @@ fn build_local_module_components<'a>(
                     } else {
                         child_md.clone()
                     };
-                    let component_decl =
-                        if use_qualified_items_for_env && !ctx.preserve_canonical_typedtree() {
-                            // OCaml compiler/ml/env.ml:1573-1578 builds
-                            // `comp_components` from the child md.md_type
-                            // while env.ml:1568 stores the substituted
-                            // module-declaration thunk. Normal compilation
-                            // needs that raw child component to scrape aliases
-                            // like `Js.Json.Kind`; strict typedtree mode keeps
-                            // the existing substituted shape until the broader
-                            // sharing model is fully unified.
-                            child_md.clone()
-                        } else if use_qualified_items_for_env {
-                            qmd.clone()
-                        } else {
-                            child_md.clone()
-                        };
+                    // OCaml compiler/ml/env.ml:1573-1578 stores the child
+                    // component thunk with the final substitution built by
+                    // env.ml:1530-1531/1454-1486 `prefix_idents`. Rust
+                    // materializes that substituted child module declaration in
+                    // the qualified signature item.
+                    let component_decl = if use_qualified_items_for_env {
+                        qmd.clone()
+                    } else {
+                        child_md.clone()
+                    };
                     working_env.add_module_with_component_context(
                         id.clone(),
                         env_decl,
