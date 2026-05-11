@@ -1145,8 +1145,14 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
             let lparen_pos_idx = p.start_pos_idx();
             p.next();
 
-            // Skip optional dot (uncurried marker)
-            let had_dot = p.optional(&Token::Dot);
+            // Skip deprecated uncurried marker.
+            let had_dot = if p.token == Token::Dot {
+                p.warn_uncurried_dot_syntax();
+                p.next();
+                true
+            } else {
+                false
+            };
 
             if p.token == Token::Rparen {
                 // Unit parameter: () or (.)
@@ -1285,8 +1291,11 @@ fn set_first_type_param_paren_pos_idx(
 fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
     let start_pos_idx = p.start_pos_idx();
 
-    // Skip optional dot (uncurried marker, ignored now)
-    p.optional(&Token::Dot);
+    // Skip deprecated uncurried marker.
+    if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
+        p.next();
+    }
 
     // Parse attributes
     let attrs = parse_attributes(p);
@@ -3152,6 +3161,7 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
     // Handle uncurried dot marker before argument
     // In f(. a, b, . c), each dot is consumed before the argument
     if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
         p.next();
         // Check for apply(.) - uncurried unit call
         if p.token == Token::Rparen {

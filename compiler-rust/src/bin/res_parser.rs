@@ -22,8 +22,8 @@ use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserMode, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
-    ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
+    Comment, Parser, ParserMode, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
+    jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::fs;
@@ -172,6 +172,8 @@ fn main() {
     if is_interface {
         let signature = module::parse_signature(&mut parser);
 
+        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+
         // Print diagnostics if any
         if parser.has_errors() {
             print_diagnostics(&parser, &source, &filename, &mut io::stdout());
@@ -282,6 +284,8 @@ fn main() {
         }
     } else {
         let structure = module::parse_structure(&mut parser);
+
+        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
 
         // Print diagnostics if any
         if parser.has_errors() {
@@ -413,6 +417,46 @@ fn print_diagnostics(parser: &Parser, source: &str, filename: &str, out: &mut im
         );
         let _ = out.write_all(error_msg.as_bytes());
     }
+}
+
+fn print_parser_warnings(parser: &Parser, source: &str, filename: &str, out: &mut impl Write) {
+    for warning in parser.warnings() {
+        print_parser_warning(source, filename, warning, out);
+    }
+}
+
+fn print_parser_warning(
+    source: &str,
+    filename: &str,
+    warning: &ParserWarning,
+    out: &mut impl Write,
+) {
+    let use_color = should_enable_color();
+    let _ = writeln!(out);
+    if use_color {
+        let _ = writeln!(
+            out,
+            "  \x1b[1;33mWarning number {}\x1b[0m",
+            warning.number()
+        );
+    } else {
+        let _ = writeln!(out, "  Warning number {}", warning.number());
+    }
+    let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
+    let location = if use_color {
+        colorize_location(&location)
+    } else {
+        location
+    };
+    let _ = writeln!(out, "  {}", location);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{}",
+        code_frame::print_warning(source, &warning.start_pos, &warning.end_pos)
+    );
+    let _ = writeln!(out, "  {}", warning.message());
+    let _ = writeln!(out);
 }
 
 fn print_jsx_preprocessor_warnings(

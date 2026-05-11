@@ -13,7 +13,7 @@ use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx};
 use super::longident::Longident;
 
 use super::comment::Comment;
-use super::diagnostics::{DiagnosticCategory, ParserDiagnostic};
+use super::diagnostics::{DiagnosticCategory, ParserDiagnostic, ParserWarning, ParserWarningKind};
 use super::grammar::Grammar;
 use super::scanner::Scanner;
 use super::token::Token;
@@ -57,6 +57,7 @@ pub struct ParserSnapshot<'src> {
     prev_end_pos_idx: PosIdx,
     breadcrumbs: Vec<(Grammar, Position)>,
     diagnostics_len: usize,
+    warnings_len: usize,
     comments_len: usize,
     location_id_counter: u32,
     /// Arena position count at snapshot time (for truncation on restore).
@@ -97,6 +98,8 @@ pub struct Parser<'src> {
     breadcrumbs: Vec<(Grammar, Position)>,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
+    /// Collected parser warnings.
+    warnings: Vec<ParserWarning>,
     /// Collected comments.
     comments: Vec<Comment>,
     /// Stack of region statuses for error deduplication.
@@ -158,6 +161,7 @@ impl<'src> Parser<'src> {
             prev_end_pos_idx: default_pos_idx,
             breadcrumbs: Vec::new(),
             diagnostics: Vec::new(),
+            warnings: Vec::new(),
             comments: Vec::new(),
             regions: vec![RegionStatus::Report],
             location_id_counter: AtomicU32::new(1), // Start at 1, 0 is reserved for default/uninitialized
@@ -537,6 +541,21 @@ impl<'src> Parser<'src> {
         self.diagnostics.push(diagnostic);
     }
 
+    /// Record a parser warning at specific positions.
+    pub fn warn_at(&mut self, start_pos: Position, end_pos: Position, kind: ParserWarningKind) {
+        self.warnings
+            .push(ParserWarning::new(start_pos, end_pos, kind));
+    }
+
+    /// Record the legacy uncurried dot deprecation warning for the current token.
+    pub fn warn_uncurried_dot_syntax(&mut self) {
+        self.warn_at(
+            self.start_pos,
+            self.end_pos,
+            ParserWarningKind::DeprecatedUncurriedDotSyntax,
+        );
+    }
+
     /// Record an unexpected token error using the current breadcrumbs.
     /// This emits an error with context-aware messaging based on the parsing context.
     pub fn err_unexpected(&mut self) {
@@ -793,6 +812,7 @@ impl<'src> Parser<'src> {
         let prev_end_pos_idx = self.prev_end_pos_idx;
         let breadcrumbs = self.breadcrumbs.clone();
         let diagnostics_len = self.diagnostics.len();
+        let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
 
         // Enter lookahead mode - next() will skip arena position allocations
@@ -817,6 +837,7 @@ impl<'src> Parser<'src> {
         self.prev_end_pos_idx = prev_end_pos_idx;
         self.breadcrumbs = breadcrumbs;
         self.diagnostics.truncate(diagnostics_len);
+        self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
 
         result
@@ -838,6 +859,7 @@ impl<'src> Parser<'src> {
             prev_end_pos_idx: self.prev_end_pos_idx,
             breadcrumbs: self.breadcrumbs.clone(),
             diagnostics_len: self.diagnostics.len(),
+            warnings_len: self.warnings.len(),
             comments_len: self.comments.len(),
             location_id_counter: self.location_id_counter.load(Ordering::Relaxed),
             arena_positions_len: self.arena.position_count(),
@@ -861,6 +883,7 @@ impl<'src> Parser<'src> {
         self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
         self.breadcrumbs = snapshot.breadcrumbs;
         self.diagnostics.truncate(snapshot.diagnostics_len);
+        self.warnings.truncate(snapshot.warnings_len);
         self.comments.truncate(snapshot.comments_len);
         self.location_id_counter
             .store(snapshot.location_id_counter, Ordering::Relaxed);
@@ -883,6 +906,11 @@ impl<'src> Parser<'src> {
     /// Get collected diagnostics.
     pub fn diagnostics(&self) -> &[ParserDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Get collected parser warnings.
+    pub fn warnings(&self) -> &[ParserWarning] {
+        &self.warnings
     }
 
     /// Get collected comments.

@@ -956,8 +956,14 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Use identity-based position (push_start_pos) to match OCaml's behavior where
     // nested function captures create different heap objects even at the same coordinate.
     let first_uncurried_start_idx = p.start_pos_idx();
-    // Skip uncurried marker
-    let first_has_dot = p.optional(&Token::Dot);
+    // Skip deprecated uncurried marker.
+    let first_has_dot = if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
+        p.next();
+        true
+    } else {
+        false
+    };
 
     // Track both the TypeArg and its start position as PosIdx (for arrow location sharing)
     let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
@@ -975,8 +981,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let has_dot = if is_first_param {
             is_first_param = false;
             first_has_dot
+        } else if p.token == Token::Dot {
+            p.warn_uncurried_dot_syntax();
+            p.next();
+            true
         } else {
-            p.optional(&Token::Dot)
+            false
         };
         // OCaml handles doc comments separately from regular attributes for location purposes.
         // In OCaml parse_type_parameter:
