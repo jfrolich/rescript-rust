@@ -4129,59 +4129,9 @@ fn unify_types<'a>(
                     }
                 }
 
-                // Narrow fallback for flattened nested-module aliases. OCaml
-                // compiler/ml/env.ml:1517 scrapes module aliases before
-                // env.ml:1530-1538 prefixes component identifiers, so require
-                // Rust's registered component-alias rewrite to identify the flat
-                // backing path and selected qualified path before linking.
-                let flatten_alias_candidate = if registered_flattened_alias_rewrite(ctx, path1)
-                    .as_ref()
-                    .is_some_and(|rewritten| rewritten.same(path2))
-                {
-                    Some((t2, t1, path2, path1))
-                } else if registered_flattened_alias_rewrite(ctx, path2)
-                    .as_ref()
-                    .is_some_and(|rewritten| rewritten.same(path1))
-                {
-                    Some((t1, t2, path1, path2))
-                } else {
-                    None
-                };
-                if let Some((qualified_ty, flat_ty, qualified_path, flat_path)) =
-                    flatten_alias_candidate
-                {
-                    if args1.len() == args2.len() {
-                        let alias_matches = if let Some(env) = state.env() {
-                            flattened_alias_paths_equivalent(
-                                ctx,
-                                env,
-                                qualified_path,
-                                flat_path,
-                                args1.len(),
-                            )
-                        } else {
-                            false
-                        };
-                        if alias_matches {
-                            let pairs: Vec<_> = args1
-                                .iter()
-                                .zip(args2.iter())
-                                .map(|(&a, &b)| (a, b))
-                                .collect();
-                            drop(desc1);
-                            drop(desc2);
-                            // Keep the qualified component path as the representative.
-                            link_type(ctx, flat_ty, qualified_ty);
-                            for (a, b) in pairs {
-                                unify(ctx, state, a, b)?;
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Paths differ. Match OCaml flow by attempting alias expansion
-                // before any equation generation.
+                // Paths differ after `expand_head_unif`; match OCaml
+                // compiler/ml/ctype.ml:2413-2433 by leaving the constructor
+                // argument path unless the expanded paths are `Path.same`.
                 // Extract paths for potential GADT equation handling (nullary Tconstr only)
                 let gadt_path1 = if args1.is_empty() {
                     Some(path1.clone())
