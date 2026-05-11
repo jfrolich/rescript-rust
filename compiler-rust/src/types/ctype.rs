@@ -4695,38 +4695,6 @@ fn unify_types<'a>(
                     }
                 }
 
-                if args1.len() == args2.len()
-                    && let Some(env) = state.env()
-                    && resolved_type_items_share_identity(ctx, env, path1, path2, args1.len())
-                {
-                    let p1 = path1.name();
-                    let p2 = path2.name();
-                    let seg1: Vec<&str> = p1.split('.').collect();
-                    let seg2: Vec<&str> = p2.split('.').collect();
-                    let same_root_drop_one = seg1.len() == seg2.len() + 1
-                        && seg1.len() >= 3
-                        && seg1[0] == seg2[0]
-                        && seg1[2..] == seg2[1..]
-                        || seg2.len() == seg1.len() + 1
-                            && seg2.len() >= 3
-                            && seg2[0] == seg1[0]
-                            && seg2[2..] == seg1[1..];
-                    let flattened_family = p1.contains("__") != p2.contains("__");
-                    if same_root_drop_one || flattened_family {
-                        let pairs: Vec<_> = args1
-                            .iter()
-                            .zip(args2.iter())
-                            .map(|(&a, &b)| (a, b))
-                            .collect();
-                        drop(desc1);
-                        drop(desc2);
-                        for (a, b) in pairs {
-                            unify(ctx, state, a, b)?;
-                        }
-                        return Ok(());
-                    }
-                }
-
                 // Paths differ. Match OCaml flow by attempting alias expansion
                 // before any equation generation.
                 // Extract paths for potential GADT equation handling (nullary Tconstr only)
