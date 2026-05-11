@@ -1792,21 +1792,6 @@ fn parent_matches_component_context(
     {
         return parent.same(&alias_path);
     }
-    if let Path::Pident(access_id) = parent_access_path
-        && (access_id.is_persistent() || access_id.stamp() == 0)
-        && let Ok((parent_head, parent_components)) = parent.flatten()
-        && !parent_components.is_empty()
-    {
-        // OCaml compiler/ml/env.ml:1573-1578 stores child `comp_components`
-        // under the selected component table. Rust can see the same table via a
-        // ReScript flattened backing unit (`Webapi__Fetch`) while the alias
-        // still names the source parent (`Webapi.Fetch`).
-        let double_underscore = format!("{}__{}", parent_head.name(), parent_components.join("__"));
-        let single_underscore = format!("{}_{}", parent_head.name(), parent_components.join("_"));
-        if access_id.name() == double_underscore || access_id.name() == single_underscore {
-            return true;
-        }
-    }
     false
 }
 
