@@ -4561,96 +4561,6 @@ fn force_qualified_value_type_paths<'a>(
         Some(candidate)
     }
 
-    fn type_expr_mentions_path_root(
-        ctx: &TypeContext,
-        ty: TypeExprRef,
-        root_name: &str,
-        seen: &mut Vec<TypeExprRef>,
-    ) -> bool {
-        // Rust-only inspection used to decide whether a copied component scheme
-        // needs the same head-expansion side effect that OCaml reaches later via
-        // compiler/ml/typecore.ml:4171-4177 and compiler/ml/ctype.ml:2338-2344.
-        // This does not mutate the type graph.
-        let ty = ctx.repr(ty);
-        if seen.contains(&ty) {
-            return false;
-        }
-        seen.push(ty);
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                path.head().name() == root_name
-                    || args
-                        .iter()
-                        .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                type_expr_mentions_path_root(ctx, arg.typ, root_name, seen)
-                    || type_expr_mentions_path_root(ctx, *ret, root_name, seen)
-            }
-            TypeDesc::Ttuple(args) => args
-                .iter()
-                .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen)),
-            TypeDesc::Tobject { fields, name } => {
-                type_expr_mentions_path_root(ctx, *fields, root_name, seen)
-                    || name.as_ref().is_some_and(|(path, args)| {
-                        path.head().name() == root_name
-                            || args
-                                .iter()
-                                .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
-                    })
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                type_expr_mentions_path_root(ctx, *typ, root_name, seen)
-                    || type_expr_mentions_path_root(ctx, *rest, root_name, seen)
-            }
-            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
-                type_expr_mentions_path_root(ctx, *inner, root_name, seen)
-            }
-            TypeDesc::Tvariant(row) => {
-                type_expr_mentions_path_root(ctx, row.row_more, root_name, seen)
-                    || row.row_name.as_ref().is_some_and(|(path, args)| {
-                        path.head().name() == root_name
-                            || args
-                                .iter()
-                                .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
-                    })
-                    || row.row_fields.iter().any(|(_, field)| match field {
-                        RowField::Rpresent(Some(arg)) => {
-                            type_expr_mentions_path_root(ctx, *arg, root_name, seen)
-                        }
-                        RowField::Reither { types, .. } => types
-                            .iter()
-                            .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen)),
-                        RowField::Rpresent(None) | RowField::Rabsent => false,
-                    })
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                type_expr_mentions_path_root(ctx, *body, root_name, seen)
-                    || vars
-                        .iter()
-                        .any(|var| type_expr_mentions_path_root(ctx, *var, root_name, seen))
-            }
-            TypeDesc::Tpackage { path, args, .. } => {
-                path.head().name() == root_name
-                    || args
-                        .iter()
-                        .any(|arg| type_expr_mentions_path_root(ctx, *arg, root_name, seen))
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
-        }
-    }
-
-    fn type_decl_manifest_mentions_path_root(
-        ctx: &TypeContext,
-        decl: &crate::types::decl::TypeDeclaration,
-        root_name: &str,
-    ) -> bool {
-        decl.type_manifest.is_some_and(|manifest| {
-            type_expr_mentions_path_root(ctx, manifest, root_name, &mut Vec::new())
-        })
-    }
-
     fn selected_value_module_alias_target<'a>(
         path: &Path,
         env: &Env,
@@ -5279,11 +5189,11 @@ fn force_qualified_value_type_paths<'a>(
                                 selected_module_path,
                                 value_access_root_is_local,
                             );
-                    let resolved = if suppress_selected_value_forces
+                    if !(suppress_selected_value_forces
                         || (nested_inside_selected_module
                             && !selected_module_is_implicit_stdlib_path)
                         || type_parent_is_selected_alias_sibling
-                        || type_parent_is_implicit_stdlib_for_non_stdlib_value
+                        || type_parent_is_implicit_stdlib_for_non_stdlib_value)
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
                         // reads the selected value description from
@@ -5295,40 +5205,13 @@ fn force_qualified_value_type_paths<'a>(
                         // roots mentioned by a non-Stdlib value scheme;
                         // compiler/ml/ctype.ml:666-695 reaches those later through
                         // `get_level` while lowering arguments.
-                        None
-                    } else {
-                        lookup_type_decl_in_resolved_path(
+                        drop(lookup_type_decl_in_resolved_path(
                             parent,
                             name.as_str(),
                             env,
                             &mut tctx.persistent_env,
                             ctx,
-                        )
-                    };
-                    // OCaml compiler/ml/typecore.ml:2421-2457 instances a
-                    // qualified value scheme immediately, while
-                    // compiler/ml/typecore.ml:4171-4177 delays argument typing
-                    // until the source argument boundary. Rust's in-process
-                    // signatures can still expose non-Stdlib flattened component
-                    // paths such as `Js_null_undefined.t`; when env.ml:800-813
-                    // resolves that type component, consume the same
-                    // compiler/ml/ctype.ml:2338-2344 head expansion OCaml later
-                    // observes before callback binders are named. Keep implicit
-                    // `Stdlib`/`Pervasives` paths lazy: compiler/core/res_compmisc.ml:58-62
-                    // opens those as components, and env.ml:1874-1877 reads them
-                    // without selecting a persistent root module here.
-                    if !suppress_selected_value_forces
-                        && !allow_stdlib_flat_parent_inference
-                        && !type_parent_is_selected_value_module
-                        && !type_parent_root_is_implicit_stdlib
-                        && let Some(decl) = resolved
-                        && type_decl_manifest_mentions_path_root(
-                            ctx,
-                            decl.as_ref(),
-                            "Primitive_js_extern",
-                        )
-                    {
-                        crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
+                        ));
                     }
                 }
                 // Keep `allow_stdlib_flat_parent_inference` available inside
@@ -19379,9 +19262,10 @@ impl Env {
                             // OCaml compiler/ml/env.ml:800-813 qualified type
                             // lookup reads component tables without forcing
                             // env.ml:719-721 `ps_sig` unless the lookup path
-                            // really reaches that lazy. Rust's constraint
-                            // probes suppress alias forcing while only testing
-                            // whether a manifest mentions Primitive_js_extern.
+                            // really reaches that lazy. Probe mode keeps the
+                            // same descriptor-only boundary for callers that
+                            // need component facts without `find_module`
+                            // forcing from env.ml:865-882.
                             pers.read_raw_sig_shared(mod_name, ctx)?.as_ref().clone()
                         };
                         let result = Some((sig, Some(mod_name.to_string())));
