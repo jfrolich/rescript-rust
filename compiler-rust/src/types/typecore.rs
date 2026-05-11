@@ -24195,14 +24195,11 @@ fn flattened_alias_component_parent<'a>(
     ctx: &'a crate::types::context::TypeContext,
 ) -> bool {
     // OCaml compiler/ml/env.ml:1440-1446 only scrapes explicit aliases.
-    // Namespace-flattened heads are Rust/ReScript backing units, so skip the
-    // eager child lookup above only for known flattened alias components. Other
-    // persistent heads, e.g. `Stdlib_Date`, still need env.ml:865-882 lookup.
+    // Skip the eager child lookup above only for component parents whose
+    // flattened backing relation was registered from that alias scrape, not
+    // from the spelling of the persistent head.
     let head = parent.head();
     head.is_persistent()
-        && head.name().contains("__")
-        && head.name() != "Stdlib"
-        && head.name() != "Pervasives"
         && pers_env
             .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
             .or_else(|| ctx.find_flattened_alias_component_path(head.name()))
