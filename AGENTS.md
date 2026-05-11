@@ -177,6 +177,7 @@ Completed for this goal:
 - **Probe cache suppression removed:** `component_alias_probe_cache_suppression` and its global guard were deleted. Probe-style type/component lookups now use explicit no-publish cache mode at the lookup API boundary, matching OCaml's separate `find_module_descr`/`find_type` descriptor reads instead of changing global context state.
 - **Global force suppression guard removed:** `component_alias_sig_force_suppression` and its scoped wrappers were deleted. Probe-style component/type lookups now carry explicit `ComponentLookupCacheMode::Probe`, matching OCaml `compiler/ml/env.ml:781-813` descriptor/type lookups separately from `find_module`/`components_of_module_maker` forcing at `compiler/ml/env.ml:865-882` and `compiler/ml/env.ml:1516-1588`.
 - **Label root rewrite name fallback removed:** `typecore.rs` no longer rewrites label argument/result type paths by matching equal printed parent names. Direct record-label root rewriting now follows OCaml `compiler/ml/subst.ml:87-95` and `compiler/ml/env.ml:1542-1559`: apply explicit component substitution with `Path.same`, not path spelling.
+- **Value-only signature qualification shortcut removed:** `typecore.rs` no longer skips component-signature copying/substitution when a signature contains only values. Component signatures now follow OCaml `compiler/ml/env.ml:1530-1538` and `compiler/ml/subst.ml:303-309`: run `prefix_idents`/`Subst.value_description` shape consistently instead of deciding laziness from signature contents.
 
 ### Running Typedtree Sexp Parity Tests
 

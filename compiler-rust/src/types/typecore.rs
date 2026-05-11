@@ -24006,18 +24006,8 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         matches!(path_root_module(access_path), Path::Pident(id) if id.is_persistent());
     let resolved_sig_has_package_self_manifests =
         Env::signature_has_package_self_manifests(resolved_sig, ctx);
-    let qualification_is_identity = resolved_name.is_none()
-        && access_path_has_local_root
-        && !matches!(mty, crate::types::decl::ModuleType::MtyAlias(..))
-        && !should_rebind_direct_type_family
-        && !resolved_sig_has_package_self_manifests
-        && resolved_sig
-            .iter()
-            .all(|item| matches!(item, crate::types::decl::SignatureItem::SigValue(_, _)));
     if ctx.compiler_counters_enabled() {
-        let kind = if qualification_is_identity {
-            "identity_values"
-        } else if let Some(old_name) = resolved_name {
+        let kind = if let Some(old_name) = resolved_name {
             match access_path {
                 Path::Pident(id) if id.name() == old_name => "resolved_name_exact_pident",
                 Path::Pident(_) => "resolved_name_alias_pident",
@@ -24044,10 +24034,12 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
             resolved_sig.len(),
         );
     }
-    if qualification_is_identity {
-        return resolved_sig.clone();
-    }
 
+    // OCaml compiler/ml/env.ml:1530-1538 always routes component signatures
+    // through `prefix_idents` and `Subst.value_description`, even when the
+    // current signature contains only values and the substitution is otherwise
+    // empty. Do not skip the signature copy based on item shape; the value-type
+    // sharing must come from compiler/ml/subst.ml:303-309.
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
     let skip_self_manifest_subst = resolved_sig_has_package_self_manifests;
     let alias_requires_exact_persistent_prefix = matches!(
