@@ -1449,6 +1449,23 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundRecordField {
+            loc,
+            field_name,
+            from_type,
+        }) => UserDiagnostic::new(
+            format_unbound_record_field_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                field_name,
+                *from_type,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
@@ -1607,6 +1624,94 @@ fn format_expr_type_clash_report(
     message.push_str(INFO);
     message.push_str(&format_type_expr(type_ctx, expected));
     message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_unbound_record_field_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    field_name: &str,
+    from_type: Option<TypeExprRef>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    let from_type_desc = from_type.map(|ty| {
+        let repr = type_ctx.repr(ty);
+        (repr, type_ctx.get_desc(repr).clone())
+    });
+
+    match from_type_desc {
+        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "option" => {
+            message.push_str("You're trying to access the record field ");
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(", but the value you're trying to access it on is an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(".\n");
+            message.push_str("You need to unwrap the option first before accessing the record field.\n");
+            message.push('\n');
+            message.push_str("Possible solutions:\n");
+            message.push_str("- Use ");
+            message.push_str(INFO);
+            message.push_str("Option.map");
+            message.push_str(RESET);
+            message.push_str(" to transform the option: ");
+            message.push_str(INFO);
+            message.push_str("xx->Option.map(field => field.");
+            message.push_str(field_name);
+            message.push(')');
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("- Or use ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr");
+            message.push_str(RESET);
+            message.push_str(" with a default: ");
+            message.push_str(INFO);
+            message.push_str("xx->Option.getOr(defaultRecord).");
+            message.push_str(field_name);
+            message.push_str(RESET);
+        }
+        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "array" => {
+            message.push_str("You're trying to access the record field ");
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(", but the value you're trying to access it on is an ");
+            message.push_str(INFO);
+            message.push_str("array");
+            message.push_str(RESET);
+            message.push_str(".\n");
+            message.push_str("You need to access an individual element of the array if you want to access an individual record field.");
+        }
+        Some((ty, TypeDesc::Tconstr { .. })) => {
+            message.push_str("You're trying to access the record field ");
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(", but the thing you're trying to access it on is not a record. \n");
+            message.push('\n');
+            message.push_str("The type of the thing you're trying to access it on is:\n");
+            message.push_str(&format_type_expr(type_ctx, ty));
+            message.push_str(",\n\n");
+            message.push_str("Only records have fields that can be accessed with dot notation.");
+        }
+        _ => {
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(" refers to a record field, but no corresponding record type is in scope.");
+        }
+    }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

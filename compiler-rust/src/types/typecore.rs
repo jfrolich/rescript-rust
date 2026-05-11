@@ -540,6 +540,13 @@ pub enum TypeCoreError {
     /// Field access on dict type.
     FieldAccessOnDictType,
 
+    /// Unbound record field access.
+    UnboundRecordField {
+        loc: LocIdx,
+        field_name: String,
+        from_type: Option<TypeExprRef>,
+    },
+
     /// JSX not enabled.
     JsxNotEnabled,
 
@@ -14723,6 +14730,17 @@ fn type_field(
         );
         (env_label, ty_arg, ty_res)
     } else {
+        let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
+        if matches!(
+            &*tctx.type_ctx.get_desc(ty_exp_repr),
+            TypeDesc::Tconstr { .. }
+        ) {
+            return Err(TypeCoreError::UnboundRecordField {
+                loc: field_lid.loc,
+                field_name: tctx.longident_to_string(&resolved_lid),
+                from_type: Some(ty_exp_repr),
+            });
+        }
         let record_ty = tctx.type_ctx.new_var(None);
         let field_ty = tctx.type_ctx.new_var(None);
         (
