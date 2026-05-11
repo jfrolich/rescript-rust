@@ -1487,6 +1487,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::NotSubtype { loc, trace, .. }) => {
+            UserDiagnostic::new(
+                format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::WrongName {
             loc,
             kind,
@@ -2058,6 +2065,26 @@ fn format_expr_type_clash_report(
     } else {
         format_compiler_error_report(arena, source, filename, loc, &message)
     }
+}
+
+fn format_not_subtype_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((left, right)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let message = format!(
+        "Type {} is not a subtype of {} ",
+        format_type_expr(type_ctx, left),
+        format_type_expr(type_ctx, right)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_array_type_clash_message(message: &str) -> String {

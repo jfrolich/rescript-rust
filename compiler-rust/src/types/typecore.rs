@@ -394,6 +394,13 @@ pub enum TypeCoreError {
         context: Option<TypeClashContext>,
     },
 
+    /// Subtype check failed during an explicit coercion.
+    NotSubtype {
+        loc: LocIdx,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+        context: Option<crate::types::SubtypeContext>,
+    },
+
     /// Applying non-function.
     ApplyNonFunction(TypeExprRef),
 
@@ -15416,7 +15423,7 @@ fn type_coerce(
         // generalizable/unify_var before the non-generalizable fast coercion
         // attempt calls compiler/ml/ctype.ml:2797 `Ctype.unify`.
         ctx.begin_def();
-        let mut typed_inner = type_exp(tctx, env, inner_expr, None)?;
+        let typed_inner = type_exp(tctx, env, inner_expr, None)?;
         ctx.end_def();
 
         let scope_var = ctx.new_var(None);
@@ -15468,10 +15475,27 @@ fn type_coerce(
                     target_for_unify,
                 );
             }
-            typed_inner.exp_type = to_ty;
         }
         typed_inner
     };
+
+    crate::types::ctype::subtype(ctx, env, typed_inner.exp_type, to_ty).map_err(|err| match err {
+        TypeError::Subtype { trace, context } => TypeCoreError::NotSubtype {
+            loc,
+            trace,
+            context,
+        },
+        TypeError::Unify(trace) => TypeCoreError::NotSubtype {
+            loc,
+            trace,
+            context: None,
+        },
+        _ => TypeCoreError::NotSubtype {
+            loc,
+            trace: vec![(typed_inner.exp_type, to_ty)],
+            context: None,
+        },
+    })?;
 
     // Return the inner expression with the coercion as exp_extra
     // The expression type becomes the target type after coercion

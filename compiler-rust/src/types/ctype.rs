@@ -25,6 +25,7 @@
 use super::asttypes::{Label, PrivateFlag};
 use super::btype::{self, iter_type_expr, row_fixed, row_more, row_repr, row_repr_ref};
 use super::context::TypeContext;
+use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
@@ -3217,6 +3218,296 @@ pub(crate) fn expand_head_unif<'a>(
 
 pub(crate) fn expand_head_opt<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
     expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
+}
+
+// ============================================================================
+// Subtyping
+// ============================================================================
+
+/// Check whether `ty1` is a subtype of `ty2`.
+///
+/// This mirrors the shape of OCaml `Ctype.subtype`: walk the two type
+/// descriptors structurally, expanding safe abbreviations at the head and
+/// accumulating the source/target pair for diagnostics. The Rust port does not
+/// yet model OCaml's delayed constraint closure, so variable constraints are
+/// forced immediately through ordinary unification.
+pub fn subtype(ctx: &TypeContext, env: &Env, ty1: TypeExprRef, ty2: TypeExprRef) -> TypeResult<()> {
+    let mut visited = HashSet::new();
+    subtype_rec(ctx, env, &mut visited, &[(ty1, ty2)], ty1, ty2)
+}
+
+fn subtype_error(trace: &[(TypeExprRef, TypeExprRef)]) -> TypeError {
+    TypeError::Subtype {
+        trace: trace.to_vec(),
+        context: None,
+    }
+}
+
+fn subtype_rec(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeResult<()> {
+    let ty1 = ctx.repr(ty1);
+    let ty2 = ctx.repr(ty2);
+    if ty1 == ty2 {
+        return Ok(());
+    }
+
+    if !visited.insert((ty1.0, ty2.0)) {
+        return Ok(());
+    }
+
+    let desc1 = (*ctx.get_desc(ty1)).clone();
+    let desc2 = (*ctx.get_desc(ty2)).clone();
+
+    match (&desc1, &desc2) {
+        (TypeDesc::Tvar(_) | TypeDesc::Tunivar(_), _)
+        | (_, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) => {
+            let mut unify_state = UnifyState::new();
+            unify(ctx, &mut unify_state, ty1, ty2).map_err(|_| subtype_error(trace))
+        }
+        (
+            TypeDesc::Tarrow {
+                arg: arg1,
+                ret: ret1,
+                ..
+            },
+            TypeDesc::Tarrow {
+                arg: arg2,
+                ret: ret2,
+                ..
+            },
+        ) if arg1.lbl.same_label(&arg2.lbl) => {
+            let mut arg_trace = trace.to_vec();
+            arg_trace.push((arg2.typ, arg1.typ));
+            subtype_rec(ctx, env, visited, &arg_trace, arg2.typ, arg1.typ)?;
+            let mut ret_trace = trace.to_vec();
+            ret_trace.push((*ret1, *ret2));
+            subtype_rec(ctx, env, visited, &ret_trace, *ret1, *ret2)
+        }
+        (TypeDesc::Ttuple(items1), TypeDesc::Ttuple(items2)) if items1.len() == items2.len() => {
+            for (item1, item2) in items1.iter().zip(items2.iter()) {
+                let mut item_trace = trace.to_vec();
+                item_trace.push((*item1, *item2));
+                subtype_rec(ctx, env, visited, &item_trace, *item1, *item2)?;
+            }
+            Ok(())
+        }
+        (TypeDesc::Ttuple(_), TypeDesc::Ttuple(_)) => Err(subtype_error(trace)),
+        (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) if path1.same(path2) && args1.is_empty() && args2.is_empty() => Ok(()),
+        (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) if path1.same(path2) => subtype_same_constr_args(
+            ctx, env, visited, trace, path1, args1, args2,
+        ),
+        (
+            TypeDesc::Tconstr {
+                path: path1,
+                args: args1,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: path2,
+                args: args2,
+                ..
+            },
+        ) => {
+            if path1.same(&crate::types::predef::path_int())
+                && path2.same(&crate::types::predef::path_float())
+                && args1.is_empty()
+                && args2.is_empty()
+            {
+                return Ok(());
+            }
+
+            if args1.is_empty()
+                && args2.is_empty()
+                && let Some(result) =
+                    subtype_concrete_type_declarations(ctx, env, visited, trace, path1, path2)
+            {
+                return result;
+            }
+
+            if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
+                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
+            }
+            if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
+                return subtype_rec(ctx, env, visited, trace, ty1, expanded2);
+            }
+
+            Err(subtype_error(trace))
+        }
+        (TypeDesc::Tconstr { .. }, _) => {
+            if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
+                subtype_rec(ctx, env, visited, trace, expanded1, ty2)
+            } else {
+                Err(subtype_error(trace))
+            }
+        }
+        (_, TypeDesc::Tconstr { .. }) => {
+            if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
+                subtype_rec(ctx, env, visited, trace, ty1, expanded2)
+            } else {
+                Err(subtype_error(trace))
+            }
+        }
+        (TypeDesc::Tpoly { body: body1, .. }, TypeDesc::Tpoly { body: body2, .. }) => {
+            subtype_rec(ctx, env, visited, trace, *body1, *body2)
+        }
+        (TypeDesc::Tlink(next1) | TypeDesc::Tsubst(next1), _) => {
+            subtype_rec(ctx, env, visited, trace, *next1, ty2)
+        }
+        (_, TypeDesc::Tlink(next2) | TypeDesc::Tsubst(next2)) => {
+            subtype_rec(ctx, env, visited, trace, ty1, *next2)
+        }
+        _ => Err(subtype_error(trace)),
+    }
+}
+
+fn subtype_same_constr_args(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    path: &Path,
+    args1: &[TypeExprRef],
+    args2: &[TypeExprRef],
+) -> TypeResult<()> {
+    if args1.len() != args2.len() {
+        return Err(subtype_error(trace));
+    }
+
+    let Some(decl) = lookup_type_decl_for_path(ctx, env, path) else {
+        return Err(subtype_error(trace));
+    };
+
+    for (variance, (arg1, arg2)) in decl.type_variance.iter().zip(args1.iter().zip(args2.iter())) {
+        let (covariant, contravariant) = variance.get_upper();
+        if covariant {
+            let mut arg_trace = trace.to_vec();
+            arg_trace.push((*arg1, *arg2));
+            subtype_rec(ctx, env, visited, &arg_trace, *arg1, *arg2)?;
+        }
+        if contravariant {
+            let mut arg_trace = trace.to_vec();
+            arg_trace.push((*arg2, *arg1));
+            subtype_rec(ctx, env, visited, &arg_trace, *arg2, *arg1)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn subtype_concrete_type_declarations(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    path1: &Path,
+    path2: &Path,
+) -> Option<TypeResult<()>> {
+    let decl1 = lookup_type_decl_for_path(ctx, env, path1)?;
+    let decl2 = lookup_type_decl_for_path(ctx, env, path2)?;
+
+    match (&decl1.type_kind, &decl2.type_kind) {
+        (
+            super::TypeKind::TypeRecord(fields1, repr1),
+            super::TypeKind::TypeRecord(fields2, repr2),
+        ) => Some(if repr1 == repr2 {
+            subtype_record_fields(ctx, env, visited, trace, fields1, fields2)
+        } else {
+            Err(subtype_error(trace))
+        }),
+        (super::TypeKind::TypeVariant(_), super::TypeKind::TypeVariant(_)) => {
+            Some(Err(subtype_error(trace)))
+        }
+        (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
+        | (super::TypeKind::TypeOpen, super::TypeKind::TypeOpen) => None,
+        _ => Some(Err(TypeError::Subtype {
+            trace: trace.to_vec(),
+            context: Some(SubtypeContext::DifferentTypeKinds {
+                left_typename: path1.clone(),
+                right_typename: path2.clone(),
+            }),
+        })),
+    }
+}
+
+fn subtype_record_fields(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    fields1: &[LabelDeclaration],
+    fields2: &[LabelDeclaration],
+) -> TypeResult<()> {
+    for field2 in fields2 {
+        let Some(field1) = fields1
+            .iter()
+            .find(|field1| field1.ld_id.name() == field2.ld_id.name())
+        else {
+            return Err(subtype_error(trace));
+        };
+
+        if field1.ld_optional != field2.ld_optional
+            || label_declaration_runtime_name(field1) != label_declaration_runtime_name(field2)
+        {
+            return Err(subtype_error(trace));
+        }
+
+        let mut field_trace = trace.to_vec();
+        field_trace.push((field1.ld_type, field2.ld_type));
+        subtype_rec(
+            ctx,
+            env,
+            visited,
+            &field_trace,
+            field1.ld_type,
+            field2.ld_type,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
+    label
+        .ld_attributes
+        .iter()
+        .find_map(|attr| {
+            if attr.attr_name.txt == "as"
+                && let super::decl::AttributePayload::Str(value) = &attr.attr_payload
+            {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| label.ld_id.name().to_string())
 }
 
 pub(crate) fn touch_constraint_match_head_expansion(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
