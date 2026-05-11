@@ -20658,11 +20658,13 @@ fn qualify_label_description_paths<'a>(
         } else if path_non_apply_root_ident(path)
             .is_some_and(|id| !id.is_persistent() && id.stamp() != 0)
         {
-            if !ctx.preserve_canonical_typedtree() {
-                QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
-            } else {
-                QualifiedRecordLabelCacheKeyResult::LocalRoot
-            }
+            // OCaml compiler/ml/env.ml:1542-1559 builds component labels by
+            // substituting the current component table, and
+            // compiler/ml/typecore.ml:942-967 `lookup_from_type` reads that
+            // substituted label directly. Do not cache labels rooted in local
+            // module paths: reusing one copied label family across later local
+            // environments would create a Rust-only sharing shortcut.
+            QualifiedRecordLabelCacheKeyResult::LocalRoot
         } else if path_non_apply_root_ident(path).is_some() {
             QualifiedRecordLabelCacheKeyResult::LocalRoot
         } else {
