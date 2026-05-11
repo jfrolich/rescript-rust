@@ -2237,8 +2237,32 @@ fn append_extra_type_clash_help(
         message.push_str("You can only compare things of the same type.");
     }
 
+    append_incompatible_type_parts(type_ctx, trace, message);
     append_dict_literal_help(type_ctx, trace, message);
     append_simple_conversion_help(type_ctx, trace, message);
+}
+
+fn append_incompatible_type_parts(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = nested_type_clash_pair(type_ctx, trace) else {
+        return;
+    };
+
+    message.push_str("\n\nThe incompatible parts:\n  ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(type_ctx, actual));
+    message.push_str(RESET);
+    message.push_str(" vs ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, expected));
+    message.push_str(RESET);
 }
 
 fn append_dict_literal_help(
@@ -2249,11 +2273,15 @@ fn append_dict_literal_help(
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
-        return;
-    };
-
-    if !type_is_object(type_ctx, actual) || !type_is_dict(type_ctx, expected) {
+    let has_dict_literal_mismatch = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| type_is_object(type_ctx, actual) && type_is_dict(type_ctx, expected));
+    if !has_dict_literal_mismatch {
         return;
     }
 
@@ -2284,17 +2312,23 @@ fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
 }
 
 fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
-    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
-        return false;
-    };
+    [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        let actual_is_array = match &*type_ctx.get_desc(type_ctx.repr(actual)) {
+            TypeDesc::Tconstr { path, .. } => path.head_name() == "array",
+            _ => false,
+        };
+        let expected_is_tuple =
+            matches!(&*type_ctx.get_desc(type_ctx.repr(expected)), TypeDesc::Ttuple(_));
 
-    let actual_is_array = match &*type_ctx.get_desc(type_ctx.repr(actual)) {
-        TypeDesc::Tconstr { path, .. } => path.head_name() == "array",
-        _ => false,
-    };
-    let expected_is_tuple = matches!(&*type_ctx.get_desc(type_ctx.repr(expected)), TypeDesc::Ttuple(_));
-
-    actual_is_array && expected_is_tuple
+        actual_is_array && expected_is_tuple
+    })
 }
 
 fn suggested_array_to_tuple_rewrite(
@@ -2317,16 +2351,7 @@ fn append_simple_conversion_help(
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
-        return;
-    };
-    let Some(actual_name) = simple_type_constr_name(type_ctx, actual) else {
-        return;
-    };
-    let Some(expected_name) = simple_type_constr_name(type_ctx, expected) else {
-        return;
-    };
-    let Some(converter) = simple_conversion(&actual_name, &expected_name) else {
+    let Some((actual_name, expected_name, converter)) = simple_conversion_candidate(type_ctx, trace) else {
         return;
     };
 
@@ -2343,6 +2368,41 @@ fn append_simple_conversion_help(
     message.push_str(converter);
     message.push_str(RESET);
     message.push('.');
+}
+
+fn simple_conversion_candidate(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(String, String, &'static str)> {
+    let candidates = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        let Some(actual_name) = simple_type_constr_name(type_ctx, candidate.0) else {
+            continue;
+        };
+        let Some(expected_name) = simple_type_constr_name(type_ctx, candidate.1) else {
+            continue;
+        };
+        if let Some(converter) = simple_conversion(&actual_name, &expected_name) {
+            return Some((actual_name, expected_name, converter));
+        }
+    }
+    None
+}
+
+fn nested_type_clash_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let (top_actual, top_expected) = trace.first().copied()?;
+    trace.iter().skip(1).rev().copied().find(|(actual, expected)| {
+        type_ctx.repr(*actual) != type_ctx.repr(top_actual)
+            || type_ctx.repr(*expected) != type_ctx.repr(top_expected)
+    })
 }
 
 fn bottom_type_clash_aliases(

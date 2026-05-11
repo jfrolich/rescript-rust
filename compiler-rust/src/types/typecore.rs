@@ -8465,9 +8465,13 @@ fn unify_expression_types(
                     return Ok(());
                 }
             }
+            let trace = match err {
+                TypeError::Unify(trace) if !trace.is_empty() => trace,
+                _ => vec![(ty1, ty2)],
+            };
             Err(TypeCoreError::ExprTypeClash {
                 loc,
-                trace: vec![(ty1, ty2)],
+                trace,
                 context,
             })
         }
