@@ -1819,6 +1819,15 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::FieldNotOptional { loc, name, typ }) => {
+            UserDiagnostic::new(
+                format_field_not_optional_report(
+                    type_ctx, arena, source, filename, *loc, name, *typ,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::FieldAccessOnDictType { loc }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -2850,6 +2859,25 @@ fn format_function_arity_mismatch_report(
     message.push_str(&actual_arity.to_string());
     message.push_str(RESET);
 
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_field_not_optional_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    typ: TypeExprRef,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let message = format!(
+        "Field {INFO}{name}{RESET} is not optional in type {}. Use without ?",
+        format_type_expr(type_ctx, typ)
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

@@ -556,7 +556,14 @@ pub enum TypeCoreError {
     },
 
     /// Field not optional.
-    FieldNotOptional(String, TypeExprRef),
+    FieldNotOptional {
+        /// Location of the expression or pattern marked with `?`.
+        loc: LocIdx,
+        /// Field name.
+        name: String,
+        /// Record type containing the field.
+        typ: TypeExprRef,
+    },
 
     /// Type params not supported.
     TypeParamsNotSupported(Longident),
@@ -3962,6 +3969,13 @@ fn type_pattern_record(
         let (label_desc, field_ty, poly_vars, force_label_arg_paths) = if let Some(env_label) =
             field.label
         {
+            if field.opt && !env_label.lbl_optional {
+                return Err(TypeCoreError::FieldNotOptional {
+                    loc: tctx.arena.get_pat(field.pat).ppat_loc,
+                    name: env_label.lbl_name.clone(),
+                    typ: env_label.lbl_res,
+                });
+            }
             // OCaml compiler/ml/typecore.ml:1623-1632 `type_label_pat`
             // creates `(vars, ty_arg, ty_res) = instance_label false label`,
             // unifies `ty_res` with the record type, then types the field
@@ -13968,6 +13982,14 @@ fn type_record(
                             )
                         })
                         .unwrap_or(env_label);
+
+                    if field.opt && !env_label.lbl_optional {
+                        return Err(TypeCoreError::FieldNotOptional {
+                            loc: tctx.arena.get_expr(field.expr).pexp_loc,
+                            name: env_label.lbl_name.clone(),
+                            typ: env_label.lbl_res,
+                        });
+                    }
 
                     let separate = env.has_local_constraints();
                     if separate {
