@@ -16,6 +16,11 @@ possible. When an error differs, read the relevant OCaml source first and port
 the same control flow, location choice, warning/error ordering, and reporting
 logic into Rust instead of adding output-specific special cases.
 
+Any compiler/parser code added for this project should be treated as a direct
+port of the OCaml implementation first. If the Rust code needs to differ for
+local architecture reasons, document the reason in the code or commit message
+and keep the externally visible diagnostic behavior byte-for-byte identical.
+
 ## Existing Work To Reuse
 
 Parser diagnostics already have a project and matrix:
