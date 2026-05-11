@@ -25002,29 +25002,6 @@ fn lookup_type_decl_for_path<'a>(
             return Some(Arc::new(decl));
         }
 
-        // Try Stdlib alias patterns as fallback.
-        // Prefer dotted `Stdlib.X.t` over flattened `Stdlib_X.t` to match
-        // OCaml path shapes in typedtree output when both are available.
-        if let Path::Pident(parent_id) = parent.as_ref() {
-            let stdlib_path = format!("Stdlib.{}.{}", parent_id.name(), type_name);
-            if let Some(decl) = ctx.find_type_decl_by_path(&stdlib_path) {
-                return Some(Arc::new(decl.clone()));
-            }
-            let flat_name = format!("Stdlib_{}.{}", parent_id.name(), type_name);
-            if let Some(decl) = ctx.find_type_decl_by_path(&flat_name) {
-                return Some(Arc::new(decl.clone()));
-            }
-            // Try loading CMI directly by module name
-            let direct_path = Path::pdot(
-                Path::Pident(Ident::create_persistent(parent_id.name())),
-                type_name.as_str(),
-            );
-            if let Some(decl) = crate::types::ctype::resolve_type_through_modules(ctx, &direct_path)
-            {
-                return Some(Arc::new(decl));
-            }
-        }
-
         if let Some(decl) = deferred_self_manifest_decl {
             return Some(decl);
         }
