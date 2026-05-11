@@ -376,7 +376,10 @@ pub enum TypeCoreError {
     LabelMismatch(Longident, Vec<(TypeExprRef, TypeExprRef)>),
 
     /// Pattern type clash.
-    PatternTypeClash(Vec<(TypeExprRef, TypeExprRef)>),
+    PatternTypeClash {
+        loc: Option<LocIdx>,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
 
     /// Or-pattern type clash.
     OrPatternTypeClash(Ident, Vec<(TypeExprRef, TypeExprRef)>),
@@ -1586,14 +1589,18 @@ fn transl_type_inner(
                             {
                                 crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
                                     .map_err(|_| {
-                                    TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)])
+                                    TypeCoreError::PatternTypeClash {
+                                        loc: Some(loc),
+                                        trace: vec![(param_ty, arg_ty)],
+                                    }
                                 })?;
                             }
                             (TypeDesc::Tvar(_), _) => {
                                 if crate::types::occurs(ctx, param_ty, arg_ty) {
-                                    return Err(TypeCoreError::PatternTypeClash(vec![(
-                                        param_ty, arg_ty,
-                                    )]));
+                                    return Err(TypeCoreError::PatternTypeClash {
+                                        loc: Some(loc),
+                                        trace: vec![(param_ty, arg_ty)],
+                                    });
                                 }
                                 crate::types::ctype::update_level(
                                     ctx,
@@ -1605,13 +1612,19 @@ fn transl_type_inner(
                             _ => {
                                 crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
                                     .map_err(|_| {
-                                    TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)])
+                                        TypeCoreError::PatternTypeClash {
+                                            loc: Some(loc),
+                                            trace: vec![(param_ty, arg_ty)],
+                                        }
                                 })?;
                             }
                         }
                     } else {
                         crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty).map_err(
-                            |_| TypeCoreError::PatternTypeClash(vec![(param_ty, arg_ty)]),
+                            |_| TypeCoreError::PatternTypeClash {
+                                loc: Some(loc),
+                                trace: vec![(param_ty, arg_ty)],
+                            },
                         )?;
                     }
                 }
@@ -1644,7 +1657,10 @@ fn transl_type_inner(
                 let alias_ty = crate::types::instance(ctx, existing_alias);
                 let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
                 crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
-                    .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_ty, inner_ty)]))?;
+                    .map_err(|_| TypeCoreError::PatternTypeClash {
+                        loc: Some(loc),
+                        trace: vec![(alias_ty, inner_ty)],
+                    })?;
                 (inner_ctyp, inner_ty)
             } else {
                 let alias_ty = ctx.new_var(None);
@@ -1660,12 +1676,18 @@ fn transl_type_inner(
                     let fallback_alias_ty = ctx.new_var(Some(name_str.clone()));
                     crate::types::unify(ctx, &mut tctx.unify_state, fallback_alias_ty, inner_ty)
                         .map_err(|_| {
-                            TypeCoreError::PatternTypeClash(vec![(fallback_alias_ty, inner_ty)])
+                            TypeCoreError::PatternTypeClash {
+                                loc: Some(loc),
+                                trace: vec![(fallback_alias_ty, inner_ty)],
+                            }
                         })?;
                     (inner_ctyp, inner_ty)
                 } else {
                     crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
-                        .map_err(|_| TypeCoreError::PatternTypeClash(vec![(alias_ty, inner_ty)]))?;
+                        .map_err(|_| TypeCoreError::PatternTypeClash {
+                            loc: Some(loc),
+                            trace: vec![(alias_ty, inner_ty)],
+                        })?;
 
                     let instantiated = crate::types::instance(ctx, alias_ty);
                     let proxy = crate::types::btype::proxy(ctx, instantiated);
@@ -1781,7 +1803,10 @@ fn transl_type_inner(
             });
             let scope_var = ctx.new_var(None);
             crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, scope_var, poly_ty)
-                .map_err(|_| TypeCoreError::PatternTypeClash(vec![(scope_var, poly_ty)]))?;
+                .map_err(|_| TypeCoreError::PatternTypeClash {
+                    loc: Some(loc),
+                    trace: vec![(scope_var, poly_ty)],
+                })?;
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(var_names, Box::new(body_ctyp)),
@@ -3052,8 +3077,14 @@ fn unify_pattern_types(
 
     match unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2) {
         Ok(()) => Ok(()),
-        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
-        Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash {
+            loc: Some(_loc),
+            trace: vec![(ty1, ty2)],
+        }),
+        Err(_) => Err(TypeCoreError::PatternTypeClash {
+            loc: Some(_loc),
+            trace: vec![(ty1, ty2)],
+        }),
     }
 }
 
@@ -3087,8 +3118,14 @@ fn unify_pattern_types_gadt(
 
     match result {
         Ok(()) => Ok(()),
-        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
-        Err(_) => Err(TypeCoreError::PatternTypeClash(vec![(ty1, ty2)])),
+        Err(TypeError::Unify(_)) => Err(TypeCoreError::PatternTypeClash {
+            loc: Some(_loc),
+            trace: vec![(ty1, ty2)],
+        }),
+        Err(_) => Err(TypeCoreError::PatternTypeClash {
+            loc: Some(_loc),
+            trace: vec![(ty1, ty2)],
+        }),
     }
 }
 
@@ -3947,7 +3984,7 @@ fn type_pattern_record(
                     ctx.end_def();
                 }
                 return Err(match err {
-                    TypeCoreError::PatternTypeClash(trace) => {
+                    TypeCoreError::PatternTypeClash { trace, .. } => {
                         TypeCoreError::LabelMismatch(field_lid_for_error, trace)
                     }
                     err => err,
@@ -11252,7 +11289,7 @@ fn type_match(
         ) {
             Ok(cases) => Ok(cases),
             // Preserve existing recovery behavior for non-GADT patterns.
-            Err(TypeCoreError::PatternTypeClash(_)) => type_match_cases_sequential(
+            Err(TypeCoreError::PatternTypeClash { .. }) => type_match_cases_sequential(
                 tctx,
                 env,
                 &val_caselist,
@@ -12145,7 +12182,7 @@ fn type_case_pattern<'a>(
         false,
     ) {
         Ok(case) => Ok(case),
-        Err(TypeCoreError::PatternTypeClash(_)) => type_case_pattern_impl(
+        Err(TypeCoreError::PatternTypeClash { .. }) => type_case_pattern_impl(
             tctx,
             env,
             case,

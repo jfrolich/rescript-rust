@@ -1487,6 +1487,14 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::PatternTypeClash {
+            loc: Some(loc),
+            trace,
+        }) => UserDiagnostic::new(
+            format_pattern_type_clash_report(type_ctx, arena, source, filename, *loc, trace),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::NotSubtype { loc, trace, .. }) => {
             UserDiagnostic::new(
                 format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace),
@@ -2065,6 +2073,36 @@ fn format_expr_type_clash_report(
     } else {
         format_compiler_error_report(arena, source, filename, loc, &message)
     }
+}
+
+fn format_pattern_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("This pattern matches values of type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(type_ctx, actual));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("but a pattern was expected which matches values of type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, expected));
+    message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_not_subtype_report(
