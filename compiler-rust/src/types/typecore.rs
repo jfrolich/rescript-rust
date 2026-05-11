@@ -8633,66 +8633,6 @@ fn unify_expression_types(
                 }
             }
 
-            // OCaml compiler/ml/env.ml:1517 and env.ml:1530-1538 derive
-            // flattened-vs-qualified module aliases from component tables, while
-            // compiler/ml/ctype.ml:2338-2364 expands both heads before choosing a
-            // representative. Do not infer `A.B`/`A__B` equivalence from path
-            // spelling here; the ctype/env alias evidence path above must handle
-            // real flattened component aliases.
-            let repeated_terminal_module_match = |lhs: &str, rhs: &str| -> bool {
-                let matches = |long: &str, short: &str| -> bool {
-                    let long_segs: Vec<&str> = long.split('.').collect();
-                    let short_segs: Vec<&str> = short.split('.').collect();
-                    if long_segs.len() != short_segs.len() + 1 || short_segs.len() < 2 {
-                        return false;
-                    }
-                    if long_segs.last() != short_segs.last() {
-                        return false;
-                    }
-                    let long_modules = &long_segs[..long_segs.len() - 1];
-                    let short_modules = &short_segs[..short_segs.len() - 1];
-                    if long_modules.len() != short_modules.len() + 1 {
-                        return false;
-                    }
-                    let Some((&short_last, short_prefix)) = short_modules.split_last() else {
-                        return false;
-                    };
-                    long_modules[..short_prefix.len()] == *short_prefix
-                        && long_modules[short_prefix.len()] == short_last
-                        && long_modules[short_prefix.len() + 1] == short_last
-                };
-                matches(lhs, rhs) || matches(rhs, lhs)
-            };
-            let repr1 = tctx.type_ctx.repr(ty1);
-            let repr2 = tctx.type_ctx.repr(ty2);
-            let desc1 = tctx.type_ctx.get_desc(repr1);
-            let desc2 = tctx.type_ctx.get_desc(repr2);
-            if let (
-                TypeDesc::Tconstr {
-                    path: path1,
-                    args: args1,
-                    ..
-                },
-                TypeDesc::Tconstr {
-                    path: path2,
-                    args: args2,
-                    ..
-                },
-            ) = (&*desc1, &*desc2)
-            {
-                if args1.is_empty()
-                    && args2.is_empty()
-                    && repeated_terminal_module_match(&path1.name(), &path2.name())
-                {
-                    drop(desc1);
-                    drop(desc2);
-                    crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
-                    return Ok(());
-                }
-            }
-            drop(desc1);
-            drop(desc2);
-
             if let Some(env) = tctx
                 .unify_state
                 .env()
