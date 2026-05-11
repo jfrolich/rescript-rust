@@ -20598,7 +20598,11 @@ fn qualify_label_description_paths<'a>(
                     );
                 }
                 let rewritten = path.parent().and_then(|parent| {
-                    (parent.same(old_root_path) || parent.name() == old_root_path.name())
+                    // OCaml compiler/ml/subst.ml:87-95 rewrites paths through
+                    // explicit substitution entries; it does not match a
+                    // sibling path only because its printed name is the same.
+                    parent
+                        .same(old_root_path)
                         .then(|| Path::pdot(new_root_path.clone(), path.last()))
                 });
                 if let Some(rewritten) = rewritten {
