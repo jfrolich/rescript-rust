@@ -1628,6 +1628,25 @@ fn format_expr_type_clash_report(
         message.push('\n');
     }
 
+    if matches!(context, Some(TypeClashContext::Await)) {
+        message.push_str("This has type: ");
+        message.push_str(ERROR);
+        message.push_str(&format_type_expr(type_ctx, actual));
+        message.push_str(RESET);
+        message.push('\n');
+        message.push_str("But you're using ");
+        message.push_str(INFO);
+        message.push_str("await");
+        message.push_str(RESET);
+        message.push_str(" on this expression, so it is expected to be of type:\n  ");
+        message.push_str(INFO);
+        message.push_str(&format_type_expr(type_ctx, expected));
+        message.push_str(RESET);
+        append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
+        let message = format_await_type_clash_message(&message);
+        return format_compiler_error_report_raw_message(arena, source, filename, loc, &message);
+    }
+
     let (error_text, expected_text) = match context {
         Some(TypeClashContext::ArrayLiteral) => (
             "This array item has type: ",
@@ -1688,6 +1707,25 @@ fn format_array_type_clash_message(message: &str) -> String {
     output
 }
 
+fn format_await_type_clash_message(message: &str) -> String {
+    let mut output = String::new();
+
+    for line in message.lines() {
+        if line.is_empty() {
+            output.push('\n');
+        } else if line == "Possible solutions:" {
+            output.push_str(line);
+            output.push('\n');
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
 fn format_type_clash_message_with_empty_blank_lines(message: &str) -> String {
     let mut output = String::new();
 
@@ -1736,6 +1774,22 @@ fn append_extra_type_clash_help(
             message.push_str(RESET);
         }
         message.push_str("\n\n");
+    }
+
+    if matches!(context, Some(TypeClashContext::Await)) {
+        message.push_str("\n\n");
+        message.push_str("You're trying to await something that is not a promise.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Remove the ");
+        message.push_str(INFO);
+        message.push_str("await");
+        message.push_str(RESET);
+        message.push_str(" if this is not expected to be a promise\n");
+        message.push_str("- Wrap the expression in ");
+        message.push_str(INFO);
+        message.push_str("Promise.resolve");
+        message.push_str(RESET);
+        message.push_str(" to convert the expression to a promise");
     }
 
     append_simple_conversion_help(type_ctx, trace, message);

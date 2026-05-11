@@ -571,6 +571,8 @@ pub enum TypeClashContext {
     IfExpression,
     /// In an assertion condition.
     AssertCondition,
+    /// In an awaited expression.
+    Await,
     /// In a switch expression.
     SwitchExpression,
 }
@@ -8647,6 +8649,16 @@ fn should_unify_expected_result_before_typing_lowered_apply(
     }
 }
 
+fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -> TypeClashContext {
+    if typed_funct_value_path
+        .is_some_and(|path| path.name() == "Primitive_promise.unsafe_await")
+    {
+        TypeClashContext::Await
+    } else {
+        TypeClashContext::FunctionCall
+    }
+}
+
 /// One-step `filter_arrow` analogue: walk through the function type's arrows
 /// `arity` times, returning the first parameter type and the ultimate result
 /// type. Returns None if the type does not have at least `arity` arrows.
@@ -8869,6 +8881,8 @@ fn type_application(
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
     }
+    let function_arg_context =
+        function_argument_type_clash_context(typed_funct_value_path.as_ref());
 
     let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
     ctx.end_def();
@@ -8987,7 +9001,7 @@ fn type_application(
                     env,
                     arg_expr,
                     arg_ty,
-                    Some(TypeClashContext::FunctionCall),
+                    Some(function_arg_context.clone()),
                 );
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
@@ -9009,7 +9023,7 @@ fn type_application(
                         typed_arg.exp_loc,
                         typed_arg.exp_type,
                         arg_ty0,
-                        Some(TypeClashContext::FunctionCall),
+                        Some(function_arg_context.clone()),
                     )?;
                 }
 
@@ -9257,7 +9271,7 @@ fn type_application(
                     env,
                     expr,
                     arg_expected_ty,
-                    Some(TypeClashContext::FunctionCall),
+                    Some(function_arg_context.clone()),
                 );
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
@@ -9283,7 +9297,7 @@ fn type_application(
                         typed_arg.exp_loc,
                         typed_arg.exp_type,
                         unify_ty,
-                        Some(TypeClashContext::FunctionCall),
+                        Some(function_arg_context.clone()),
                     )?;
                 }
                 let typed_arg = if enforce_optional {
