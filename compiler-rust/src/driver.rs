@@ -2357,6 +2357,18 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But it's being compared to something of type: ",
         ),
+        Some(TypeClashContext::IfCondition) => (
+            "This has type: ",
+            "But \x1b[1;33mif\x1b[0m conditions must always be of type: ",
+        ),
+        Some(TypeClashContext::WhileCondition) => (
+            "This has type: ",
+            "But a \x1b[1;33mwhile\x1b[0m loop condition must always be of type: ",
+        ),
+        Some(TypeClashContext::ForLoopCondition) => (
+            "This has type: ",
+            "But a \x1b[1;33mfor\x1b[0m loop bounds must always be of type: ",
+        ),
         Some(TypeClashContext::AssertCondition) => (
             "This has type: ",
             "But assertions must always be of type: ",
@@ -2388,7 +2400,10 @@ fn format_expr_type_clash_report(
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
         let message = format_array_type_clash_message(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
+    } else if matches!(
+        context,
+        Some(TypeClashContext::ComparisonOperator) | Some(TypeClashContext::IfCondition)
+    ) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_array_to_tuple(type_ctx, trace) {
@@ -2620,6 +2635,15 @@ fn append_extra_type_clash_help(
     if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
         message.push_str("\n\n");
         message.push_str("You can only compare things of the same type.");
+    }
+
+    if matches!(context, Some(TypeClashContext::IfCondition)) {
+        message.push_str("\n\n");
+        message.push_str("To fix this, change the highlighted code so it evaluates to a ");
+        message.push_str(INFO);
+        message.push_str("bool");
+        message.push_str(RESET);
+        message.push('.');
     }
 
     append_incompatible_type_parts(type_ctx, trace, message);

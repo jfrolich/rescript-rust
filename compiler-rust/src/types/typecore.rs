@@ -602,8 +602,12 @@ pub enum TypeClashContext {
     ArrayLiteral,
     /// In a tuple.
     Tuple,
-    /// In an if expression.
-    IfExpression,
+    /// In an if condition.
+    IfCondition,
+    /// In a while loop condition.
+    WhileCondition,
+    /// In a for loop bound.
+    ForLoopCondition,
     /// In an assertion condition.
     AssertCondition,
     /// In an awaited expression.
@@ -6285,7 +6289,13 @@ pub fn type_expect<'a>(
 
             // Condition should be bool
             let cond = tctx.arena.get_expr(*cond_idx);
-            let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
+            let typed_cond = type_expect(
+                tctx,
+                env,
+                cond,
+                bool_ty,
+                Some(TypeClashContext::IfCondition),
+            )?;
             let then_branch = tctx.arena.get_expr(*then_idx);
             let else_branch = else_idx.map(|idx| tctx.arena.get_expr(idx));
 
@@ -6347,7 +6357,13 @@ pub fn type_expect<'a>(
             let bool_ty = env.type_bool(ctx);
 
             let cond = tctx.arena.get_expr(*cond_idx);
-            let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
+            let typed_cond = type_expect(
+                tctx,
+                env,
+                cond,
+                bool_ty,
+                Some(TypeClashContext::WhileCondition),
+            )?;
             let body = tctx.arena.get_expr(*body_idx);
             let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, env, body))?;
 
@@ -12756,8 +12772,20 @@ fn type_for(
     let end_int_ty = env.type_int(ctx);
 
     // Type check bounds with separate expected types
-    let typed_start = type_expect(tctx, env, start_expr, start_int_ty, None)?;
-    let typed_end = type_expect(tctx, env, end_expr, end_int_ty, None)?;
+    let typed_start = type_expect(
+        tctx,
+        env,
+        start_expr,
+        start_int_ty,
+        Some(TypeClashContext::ForLoopCondition),
+    )?;
+    let typed_end = type_expect(
+        tctx,
+        env,
+        end_expr,
+        end_int_ty,
+        Some(TypeClashContext::ForLoopCondition),
+    )?;
 
     // OCaml only accepts `_` or a variable for `for` loop indices.
     if !matches!(
