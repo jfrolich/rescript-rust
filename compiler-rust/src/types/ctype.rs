@@ -2996,24 +2996,6 @@ fn try_expand_head_with_mode<'a>(
                 None
             };
             if let Some(decl) = resolved_env_decl {
-                if matches!(mode, ExpandHeadMode::General) {
-                    if let Some(decl_type_path) = decl.type_path.as_ref() {
-                        if path_name.contains("__")
-                            && !path_root_is_persistent(&path)
-                            && decl.type_params.len() == args.len()
-                            && !decl_type_path.same(&path)
-                        {
-                            let level = ctx.get_level(ty);
-                            let rewritten = ctx.new_type(TypeDesc::Tconstr {
-                                path: decl_type_path.clone(),
-                                args: args.clone(),
-                                abbrev: orig_abbrev,
-                            });
-                            ctx.set_level(rewritten, level);
-                            return Some(rewritten);
-                        }
-                    }
-                }
                 if let Some(manifest) = decl.type_manifest {
                     let synthetic_self_manifest = {
                         let manifest_repr = ctx.repr(manifest);
