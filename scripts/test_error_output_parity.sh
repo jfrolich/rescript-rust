@@ -81,9 +81,9 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/debug/bsc}"
 OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
-RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/release/res_parser_rust}"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/debug/res_parser_rust}"
 
 PARSER_MATRIX="$PROJECT_ROOT/tests/syntax_tests/data/parsing/diagnostics_numbers.csv"
 COMPILER_CASES_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/cases.tsv"
@@ -120,7 +120,7 @@ fi
 if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  eval \$(opam env --shell=sh) && make lib"
-    echo "  cargo build --release --manifest-path compiler-rust/Cargo.toml"
+    echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
     exit 2
 fi
 

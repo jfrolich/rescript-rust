@@ -54,7 +54,7 @@ Useful commands:
 ```bash
 # Build prerequisites
 eval $(opam env --shell=sh) && make lib
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # All current parser and compiler diagnostics fixtures
 ./scripts/test_error_output_parity.sh

@@ -7,7 +7,7 @@ Run:
 
 ```bash
 eval $(opam env --shell=sh) && make lib
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 ./scripts/test_error_output_parity.sh --compiler-only
 ```
 
