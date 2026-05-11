@@ -15736,7 +15736,12 @@ pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
     let sig = match &md.md_type {
         DeclMty::MtySignature(sig) => copy_lookup_signature_for_subst(sig, ctx),
         DeclMty::MtyAlias(..) | DeclMty::MtyIdent(..) => env
-            .resolve_module_type(&md.md_type, pers_env, ctx)
+            .resolve_module_type(
+                &md.md_type,
+                pers_env,
+                ctx,
+                ComponentLookupCacheMode::Publish,
+            )
             .map(|(sig, _)| copy_lookup_signature_for_subst(&sig, ctx))?,
         DeclMty::MtyFunctor { .. } => return None,
     };
@@ -16455,14 +16460,12 @@ fn type_pack(
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
     // typedtree parity depends on doing that work at the same program points.
-    // The scoped env_lazy guard keeps the Rust-only implicit-open alias
-    // compensation out of this inclusion walk, matching compiler/ml/env.ml:800-813
-    // component-table laziness during typemod.ml:1710-1719 package wrapping.
-    let coercion = ctx
-        .with_component_alias_sig_force_suppressed(|| {
-            crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
-        })
-        .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    // Component-table probes now carry `ComponentLookupCacheMode::Probe`
+    // explicitly, so package wrapping can call inclusion directly without
+    // changing global lazy-forcing state.
+    let coercion =
+        crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
+            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
@@ -18638,7 +18641,12 @@ impl Env {
                         );
                         return Some((resolved_path, resolved_sig));
                     }
-                    let result = self.resolve_module_type(&md.md_type, pers_env, ctx);
+                    let result = self.resolve_module_type(
+                        &md.md_type,
+                        pers_env,
+                        ctx,
+                        ComponentLookupCacheMode::Publish,
+                    );
                     // Some opened submodules carry alias module types with hidden
                     // local idents (e.g. ArrayExt!) that are not directly
                     // resolvable via resolve_module_type. Fall back to resolving
@@ -18890,7 +18898,12 @@ impl Env {
                                 &sub_path, self, pers_env, ctx,
                             );
                         }
-                        let result = self.resolve_module_type(&sub_md.md_type, pers_env, ctx);
+                        let result = self.resolve_module_type(
+                            &sub_md.md_type,
+                            pers_env,
+                            ctx,
+                            ComponentLookupCacheMode::Publish,
+                        );
                         if let Some((sig, resolved_name)) = result {
                             let (alias_target_pdot, alias_target_pident) = if apply_subst {
                                 match &sub_md.md_type {
@@ -19063,6 +19076,7 @@ impl Env {
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext,
+        cache_mode: ComponentLookupCacheMode,
     ) -> Option<(crate::types::decl::Signature, Option<String>)> {
         use HashSet;
 
@@ -19072,17 +19086,18 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
+            cache_mode: ComponentLookupCacheMode,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             match mty {
                 crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
                 crate::types::decl::ModuleType::MtyAlias(_, path) => {
-                    resolve_path(env, path, pers_env, ctx, visiting)
+                    resolve_path(env, path, pers_env, ctx, visiting, cache_mode)
                 }
                 crate::types::decl::ModuleType::MtyIdent(path) => {
                     // Match OCaml Env.scrape_alias: resolve Mty_ident via module-type
                     // expansion first, then fall back to module-path resolution.
-                    resolve_modtype_path(env, path, pers_env, ctx, visiting)
-                        .or_else(|| resolve_path(env, path, pers_env, ctx, visiting))
+                    resolve_modtype_path(env, path, pers_env, ctx, visiting, cache_mode)
+                        .or_else(|| resolve_path(env, path, pers_env, ctx, visiting, cache_mode))
                 }
                 _ => None,
             }
@@ -19094,6 +19109,7 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
+            cache_mode: ComponentLookupCacheMode,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
 
@@ -19110,7 +19126,7 @@ impl Env {
                     ctx,
                 ) {
                     let result = mtd.mtd_type.as_ref().and_then(|mty| {
-                        resolve_module_type_inner(env, mty, pers_env, ctx, visiting)
+                        resolve_module_type_inner(env, mty, pers_env, ctx, visiting, cache_mode)
                     });
                     visiting.remove(path);
                     return result;
@@ -19122,7 +19138,7 @@ impl Env {
                     let modtype_name = id.name();
                     match env.find_modtype(modtype_name) {
                         Ok(mtd) => mtd.mtd_type.as_ref().and_then(|mty| {
-                            resolve_module_type_inner(env, mty, pers_env, ctx, visiting)
+                            resolve_module_type_inner(env, mty, pers_env, ctx, visiting, cache_mode)
                         }),
                         Err(_) => None,
                     }
@@ -19141,7 +19157,9 @@ impl Env {
                         if let SignatureItem::SigModtype(id, mtd) = sig_item {
                             if id.name() == modtype_name.as_str() {
                                 return mtd.mtd_type.as_ref().and_then(|mty| {
-                                    resolve_module_type_inner(env, mty, pers_env, ctx, visiting)
+                                    resolve_module_type_inner(
+                                        env, mty, pers_env, ctx, visiting, cache_mode,
+                                    )
                                 });
                             }
                         }
@@ -19205,6 +19223,7 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
+            cache_mode: ComponentLookupCacheMode,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
             if !visiting.insert(path.clone()) {
@@ -19291,13 +19310,20 @@ impl Env {
                                 pers_env,
                                 ctx,
                                 visiting,
+                                cache_mode,
                             );
                             visiting.remove(path);
                             return result;
                         }
                     }
-                    let result =
-                        resolve_module_type_inner(env, &sub_md.md_type, pers_env, ctx, visiting);
+                    let result = resolve_module_type_inner(
+                        env,
+                        &sub_md.md_type,
+                        pers_env,
+                        ctx,
+                        visiting,
+                        cache_mode,
+                    );
                     let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
                         result.map(|(sig, resolved_name)| {
                             let sig = copy_lookup_signature_for_subst(&sig, ctx);
@@ -19326,22 +19352,27 @@ impl Env {
                 Path::Pident(id) => {
                     let mod_name = id.name();
                     if let Ok(md) = env.find_module_same(id) {
-                        let result =
-                            resolve_module_type_inner(env, &md.md_type, pers_env, ctx, visiting);
+                        let result = resolve_module_type_inner(
+                            env,
+                            &md.md_type,
+                            pers_env,
+                            ctx,
+                            visiting,
+                            cache_mode,
+                        );
                         visiting.remove(path);
                         return result;
                     }
                     if let Some(pers) = pers_env.as_mut() {
-                        let sig = if !ctx.suppresses_component_alias_sig_force() {
+                        let sig = if cache_mode.forces_alias_sig() {
                             // OCaml compiler/ml/env.ml:1435-1446
                             // `scrape_alias` resolves Mty_alias through
                             // `find_module`; for persistent Pidents,
                             // env.ml:872-875 returns an Mty_signature after
                             // forcing ps_sig, which is initialized as
-                            // `Subst.signature Subst.identity sign` at
-                            // env.ml:677. Only Rust's explicit component
-                            // alias probes suppress this force to mirror
-                            // env.ml:781-813 type-component lookup.
+                            // `Subst.signature Subst.identity sign` at env.ml:677.
+                            // Probe mode mirrors env.ml:781-813 type-component
+                            // lookup and reads the component descriptor instead.
                             let renamed_sig = pers.get_renamed_sig_shared(mod_name, ctx)?;
                             copy_lookup_signature_for_subst(renamed_sig.as_ref(), ctx)
                         } else {
@@ -19443,6 +19474,7 @@ impl Env {
                                             pers_env,
                                             ctx,
                                             visiting,
+                                            cache_mode,
                                         );
                                         visiting.remove(path);
                                         return result;
@@ -19454,6 +19486,7 @@ impl Env {
                                     pers_env,
                                     ctx,
                                     visiting,
+                                    cache_mode,
                                 );
                                 let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type)
                                 {
@@ -19493,7 +19526,7 @@ impl Env {
 
         // Follow aliases through both local and persistent modules, while avoiding cycles.
         let mut visiting = HashSet::new();
-        resolve_module_type_inner(self, mty, pers_env, ctx, &mut visiting)
+        resolve_module_type_inner(self, mty, pers_env, ctx, &mut visiting, cache_mode)
     }
 }
 
@@ -20227,16 +20260,13 @@ fn type_contains_unresolved_local_path<'a>(
         TypeDesc::Tconstr { path, args, .. } => {
             let has_local_head =
                 matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent());
+            // OCaml compiler/ml/env.ml:781-813 reads component descriptors for
+            // type lookup without forcing env.ml:1568's module-declaration
+            // thunk. This unresolved-path probe uses the explicit no-publish
+            // cache mode so it does not make alias children such as
+            // `Functions.Types` earlier than OCaml would.
             let local_path_is_unresolved = has_local_head
-                && ctx.with_component_alias_sig_force_suppressed(|| {
-                    // OCaml compiler/ml/env.ml:781-813 reads component
-                    // descriptors for type lookup without forcing
-                    // env.ml:1568's module-declaration thunk. This unresolved-path
-                    // probe uses the explicit no-publish cache mode so it does not
-                    // make alias children such as `Functions.Types` earlier than
-                    // OCaml would.
-                    lookup_type_decl_for_path_for_probe(path, env, pers_env, ctx).is_none()
-                });
+                && lookup_type_decl_for_path_for_probe(path, env, pers_env, ctx).is_none();
             if local_path_is_unresolved {
                 return true;
             }
@@ -21881,9 +21911,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         // qualification probes only check whether a rewritten path exists; they
         // must not force env.ml:1568 module-declaration thunks or populate the
         // normal Rust lookup caches before the later real lookup reaches them.
-        ctx.with_component_alias_sig_force_suppressed(|| {
-            lookup_type_decl_for_path_for_probe(type_path, env, pers_env, ctx)
-        })
+        lookup_type_decl_for_path_for_probe(type_path, env, pers_env, ctx)
     }
 
     let repr = ctx.repr(ty);
@@ -23112,6 +23140,7 @@ fn with_resolved_child_module_components<'a, R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
@@ -23145,7 +23174,7 @@ fn with_resolved_child_module_components<'a, R>(
             child_name,
             access_path,
         );
-        return stored.with_components(pers_env, ctx, |components| {
+        return stored.with_components(pers_env, ctx, cache_mode, |components| {
             (f.take()
                 .expect("qualified child module components callback reused"))(components)
         });
@@ -23185,6 +23214,7 @@ fn with_resolved_child_module_components<'a, R>(
                 &md.md_type,
                 pers_env,
                 ctx,
+                cache_mode,
             )?;
             crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig, ctx)
         }
@@ -23192,7 +23222,9 @@ fn with_resolved_child_module_components<'a, R>(
     let result = (f
         .take()
         .expect("qualified child module components callback reused"))(&components);
-    if let Some(module_key) = module_key {
+    if let Some(module_key) = module_key
+        && cache_mode.publishes()
+    {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
@@ -23241,6 +23273,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 env,
                 pers_env,
                 ctx,
+                ComponentLookupCacheMode::Publish,
                 |components| f(components),
             )
             .flatten()
@@ -23271,6 +23304,7 @@ fn build_module_components_from_parent_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
     let Path::Pdot(parent, module_name, _) = module_path else {
         return None;
@@ -23281,23 +23315,30 @@ fn build_module_components_from_parent_path<'a>(
     // find_module, independent of typedtree output mode.
     if ctx.persistent_env_is_in_process()
         && let Some(Some((runtime_pos, alias_target, parent_access_path))) =
-            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                components
-                    .lookup_module(module_name.as_str())
-                    .and_then(|(runtime_pos, _, md)| match &md.md_type {
-                        crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                        | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
-                            if alias_id.is_persistent() =>
-                        {
-                            Some((
-                                runtime_pos,
-                                alias_id.name().to_string(),
-                                components.access_path().clone(),
-                            ))
-                        }
-                        _ => None,
-                    })
-            })
+            with_resolved_module_components_for_path_with_cache_mode(
+                parent,
+                env,
+                pers_env,
+                ctx,
+                cache_mode,
+                |components| {
+                    components.lookup_module(module_name.as_str()).and_then(
+                        |(runtime_pos, _, md)| match &md.md_type {
+                            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
+                            | crate::types::decl::ModuleType::MtyIdent(Path::Pident(alias_id))
+                                if alias_id.is_persistent() =>
+                            {
+                                Some((
+                                    runtime_pos,
+                                    alias_id.name().to_string(),
+                                    components.access_path().clone(),
+                                ))
+                            }
+                            _ => None,
+                        },
+                    )
+                },
+            )
     {
         let pers = pers_env.as_mut()?;
         if let Some(ps) = pers.find_pers_struct(&alias_target, ctx) {
@@ -23316,12 +23357,17 @@ fn build_module_components_from_parent_path<'a>(
         }
     }
 
-    if let Some(Some((_, stored))) =
-        with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-            components.lookup_child_components(module_name.as_str())
-        })
-    {
-        if let Some(components) = stored.with_components(pers_env, ctx, |child| child.clone()) {
+    if let Some(Some((_, stored))) = with_resolved_module_components_for_path_with_cache_mode(
+        parent,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| components.lookup_child_components(module_name.as_str()),
+    ) {
+        if let Some(components) =
+            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+        {
             return Some(components);
         }
     }
@@ -23333,24 +23379,31 @@ fn build_module_components_from_parent_path<'a>(
     // `Belt.Array` from forcing the parent module-declaration thunk and
     // freshening sibling module binders before OCaml does.
     if let Some(Some((access_path, md, parent_access_path, parent_sig))) =
-        with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-            components
-                .lookup_module(module_name.as_str())
-                .map(|(runtime_pos, _, md)| {
-                    let access_path = qualified_submodule_access_path(
-                        components.access_path(),
-                        module_name.as_str(),
-                        runtime_pos,
-                        md,
-                    );
-                    (
-                        access_path,
-                        md.clone(),
-                        components.access_path().clone(),
-                        components.signature_arc(),
-                    )
-                })
-        })
+        with_resolved_module_components_for_path_with_cache_mode(
+            parent,
+            env,
+            pers_env,
+            ctx,
+            cache_mode,
+            |components| {
+                components
+                    .lookup_module(module_name.as_str())
+                    .map(|(runtime_pos, _, md)| {
+                        let access_path = qualified_submodule_access_path(
+                            components.access_path(),
+                            module_name.as_str(),
+                            runtime_pos,
+                            md,
+                        );
+                        (
+                            access_path,
+                            md.clone(),
+                            components.access_path().clone(),
+                            components.signature_arc(),
+                        )
+                    })
+            },
+        )
     {
         let stored = crate::types::env_lazy::StoredModuleComponents::new_with_parent_context(
             env.clone_preserve_id(),
@@ -23358,26 +23411,36 @@ fn build_module_components_from_parent_path<'a>(
             md,
             Some((parent_access_path, parent_sig)),
         );
-        if let Some(components) = stored.with_components(pers_env, ctx, |child| child.clone()) {
+        if let Some(components) =
+            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+        {
             return Some(components);
         }
     }
 
-    with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-        let (runtime_pos, _, md) = components.lookup_qualified_module(module_name.as_str(), ctx)?;
-        let access_path = qualified_submodule_access_path(
-            components.access_path(),
-            module_name.as_str(),
-            runtime_pos,
-            &md,
-        );
-        match md.md_type {
-            crate::types::decl::ModuleType::MtySignature(sig) => Some(
-                crate::types::env_lazy::QualifiedModuleComponents::new(access_path, sig, ctx),
-            ),
-            _ => None,
-        }
-    })
+    with_resolved_module_components_for_path_with_cache_mode(
+        parent,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| {
+            let (runtime_pos, _, md) =
+                components.lookup_qualified_module(module_name.as_str(), ctx)?;
+            let access_path = qualified_submodule_access_path(
+                components.access_path(),
+                module_name.as_str(),
+                runtime_pos,
+                &md,
+            );
+            match md.md_type {
+                crate::types::decl::ModuleType::MtySignature(sig) => Some(
+                    crate::types::env_lazy::QualifiedModuleComponents::new(access_path, sig, ctx),
+                ),
+                _ => None,
+            }
+        },
+    )
     .flatten()
 }
 
@@ -23386,6 +23449,7 @@ fn build_functor_application_components<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
     let Path::Papply(functor_path, arg_path) = module_path else {
         return None;
@@ -23403,11 +23467,12 @@ fn build_functor_application_components<'a>(
             // `comp_components` thunk, not the module-declaration thunk from
             // env.ml:1568, because env.ml:1595-1602 freshens only the functor
             // argument/result module types at this point.
-            let stored = with_resolved_module_components_for_path(
+            let stored = with_resolved_module_components_for_path_with_cache_mode(
                 parent,
                 env,
                 pers_env,
                 ctx,
+                cache_mode,
                 |components| {
                     components
                         .lookup_child_components(module_name.as_str())
@@ -23422,7 +23487,7 @@ fn build_functor_application_components<'a>(
 
     let (raw_sig, resolved_name) = match &applied_mty {
         crate::types::decl::ModuleType::MtySignature(sig) => (sig.clone(), None),
-        _ => env.resolve_module_type(&applied_mty, pers_env, ctx)?,
+        _ => env.resolve_module_type(&applied_mty, pers_env, ctx, cache_mode)?,
     };
     let sig = qualify_resolved_signature_for_local_components(
         module_path,
@@ -23493,14 +23558,18 @@ fn build_shared_persistent_root_components<'a>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ComponentLookupCacheMode {
+pub(crate) enum ComponentLookupCacheMode {
     Publish,
     Probe,
 }
 
 impl ComponentLookupCacheMode {
-    fn publishes(self) -> bool {
+    pub(crate) fn publishes(self) -> bool {
         matches!(self, ComponentLookupCacheMode::Publish)
+    }
+
+    pub(crate) fn forces_alias_sig(self) -> bool {
+        self.publishes()
     }
 }
 
@@ -23529,7 +23598,7 @@ fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
     let module_key = module_components_cache_key(module_path, env);
     if let Some(result) = env
         .with_local_module_components(module_path, |stored| {
-            stored.with_components(pers_env, ctx, |components| {
+            stored.with_components(pers_env, ctx, cache_mode, |components| {
                 (f.take()
                     .expect("qualified module components callback reused"))(
                     components
@@ -23550,18 +23619,21 @@ fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
         }
     }
 
-    let components = build_module_components_from_parent_path(module_path, env, pers_env, ctx)
-        .or_else(|| build_functor_application_components(module_path, env, pers_env, ctx))
-        .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
-        .or_else(|| {
-            let (access_path, sig) =
-                build_module_signature_for_path(module_path, env, pers_env, ctx)?;
-            Some(crate::types::env_lazy::QualifiedModuleComponents::new(
-                access_path,
-                sig,
-                ctx,
-            ))
-        })?;
+    let components =
+        build_module_components_from_parent_path(module_path, env, pers_env, ctx, cache_mode)
+            .or_else(|| {
+                build_functor_application_components(module_path, env, pers_env, ctx, cache_mode)
+            })
+            .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
+            .or_else(|| {
+                let (access_path, sig) =
+                    build_module_signature_for_path(module_path, env, pers_env, ctx, cache_mode)?;
+                Some(crate::types::env_lazy::QualifiedModuleComponents::new(
+                    access_path,
+                    sig,
+                    ctx,
+                ))
+            })?;
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
@@ -24239,8 +24311,9 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
     mty: &crate::types::decl::ModuleType,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
 ) -> Option<crate::types::decl::Signature> {
-    let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx)?;
+    let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx, cache_mode)?;
     Some(qualify_resolved_signature_for_access_path(
         access_path,
         mty,
@@ -24275,6 +24348,7 @@ fn build_module_signature_for_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
@@ -24303,6 +24377,7 @@ fn build_module_signature_for_path<'a>(
                     &md.md_type,
                     pers_env,
                     ctx,
+                    cache_mode,
                 )?;
                 Some((access_path, sig))
             } else if let Some(pers) = pers_env.as_mut() {
@@ -24481,7 +24556,8 @@ fn build_module_signature_for_path<'a>(
                 pers_env,
                 ctx,
             )?;
-            let (sig, resolved_name) = env.resolve_module_type(&md.md_type, pers_env, ctx)?;
+            let (sig, resolved_name) =
+                env.resolve_module_type(&md.md_type, pers_env, ctx, cache_mode)?;
             let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
             let skip_self_manifest_subst = Env::signature_has_package_self_manifests(&sig, ctx);
             if matches!(&md.md_type, crate::types::decl::ModuleType::MtyAlias(..)) {

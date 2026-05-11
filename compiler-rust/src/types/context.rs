@@ -320,13 +320,6 @@ pub struct TypeContext {
     /// explicit side table for paths that later appear without `PersistentEnv`.
     flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
 
-    /// Scoped guard for package inclusion. OCaml's `Typemod.type_package`
-    /// reaches `wrap_constraint` after package path construction
-    /// (compiler/ml/typemod.ml:1710-1719); the Rust-only implicit-open alias
-    /// force in env_lazy.rs must not run while that inclusion walk is using
-    /// component tables that OCaml keeps lazy through compiler/ml/env.ml:800-813.
-    component_alias_sig_force_suppression: Cell<u32>,
-
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
         ahash::AHashMap<Path, ahash::AHashMap<String, (Path, super::decl::ValueDescription)>>,
@@ -501,7 +494,6 @@ impl TypeContext {
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
             flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
-            component_alias_sig_force_suppression: Cell::new(0),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -1007,19 +999,6 @@ impl TypeContext {
             .borrow()
             .as_ref()
             .is_some_and(crate::cmi::persistent_env::PersistentEnv::is_in_process_mode)
-    }
-
-    pub(crate) fn suppresses_component_alias_sig_force(&self) -> bool {
-        self.component_alias_sig_force_suppression.get() > 0
-    }
-
-    pub(crate) fn with_component_alias_sig_force_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
-        let previous = self.component_alias_sig_force_suppression.get();
-        self.component_alias_sig_force_suppression
-            .set(previous.saturating_add(1));
-        let result = f();
-        self.component_alias_sig_force_suppression.set(previous);
-        result
     }
 
     /// Look up a type declaration by full qualified path string.
