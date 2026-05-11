@@ -23865,40 +23865,12 @@ fn with_resolved_child_module_components<'a, R>(
     // module's `comp_modules` and `comp_components` as separate thunks. Direct
     // persistent-unit descent such as `Inner_define.N` follows env.ml:1000-1007
     // through `comp_components` only, and explicit opens keep that lazy order.
-    // The implicit Stdlib/Pervasives open from compiler/core/res_compmisc.ml:61-62
-    // and compiler/ml/env.ml:1874-1877 exposes dotted component paths such as
-    // `Stdlib.JsError.RangeError`. When the child signature contains only
-    // values, or exposes manifest types that OCaml expands through
-    // compiler/ml/ctype.ml:1346-1372 before the next structure item, OCaml
-    // observes the env.ml:1568-1569 module thunk via env.ml:865-882. Children
-    // with nested components but no manifest type should keep following
-    // env.ml:781-793 and env.ml:1000-1007 through `comp_components` only.
+    // Module-declaration forcing must come from the actual env.ml:865-882
+    // lookup/normalization path, not from inspecting the child signature shape.
     // Alias children are the direct `scrape_alias` case: env.ml:1517 calls
     // `scrape_alias`, and env.ml:1441-1444 forces `find_module path env`
     // through env.ml:865-882 before the aliased component table is built.
     if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
-        let parent_head_name = parent_components.access_path().head().name();
-        let parent_is_implicit_stdlib_component_path =
-            matches!(parent_components.access_path(), Path::Pdot(_, _, _))
-                && (parent_head_name == "Stdlib" || parent_head_name == "Pervasives");
-        let child_module_has_only_values = parent_components
-            .lookup_module(child_name)
-            .is_some_and(|(_, _, md)| module_type_has_only_values(&md.md_type));
-        let child_module_has_manifest_type = parent_components
-            .lookup_module(child_name)
-            .is_some_and(|(_, _, md)| module_type_has_manifest_type(&md.md_type));
-        if parent_is_implicit_stdlib_component_path
-            && (child_module_has_only_values || child_module_has_manifest_type)
-        {
-            // OCaml compiler/ml/env.ml:797-812 descends into
-            // `comp_components` for qualified value lookup. That does not force
-            // env.ml:1568's `comp_modules` thunk just because the child is an
-            // alias; alias scraping is forced separately by env.ml:1517 and
-            // env.ml:1440-1446 when building the child component table. Keep this
-            // eager force limited to the implicit Stdlib cases where OCaml reaches
-            // the module-declaration thunk through normalize/manifest expansion.
-            let _ = parent_components.lookup_qualified_module_shared(child_name, ctx);
-        }
         let access_path = if parent_components.access_path().head().is_persistent()
             || parent_components.access_path().head().stamp() == 0
         {
@@ -23969,35 +23941,6 @@ fn with_resolved_child_module_components<'a, R>(
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
-}
-
-fn module_type_has_only_values(module_type: &crate::types::decl::ModuleType) -> bool {
-    matches!(
-        module_type,
-        crate::types::decl::ModuleType::MtySignature(sig)
-            if sig.iter().all(|item| matches!(
-                item,
-                crate::types::decl::SignatureItem::SigValue(..)
-            ))
-    )
-}
-
-fn module_type_has_manifest_type(module_type: &crate::types::decl::ModuleType) -> bool {
-    // OCaml compiler/ml/ctype.ml:1367-1372 expands manifest type
-    // abbreviations through `Env.find_type_expansion`, and its fallback
-    // `Env.normalize_path` reaches compiler/ml/env.ml:903-914. For dotted
-    // module paths that asks env.ml:865-882 for the module declaration,
-    // forcing the env.ml:1568 `comp_modules` thunk and running
-    // compiler/ml/subst.ml:378-400 binder substitution.
-    matches!(
-        module_type,
-        crate::types::decl::ModuleType::MtySignature(sig)
-            if sig.iter().any(|item| matches!(
-                item,
-                crate::types::decl::SignatureItem::SigType(_, decl, _)
-                    if decl.type_manifest.is_some()
-            ))
-    )
 }
 
 fn with_resolved_module_components_for_lid_inner<'a, R>(
