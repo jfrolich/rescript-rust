@@ -5306,10 +5306,9 @@ fn force_qualified_value_type_paths<'a>(
                 // then reaches component tables for non-local type paths in that
                 // scheme. A local module alias such as `UploadManager.registerFile`
                 // still forces imported paths like `Js.TypedArray2.Uint8Array.t`
-                // before the next binder; only keep Rust's lazier behavior for
-                // normal compilation where stamp parity is unobservable.
-                let should_force_component_type_lookup = !value_access_root_is_local
-                    || (ctx.preserve_canonical_typedtree() && !path_root_is_local(&path));
+                // before the next binder.
+                let should_force_component_type_lookup =
+                    !value_access_root_is_local || !path_root_is_local(&path);
                 if should_force_component_type_lookup && let Path::Pdot(parent, name, _) = &path {
                     // OCaml compiler/ml/typecore.ml:2421-2457 types
                     // `Pexp_ident` by calling `Typetexp.find_value`, checking
