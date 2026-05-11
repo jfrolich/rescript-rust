@@ -2793,7 +2793,6 @@ fn try_expand_head_with_mode<'a>(
             let path = path.clone();
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
-            let path_name = path.name();
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
@@ -2909,7 +2908,11 @@ fn try_expand_head_with_mode<'a>(
                         // resolver below handles path lookup for declarations with
                         // no stored `type_path`.
                         env_decl.type_path.as_ref().is_some_and(|decl_path| {
-                            decl_path.same(&path) || decl_path.name() == path_name
+                            // OCaml compiler/ml/env.ml:800-813 `Env.find_type`
+                            // reaches a qualified declaration through the
+                            // parent component table; it does not accept an
+                            // unrelated declaration with the same printed path.
+                            decl_path.same(&path)
                         })
                     }
                     Path::Papply(_, _) => false,
