@@ -359,6 +359,7 @@ fn format_constructor_attributes(attrs: &[Attribute]) -> String {
                 AttributePayload::Float(value) | AttributePayload::BigInt(value) => value.clone(),
                 AttributePayload::Bool(true) => "true".to_string(),
                 AttributePayload::Bool(false) => "false".to_string(),
+                AttributePayload::Deprecated { reason, .. } => format!("\"{reason}\""),
                 AttributePayload::Empty | AttributePayload::Structure(_) => return None,
             };
             Some(format!("@as({payload}) "))

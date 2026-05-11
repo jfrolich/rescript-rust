@@ -509,6 +509,9 @@ fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<Tag
                 crate::types::decl::AttributePayload::Ident(value) => {
                     TagAttributePayload::Ident(value.clone())
                 }
+                crate::types::decl::AttributePayload::Deprecated { reason, .. } => {
+                    TagAttributePayload::Str(reason.clone())
+                }
                 crate::types::decl::AttributePayload::Structure(_) => TagAttributePayload::Empty,
             },
         })

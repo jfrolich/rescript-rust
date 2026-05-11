@@ -5961,6 +5961,35 @@ fn constructor_alias_rewrite_value_path(
     ))
 }
 
+fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<Warning> {
+    for attr in &desc.val_attributes {
+        if attr.attr_name.txt != "deprecated" && attr.attr_name.txt != "ocaml.deprecated" {
+            continue;
+        }
+        let (reason, can_be_automigrated) = match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Deprecated {
+                reason,
+                can_be_automigrated,
+            } => (reason.as_str(), *can_be_automigrated),
+            crate::types::decl::AttributePayload::Str(reason) => (reason.as_str(), false),
+            crate::types::decl::AttributePayload::Empty => ("", false),
+            _ => ("", false),
+        };
+        let message = if reason.is_empty() {
+            path.name()
+        } else {
+            format!("{}\n{}", path.name(), reason)
+        };
+        return Some(Warning::Deprecated {
+            message,
+            def_loc: Location::none(),
+            use_loc: Location::none(),
+            can_be_automigrated,
+        });
+    }
+    None
+}
+
 /// Type check an expression against an expected type.
 pub fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -6015,6 +6044,9 @@ pub fn type_expect<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             )?;
+            if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
+                tctx.report_warning(lid.loc, warning);
+            }
 
             let ty = crate::types::instance(ctx, desc.val_type);
             force_qualified_value_type_paths(tctx, env, &path, ty);

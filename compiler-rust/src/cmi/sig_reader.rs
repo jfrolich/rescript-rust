@@ -1122,7 +1122,11 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
             OcamlValue::Block(_, fields) if !fields.is_empty() => {
                 let attr_name = read_attribute_name(&fields[0]);
                 let payload = if fields.len() > 1 {
-                    read_attribute_payload(&fields[1])
+                    if attr_name.txt == "deprecated" {
+                        read_deprecated_attribute_payload(&fields[1])
+                    } else {
+                        read_attribute_payload(&fields[1])
+                    }
                 } else {
                     AttributePayload::Empty
                 };
@@ -1162,6 +1166,38 @@ fn read_attribute_payload(value: &OcamlValue) -> AttributePayload {
         }
         _ => AttributePayload::Empty,
     }
+}
+
+fn read_deprecated_attribute_payload(value: &OcamlValue) -> AttributePayload {
+    match value {
+        OcamlValue::Block(0, fields) if !fields.is_empty() => {
+            let structure = &fields[0];
+            let Some(reason) = extract_str_payload_string(structure) else {
+                return AttributePayload::Empty;
+            };
+            AttributePayload::Deprecated {
+                reason,
+                can_be_automigrated: deprecated_payload_has_migration_template(structure),
+            }
+        }
+        _ => AttributePayload::Empty,
+    }
+}
+
+fn deprecated_payload_has_migration_template(value: &OcamlValue) -> bool {
+    fn visit(value: &OcamlValue, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match value {
+            OcamlValue::String(value) => {
+                value == "migrate" || value == "migrateInPipeChain"
+            }
+            OcamlValue::Block(_, fields) => fields.iter().any(|field| visit(field, depth + 1)),
+            _ => false,
+        }
+    }
+    visit(value, 0)
 }
 
 /// Try to extract an identifier-like payload from a marshaled PStr payload.

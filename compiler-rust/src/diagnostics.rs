@@ -237,7 +237,7 @@ impl Warning {
                 let mut msg = format!("deprecated: {message}");
                 if *can_be_automigrated {
                     msg.push_str(
-                        "\n\n  This can be automatically migrated by the ReScript migration tool.",
+                        "\n\nThis can be automatically migrated by the ReScript migration tool. Run `rescript-tools migrate-all <project-root>` to run all automatic migrations available in your project, or `rescript-tools migrate <file>` to migrate a single file.",
                     );
                 }
                 msg

@@ -181,8 +181,21 @@ fn parser_attr_to_decl_attr(
     attr: &ParsedAttribute,
 ) -> crate::types::decl::Attribute {
     let (name, payload) = attr;
+    let attr_name = arena.get_string(name.txt);
     let attr_payload = match payload {
         ParsedPayload::PStr(items) => {
+            if attr_name == "deprecated"
+                && let Some(payload) = parser_deprecated_payload_to_decl_payload(arena, items)
+            {
+                return crate::types::decl::Attribute {
+                    attr_name: crate::types::asttypes::Located {
+                        txt: attr_name.to_string(),
+                        loc: arena.to_location(name.loc),
+                    },
+                    attr_payload: payload,
+                    attr_loc: arena.to_location(name.loc),
+                };
+            }
             // OCaml's Lambda.find_name: extract string from @as("name") payloads.
             // PStr with a single Pstr_eval(Pexp_constant(String(value, _)), _) → Str(value)
             if let [item] = items.as_slice() {
@@ -265,6 +278,57 @@ fn parser_attrs_to_decl_attrs(
         .iter()
         .map(|attr| parser_attr_to_decl_attr(arena, attr))
         .collect()
+}
+
+fn parser_deprecated_payload_to_decl_payload(
+    arena: &ParseArena,
+    items: &[ParsedStructureItem],
+) -> Option<crate::types::decl::AttributePayload> {
+    let [item] = items else {
+        return None;
+    };
+    let ParsedStructureItemDesc::Pstr_eval(eval_box) = item.pstr_desc.as_ref() else {
+        return None;
+    };
+    let (expr_idx, _attrs) = eval_box.as_ref();
+    let expr = arena.get_expr(*expr_idx);
+
+    match expr.pexp_desc.as_ref() {
+        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match c.as_ref() {
+            crate::parser::ast::Constant::String(reason, _) => {
+                Some(crate::types::decl::AttributePayload::Deprecated {
+                    reason: reason.to_string(),
+                    can_be_automigrated: false,
+                })
+            }
+            _ => None,
+        },
+        crate::parser::ast::ExpressionDesc::Pexp_record(record) => {
+            let (fields, _base) = record.as_ref();
+            let mut reason = None;
+            let mut can_be_automigrated = false;
+            for field in fields {
+                let field_name = arena.lident_last(field.lid.txt);
+                if field_name == "reason" {
+                    let field_expr = arena.get_expr(field.expr);
+                    if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
+                        field_expr.pexp_desc.as_ref()
+                    {
+                        if let crate::parser::ast::Constant::String(value, _) = c.as_ref() {
+                            reason = Some(value.to_string());
+                        }
+                    }
+                } else if field_name == "migrate" || field_name == "migrateInPipeChain" {
+                    can_be_automigrated = true;
+                }
+            }
+            reason.map(|reason| crate::types::decl::AttributePayload::Deprecated {
+                reason,
+                can_be_automigrated,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn decl_attrs_mark_immediate(attrs: &[crate::types::decl::Attribute]) -> bool {

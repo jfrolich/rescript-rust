@@ -1663,8 +1663,10 @@ fn format_compiler_warning_report(
     output.push('\n');
 
     for line in warning.warning.message().lines() {
-        output.push_str("  ");
-        output.push_str(line);
+        if !line.is_empty() {
+            output.push_str("  ");
+            output.push_str(line);
+        }
         output.push('\n');
     }
     output.push('\n');

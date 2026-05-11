@@ -517,6 +517,11 @@ pub enum AttributePayload {
     Bool(bool),
     /// Identifier payload
     Ident(String),
+    /// Deprecated payload with optional migration metadata.
+    Deprecated {
+        reason: String,
+        can_be_automigrated: bool,
+    },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
 }
