@@ -2465,12 +2465,28 @@ fn rendered_alias_expansion(
     actual_side: bool,
 ) -> Option<TypeExprRef> {
     let first = trace.first()?;
-    let top = if actual_side { first.0 } else { first.1 };
+    let (top_actual, top_expected) = *first;
+    let top = if actual_side { top_actual } else { top_expected };
     let top_text = format_type_expr(type_ctx, top);
-    trace.iter().skip(1).find_map(|pair| {
+    if let Some(expansion) = trace.iter().skip(1).find_map(|pair| {
         let ty = if actual_side { pair.0 } else { pair.1 };
         (type_ctx.repr(ty) != type_ctx.repr(top) && format_type_expr(type_ctx, ty) == top_text)
             .then_some(ty)
+    }) {
+        return Some(expansion);
+    }
+
+    let counterpart_text =
+        format_type_expr(type_ctx, if actual_side { top_expected } else { top_actual });
+    trace.iter().skip(1).find_map(|pair| {
+        let (counterpart, candidate) = if actual_side {
+            (pair.0, pair.1)
+        } else {
+            (pair.1, pair.0)
+        };
+        let candidate_text = format_type_expr(type_ctx, candidate);
+        (format_type_expr(type_ctx, counterpart) == counterpart_text && candidate_text != top_text)
+            .then_some(candidate)
     })
 }
 
@@ -2771,8 +2787,13 @@ fn nested_type_clash_pair(
     let top_actual_text = format_type_expr(type_ctx, top_actual);
     let top_expected_text = format_type_expr(type_ctx, top_expected);
     trace.iter().skip(1).rev().copied().find(|(actual, expected)| {
-        format_type_expr(type_ctx, *actual) != top_actual_text
-            || format_type_expr(type_ctx, *expected) != top_expected_text
+        let actual_text = format_type_expr(type_ctx, *actual);
+        let expected_text = format_type_expr(type_ctx, *expected);
+        let is_top_alias_expansion =
+            (actual_text == top_expected_text && expected_text != top_actual_text)
+                || (expected_text == top_actual_text && actual_text != top_expected_text);
+        !is_top_alias_expansion
+            && (actual_text != top_actual_text || expected_text != top_expected_text)
     })
 }
 
