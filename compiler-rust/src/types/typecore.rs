@@ -8916,6 +8916,20 @@ fn type_application(
             _ => None,
         }
     };
+    if total_app
+        && let Some(arity) = function_arity
+        && args.len() as i32 > arity
+    {
+        return Err(TypeCoreError::UncurriedArityMismatch {
+            loc: funct.pexp_loc,
+            function_type: typed_funct.exp_type,
+            expected_arity: arity as usize,
+            provided_arity: args.len(),
+            provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
+            function_name: None,
+            use_fallback_message: matches!(typed_funct.exp_desc, ExpressionDesc::Texp_send(..)),
+        });
+    }
     let max_arity = function_arity.unwrap_or(i32::MAX);
     let mut top_arity: Option<i32> = function_arity;
 
