@@ -561,7 +561,12 @@ pub(crate) fn flattened_alias_paths_equivalent(
             .type_path
             .as_ref()
             .zip(decl2.type_path.as_ref())
-            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name())
+            .is_some_and(|(lp, sp)| {
+                // OCaml compiler/ml/ctype.ml:1941 `compatible_paths` is
+                // `Path.same`; compiler/ml/ctype.ml:2077-2088 compares type
+                // declarations without falling back to printed path names.
+                lp.same(sp)
+            })
 }
 
 pub(crate) fn nullary_constr_paths_equivalent(
