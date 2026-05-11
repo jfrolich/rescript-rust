@@ -37,7 +37,7 @@ use crate::types::sexp_typedtree::{
 use crate::types::typecore::{TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::TypeModError;
 use crate::types::{
-    ArgLabel as TypeArgLabel, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
+    ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
     TypeExprRef, initial_env, transl_signature, type_structure,
 };
 
@@ -2199,7 +2199,50 @@ fn append_extra_type_clash_help(
         message.push_str("You can only compare things of the same type.");
     }
 
+    append_dict_literal_help(type_ctx, trace, message);
     append_simple_conversion_help(type_ctx, trace, message);
+}
+
+fn append_dict_literal_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
+        return;
+    };
+
+    if !type_is_object(type_ctx, actual) || !type_is_dict(type_ctx, expected) {
+        return;
+    }
+
+    message.push_str("\n\nDicts are written like: ");
+    message.push_str(INFO);
+    message.push_str("dict{\"a\": 1, \"b\": 2}");
+    message.push_str(RESET);
+    message.push_str("\n\n");
+}
+
+fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    matches!(
+        &*type_ctx.get_desc(repr),
+        TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. }
+    )
+}
+
+fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => {
+            path.same(&crate::types::predef::path_dict()) || path.last() == "dict"
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_dict(type_ctx, *next),
+        _ => false,
+    }
 }
 
 fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
@@ -2718,12 +2761,45 @@ impl<'a> TypeExprPrinter<'a> {
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
             TypeDesc::Tpoly { body, .. } => self.format(*body),
-            TypeDesc::Tobject { .. } => "<object>".to_string(),
-            TypeDesc::Tfield { .. } => "<object-field>".to_string(),
-            TypeDesc::Tnil => "<object-end>".to_string(),
+            TypeDesc::Tobject { fields, .. } => self.format_object(*fields),
+            TypeDesc::Tfield { .. } => self.format_object(repr),
+            TypeDesc::Tnil => "{}".to_string(),
             TypeDesc::Tvariant(_) => "<variant>".to_string(),
             TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
         }
+    }
+
+    fn format_object(&mut self, fields: TypeExprRef) -> String {
+        let mut items = Vec::new();
+        let mut current = fields;
+        let mut seen = AHashSet::new();
+
+        loop {
+            let repr = self.type_ctx.repr(current);
+            if !seen.insert(repr) {
+                break;
+            }
+
+            match &*self.type_ctx.get_desc(repr) {
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => {
+                    if !matches!(kind, FieldKind::Fabsent) {
+                        items.push(format!("\"{}\": {}", name, self.format(*typ)));
+                    }
+                    current = *rest;
+                }
+                TypeDesc::Tobject { fields, .. } => current = *fields,
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+                TypeDesc::Tnil => break,
+                _ => break,
+            }
+        }
+
+        format!("{{{}}}", items.join(", "))
     }
 
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
