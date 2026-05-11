@@ -573,14 +573,13 @@ pub(crate) fn flattened_alias_paths_equivalent(
 
     let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
     let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
-    // The naming shape already proves these are flattened/unflattened forms
-    // of the same path family. If declaration lookup fails (common for some
-    // external aliases), accept the equivalence directly.
-    if long_decl.is_none() || short_decl.is_none() {
-        return true;
-    }
-    let long_decl = long_decl.unwrap();
-    let short_decl = short_decl.unwrap();
+    // OCaml derives alias identity from declarations reached through
+    // compiler/ml/env.ml:800-813 `find_type`, compiler/ml/subst.ml:87-100
+    // `type_path`, and manifest expansion in compiler/ml/ctype.ml:1346-1372.
+    // A flattened/unflattened spelling match alone is not evidence of identity.
+    let (Some(long_decl), Some(short_decl)) = (long_decl, short_decl) else {
+        return false;
+    };
     if (short_decl.type_manifest.is_none() && short_decl.type_path.is_none())
         || (long_decl.type_manifest.is_none() && long_decl.type_path.is_none())
     {
