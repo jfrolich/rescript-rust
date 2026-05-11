@@ -166,7 +166,7 @@ Completed for this goal:
 - **Alias representative patching removed:** `preserve_alias_unify_representative` and its call sites were deleted. Do not reintroduce a typecore-side representative rewrite; representative choice must continue to emerge from the OCaml-aligned `type_argument` -> `type_expect` -> `unify_exp` flow plus `ctype.ml` unification/expansion.
 - **Canonical typedtree mode altering semantics removed:** `preserve_canonical_typedtree` and its driver/typecore branches were deleted. Normal compilation and typedtree dumping now use one lazy component-resolution path; output mode must stay out of force order, thunk sharing, and signature copy depth.
 - **Alias representative selection removed:** `preferred_alias_equiv_representative` and its call sites were deleted. Alias-equivalent constructor recovery now links through the existing unification order instead of a typecore-side representative preference.
-- **Path-spelling alias fallbacks reduced:** `env_lazy::parent_matches_component_context` no longer formats `A__B`/`A_B`; local alias unification no longer succeeds when the short declaration is missing; `lookup_type_decl_for_path` no longer synthesizes `Stdlib.X.t`/`Stdlib_X.t`; flattened constructor, signature-prefix, nested self-path, and include-localization rewrites now require registered alias-table evidence. Keep the broader path-spelling debt item open until all remaining spelling-driven alias paths are removed or justified against OCaml.
+- **Path-spelling alias fallbacks reduced:** `env_lazy::parent_matches_component_context` no longer formats `A__B`/`A_B`; local alias unification no longer succeeds when the short declaration is missing; `lookup_type_decl_for_path` no longer synthesizes `Stdlib.X.t`/`Stdlib_X.t`; flattened constructor, signature-prefix, nested self-path, include-localization, and raw lazy signature registration now require registered alias-table evidence. Keep the broader path-spelling debt item open until all remaining spelling-driven alias paths are removed or justified against OCaml.
 - **Probe cache suppression removed:** `component_alias_probe_cache_suppression` and its global guard were deleted. Probe-style type/component lookups now use explicit no-publish cache mode at the lookup API boundary, matching OCaml's separate `find_module_descr`/`find_type` descriptor reads instead of changing global context state.
 
 ### Running Typedtree Sexp Parity Tests
@@ -193,8 +193,8 @@ Completed for this goal:
 
 **CRITICAL: Build BOTH compiler and rewatch before parity tests:**
 ```bash
-cargo build --release --manifest-path compiler-rust/Cargo.toml
-cargo build --release --manifest-path rewatch/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
 ```
 The parity script uses the rewatch binary, NOT bsc directly. A stale rewatch binary gives WRONG results!
 
@@ -277,8 +277,8 @@ Use this workflow for every parity session so results are reproducible and analy
 
 ```bash
 # 1) Build compiler binaries used by parity
-cargo build --release --manifest-path compiler-rust/Cargo.toml
-cargo build --release --manifest-path rewatch/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
 
 # 2) Clear cached parity artifacts (files only)
 find .parity-cache/tests/diffs -type f -delete
@@ -345,7 +345,7 @@ cd tests/tests
 
 # 2) Run Rust bsc with those args from tests/tests/lib/bs
 cd lib/bs
-timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust.sexp 1>/dev/null
+timeout 10 /absolute/path/to/compiler-rust/target/debug/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust.sexp 1>/dev/null
 
 # 3) Optional: run OCaml bsc with same args for side-by-side diffs
 timeout 10 /absolute/path/to/_build/install/default/bin/bsc -dtyped-sexp <compiler-args...> 2> /tmp/ocaml.sexp 1>/dev/null
@@ -354,7 +354,7 @@ diff -u /tmp/ocaml.sexp /tmp/rust.sexp | sed -n '1,200p'
 
 Use env-gated debug tracing with direct bsc repro (example):
 ```bash
-RUST_DEBUG_FINALIZE_VARIANT=1 timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust-debug.sexp 1>/dev/null
+RUST_DEBUG_FINALIZE_VARIANT=1 timeout 10 /absolute/path/to/compiler-rust/target/debug/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust-debug.sexp 1>/dev/null
 rg "\[finalize-" /tmp/rust-debug.sexp
 ```
 
@@ -741,7 +741,7 @@ cargo clippy --manifest-path rewatch/Cargo.toml --all-targets --all-features
 cargo fmt --check --manifest-path rewatch/Cargo.toml
 
 # Build rewatch
-cargo build --manifest-path rewatch/Cargo.toml --release
+cargo build --manifest-path rewatch/Cargo.toml
 
 # Or use the Makefile shortcuts
 make rewatch          # Build rewatch
@@ -962,7 +962,7 @@ The expected files in `tests/syntax_tests/data/*/expected/` contain the OCaml re
 
 ```bash
 # Build the Rust parser first
-cargo build --manifest-path compiler-rust/Cargo.toml --release
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # Run all syntax tests with the Rust parser
 PARSER=rust ./scripts/test_syntax.sh
@@ -1014,10 +1014,10 @@ cat tests/temp/syntax_tests/data/printer/expr/expected/apply.res.txt
 
 ```bash
 # For printer tests (default ReScript output)
-./compiler-rust/target/release/res_parser_rust tests/syntax_tests/data/printer/expr/apply.res
+./compiler-rust/target/debug/res_parser_rust tests/syntax_tests/data/printer/expr/apply.res
 
 # For parsing tests (ML format output)
-./compiler-rust/target/release/res_parser_rust -print ml tests/syntax_tests/data/parsing/grammar/expressions/binary.res
+./compiler-rust/target/debug/res_parser_rust -print ml tests/syntax_tests/data/parsing/grammar/expressions/binary.res
 
 # Compare with OCaml parser output
 ./_build/install/default/bin/res_parser tests/syntax_tests/data/printer/expr/apply.res
@@ -1132,7 +1132,7 @@ The following files have known location parity differences that require more com
 
 ```bash
 # 1. Build the Rust compiler
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # 2. Run the triage script to see what's broken and WHY
 ./scripts/triage_js_failures.sh
@@ -1141,7 +1141,7 @@ cargo build --release --manifest-path compiler-rust/Cargo.toml
 #    Fix the root cause in Rust code
 
 # 4. Rebuild
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # 5. Use single-file test for rapid iteration while developing a fix
 ./scripts/test_js_single.sh adt_optimize_test --diff
@@ -1282,7 +1282,7 @@ These indices are updated in `next()` when tokens are consumed. The key methods 
    ```bash
    FILE=tests/syntax_tests/data/parsing/grammar/expressions/binary.res
    ./_build/install/default/bin/res_parser -print binary $FILE > /tmp/ocaml.bin
-   ./compiler-rust/target/release/res_parser_rust -print binary $FILE > /tmp/rust.bin
+   ./compiler-rust/target/debug/res_parser_rust -print binary $FILE > /tmp/rust.bin
    diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin) | head -50
    ```
 
@@ -1303,7 +1303,7 @@ These indices are updated in `next()` when tokens are consumed. The key methods 
 
 6. **Test and commit:**
    ```bash
-   cargo build --manifest-path compiler-rust/Cargo.toml --release
+   cargo build --manifest-path compiler-rust/Cargo.toml
    ./scripts/test_parser_ast_parity.sh 2>&1 | grep "FAILED\|passing"
    # If improved, commit immediately!
    ```
@@ -1392,7 +1392,7 @@ fn parse_inner(p: &mut Parser) {
 
 # Compare binary output directly
 ./_build/install/default/bin/res_parser -print binary FILE > /tmp/ocaml.bin
-./compiler-rust/target/release/res_parser_rust -print binary FILE > /tmp/rust.bin
+./compiler-rust/target/debug/res_parser_rust -print binary FILE > /tmp/rust.bin
 diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin)
 ```
 
