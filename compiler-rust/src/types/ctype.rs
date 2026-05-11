@@ -489,7 +489,10 @@ pub(crate) fn decl_manifest_aliases_path(
         let manifest_desc = ctx.get_desc(manifest);
         match &*manifest_desc {
             TypeDesc::Tconstr { path, args, .. } => {
-                args.len() == arity && (path.same(target) || path.name() == target.name())
+                // OCaml compiler/ml/ctype.ml:1941 `compatible_paths` is
+                // `Path.same`; manifest aliases must not become equivalent
+                // through printed path names.
+                args.len() == arity && path.same(target)
             }
             _ => false,
         }
@@ -575,7 +578,7 @@ pub(crate) fn nullary_constr_paths_equivalent(
     path1: &Path,
     path2: &Path,
 ) -> bool {
-    if path1.same(path2) || path1.name() == path2.name() {
+    if path1.same(path2) {
         return true;
     }
 
@@ -591,7 +594,12 @@ pub(crate) fn nullary_constr_paths_equivalent(
         .type_path
         .as_ref()
         .zip(decl2.type_path.as_ref())
-        .is_some_and(|(p1, p2)| p1.same(p2) || p1.name() == p2.name());
+        .is_some_and(|(p1, p2)| {
+            // OCaml compiler/ml/ctype.ml:2077-2088 compares declaration paths
+            // through `compatible_paths`, which is `Path.same` at
+            // compiler/ml/ctype.ml:1941.
+            p1.same(p2)
+        });
     if same_type_path {
         return true;
     }
