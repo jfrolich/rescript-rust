@@ -9469,14 +9469,6 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
-                preserve_alias_unify_representative(
-                    tctx,
-                    env,
-                    arg_ty,
-                    typed_arg.exp_type,
-                    true,
-                    typed_funct_value_path.as_ref(),
-                );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
@@ -9755,14 +9747,6 @@ fn type_application(
                 tctx.force_fresh_local_float = previous_force_fresh_local_float;
 
                 let typed_arg = typed_arg_result?;
-                preserve_alias_unify_representative(
-                    tctx,
-                    env,
-                    arg_expected_ty,
-                    typed_arg.exp_type,
-                    true,
-                    typed_funct_value_path.as_ref(),
-                );
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
