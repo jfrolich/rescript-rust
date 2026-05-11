@@ -4378,24 +4378,10 @@ fn unify_types<'a>(
                     }
                     return Ok(());
                 }
-                let p1 = path1.name();
-                let p2 = path2.name();
-                if p1 == p2 && args1.len() == args2.len() {
-                    let pairs: Vec<_> = args1
-                        .iter()
-                        .zip(args2.iter())
-                        .map(|(&a, &b)| (a, b))
-                        .collect();
-                    drop(desc1);
-                    drop(desc2);
-                    // Equivalent named paths with divergent stamps should still
-                    // unify structurally through their arguments.
-                    link_type(ctx, t1, t2);
-                    for (a, b) in pairs {
-                        unify(ctx, state, a, b)?;
-                    }
-                    return Ok(());
-                }
+                // OCaml compiler/ml/ctype.ml:2413-2433 only takes the
+                // constructor argument-only path for `Path.same`; divergent
+                // stamps with the same printed path fall through to normal
+                // expansion, equation generation, or failure.
                 if let Some(env) = state.env() {
                     let norm1 = normalize_path_full(ctx, env, path1);
                     let norm2 = normalize_path_full(ctx, env, path2);
