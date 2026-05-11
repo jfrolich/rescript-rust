@@ -1777,6 +1777,24 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundValue {
+            loc,
+            name,
+            qualifier,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_unbound_value_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                name,
+                qualifier.as_deref(),
+                alternatives,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LabelMultiplyDefined {
             loc,
             label,
@@ -2159,6 +2177,42 @@ fn format_wrong_name_report(
             &raw_message,
         );
     }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_unbound_value_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    qualifier: Option<&str>,
+    alternatives: &[String],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    if let Some(qualifier) = qualifier {
+        message.push_str("The value ");
+        message.push_str(name);
+        message.push_str(" can't be found in ");
+        message.push_str(qualifier);
+    } else {
+        message.push_str("The value ");
+        message.push_str(name);
+        message.push_str(" can't be found");
+    }
+
+    if let Some(hint) = spellcheck_hint(name, alternatives) {
+        message.push_str("\n\n");
+        message.push_str(INFO);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        message.push_str(RESET);
+    }
+
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

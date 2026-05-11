@@ -461,6 +461,14 @@ pub enum TypeCoreError {
         alternatives: Option<Vec<String>>,
     },
 
+    /// Unbound value identifier.
+    UnboundValue {
+        loc: LocIdx,
+        name: String,
+        qualifier: Option<String>,
+        alternatives: Vec<String>,
+    },
+
     /// Private type.
     PrivateType(TypeExprRef),
 
@@ -6200,12 +6208,18 @@ pub fn type_expect<'a>(
             }
 
             // Normal identifier expression
-            let (path, desc) = env.lookup_value_by_lid(
+            let (path, desc) = match env.lookup_value_by_lid(
                 longident,
                 tctx.arena,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(TypeCoreError::UndefinedMethod { .. }) => {
+                    return Err(unbound_value_error(tctx, env, lid.loc, longident));
+                }
+                Err(err) => return Err(err),
+            };
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -16735,6 +16749,60 @@ fn apply_letmodule_local_path_cleanup<'a>(
             &mut replacements,
             &mut seen,
         );
+    }
+}
+
+fn unbound_value_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> TypeCoreError {
+    let (name, qualifier) = match lid {
+        Longident::Ldot(prefix, idx) => (
+            tctx.arena.get_string(*idx).to_string(),
+            Some(tctx.longident_to_string(prefix)),
+        ),
+        _ => (tctx.longident_to_string(lid), None),
+    };
+    let alternatives = unbound_value_alternatives(tctx, env, lid);
+    TypeCoreError::UnboundValue {
+        loc,
+        name,
+        qualifier,
+        alternatives,
+    }
+}
+
+fn unbound_value_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    match lid {
+        Longident::Lident(_) => env
+            .iter_values()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        Longident::Ldot(prefix, _) => env
+            .resolve_module_lid_raw(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .map(|(_, sig)| {
+                sig.iter()
+                    .filter_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigValue(id, _) => {
+                            Some(id.name().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Longident::Lapply(_, _) => Vec::new(),
     }
 }
 
