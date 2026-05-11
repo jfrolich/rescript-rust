@@ -2894,85 +2894,6 @@ fn type_pattern_inner(
     }
 }
 
-fn preferred_alias_equiv_representative<'a>(
-    env: &Env,
-    ctx: &'a crate::types::context::TypeContext,
-    lhs: TypeExprRef,
-    rhs: TypeExprRef,
-) -> Option<TypeExprRef> {
-    fn prefer_qualified_flat_alias(
-        ctx: &TypeContext,
-        lhs: TypeExprRef,
-        rhs: TypeExprRef,
-        path1: &Path,
-        path2: &Path,
-    ) -> Option<TypeExprRef> {
-        // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
-        // env.ml:1530-1538 prefixes the selected component path, then
-        // compiler/ml/subst.ml:303-309 substitutes value descriptions through
-        // that component table. Prefer the qualified component path only when
-        // Rust has recorded that exact Env-derived flattened-head rewrite.
-        let rewrite1 = crate::types::ctype::registered_flattened_alias_rewrite(ctx, path1);
-        if rewrite1
-            .as_ref()
-            .is_some_and(|rewritten| rewritten.same(path2))
-        {
-            Some(rhs)
-        } else if crate::types::ctype::registered_flattened_alias_rewrite(ctx, path2)
-            .as_ref()
-            .is_some_and(|rewritten| rewritten.same(path1))
-        {
-            Some(lhs)
-        } else {
-            None
-        }
-    }
-
-    fn prefers_local_alias_path(env: &Env, path: &Path) -> bool {
-        // OCaml compiler/ml/env.ml:865-880 forces local module aliases through
-        // the environment path selected by the source, then ctype.ml:2361-2364
-        // and ctype.ml:2393-2397 can make that alias path the shared
-        // representative during expression unification. This applies to nested
-        // alias-rooted paths such as `J.Kind.json`, not only `J.t`.
-        !path.head().is_persistent()
-            && env.find_module(path.head().name()).ok().is_some_and(|md| {
-                matches!(md.md_type, crate::types::decl::ModuleType::MtyAlias(..))
-            })
-    }
-
-    let lhs_repr = ctx.repr(lhs);
-    let rhs_repr = ctx.repr(rhs);
-    let lhs_desc = ctx.get_desc(lhs_repr);
-    let rhs_desc = ctx.get_desc(rhs_repr);
-    let result = match (&*lhs_desc, &*rhs_desc) {
-        (TypeDesc::Tconstr { path: path1, .. }, TypeDesc::Tconstr { path: path2, .. }) => {
-            let lhs_alias_path = prefers_local_alias_path(env, path1);
-            let rhs_alias_path = prefers_local_alias_path(env, path2);
-            if lhs_alias_path != rhs_alias_path {
-                if lhs_alias_path {
-                    Some(lhs_repr)
-                } else {
-                    Some(rhs_repr)
-                }
-            } else if let Some(preferred) =
-                prefer_qualified_flat_alias(ctx, lhs_repr, rhs_repr, path1, path2)
-            {
-                Some(preferred)
-            } else {
-                match (path1.head().is_persistent(), path2.head().is_persistent()) {
-                    (true, false) => Some(lhs_repr),
-                    (false, true) => Some(rhs_repr),
-                    _ => None,
-                }
-            }
-        }
-        _ => None,
-    };
-    drop(lhs_desc);
-    drop(rhs_desc);
-    result
-}
-
 /// Unify pattern types, raising PatternTypeClash on error.
 fn unify_pattern_types(
     tctx: &mut TypeCheckContext<'_>,
@@ -8156,16 +8077,11 @@ fn unify_expression_types(
                                     TypeDesc::Tconstr { args, .. } if args.len() == arg_count
                                 )
                             };
-                            let representative =
-                                preferred_alias_equiv_representative(&env, tctx.type_ctx, ty1, ty2)
-                                    .or_else(|| {
-                                        if top_is_compatible_constr {
-                                            Some(top_repr)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or(rhs_repr);
+                            let representative = if top_is_compatible_constr {
+                                top_repr
+                            } else {
+                                rhs_repr
+                            };
                             if lhs_repr != representative {
                                 crate::types::ctype::link_type(
                                     tctx.type_ctx,
@@ -8258,26 +8174,14 @@ fn unify_expression_types(
                     for (arg1, arg2) in args1.into_iter().zip(args2.into_iter()) {
                         unify_expression_types(tctx, loc, arg1, arg2, context.clone())?;
                     }
-                    let representative =
-                        preferred_alias_equiv_representative(&env, tctx.type_ctx, ty1, ty2)
-                            .unwrap_or(repr2);
-                    if repr1 != representative {
-                        crate::types::ctype::link_type(tctx.type_ctx, repr1, representative);
-                    }
-                    if repr2 != representative {
-                        crate::types::ctype::link_type(tctx.type_ctx, repr2, representative);
+                    if repr1 != repr2 {
+                        crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
                     }
                     return Ok(());
                 }
                 if decl_equivalent_nullary_constrs {
-                    let representative =
-                        preferred_alias_equiv_representative(&env, tctx.type_ctx, ty1, ty2)
-                            .unwrap_or(repr2);
-                    if repr1 != representative {
-                        crate::types::ctype::link_type(tctx.type_ctx, repr1, representative);
-                    }
-                    if repr2 != representative {
-                        crate::types::ctype::link_type(tctx.type_ctx, repr2, representative);
+                    if repr1 != repr2 {
+                        crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
                     }
                     return Ok(());
                 }
