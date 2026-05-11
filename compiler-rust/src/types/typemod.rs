@@ -95,46 +95,16 @@ fn flattened_persistent_alias_path(
         return None;
     }
 
-    let registered_heads = pers.flattened_alias_heads_for_path(path);
-    let mut flattened_heads = if registered_heads.is_empty() {
-        Vec::new()
-    } else {
-        // OCaml compiler/ml/env.ml:1441-1444 and 1517 use the exact alias
-        // module selected by `find_module`. Prefer registered rewrites over
-        // heuristic spellings so `Js.Dict` resolves to `Js_dict` only, not an
-        // additional fabricated `Js_Dict` persistent unit.
-        registered_heads
-    };
-    let mut underscore_joined = head.name().to_string();
-    if flattened_heads.is_empty() {
-        for component in &components {
-            underscore_joined.push('_');
-            underscore_joined.push_str(component);
-        }
-        flattened_heads.push(underscore_joined);
-        if components.len() > 1 {
-            let mut concatenated = head.name().to_string();
-            concatenated.push('_');
-            for component in &components {
-                concatenated.push_str(component);
-            }
-            flattened_heads.push(concatenated);
-        }
-    }
-    // OCaml compiler/ml/env.ml:781-813 resolves dotted lookups through
-    // component tables. ReScript's persistent environment can materialize
-    // those components as flattened compile units (`Stdlib.JSON` ->
-    // `Stdlib_JSON`, `Belt.Map.String` -> `Belt_MapString`) before the alias
-    // rewrite table has been populated, so accept a known flattened persistent
-    // head as the same semantic alias.
-    flattened_heads.into_iter().find_map(|flattened_head| {
-        let alias_registered = pers
-            .flattened_alias_heads_for_path(path)
-            .iter()
-            .any(|candidate| candidate == &flattened_head);
-        (alias_registered || pers.has_known_module_without_loading(&flattened_head))
-            .then(|| Path::pident(Ident::create_persistent(&flattened_head)))
-    })
+    // OCaml compiler/ml/env.ml:781-813 resolves dotted lookups through component
+    // tables, while env.ml:1441-1444 and 1517 use the exact module reached by
+    // `find_module`/`scrape_alias`. Only use flattened heads already registered
+    // from that component-derived alias evidence; do not fabricate candidates
+    // from `Stdlib.JSON` -> `Stdlib_JSON`/`Belt.Map.String` -> `Belt_MapString`
+    // spellings here.
+    pers.flattened_alias_heads_for_path(path)
+        .into_iter()
+        .next()
+        .map(|flattened_head| Path::pident(Ident::create_persistent(&flattened_head)))
 }
 
 /// Wrap a translated label type in Ttyp_poly if not already poly.
