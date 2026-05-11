@@ -4826,7 +4826,16 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
-            if !path1.same(&path2) && path1.name() != path2.name() {
+            let package_paths_equivalent = path1.same(&path2)
+                || unify_env.as_ref().is_some_and(|env| {
+                    // OCaml compiler/ml/ctype.ml:2173-2175 `eq_package_path`
+                    // compares the original paths or their normalized paths
+                    // with `Path.same`; it does not compare printed names.
+                    let norm1 = normalize_path_full(ctx, env, &path1);
+                    let norm2 = normalize_path_full(ctx, env, &path2);
+                    norm1.same(&norm2)
+                });
+            if !package_paths_equivalent {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
