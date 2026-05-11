@@ -479,45 +479,6 @@ impl QualifiedModuleComponents {
         value_source_prefix: Option<Path>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        // OCaml compiler/ml/env.ml:1513-1519 builds one component table after
-        // `scrape_alias`, so aliases like `Webapi.Dom` and their flattened
-        // backing unit can reach the same env.ml:1581-1585 modtype force.
-        let mut source_prefixes = Vec::new();
-        if let Some(source_prefix) = value_source_prefix.as_ref() {
-            source_prefixes.push(source_prefix.clone());
-        }
-        let one_hop_selected_alias = matches!(
-            &access_path,
-            Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pident(_))
-        );
-        if one_hop_selected_alias {
-            for flat_head in ctx.flattened_alias_heads_for_component_path(&access_path) {
-                let source_prefix = Path::pident(Ident::create_persistent(&flat_head));
-                if !source_prefix.same(&access_path)
-                    && !source_prefixes
-                        .iter()
-                        .any(|existing| existing.same(&source_prefix))
-                {
-                    source_prefixes.push(source_prefix);
-                }
-            }
-        }
-        // OCaml compiler/ml/env.ml:781-813 can later select the flattened
-        // persistent unit directly (`Pident Webapi__Dom`) after an earlier
-        // selected alias force (`Webapi.Dom`). That direct persistent path uses
-        // its own env.ml:1513-1519 component table, so env.ml:1581-1585 freshens
-        // module-type declarations again. Preserve that per-table stamp stream
-        // for typedtree output; keep the cross-path sharing only for normal
-        // compilation.
-        let share_modtype_force = !ctx.preserve_canonical_typedtree()
-            && (!source_prefixes.is_empty()
-                || flattened_component_head(&access_path).is_some_and(|head| {
-                    head.is_persistent()
-                        && ctx
-                            .find_flattened_alias_component_path(head.name())
-                            .is_some()
-                }));
-
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
@@ -554,72 +515,20 @@ impl QualifiedModuleComponents {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(id, mtd) => {
-                    let (component_id, component_mtd) = if !share_modtype_force {
-                        let mut component_mtd = mtd.clone();
-                        // OCaml compiler/ml/env.ml:1513-1514 memoizes a
-                        // component table per force point, then env.ml:1581-1585
-                        // applies `Subst.modtype_declaration` for that table.
-                        // With no scraped alias source, this Rust component
-                        // construction is the force point, so freshen locally.
-                        crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
-                            &mut component_mtd,
-                            &signature,
-                            &access_path,
-                            ctx,
-                        );
-                        (id.clone(), component_mtd)
-                    } else {
-                        ctx.find_qualified_modtype_decl(&access_path, id.name())
-                            .or_else(|| {
-                                source_prefixes.iter().find_map(|source_prefix| {
-                                    ctx.find_qualified_modtype_decl(source_prefix, id.name())
-                                })
-                            })
-                            .unwrap_or_else(|| {
-                                let mut component_mtd = mtd.clone();
-                                // OCaml compiler/ml/env.ml:1513-1514 memoizes the
-                                // component table, then env.ml:1581-1585 applies
-                                // `Subst.modtype_declaration` once for each
-                                // module type in that table. Cache the forced
-                                // declaration by selected access path so Rust
-                                // component views reached through type-path probes
-                                // reuse the same OCaml force point instead of
-                                // freshening the module type again.
-                                crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
-                                    &mut component_mtd,
-                                    &signature,
-                                    &access_path,
-                                    ctx,
-                                );
-                                let result = (id.clone(), component_mtd);
-                                ctx.register_qualified_modtype_decl(
-                                    &access_path,
-                                    id.name(),
-                                    result.0.clone(),
-                                    result.1.clone(),
-                                );
-                                for source_prefix in source_prefixes.iter() {
-                                    if source_prefix.same(&access_path) {
-                                        continue;
-                                    }
-                                    // OCaml compiler/ml/env.ml:1513-1519 keeps
-                                    // one component-table force result reachable
-                                    // through both the selected path and the
-                                    // scraped alias source. Rust has separate
-                                    // views for paths such as `Webapi.Dom` and
-                                    // `Webapi__Dom`, so share the
-                                    // env.ml:1581-1585 modtype declaration force
-                                    // across both keys.
-                                    ctx.register_qualified_modtype_decl(
-                                        source_prefix,
-                                        id.name(),
-                                        result.0.clone(),
-                                        result.1.clone(),
-                                    );
-                                }
-                                result
-                            })
-                    };
+                    let mut component_mtd = mtd.clone();
+                    // OCaml compiler/ml/env.ml:1513-1514 memoizes the component
+                    // table being forced, then env.ml:1581-1585 applies
+                    // `Subst.modtype_declaration` for that table. A later lookup
+                    // that reaches a different Rust component view, such as a
+                    // flattened backing unit, must not choose a different
+                    // force-sharing rule based on output mode.
+                    crate::cmi::persistent_env::freshen_component_modtype_declaration_bound_idents(
+                        &mut component_mtd,
+                        &signature,
+                        &access_path,
+                        ctx,
+                    );
+                    let component_id = id.clone();
                     component_modtypes.insert(id.name().to_string(), (component_id, component_mtd));
                 }
                 SignatureItem::SigClassType => {}

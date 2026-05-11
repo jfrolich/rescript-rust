@@ -362,15 +362,6 @@ pub struct TypeContext {
         >,
     >,
 
-    /// Cached forced module-type declarations from qualified component tables.
-    ///
-    /// OCaml compiler/ml/env.ml:1513-1519 memoizes one component table per
-    /// `scrape_alias` access path, and env.ml:1581-1585 stores the substituted
-    /// module-type declarations in that table.
-    qualified_modtype_decl_cache: RefCell<
-        ahash::AHashMap<Path, ahash::AHashMap<String, (Ident, super::decl::ModtypeDeclaration)>>,
-    >,
-
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
@@ -528,7 +519,6 @@ impl TypeContext {
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
-            qualified_modtype_decl_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             persistent_env: RefCell::new(None),
@@ -979,41 +969,6 @@ impl TypeContext {
             .borrow()
             .get(parent_path)
             .and_then(|modules| modules.get(child_name))
-            .cloned()
-    }
-
-    /// Cache a forced qualified module-type declaration.
-    ///
-    /// Matches OCaml compiler/ml/env.ml:1513-1519 and env.ml:1581-1585: once a
-    /// component modtype is forced for an access path, later lookups through
-    /// the same component table observe that same declaration.
-    pub(crate) fn register_qualified_modtype_decl(
-        &self,
-        parent_path: &Path,
-        child_name: &str,
-        id: Ident,
-        mtd: super::decl::ModtypeDeclaration,
-    ) {
-        self.qualified_modtype_decl_cache
-            .borrow_mut()
-            .entry(parent_path.clone())
-            .or_default()
-            .insert(child_name.to_string(), (id, mtd));
-    }
-
-    /// Look up a forced qualified module-type declaration.
-    ///
-    /// This is the Rust side of OCaml compiler/ml/env.ml:1513-1519's component
-    /// table memoization for qualified module-type lookups.
-    pub(crate) fn find_qualified_modtype_decl(
-        &self,
-        parent_path: &Path,
-        child_name: &str,
-    ) -> Option<(Ident, super::decl::ModtypeDeclaration)> {
-        self.qualified_modtype_decl_cache
-            .borrow()
-            .get(parent_path)
-            .and_then(|modtypes| modtypes.get(child_name))
             .cloned()
     }
 
