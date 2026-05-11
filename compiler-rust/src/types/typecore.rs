@@ -6220,7 +6220,7 @@ pub fn type_expect<'a>(
             let array_ty =
                 ctx.new_generic_constr(crate::types::predef::path_array(), vec![elem_ty]);
 
-            unify_expression_types(tctx, loc, array_ty, expected_ty, context)?;
+            unify_expression_types(tctx, loc, array_ty, expected_ty, None)?;
 
             let mut typed_exprs = Vec::new();
             for e in exprs.iter() {

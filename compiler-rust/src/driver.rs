@@ -1578,7 +1578,7 @@ fn format_expr_type_clash_report(
     filename: &str,
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
-    _context: &Option<TypeClashContext>,
+    context: &Option<TypeClashContext>,
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
@@ -1628,17 +1628,206 @@ fn format_expr_type_clash_report(
         message.push('\n');
     }
 
-    message.push_str("This has type: ");
+    let (error_text, expected_text) = match context {
+        Some(TypeClashContext::ArrayLiteral) => (
+            "This array item has type: ",
+            "But this array is expected to have items of type: ",
+        ),
+        Some(TypeClashContext::FunctionCall) => (
+            "This has type: ",
+            "But this function argument is expecting: ",
+        ),
+        _ => ("This has type: ", "But it's expected to have type: "),
+    };
+
+    message.push_str(error_text);
     message.push_str(ERROR);
     message.push_str(&format_type_expr(type_ctx, actual));
     message.push_str(RESET);
     message.push('\n');
-    message.push_str("But it's expected to have type: ");
+    message.push_str(expected_text);
     message.push_str(INFO);
     message.push_str(&format_type_expr(type_ctx, expected));
     message.push_str(RESET);
+    append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
+        let message = format_array_type_clash_message(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if type_clash_array_to_tuple(type_ctx, trace) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else {
+        format_compiler_error_report(arena, source, filename, loc, &message)
+    }
+}
+
+fn format_array_type_clash_message(message: &str) -> String {
+    let mut output = String::new();
+    let mut blank_lines = 0;
+
+    for line in message.lines() {
+        if line.is_empty() {
+            blank_lines += 1;
+            if blank_lines <= 2 {
+                output.push('\n');
+            } else {
+                output.push_str("  \n");
+            }
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn format_type_clash_message_with_empty_blank_lines(message: &str) -> String {
+    let mut output = String::new();
+
+    for line in message.lines() {
+        if line.is_empty() {
+            output.push('\n');
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn append_extra_type_clash_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
+        message.push_str("\n\n");
+        message.push_str("Arrays can only contain items of the same type.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Convert all values in the array to the same type.\n");
+        message.push_str("- Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, \"hello\", 15.5, true)");
+    }
+
+    if type_clash_array_to_tuple(type_ctx, trace) {
+        message.push_str("\n\n- Fix this by passing a tuple instead of an array");
+        if let Some(rewrite) = suggested_array_to_tuple_rewrite(arena, source, loc) {
+            message.push_str(", like: ");
+            message.push_str(INFO);
+            message.push_str(&rewrite);
+            message.push_str(RESET);
+        } else {
+            message.push_str(INFO);
+            message.push_str(RESET);
+        }
+        message.push_str("\n\n");
+    }
+
+    append_simple_conversion_help(type_ctx, trace, message);
+}
+
+fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
+    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
+        return false;
+    };
+
+    let actual_is_array = match &*type_ctx.get_desc(type_ctx.repr(actual)) {
+        TypeDesc::Tconstr { path, .. } => path.head_name() == "array",
+        _ => false,
+    };
+    let expected_is_tuple = matches!(&*type_ctx.get_desc(type_ctx.repr(expected)), TypeDesc::Ttuple(_));
+
+    actual_is_array && expected_is_tuple
+}
+
+fn suggested_array_to_tuple_rewrite(
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> Option<String> {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    let text = source.get(start..end)?.trim();
+    let inner = text.strip_prefix('[')?.strip_suffix(']')?;
+    Some(format!("({inner})"))
+}
+
+fn append_simple_conversion_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = bottom_type_clash_aliases(trace).or_else(|| trace.first().copied()) else {
+        return;
+    };
+    let Some(actual_name) = simple_type_constr_name(type_ctx, actual) else {
+        return;
+    };
+    let Some(expected_name) = simple_type_constr_name(type_ctx, expected) else {
+        return;
+    };
+    let Some(converter) = simple_conversion(&actual_name, &expected_name) else {
+        return;
+    };
+
+    message.push_str("\n\nYou can convert ");
+    message.push_str(INFO);
+    message.push_str(&actual_name);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push_str(&expected_name);
+    message.push_str(RESET);
+    message.push_str(" with ");
+    message.push_str(INFO);
+    message.push_str(converter);
+    message.push_str(RESET);
+    message.push('.');
+}
+
+fn bottom_type_clash_aliases(
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let mut result = None;
+    for window in trace.windows(2) {
+        result = Some((window[0].1, window[1].1));
+    }
+    result
+}
+
+fn simple_type_constr_name(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<String> {
+    match &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() => {
+            Some(path.head_name().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn simple_conversion(actual: &str, expected: &str) -> Option<&'static str> {
+    match (actual, expected) {
+        ("float", "int") => Some("Float.toInt"),
+        ("float", "string") => Some("Float.toString"),
+        ("int", "float") => Some("Int.toFloat"),
+        ("int", "string") => Some("Int.toString"),
+        ("string", "float") => Some("Float.fromString"),
+        ("string", "int") => Some("Int.fromString"),
+        _ => None,
+    }
 }
 
 fn expr_type_clash_uncurried_arity_mismatch(
