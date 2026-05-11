@@ -2419,7 +2419,9 @@ fn format_expr_type_clash_report(
     ) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if type_clash_array_to_tuple(type_ctx, trace) {
+    } else if type_clash_array_to_tuple(type_ctx, trace)
+        || type_clash_expected_unit_actual(type_ctx, trace).is_some()
+    {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else {
@@ -2507,14 +2509,23 @@ fn rendered_alias_expansion(
     let counterpart_text =
         format_type_expr(type_ctx, if actual_side { top_expected } else { top_actual });
     trace.iter().skip(1).find_map(|pair| {
-        let (counterpart, candidate) = if actual_side {
-            (pair.0, pair.1)
+        let left_text = format_type_expr(type_ctx, pair.0);
+        let right_text = format_type_expr(type_ctx, pair.1);
+        if actual_side {
+            if right_text == counterpart_text && left_text != top_text {
+                Some(pair.0)
+            } else if left_text == counterpart_text && right_text != top_text {
+                Some(pair.1)
+            } else {
+                None
+            }
+        } else if left_text == counterpart_text && right_text != top_text {
+            Some(pair.1)
+        } else if right_text == counterpart_text && left_text != top_text {
+            Some(pair.0)
         } else {
-            (pair.1, pair.0)
-        };
-        let candidate_text = format_type_expr(type_ctx, candidate);
-        (format_type_expr(type_ctx, counterpart) == counterpart_text && candidate_text != top_text)
-            .then_some(candidate)
+            None
+        }
     })
 }
 
@@ -2683,9 +2694,83 @@ fn append_extra_type_clash_help(
         message.push_str("\n\n\n");
     }
 
+    if !matches!(context, Some(TypeClashContext::StatementFunctionCall))
+        && let Some(actual) = type_clash_expected_unit_actual(type_ctx, trace)
+    {
+        message.push_str("\n\n");
+        if type_is_jsx_element_like(type_ctx, trace, actual) {
+            message.push_str("- Did you forget to wrap this + adjacent JSX in a JSX fragment (");
+            message.push_str(INFO);
+            message.push_str("<></>");
+            message.push_str(RESET);
+            message.push_str(")?\n");
+            message.push_str("- Did you mean to assign this to a variable?\n\n\n");
+        } else {
+            message.push_str("- Did you mean to assign this to a variable?\n");
+            message.push_str(
+                "- If you don't care about the result of this expression, you can assign it to ",
+            );
+            message.push_str(INFO);
+            message.push('_');
+            message.push_str(RESET);
+            message.push_str(" via ");
+            message.push_str(INFO);
+            message.push_str("let _ = ...");
+            message.push_str(RESET);
+            message.push_str(" or pipe it to ");
+            message.push_str(INFO);
+            message.push_str("ignore");
+            message.push_str(RESET);
+            message.push_str(" via ");
+            message.push_str(INFO);
+            message.push_str("expression->ignore");
+            message.push_str(RESET);
+            message.push_str("\n\n\n");
+        }
+        return;
+    }
+
     append_incompatible_type_parts(type_ctx, trace, message);
     append_dict_literal_help(type_ctx, trace, message);
     append_simple_conversion_help(type_ctx, trace, message);
+}
+
+fn type_clash_expected_unit_actual(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<TypeExprRef> {
+    [trace.first().copied(), bottom_type_clash_aliases(trace)]
+        .into_iter()
+        .flatten()
+        .find_map(|(actual, expected)| type_is_unit(type_ctx, expected).then_some(actual))
+}
+
+fn type_is_unit(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.same(&crate::types::predef::path_unit()),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_unit(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn type_is_jsx_element_like(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    ty: TypeExprRef,
+) -> bool {
+    type_is_jsx_element(type_ctx, ty)
+        || rendered_alias_expansion(type_ctx, trace, true)
+            .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
+}
+
+fn type_is_jsx_element(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.name() == "Jsx.element",
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_element(type_ctx, *next),
+        _ => false,
+    }
 }
 
 fn append_incompatible_type_parts(
@@ -2851,7 +2936,9 @@ fn nested_type_clash_pair(
         let actual_text = format_type_expr(type_ctx, *actual);
         let expected_text = format_type_expr(type_ctx, *expected);
         let is_top_alias_expansion =
-            (actual_text == top_expected_text && expected_text != top_actual_text)
+            (actual_text == top_actual_text && expected_text != top_expected_text)
+                || (expected_text == top_expected_text && actual_text != top_actual_text)
+                || (actual_text == top_expected_text && expected_text != top_actual_text)
                 || (expected_text == top_actual_text && actual_text != top_expected_text);
         !is_top_alias_expansion
             && (actual_text != top_actual_text || expected_text != top_expected_text)
