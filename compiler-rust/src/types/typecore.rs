@@ -23568,7 +23568,7 @@ fn build_shared_persistent_root_components<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
-    if ctx.preserve_canonical_typedtree() || !ctx.persistent_env_is_in_process() {
+    if !ctx.persistent_env_is_in_process() {
         return None;
     }
 
