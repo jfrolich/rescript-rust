@@ -20228,14 +20228,14 @@ fn type_contains_unresolved_local_path<'a>(
             let has_local_head =
                 matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent());
             let local_path_is_unresolved = has_local_head
-                && ctx.with_component_alias_probe_caches_suppressed(|| {
+                && ctx.with_component_alias_sig_force_suppressed(|| {
                     // OCaml compiler/ml/env.ml:781-813 reads component
                     // descriptors for type lookup without forcing
-                    // env.ml:1568's module-declaration thunk. This Rust-only
-                    // unresolved-path probe is used while qualifying record
-                    // labels, so it must not make alias children such as
-                    // `Functions.Types` earlier than OCaml would.
-                    lookup_type_decl_for_path(path, env, pers_env, ctx).is_none()
+                    // env.ml:1568's module-declaration thunk. This unresolved-path
+                    // probe uses the explicit no-publish cache mode so it does not
+                    // make alias children such as `Functions.Types` earlier than
+                    // OCaml would.
+                    lookup_type_decl_for_path_for_probe(path, env, pers_env, ctx).is_none()
                 });
             if local_path_is_unresolved {
                 return true;
@@ -21881,8 +21881,8 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         // qualification probes only check whether a rewritten path exists; they
         // must not force env.ml:1568 module-declaration thunks or populate the
         // normal Rust lookup caches before the later real lookup reaches them.
-        ctx.with_component_alias_probe_caches_suppressed(|| {
-            lookup_type_decl_for_path(type_path, env, pers_env, ctx)
+        ctx.with_component_alias_sig_force_suppressed(|| {
+            lookup_type_decl_for_path_for_probe(type_path, env, pers_env, ctx)
         })
     }
 
@@ -23492,11 +23492,24 @@ fn build_shared_persistent_root_components<'a>(
     )
 }
 
-pub(crate) fn with_resolved_module_components_for_path<'a, R>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComponentLookupCacheMode {
+    Publish,
+    Probe,
+}
+
+impl ComponentLookupCacheMode {
+    fn publishes(self) -> bool {
+        matches!(self, ComponentLookupCacheMode::Publish)
+    }
+}
+
+fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let local_module_path = match module_path {
@@ -23552,17 +23565,33 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
     let result = (f
         .take()
         .expect("qualified module components callback reused"))(&components);
-    // OCaml compiler/ml/env.ml:800-813 can inspect type components during
-    // typedecl.ml:767-779 constraint checks without forcing env.ml:719-721
-    // `ps_sig`. Those Rust probes must not populate the normal component cache,
-    // otherwise the later real value/module lookup reuses the suppressed view
-    // and misses the OCaml lazy-force point.
+    // OCaml compiler/ml/env.ml:781-813 exposes separate descriptor/type lookup
+    // paths from env.ml:865-882 module-declaration lookup. Probe callers such as
+    // typedecl.ml:767-779 constraint checks can read component descriptors, but
+    // must not publish that probe view as the normal lazy component result.
     if let Some(module_key) = module_key
-        && !ctx.suppresses_component_alias_probe_caches()
+        && cache_mode.publishes()
     {
         ctx.register_qualified_module_components(module_key, components);
     }
     Some(result)
+}
+
+pub(crate) fn with_resolved_module_components_for_path<'a, R>(
+    module_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+) -> Option<R> {
+    with_resolved_module_components_for_path_with_cache_mode(
+        module_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Publish,
+        f,
+    )
 }
 
 fn qualified_submodule_access_path(
@@ -23663,6 +23692,41 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
+    lookup_type_in_resolved_path_with_cache_mode(
+        parent_module_path,
+        type_name,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Publish,
+    )
+}
+
+pub(crate) fn lookup_type_in_resolved_path_for_probe<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
+    lookup_type_in_resolved_path_with_cache_mode(
+        parent_module_path,
+        type_name,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Probe,
+    )
+}
+
+fn lookup_type_in_resolved_path_with_cache_mode<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
+) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
     }
@@ -23722,31 +23786,76 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
     // resolved component table for the declaration, but return the selected
     // lookup prefix: env.ml:1091-1099 builds `Pdot(p, s, pos)` from the module
     // path `p`, even when the component table was produced by scraping an alias.
-    with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components.lookup_type(type_name).map(|(id, decl)| {
-            let result = (
-                parent_module_path.clone(),
-                id.clone(),
-                Arc::new(decl.clone()),
-            );
-            // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
-            // component tables through env.ml:781-793 `find_module_descr`, and
-            // env.ml:1516-1518 still scrapes aliases while those component
-            // tables are built. Only Rust's explicit typedecl.ml:767-779 probe
-            // walkers suppress alias forcing/cache population; real lookups
-            // must leave scrape_alias side effects visible.
-            if !ctx.suppresses_component_alias_probe_caches() {
-                ctx.register_resolved_module_type(
-                    parent_module_path,
-                    type_name,
-                    result.0.clone(),
-                    result.1.clone(),
-                    result.2.clone(),
+    with_resolved_module_components_for_path_with_cache_mode(
+        parent_module_path,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| {
+            components.lookup_type(type_name).map(|(id, decl)| {
+                let result = (
+                    parent_module_path.clone(),
+                    id.clone(),
+                    Arc::new(decl.clone()),
                 );
-            }
-            result
-        })
-    })
+                // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
+                // component tables through env.ml:781-793 `find_module_descr`, while
+                // typedecl.ml:767-779 probe-style constraint checks can inspect the
+                // descriptor without publishing Rust's selected lookup cache.
+                if cache_mode.publishes() {
+                    ctx.register_resolved_module_type(
+                        parent_module_path,
+                        type_name,
+                        result.0.clone(),
+                        result.1.clone(),
+                        result.2.clone(),
+                    );
+                }
+                result
+            })
+        },
+    )
+    .flatten()
+}
+
+fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
+        return Some(decl);
+    }
+
+    with_resolved_module_components_for_path_with_cache_mode(
+        parent_module_path,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| {
+            components.lookup_type(type_name).map(|(id, decl)| {
+                let decl = Arc::new(decl.clone());
+                // OCaml compiler/ml/env.ml:800-813 type lookup uses component
+                // descriptors from env.ml:781-793; explicit Rust probe callers
+                // keep that descriptor view out of the normal lookup cache.
+                if cache_mode.publishes() {
+                    ctx.register_resolved_module_type(
+                        parent_module_path,
+                        type_name,
+                        parent_module_path.clone(),
+                        id.clone(),
+                        decl.clone(),
+                    );
+                }
+                decl
+            })
+        },
+    )
     .flatten()
 }
 
@@ -23757,30 +23866,31 @@ fn lookup_type_decl_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
-        return Some(decl);
-    }
+    lookup_type_decl_in_resolved_path_with_cache_mode(
+        parent_module_path,
+        type_name,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Publish,
+    )
+}
 
-    with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components.lookup_type(type_name).map(|(id, decl)| {
-            let decl = Arc::new(decl.clone());
-            // OCaml compiler/ml/env.ml:800-813 type lookup uses component
-            // descriptors from env.ml:781-793; building those descriptors
-            // still runs env.ml:1516-1518 `scrape_alias` unless an explicit
-            // Rust probe guard is active.
-            if !ctx.suppresses_component_alias_probe_caches() {
-                ctx.register_resolved_module_type(
-                    parent_module_path,
-                    type_name,
-                    parent_module_path.clone(),
-                    id.clone(),
-                    decl.clone(),
-                );
-            }
-            decl
-        })
-    })
-    .flatten()
+fn lookup_type_decl_in_resolved_path_for_probe<'a>(
+    parent_module_path: &Path,
+    type_name: &str,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    lookup_type_decl_in_resolved_path_with_cache_mode(
+        parent_module_path,
+        type_name,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Probe,
+    )
 }
 
 fn rewrite_alias_pident_child_prefixes<'a>(
@@ -24672,6 +24782,37 @@ fn lookup_type_decl_for_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    lookup_type_decl_for_path_with_cache_mode(
+        type_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Publish,
+    )
+}
+
+fn lookup_type_decl_for_path_for_probe<'a>(
+    type_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    lookup_type_decl_for_path_with_cache_mode(
+        type_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupCacheMode::Probe,
+    )
+}
+
+fn lookup_type_decl_for_path_with_cache_mode<'a>(
+    type_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    cache_mode: ComponentLookupCacheMode,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     fn lookup_raw_type_decl_from_module_path<'a>(
         module_path: &Path,
         type_name: &str,
@@ -24772,7 +24913,8 @@ fn lookup_type_decl_for_path<'a>(
             .next()
             .is_some_and(|first| first.is_ascii_uppercase());
         if could_be_inline_record_constructor
-            && let Some(parent_decl) = lookup_type_decl_for_path(parent, env, pers_env, ctx)
+            && let Some(parent_decl) =
+                lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
         {
             if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
                 let num_consts = constrs
@@ -24838,8 +24980,13 @@ fn lookup_type_decl_for_path<'a>(
             }
         }
 
-        if let Some(Some(decl)) =
-            with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
+        if let Some(Some(decl)) = with_resolved_module_components_for_path_with_cache_mode(
+            parent,
+            env,
+            pers_env,
+            ctx,
+            cache_mode,
+            |components| {
                 let (_, decl) = match components.lookup_type(type_name.as_str()) {
                     Some(found) => found,
                     None => return None,
@@ -24876,7 +25023,9 @@ fn lookup_type_decl_for_path<'a>(
                                         | crate::types::decl::ModuleType::MtyIdent(..)
                                 )
                             {
-                                if let Some(cache_key) = cache_key.as_deref() {
+                                if cache_mode.publishes()
+                                    && let Some(cache_key) = cache_key.as_deref()
+                                {
                                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                                 }
                                 return Some(decl);
@@ -24895,7 +25044,9 @@ fn lookup_type_decl_for_path<'a>(
                         .as_ref()
                         .is_some_and(|stored_path| !stored_path.same(type_path))
                     {
-                        if let Some(cache_key) = cache_key.as_deref() {
+                        if cache_mode.publishes()
+                            && let Some(cache_key) = cache_key.as_deref()
+                        {
                             ctx.register_resolved_pdot_type(cache_key, decl.clone());
                         }
                         return Some(decl);
@@ -24911,12 +25062,14 @@ fn lookup_type_decl_for_path<'a>(
                 // Cache the resolved decl so subsequent lookups for the same
                 // Pdot path reuse the same type nodes (matching OCaml's
                 // components_of_module_maker lazy caching).
-                if let Some(cache_key) = cache_key.as_deref() {
+                if cache_mode.publishes()
+                    && let Some(cache_key) = cache_key.as_deref()
+                {
                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                 }
                 Some(decl)
-            })
-        {
+            },
+        ) {
             return Some(decl);
         }
 
@@ -24932,10 +25085,17 @@ fn lookup_type_decl_for_path<'a>(
         {
             let qualified_type_path = Path::pdot(qualified_parent, type_name.as_str());
             if !qualified_type_path.same(type_path)
-                && let Some(decl) =
-                    lookup_type_decl_for_path(&qualified_type_path, env, pers_env, ctx)
+                && let Some(decl) = lookup_type_decl_for_path_with_cache_mode(
+                    &qualified_type_path,
+                    env,
+                    pers_env,
+                    ctx,
+                    cache_mode,
+                )
             {
-                if let Some(cache_key) = cache_key.as_deref() {
+                if cache_mode.publishes()
+                    && let Some(cache_key) = cache_key.as_deref()
+                {
                     ctx.register_resolved_pdot_type(cache_key, decl.clone());
                 }
                 return Some(decl);
@@ -24963,21 +25123,29 @@ fn lookup_type_decl_for_path<'a>(
                     ModuleType::MtySignature(_) => {
                         let module_path = Path::pident(parent_id.clone());
                         let mut no_persistent_env = None;
-                        if let Some(Some(decl)) = with_resolved_module_components_for_path(
-                            &module_path,
-                            env,
-                            &mut no_persistent_env,
-                            ctx,
-                            |components| {
-                                components.lookup_type(type_name.as_str()).map(|(_, decl)| {
-                                    let decl = Arc::new(decl.clone());
-                                    if let Some(cache_key) = cache_key.as_deref() {
-                                        ctx.register_resolved_pdot_type(cache_key, decl.clone());
-                                    }
-                                    decl
-                                })
-                            },
-                        ) {
+                        if let Some(Some(decl)) =
+                            with_resolved_module_components_for_path_with_cache_mode(
+                                &module_path,
+                                env,
+                                &mut no_persistent_env,
+                                ctx,
+                                cache_mode,
+                                |components| {
+                                    components.lookup_type(type_name.as_str()).map(|(_, decl)| {
+                                        let decl = Arc::new(decl.clone());
+                                        if cache_mode.publishes()
+                                            && let Some(cache_key) = cache_key.as_deref()
+                                        {
+                                            ctx.register_resolved_pdot_type(
+                                                cache_key,
+                                                decl.clone(),
+                                            );
+                                        }
+                                        decl
+                                    })
+                                },
+                            )
+                        {
                             return Some(decl);
                         }
                     }

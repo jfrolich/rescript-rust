@@ -3161,8 +3161,8 @@ fn touch_type_constraint_path(
             // Rust package-side-effect probe from advancing those persistent
             // signature lazies while it merely asks whether the manifest is a
             // package.
-            let resolved = ctx.with_component_alias_probe_caches_suppressed(|| {
-                crate::types::typecore::lookup_type_in_resolved_path(
+            let resolved = ctx.with_component_alias_sig_force_suppressed(|| {
+                crate::types::typecore::lookup_type_in_resolved_path_for_probe(
                     parent, type_name, env, pers_env, ctx,
                 )
             });
@@ -3449,10 +3449,10 @@ fn type_path_decl_manifest_mentions_path_root(
         return false;
     }
 
-    ctx.with_component_alias_probe_caches_suppressed(|| {
+    ctx.with_component_alias_sig_force_suppressed(|| {
         let decl = match path {
             Path::Pdot(parent, type_name, _) => {
-                crate::types::typecore::lookup_type_in_resolved_path(
+                crate::types::typecore::lookup_type_in_resolved_path_for_probe(
                     parent, type_name, env, pers_env, ctx,
                 )
                 .map(|(_, _, decl)| (*decl).clone())
@@ -3523,8 +3523,8 @@ fn constraint_path_needs_primitive_js_match_force(
         // Primitive_js_extern probe is a narrower compensation; do not let the
         // probe itself force persistent alias-target signatures before
         // compiler/ml/env.ml:800-813-style type lookup would.
-        return ctx.with_component_alias_probe_caches_suppressed(|| {
-            crate::types::typecore::lookup_type_in_resolved_path(
+        return ctx.with_component_alias_sig_force_suppressed(|| {
+            crate::types::typecore::lookup_type_in_resolved_path_for_probe(
                 parent, type_name, env, pers_env, ctx,
             )
             .is_some_and(|(_, _, decl)| {
