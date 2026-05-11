@@ -8319,7 +8319,16 @@ fn manifest_parent_is_persistent_alias_child(
     if !(root_id.is_persistent() || root_id.stamp() == 0) {
         return false;
     }
-    if root_id.name().contains("__") {
+    // OCaml compiler/ml/env.ml:1440-1446 follows explicit alias components
+    // through `scrape_alias`. If this root is Rust's registered backing path
+    // for such an alias, do not also treat its child as a source-selected alias
+    // child based on the spelling of the persistent unit.
+    if pers_env
+        .as_ref()
+        .and_then(|pers| pers.qualified_alias_path_for_flattened_head(root_id.name()))
+        .or_else(|| ctx.find_flattened_alias_component_path(root_id.name()))
+        .is_some()
+    {
         return false;
     }
 
