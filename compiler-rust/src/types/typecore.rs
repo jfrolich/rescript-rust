@@ -9488,14 +9488,6 @@ fn type_application(
                         arg_ty0,
                         Some(TypeClashContext::FunctionCall),
                     )?;
-                    preserve_alias_unify_representative(
-                        tctx,
-                        env,
-                        arg_ty0,
-                        typed_arg.exp_type,
-                        true,
-                        typed_funct_value_path.as_ref(),
-                    );
                 }
 
                 ctx.end_def();
@@ -9763,21 +9755,6 @@ fn type_application(
                     typed_funct_value_path.as_ref(),
                 );
                 if !skip_post_unify && !skip_selected_value_alias_unify {
-                    // OCaml compiler/ml/typecore.ml:3771-3773 types the
-                    // source argument against `ty_expected'`, then unifies the
-                    // resulting expression type with the instantiated
-                    // `ty_expected`. Preserve alias representatives from the
-                    // expression side before that second unification so Rust's
-                    // copied instance does not make flattened backing-unit
-                    // paths win where OCaml keeps the selected component refs.
-                    preserve_alias_unify_representative(
-                        tctx,
-                        env,
-                        typed_arg.exp_type,
-                        unify_ty,
-                        false,
-                        None,
-                    );
                     unify_expression_types(
                         tctx,
                         typed_arg.exp_loc,
@@ -9785,14 +9762,6 @@ fn type_application(
                         unify_ty,
                         Some(TypeClashContext::FunctionCall),
                     )?;
-                    preserve_alias_unify_representative(
-                        tctx,
-                        env,
-                        unify_ty,
-                        typed_arg.exp_type,
-                        true,
-                        typed_funct_value_path.as_ref(),
-                    );
                 }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;

@@ -2781,7 +2781,6 @@ fn try_expand_head_with_mode<'a>(
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
             let path_name = path.name();
-
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
@@ -3886,24 +3885,11 @@ fn unify_after_expansion<'a>(
             if args1.is_empty() && args2.is_empty() && path1.name() == path2.name() {
                 drop(lhs_desc);
                 drop(rhs_desc);
-                let keep_expanded_repr = state.mode != crate::types::UnifyMode::Pattern
-                    && state.env().is_some_and(|env| {
-                        should_keep_expanded_manifest_alias_repr(
-                            ctx,
-                            env,
-                            lhs,
-                            rhs,
-                            relink_target,
-                            swap,
-                        )
-                    });
                 link_type(ctx, lhs, rhs);
                 if state.mode != crate::types::UnifyMode::Pattern {
-                    if !keep_expanded_repr {
-                        let to_ty = ctx.repr(relink_target);
-                        if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
-                            ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
-                        }
+                    let to_ty = ctx.repr(relink_target);
+                    if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
+                        ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
                     }
                 }
                 return Ok(());
@@ -3912,11 +3898,6 @@ fn unify_after_expansion<'a>(
         drop(lhs_desc);
         drop(rhs_desc);
     }
-
-    let keep_expanded_repr = state.mode != crate::types::UnifyMode::Pattern
-        && state.env().is_some_and(|env| {
-            should_keep_expanded_manifest_alias_repr(ctx, env, lhs, rhs, relink_target, swap)
-        });
 
     {
         let lhs_desc = ctx.get_desc(lhs);
@@ -3945,17 +3926,13 @@ fn unify_after_expansion<'a>(
             drop(rhs_desc);
 
             if state.mode != crate::types::UnifyMode::Pattern {
-                if keep_expanded_repr {
-                    link_type(ctx, lhs, rhs);
-                } else {
-                    // OCaml ctype.ml:2393-2414 links the selected expanded
-                    // side to the original opposite side before unifying
-                    // constructor arguments, so nested alias spelling follows
-                    // the original argument type.
-                    let to_ty = ctx.repr(relink_target);
-                    if lhs != to_ty && !deep_occur(ctx, lhs, rhs) {
-                        ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
-                    }
+                // OCaml ctype.ml:2393-2414 links the selected expanded
+                // side to the original opposite side before unifying
+                // constructor arguments, so nested alias spelling follows
+                // the original argument type.
+                let to_ty = ctx.repr(relink_target);
+                if lhs != to_ty && !deep_occur(ctx, lhs, rhs) {
+                    ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
                 }
             }
 
@@ -3975,83 +3952,13 @@ fn unify_after_expansion<'a>(
         //   link_type t1' t2
         // where t1' is the selected expanded side and t2 is the selected
         // ORIGINAL opposite side.
-        if !keep_expanded_repr {
-            let to_ty = ctx.repr(relink_target);
-            if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
-                ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
-            }
+        let to_ty = ctx.repr(relink_target);
+        if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
+            ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
         }
     }
 
     Ok(())
-}
-
-fn should_keep_expanded_manifest_alias_repr(
-    ctx: &TypeContext,
-    env: &Env,
-    lhs: TypeExprRef,
-    rhs: TypeExprRef,
-    relink_target: TypeExprRef,
-    swap: bool,
-) -> bool {
-    let (lhs_path, lhs_args_len) = {
-        let lhs_desc = ctx.borrow_desc(ctx.repr(lhs));
-        match &*lhs_desc {
-            TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.len()),
-            _ => return false,
-        }
-    };
-    let rhs_path = {
-        let rhs_desc = ctx.borrow_desc(ctx.repr(rhs));
-        match &*rhs_desc {
-            TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
-            _ => return false,
-        }
-    };
-    let relink_path = {
-        let relink_desc = ctx.borrow_desc(ctx.repr(relink_target));
-        match &*relink_desc {
-            TypeDesc::Tconstr { path, .. } => path.clone(),
-            _ => return false,
-        }
-    };
-    fn has_temporary_package_head(path: &Path) -> bool {
-        match path {
-            Path::Pident(id) => id.name() == "%M" && !id.is_persistent(),
-            Path::Pdot(parent, _, _) => has_temporary_package_head(parent),
-            Path::Papply(_, _) => false,
-        }
-    }
-    let same_family = |left: &Path, right: &Path| {
-        left.same(right) || flattened_alias_paths_equivalent(ctx, env, left, right, lhs_args_len)
-    };
-    if has_temporary_package_head(&relink_path) && same_family(&lhs_path, &rhs_path) {
-        return true;
-    }
-    let lhs_has_nested_parent =
-        matches!(&lhs_path, Path::Pdot(parent, _, _) if matches!(parent.as_ref(), Path::Pdot(..)));
-    let expected_alias_name = if swap { "t" } else { "cmp" };
-    if !lhs_has_nested_parent || relink_path.last() != expected_alias_name {
-        return false;
-    }
-
-    let Some((_id, decl)) = resolve_type_item_through_env(ctx, env, &relink_path, false) else {
-        return false;
-    };
-    let Some(manifest) = decl.type_manifest else {
-        return false;
-    };
-    let manifest_path = {
-        let manifest_desc = ctx.borrow_desc(ctx.repr(manifest));
-        match &*manifest_desc {
-            TypeDesc::Tconstr { path, args, .. } if args.len() == lhs_args_len => path.clone(),
-            _ => return false,
-        }
-    };
-
-    same_family(&manifest_path, &lhs_path)
-        && same_family(&lhs_path, &rhs_path)
-        && !same_family(&relink_path, &lhs_path)
 }
 
 fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef) -> bool {
@@ -4347,6 +4254,22 @@ fn unify_types<'a>(
             },
         ) => {
             if !path1.same(path2) {
+                if let Some(env) = state.env() {
+                    // OCaml compiler/ml/ctype.ml:2338-2344 (`unify2`) expands
+                    // both constructor heads before the constructor-path cases
+                    // at ctype.ml:2412-2414 are considered. Keep Rust's
+                    // same-type-item fallback below this expansion so aliases
+                    // such as local module aliases and flattened persistent
+                    // units get the same `unify3` representative relinking
+                    // opportunity first.
+                    let exp1 = expand_head_unif(ctx, env, t1);
+                    let exp2 = expand_head_unif(ctx, env, t2);
+                    if exp1 != t1 || exp2 != t2 {
+                        drop(desc1);
+                        drop(desc2);
+                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+                    }
+                }
                 if args1.len() == args2.len()
                     && let Some(env) = state.env()
                     && resolved_type_items_share_identity(ctx, env, path1, path2, args1.len())
@@ -4470,15 +4393,6 @@ fn unify_types<'a>(
                         unify(ctx, state, a, b)?;
                     }
                     return Ok(());
-                }
-                if let Some(env) = state.env() {
-                    let exp1 = expand_head_unif(ctx, env, t1);
-                    let exp2 = expand_head_unif(ctx, env, t2);
-                    if exp1 != t1 || exp2 != t2 {
-                        drop(desc1);
-                        drop(desc2);
-                        return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
-                    }
                 }
                 let p1 = path1.name();
                 let p2 = path2.name();
