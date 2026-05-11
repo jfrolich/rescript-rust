@@ -14,9 +14,10 @@ use crate::ident::Ident;
 use crate::types::Path;
 use crate::types::ctype;
 use crate::types::decl::{
-    ConstructorArguments, ConstructorDeclaration, ExtensionConstructor, LabelDeclaration,
-    ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration,
-    TypeInlinedType, TypeKind, ValueDescription, ValueKind,
+    Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
+    ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType,
+    Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind, ValueDescription,
+    ValueKind,
 };
 use crate::types::env::Env;
 use crate::types::type_expr::TypeDesc;
@@ -146,9 +147,11 @@ fn format_include_error(
             ));
             output.push_str(":\n");
             output.push_str("    Actual declaration\n");
-            output.push_str("  ");
-            output.push_str(detail);
-            output.push('\n');
+            for line in detail.lines() {
+                output.push_str("  ");
+                output.push_str(line);
+                output.push('\n');
+            }
         }
         IncludeModError::MissingValue(id) => {
             output.push_str("  The value `");
@@ -270,10 +273,15 @@ fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclar
     let mut printer = TypeExprErrorPrinter::new(type_ctx);
     let name = id.name();
     let params = format_type_params(&mut printer, &decl.type_params);
-    let head = if params.is_empty() {
-        format!("type {name}")
+    let prefix = if decl.type_unboxed.unboxed {
+        "@unboxed "
     } else {
-        format!("type {name}<{params}>")
+        ""
+    };
+    let head = if params.is_empty() {
+        format!("{prefix}type {name}")
+    } else {
+        format!("{prefix}type {name}<{params}>")
     };
 
     match &decl.type_kind {
@@ -310,9 +318,10 @@ fn format_constructor_declaration(
     printer: &mut TypeExprErrorPrinter<'_>,
     constructor: &ConstructorDeclaration,
 ) -> String {
+    let constructor_prefix = format_constructor_attributes(&constructor.cd_attributes);
     match &constructor.cd_args {
         ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            constructor.cd_id.name().to_string()
+            format!("{constructor_prefix}{}", constructor.cd_id.name())
         }
         ConstructorArguments::CstrTuple(args) => {
             let mut formatted_args = Vec::with_capacity(args.len());
@@ -320,7 +329,7 @@ fn format_constructor_declaration(
                 formatted_args.push(printer.format(*arg));
             }
             let args = formatted_args.join(", ");
-            format!("{}({args})", constructor.cd_id.name())
+            format!("{constructor_prefix}{}({args})", constructor.cd_id.name())
         }
         ConstructorArguments::CstrRecord(labels) => {
             let mut fields = Vec::with_capacity(labels.len());
@@ -328,9 +337,33 @@ fn format_constructor_declaration(
                 fields.push(format_label_declaration(printer, label));
             }
             let fields = fields.join(", ");
-            format!("{}({{{fields}}})", constructor.cd_id.name())
+            format!(
+                "{constructor_prefix}{}({{{fields}}})",
+                constructor.cd_id.name()
+            )
         }
     }
+}
+
+fn format_constructor_attributes(attrs: &[Attribute]) -> String {
+    attrs
+        .iter()
+        .filter_map(|attr| {
+            if attr.attr_name.txt != "as" {
+                return None;
+            }
+            let payload = match &attr.attr_payload {
+                AttributePayload::Ident(value) => value.clone(),
+                AttributePayload::Str(value) => format!("\"{value}\""),
+                AttributePayload::Int(value) => value.to_string(),
+                AttributePayload::Float(value) | AttributePayload::BigInt(value) => value.clone(),
+                AttributePayload::Bool(true) => "true".to_string(),
+                AttributePayload::Bool(false) => "false".to_string(),
+                AttributePayload::Empty | AttributePayload::Structure(_) => return None,
+            };
+            Some(format!("@as({payload}) "))
+        })
+        .collect::<String>()
 }
 
 fn format_type_params(printer: &mut TypeExprErrorPrinter<'_>, params: &[TypeExprRef]) -> String {
@@ -2117,6 +2150,22 @@ fn type_declarations<'a>(
     match (&impl_decl.type_kind, &sig_decl.type_kind) {
         // Abstract in signature allows any implementation
         (_, crate::types::decl::TypeKind::TypeAbstract) => Ok(()),
+
+        _ if impl_decl.type_unboxed.unboxed != sig_decl.type_unboxed.unboxed => {
+            let unboxed_decl = if sig_decl.type_unboxed.unboxed {
+                "the second"
+            } else {
+                "the first"
+            };
+            Err(IncludeModError::TypeDeclarationMismatch {
+                name: id,
+                actual: impl_decl.clone(),
+                expected: sig_decl.clone(),
+                detail: format!(
+                    "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
+                ),
+            })
+        }
 
         (
             crate::types::decl::TypeKind::TypeRecord(impl_labels, _),
