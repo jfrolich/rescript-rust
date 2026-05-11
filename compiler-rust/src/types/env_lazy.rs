@@ -1523,15 +1523,10 @@ fn build_local_module_components<'a>(
     let qualified_sig = Arc::new(qualified_sig);
     // OCaml compiler/ml/env.ml:1548-1578 closes child `comp_components`
     // thunks over the evolving `env` that is extended while walking the parent
-    // signature. Alias parents need the same captured env even when the child
-    // component itself stays lazy; otherwise a later scrape of aliases such as
-    // `Js.Json.Kind` resolves from an empty environment.
-    let eager_child_components = ctx.preserve_canonical_typedtree()
-        || matches!(
-            md.md_type,
-            super::decl::ModuleType::MtyAlias(..) | super::decl::ModuleType::MtyIdent(..)
-        );
-    let mut working_env = eager_child_components.then(|| env.clone_preserve_id());
+    // signature. Every child `comp_components` thunk should capture that
+    // evolving environment, independent of typedtree output mode; env.ml:1579
+    // stores the raw child module only after creating the thunk.
+    let mut working_env = Some(env.clone_preserve_id());
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
     let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();
