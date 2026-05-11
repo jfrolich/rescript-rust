@@ -496,7 +496,7 @@ pub(crate) fn decl_manifest_aliases_path(
     })
 }
 
-fn registered_flattened_alias_rewrite(ctx: &TypeContext, path: &Path) -> Option<Path> {
+pub(crate) fn registered_flattened_alias_rewrite(ctx: &TypeContext, path: &Path) -> Option<Path> {
     let root = path_root_ident(path)?;
     if !root.is_persistent() {
         return None;

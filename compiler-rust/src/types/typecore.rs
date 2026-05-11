@@ -2901,37 +2901,28 @@ fn preferred_alias_equiv_representative<'a>(
     rhs: TypeExprRef,
 ) -> Option<TypeExprRef> {
     fn prefer_qualified_flat_alias(
+        ctx: &TypeContext,
         lhs: TypeExprRef,
         rhs: TypeExprRef,
         path1: &Path,
         path2: &Path,
     ) -> Option<TypeExprRef> {
-        let name1 = path1.name();
-        let name2 = path2.name();
-        let seg1: Vec<&str> = name1.split('.').collect();
-        let seg2: Vec<&str> = name2.split('.').collect();
-
-        let qualifies = |long: &[&str], short: &[&str]| {
-            // OCaml compiler/ml/env.ml:1530-1538 prefixes the selected
-            // component path before compiler/ml/subst.ml:303-309 substitutes
-            // value descriptions. Prefer that qualified component path over
-            // ReScript's flattened backing unit for both `A.B.t`/`A__B.t` and
-            // deeper `A.B.C.t`/`A__B.C.t` namespace families.
-            (long.len() == short.len() + 1
-                && long.len() >= 3
-                && short.len() >= 2
-                && short[0] == format!("{}__{}", long[0], long[1])
-                && long[2..] == short[1..])
-                || (long.len() == 3
-                    && short.len() == 2
-                    && short[1] == long[2]
-                    && short[0] == format!("{}_{}", long[0], long[1]))
-        };
-
-        if qualifies(&seg1, &seg2) {
-            Some(lhs)
-        } else if qualifies(&seg2, &seg1) {
+        // OCaml compiler/ml/env.ml:1517 scrapes module aliases before
+        // env.ml:1530-1538 prefixes the selected component path, then
+        // compiler/ml/subst.ml:303-309 substitutes value descriptions through
+        // that component table. Prefer the qualified component path only when
+        // Rust has recorded that exact Env-derived flattened-head rewrite.
+        let rewrite1 = crate::types::ctype::registered_flattened_alias_rewrite(ctx, path1);
+        if rewrite1
+            .as_ref()
+            .is_some_and(|rewritten| rewritten.same(path2))
+        {
             Some(rhs)
+        } else if crate::types::ctype::registered_flattened_alias_rewrite(ctx, path2)
+            .as_ref()
+            .is_some_and(|rewritten| rewritten.same(path1))
+        {
+            Some(lhs)
         } else {
             None
         }
@@ -2964,7 +2955,7 @@ fn preferred_alias_equiv_representative<'a>(
                     Some(rhs_repr)
                 }
             } else if let Some(preferred) =
-                prefer_qualified_flat_alias(lhs_repr, rhs_repr, path1, path2)
+                prefer_qualified_flat_alias(ctx, lhs_repr, rhs_repr, path1, path2)
             {
                 Some(preferred)
             } else {
