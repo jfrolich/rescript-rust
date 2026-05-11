@@ -3880,39 +3880,6 @@ fn unify_after_expansion<'a>(
     }
 
     {
-        let lhs_desc = ctx.borrow_desc(lhs);
-        let rhs_desc = ctx.borrow_desc(rhs);
-        if let (
-            TypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                ..
-            },
-            TypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                ..
-            },
-        ) = (&*lhs_desc, &*rhs_desc)
-        {
-            if args1.is_empty() && args2.is_empty() && path1.name() == path2.name() {
-                drop(lhs_desc);
-                drop(rhs_desc);
-                link_type(ctx, lhs, rhs);
-                if state.mode != crate::types::UnifyMode::Pattern {
-                    let to_ty = ctx.repr(relink_target);
-                    if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
-                        ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
-                    }
-                }
-                return Ok(());
-            }
-        }
-        drop(lhs_desc);
-        drop(rhs_desc);
-    }
-
-    {
         let lhs_desc = ctx.get_desc(lhs);
         let rhs_desc = ctx.get_desc(rhs);
         if let (
