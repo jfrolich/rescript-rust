@@ -1584,6 +1584,19 @@ fn format_expr_type_clash_report(
     const ERROR: &str = "\x1b[1;31m";
     const RESET: &str = "\x1b[0m";
 
+    if let Some((actual_arity, expected_arity)) =
+        expr_type_clash_uncurried_arity_mismatch(type_ctx, trace)
+    {
+        return format_function_arity_mismatch_report(
+            arena,
+            source,
+            filename,
+            loc,
+            actual_arity,
+            expected_arity,
+        );
+    }
+
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
@@ -1623,6 +1636,61 @@ fn format_expr_type_clash_report(
     message.push_str("But it's expected to have type: ");
     message.push_str(INFO);
     message.push_str(&format_type_expr(type_ctx, expected));
+    message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn expr_type_clash_uncurried_arity_mismatch(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(i32, i32)> {
+    let (actual, expected) = trace.first().copied()?;
+    let actual_arity = uncurried_arrow_arity(type_ctx, actual)?;
+    let expected_arity = uncurried_arrow_arity(type_ctx, expected)?;
+    (actual_arity != expected_arity).then_some((actual_arity, expected_arity))
+}
+
+fn uncurried_arrow_arity(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<i32> {
+    match &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        TypeDesc::Tarrow {
+            arity: Some(arity),
+            ..
+        } => Some(*arity),
+        _ => None,
+    }
+}
+
+fn format_function_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    actual_arity: i32,
+    expected_arity: i32,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    message.push_str("This function is expected to have ");
+    message.push_str(INFO);
+    message.push_str(&expected_arity.to_string());
+    message.push_str(RESET);
+    message.push(' ');
+    message.push_str(if expected_arity == 1 {
+        "argument"
+    } else {
+        "arguments"
+    });
+    message.push_str(", but");
+    if actual_arity < expected_arity {
+        message.push_str(" only");
+    }
+    message.push_str(" has ");
+    message.push_str(ERROR);
+    message.push_str(&actual_arity.to_string());
     message.push_str(RESET);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
