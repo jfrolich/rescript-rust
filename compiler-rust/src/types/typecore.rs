@@ -8354,60 +8354,6 @@ fn type_application(
         }
     }
 
-    fn skip_selected_value_alias_post_unify(
-        ctx: &TypeContext,
-        env: &Env,
-        parameter_ty: TypeExprRef,
-        argument_ty: TypeExprRef,
-        selected_value_path: Option<&Path>,
-    ) -> bool {
-        fn constr_path_and_arity(ctx: &TypeContext, ty: TypeExprRef) -> Option<(Path, usize)> {
-            let ty = ctx.repr(ty);
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => Some((path.clone(), args.len())),
-                _ => None,
-            }
-        }
-
-        let Some(Path::Pdot(selected_parent, _, _)) = selected_value_path else {
-            return false;
-        };
-        if crate::types::ctype::registered_flattened_alias_rewrite(ctx, selected_parent).is_none() {
-            return false;
-        }
-        let Some((parameter_path, parameter_arity)) = constr_path_and_arity(ctx, parameter_ty)
-        else {
-            return false;
-        };
-        let Some((argument_path, argument_arity)) = constr_path_and_arity(ctx, argument_ty) else {
-            return false;
-        };
-        if parameter_arity != argument_arity {
-            return false;
-        }
-        let Path::Pdot(parameter_parent, parameter_name, _) = &parameter_path else {
-            return false;
-        };
-        if parameter_name != "t" || !parameter_parent.same(selected_parent) {
-            return false;
-        }
-        // OCaml compiler/ml/typecore.ml:3771-3773 runs `type_expect`
-        // followed by `unify_exp`, but the selected function expression was
-        // already built by typecore.ml:2421-2457 from
-        // `instance env desc.val_type`. When env.ml:1091-1100 selected an
-        // explicit backing-unit value such as `Webapi__Dom.Event.target`, that
-        // function instance keeps `Webapi__Dom.Event.t` even if the argument
-        // expression has the namespace alias `Webapi.Dom.Event.t`.
-        crate::types::ctype::flattened_alias_paths_equivalent(
-            ctx,
-            env,
-            &parameter_path,
-            &argument_path,
-            parameter_arity,
-        )
-    }
-
     let ctx = tctx.type_ctx;
     let total_app = !partial;
 
@@ -8418,10 +8364,6 @@ fn type_application(
     ctx.begin_def();
     let funct_ty = ctx.new_var(None);
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
-    let typed_funct_value_path = match &typed_funct.exp_desc {
-        ExpressionDesc::Texp_ident(path, _, _) => Some(path.clone()),
-        _ => None,
-    };
 
     // Backport of upstream #8359:
     // Lowered syntax like `dict{...}` and async wrappers becomes a regular
@@ -8550,21 +8492,16 @@ fn type_application(
                 } else {
                     tctx.set_unify_env(env);
                 }
-                if !skip_selected_value_alias_post_unify(
-                    ctx,
-                    env,
-                    arg_ty0,
+                // OCaml compiler/ml/typecore.ml:3771-3773 `type_argument`
+                // runs `type_expect` followed by `unify_exp`; do not skip this
+                // post-typing unification for flattened aliases.
+                unify_expression_types(
+                    tctx,
+                    typed_arg.exp_loc,
                     typed_arg.exp_type,
-                    typed_funct_value_path.as_ref(),
-                ) {
-                    unify_expression_types(
-                        tctx,
-                        typed_arg.exp_loc,
-                        typed_arg.exp_type,
-                        arg_ty0,
-                        Some(TypeClashContext::FunctionCall),
-                    )?;
-                }
+                    arg_ty0,
+                    Some(TypeClashContext::FunctionCall),
+                )?;
 
                 ctx.end_def();
                 unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
@@ -8823,14 +8760,11 @@ fn type_application(
                 // OCaml's type_unknown_args only calls type_expect (no
                 // subsequent unify_exp). Skip the post-unify for that path
                 // to preserve separate physical nodes in the typed tree.
-                let skip_selected_value_alias_unify = skip_selected_value_alias_post_unify(
-                    ctx,
-                    env,
-                    unify_ty,
-                    typed_arg.exp_type,
-                    typed_funct_value_path.as_ref(),
-                );
-                if !skip_post_unify && !skip_selected_value_alias_unify {
+                if !skip_post_unify {
+                    // OCaml compiler/ml/typecore.ml:3771-3773 `type_argument`
+                    // runs this second unification for selected arguments too;
+                    // alias handling belongs in Ctype/Env, not a typecore-side
+                    // selected-value guard.
                     unify_expression_types(
                         tctx,
                         typed_arg.exp_loc,
