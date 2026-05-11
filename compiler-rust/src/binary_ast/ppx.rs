@@ -14,7 +14,7 @@
 //! - `compiler/frontend/bs_builtin_ppx.ml`
 //! - `compiler/frontend/ast_external.ml`
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt};
 
 use crate::intern::StrIdx;
 use crate::parse_arena::{
@@ -54,6 +54,48 @@ const EXTERNAL_ATTRS: &[&str] = &[
     "set_index",
     "taggedTemplate",
 ];
+
+pub const ACCESSORS_VARIANT_RECORD_ARG_ERROR: &str = "@deriving(accessors) from a variant record argument is unsupported. Either define the record type separately from the variant type or use a positional argument.";
+
+#[derive(Debug, Clone)]
+pub struct PpxError {
+    loc: Option<LocIdx>,
+    message: String,
+}
+
+impl PpxError {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            loc: None,
+            message: message.into(),
+        }
+    }
+
+    fn at_loc(loc: LocIdx, message: impl Into<String>) -> Self {
+        Self {
+            loc: Some(loc),
+            message: message.into(),
+        }
+    }
+
+    pub fn loc(&self) -> Option<LocIdx> {
+        self.loc
+    }
+
+    pub fn message_text(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for PpxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PpxError {}
+
+pub type PpxResult<T> = Result<T, PpxError>;
 
 /// Check if the first char of a string is special (OCaml FFI marker)
 fn first_char_special(s: &str) -> bool {
@@ -8956,6 +8998,206 @@ fn handle_deriving_type(
     }]
 }
 
+fn validate_deriving_accessors_for_tdcls(
+    tdcls: &[TypeDeclaration],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let Some(last_tdcl) = tdcls.last() else {
+        return Ok(());
+    };
+    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if !actions
+        .iter()
+        .any(|action| matches!(action, DeriveAction::Accessors))
+    {
+        return Ok(());
+    }
+
+    for tdcl in tdcls {
+        if let TypeKind::Ptype_variant(constructors) = &tdcl.ptype_kind {
+            for constructor in constructors {
+                if matches!(constructor.pcd_args, ConstructorArguments::Pcstr_record(_)) {
+                    return Err(PpxError::at_loc(
+                        constructor.pcd_loc,
+                        ACCESSORS_VARIANT_RECORD_ARG_ERROR,
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_payload_deriving_errors(payload: &Payload, arena: &mut ParseArena) -> PpxResult<()> {
+    match payload {
+        Payload::PStr(items) => validate_structure_deriving_errors(items, arena),
+        Payload::PSig(items) => validate_signature_deriving_errors(items, arena),
+        Payload::PTyp(_) | Payload::PPat(_) => Ok(()),
+    }
+}
+
+fn validate_structure_deriving_errors(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_type(inner) => {
+                let (_rec_flag, tdcls) = &**inner;
+                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
+            }
+            StructureItemDesc::Pstr_module(mb) => {
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                validate_module_expr_deriving_errors(&mod_expr, arena)?;
+            }
+            StructureItemDesc::Pstr_recmodule(mbs) => {
+                for mb in mbs.iter() {
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    validate_module_expr_deriving_errors(&mod_expr, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_deriving_errors(&mod_type, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_include(incl) => {
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                validate_module_expr_deriving_errors(&mod_expr, arena)?;
+            }
+            StructureItemDesc::Pstr_attribute(attr) => {
+                validate_payload_deriving_errors(&attr.1, arena)?;
+            }
+            StructureItemDesc::Pstr_extension(inner) => {
+                let (extension, _attrs) = &**inner;
+                validate_payload_deriving_errors(&extension.1, arena)?;
+            }
+            StructureItemDesc::Pstr_eval(_)
+            | StructureItemDesc::Pstr_value(_)
+            | StructureItemDesc::Pstr_primitive(_)
+            | StructureItemDesc::Pstr_typext(_)
+            | StructureItemDesc::Pstr_exception(_)
+            | StructureItemDesc::Pstr_open(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_signature_deriving_errors(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_type(inner) => {
+                let (_rec_flag, tdcls) = &**inner;
+                validate_deriving_accessors_for_tdcls(tdcls, arena)?;
+            }
+            SignatureItemDesc::Psig_module(md) => {
+                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                validate_module_type_deriving_errors(&mod_type, arena)?;
+            }
+            SignatureItemDesc::Psig_recmodule(mds) => {
+                for md in mds.iter() {
+                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    validate_module_type_deriving_errors(&mod_type, arena)?;
+                }
+            }
+            SignatureItemDesc::Psig_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_deriving_errors(&mod_type, arena)?;
+                }
+            }
+            SignatureItemDesc::Psig_include(incl) => {
+                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                validate_module_type_deriving_errors(&mod_type, arena)?;
+            }
+            SignatureItemDesc::Psig_attribute(attr) => {
+                validate_payload_deriving_errors(&attr.1, arena)?;
+            }
+            SignatureItemDesc::Psig_extension(inner) => {
+                let (extension, _attrs) = &**inner;
+                validate_payload_deriving_errors(&extension.1, arena)?;
+            }
+            SignatureItemDesc::Psig_value(_)
+            | SignatureItemDesc::Psig_typext(_)
+            | SignatureItemDesc::Psig_exception(_)
+            | SignatureItemDesc::Psig_open(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_module_expr_deriving_errors(
+    mod_expr: &current::ModuleExpr,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => validate_structure_deriving_errors(items, arena),
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_name, param_type, body) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let mod_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_deriving_errors(&mod_type, arena)?;
+            }
+            let body_expr = arena.get_mod_expr(*body).clone();
+            validate_module_expr_deriving_errors(&body_expr, arena)
+        }
+        ModuleExprDesc::Pmod_apply(left, right) => {
+            let left_expr = arena.get_mod_expr(*left).clone();
+            validate_module_expr_deriving_errors(&left_expr, arena)?;
+            let right_expr = arena.get_mod_expr(*right).clone();
+            validate_module_expr_deriving_errors(&right_expr, arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
+            let inner_expr = arena.get_mod_expr(*inner).clone();
+            validate_module_expr_deriving_errors(&inner_expr, arena)?;
+            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_deriving_errors(&mod_type, arena)
+        }
+        ModuleExprDesc::Pmod_extension(extension) => {
+            validate_payload_deriving_errors(&extension.1, arena)
+        }
+        ModuleExprDesc::Pmod_ident(_) | ModuleExprDesc::Pmod_unpack(_) => Ok(()),
+    }
+}
+
+fn validate_module_type_deriving_errors(
+    mod_type: &ModuleType,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match &*mod_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(items) => validate_signature_deriving_errors(items, arena),
+        ModuleTypeDesc::Pmty_functor(inner) => {
+            let (_name, param_type, result_type) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let param_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_deriving_errors(&param_type, arena)?;
+            }
+            let result_type = arena.get_mod_type(*result_type).clone();
+            validate_module_type_deriving_errors(&result_type, arena)
+        }
+        ModuleTypeDesc::Pmty_with(inner) => {
+            let (mod_type_idx, _constraints) = &**inner;
+            let inner_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_deriving_errors(&inner_type, arena)
+        }
+        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_deriving_errors(&mod_expr, arena)
+        }
+        ModuleTypeDesc::Pmty_extension(extension) => {
+            validate_payload_deriving_errors(&extension.1, arena)
+        }
+        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
+    }
+}
+
 /// Handle @deriving(abstract) which transforms record types into abstract types with accessors
 ///
 /// For a type like:
@@ -10131,7 +10373,9 @@ fn core_type_of_type_declaration_with_attrs(
 pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
-) -> Result<Vec<StructureItem>, String> {
+) -> PpxResult<Vec<StructureItem>> {
+    validate_structure_deriving_errors(structure, arena)?;
+
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -10452,19 +10696,21 @@ fn expand_extensions_mod_expr(me_idx: ModExprIdx, arena: &mut ParseArena) -> Mod
 pub fn rewrite_signature(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
-) -> Result<Vec<SignatureItem>, String> {
+) -> PpxResult<Vec<SignatureItem>> {
+    validate_signature_deriving_errors(signature, arena)?;
     try_rewrite_signature_items(signature, arena)
 }
 
 fn try_rewrite_signature_items(
     items: &[SignatureItem],
     arena: &mut ParseArena,
-) -> Result<Vec<SignatureItem>, String> {
+) -> PpxResult<Vec<SignatureItem>> {
     let mut rewritten = Vec::new();
     let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
     for item in items {
         let expanded_items =
-            spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)?;
+            spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
+                .map_err(PpxError::message)?;
         for expanded in expanded_items {
             let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
             rewritten.extend(expand_signature_deriving_items(
@@ -10524,9 +10770,10 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
-) -> Result<Vec<StructureItem>, String> {
+) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)?
+    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+        .map_err(PpxError::message)?
     {
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }

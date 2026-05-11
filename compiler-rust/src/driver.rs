@@ -1361,13 +1361,50 @@ fn preprocess_signature_for_typecheck(
     options: &CompilerOptions,
     arena: &mut crate::parse_arena::ParseArena,
 ) -> Result<Signature> {
+    preprocess_signature_for_typecheck_inner(signature, options, arena)
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))
+}
+
+fn preprocess_signature_for_typecheck_with_source(
+    signature: Signature,
+    options: &CompilerOptions,
+    arena: &mut crate::parse_arena::ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<Signature> {
+    preprocess_signature_for_typecheck_inner(signature, options, arena)
+        .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+}
+
+fn preprocess_signature_for_typecheck_inner(
+    signature: Signature,
+    options: &CompilerOptions,
+    arena: &mut crate::parse_arena::ParseArena,
+) -> std::result::Result<Signature, ppx::PpxError> {
     let signature = if let Some(jsx_version) = options.jsx_version {
         jsx_ppx::transform_signature(signature, jsx_version, arena)
     } else {
         signature
     };
 
-    ppx::rewrite_signature(&signature, arena).map_err(|e| anyhow!("PPX rewrite failed: {e}"))
+    ppx::rewrite_signature(&signature, arena)
+}
+
+fn ppx_error_to_anyhow(
+    err: ppx::PpxError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    if let Some(loc) = err.loc() {
+        UserDiagnostic::new(
+            format_compiler_error_report(arena, source, filename, loc, err.message_text()),
+            2,
+        )
+        .into()
+    } else {
+        anyhow!("PPX rewrite failed: {err}")
+    }
 }
 
 fn type_mod_error_to_anyhow(
@@ -1782,7 +1819,7 @@ pub fn compile_source_to_js_with_options(
     // await, tagged templates, encode externals, and apply spice mapper rewrites.
     // spice is handled here, so avoid running a second top-level spice expansion pass.
     let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -2360,7 +2397,13 @@ pub fn typecheck_interface_source(
     }
     let experimental_let_unwrap =
         experimental_let_unwrap_for_signature(&signature, options, parser.arena());
-    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+    let signature = preprocess_signature_for_typecheck_with_source(
+        signature,
+        options,
+        parser.arena_mut(),
+        source,
+        filename,
+    )?;
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -2633,7 +2676,13 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
         let experimental_let_unwrap =
             experimental_let_unwrap_for_signature(&signature, options, parser.arena());
-        let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+        let signature = preprocess_signature_for_typecheck_with_source(
+            signature,
+            options,
+            parser.arena_mut(),
+            source,
+            filename,
+        )?;
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -2690,7 +2739,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let structure = ppx::expand_extensions(&structure, parser.arena_mut());
         let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -3851,7 +3900,7 @@ pub fn compile_source_in_process(
         structure
     };
     let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
 
@@ -4499,7 +4548,13 @@ pub fn typecheck_interface_in_process(
             parser.diagnostics().len()
         ));
     }
-    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+    let signature = preprocess_signature_for_typecheck_with_source(
+        signature,
+        options,
+        parser.arena_mut(),
+        source,
+        filename,
+    )?;
 
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
