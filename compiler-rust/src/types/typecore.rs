@@ -6467,16 +6467,6 @@ pub fn type_expect<'a>(
 
             let ty = crate::types::instance(ctx, desc.val_type);
             force_qualified_value_type_paths(tctx, env, &path, ty);
-            // OCaml compiler/ml/typecore.ml:2404-2457 builds the identifier
-            // expression with `instance env desc.val_type`, then `rue` calls
-            // `unify_exp` on that expression before returning it. Preserve the
-            // selected persistent representative before Rust's identifier-level
-            // unification so an expected application type does not relink a
-            // selected component path such as `Web.MediaStream.t` back to its
-            // flattened backing unit.
-            if matches!(path, Path::Pdot(..)) {
-                preserve_alias_unify_representative(tctx, env, ty, expected_ty, false, Some(&path));
-            }
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
