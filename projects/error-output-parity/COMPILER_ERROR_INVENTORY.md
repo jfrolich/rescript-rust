@@ -1,0 +1,198 @@
+# Compiler Error Inventory
+
+Starting source inventory for compiler/typechecker diagnostic parity.
+
+The fixture suite should eventually map each reachable variant below to at least
+one `.res` or `.resi` file. Internal or unreachable variants should be marked
+with a reason after checking raise sites.
+
+## `compiler/ml/typecore.ml`
+
+- `Polymorphic_label`
+- `Constructor_arity_mismatch`
+- `Label_mismatch`
+- `Pattern_type_clash`
+- `Or_pattern_type_clash`
+- `Multiply_bound_variable`
+- `Orpat_vars`
+- `Expr_type_clash`
+- `Apply_non_function`
+- `Apply_wrong_label`
+- `Label_multiply_defined`
+- `Labels_missing`
+- `Label_not_mutable`
+- `Wrong_name`
+- `Name_type_mismatch`
+- `Undefined_method`
+- `Private_type`
+- `Private_label`
+- `Not_subtype`
+- `Too_many_arguments`
+- `Abstract_wrong_label`
+- `Scoping_let_module`
+- `Not_a_variant_type`
+- `Incoherent_label_order`
+- `Less_general`
+- `Modules_not_allowed`
+- `Cannot_infer_signature`
+- `Not_a_packed_module`
+- `Recursive_local_constraint`
+- `Unexpected_existential`
+- `Unqualified_gadt_pattern`
+- `Invalid_interval`
+- `Invalid_for_loop_index`
+- `Invalid_for_of_pattern`
+- `No_value_clauses`
+- `Exception_pattern_below_toplevel`
+- `Inlined_record_escape`
+- `Inlined_record_expected`
+- `Invalid_extension_constructor_payload`
+- `Not_an_extension_constructor`
+- `Break_outside_loop`
+- `Continue_outside_loop`
+- `Literal_overflow`
+- `Unknown_literal`
+- `Illegal_letrec_pat`
+- `Empty_record_literal`
+- `Uncurried_arity_mismatch`
+- `Field_not_optional`
+- `Type_params_not_supported`
+- `Field_access_on_dict_type`
+- `Jsx_not_enabled`
+
+## `compiler/ml/typetexp.ml`
+
+- `Unbound_type_variable`
+- `Unbound_type_constructor`
+- `Unbound_type_constructor_2`
+- `Type_arity_mismatch`
+- `Type_mismatch`
+- `Alias_type_mismatch`
+- `Present_has_conjunction`
+- `Present_has_no_type`
+- `Constructor_mismatch`
+- `Not_a_variant`
+- `Variant_tags`
+- `Invalid_variable_name`
+- `Cannot_quantify`
+- `Multiple_constraints_on_type`
+- `Method_mismatch`
+- `Unbound_value`
+- `Unbound_constructor`
+- `Unbound_label`
+- `Unbound_module`
+- `Unbound_modtype`
+- `Ill_typed_functor_application`
+- `Illegal_reference_to_recursive_module`
+- `Access_functor_as_structure`
+- `Apply_structure_as_functor`
+- `Cannot_scrape_alias`
+- `Opened_object`
+- `Not_an_object`
+
+## `compiler/ml/typedecl.ml`
+
+- `Repeated_parameter`
+- `Duplicate_constructor`
+- `Duplicate_label`
+- `Object_spread_with_record_field`
+- `Recursive_abbrev`
+- `Cycle_in_def`
+- `Definition_mismatch`
+- `Constraint_failed`
+- `Inconsistent_constraint`
+- `Type_clash`
+- `Parameters_differ`
+- `Null_arity_external`
+- `Unbound_type_var`
+- `Cannot_extend_private_type`
+- `Not_extensible_type`
+- `Extension_mismatch`
+- `Rebind_wrong_type`
+- `Rebind_mismatch`
+- `Rebind_private`
+- `Bad_variance`
+- `Unavailable_type_constructor`
+- `Bad_fixed_type`
+- `Unbound_type_var_ext`
+- `Varying_anonymous`
+- `Val_in_structure`
+- `Invalid_attribute`
+- `Bad_immediate_attribute`
+- `Bad_unboxed_attribute`
+- `Boxed_and_unboxed`
+- `Nonrec_gadt`
+- `Variant_runtime_representation_mismatch`
+- `Variant_spread_fail`
+
+## `compiler/ml/typemod.ml`
+
+- `Cannot_apply`
+- `Not_included`
+- `Cannot_eliminate_dependency`
+- `Signature_expected`
+- `Structure_expected`
+- `With_no_component`
+- `With_mismatch`
+- `With_makes_applicative_functor_ill_typed`
+- `With_changes_module_alias`
+- `With_cannot_remove_constrained_type`
+- `Repeated_name`
+- `Non_generalizable`
+- `Non_generalizable_module`
+- `Interface_not_compiled`
+- `Not_allowed_in_functor_body`
+- `Not_a_packed_module`
+- `Incomplete_packed_module`
+- `Scoping_pack`
+- `Recursive_module_require_explicit_type`
+- `Apply_generative`
+- `Cannot_scrape_alias`
+
+## Other Compiler Error Surfaces
+
+- `compiler/ml/env.ml`
+  - `Illegal_renaming`
+  - `Inconsistent_import`
+  - `Missing_module`
+  - `Illegal_value_name`
+- `compiler/ml/rec_check.ml`
+  - `Illegal_letrec_expr`
+- `compiler/ml/syntaxerr.ml`
+  - `Variable_in_scope`
+- `compiler/ml/translcore.ml`
+  - `Unknown_builtin_primitive`
+- `compiler/ml/translmod.ml`
+  - `Fragile_pattern_in_toplevel`
+- `compiler/ml/transl_recmodule.ml`
+  - `Circular_dependency`
+- `compiler/ml/ast_untagged_variants.ml`
+  - `InvalidVariantAsAnnotation`
+  - `Duplicated_bs_as`
+  - `InvalidVariantTagAnnotation`
+  - `InvalidUntaggedVariantDefinition`
+  - `TagFieldNameConflict`
+- `compiler/ml/cmi_format.ml`
+  - `Not_an_interface`
+  - `Wrong_version_interface`
+  - `Corrupted_interface`
+
+## Include Mismatch Surfaces
+
+`compiler/ml/includemod.ml` and `compiler/ml/includecore.ml` are reported
+through higher-level errors such as `Typemod.Not_included`,
+`Typemod.With_mismatch`, `Typedecl.Definition_mismatch`, and
+`Typedecl.Extension_mismatch`.
+
+Coverage should include representative include mismatch symptoms rather than
+only the wrapper variant:
+
+- missing values
+- value description mismatch
+- type declaration mismatch
+- extension constructor mismatch
+- module mismatch
+- module type mismatch
+- invalid module alias
+- unbound module path
+- unbound module type path
