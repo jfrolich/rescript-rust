@@ -566,6 +566,8 @@ pub enum TypeCoreError {
 pub enum TypeClashContext {
     /// In a function call.
     FunctionCall,
+    /// In a comparison operator.
+    ComparisonOperator,
     /// In a braced identifier.
     BracedIdent,
     /// In a record spread.
@@ -8692,7 +8694,18 @@ fn should_unify_expected_result_before_typing_lowered_apply(
     }
 }
 
+fn is_comparison_operator_name(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().unwrap_or(name),
+        "==" | "===" | "!=" | "!==" | ">" | ">=" | "<" | "<="
+    )
+}
+
 fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -> TypeClashContext {
+    if typed_funct_value_path.is_some_and(|path| is_comparison_operator_name(&path.name())) {
+        return TypeClashContext::ComparisonOperator;
+    }
+
     if typed_funct_value_path
         .is_some_and(|path| path.name() == "Primitive_promise.unsafe_await")
     {

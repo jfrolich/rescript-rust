@@ -1740,6 +1740,10 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But this function argument is expecting: ",
         ),
+        Some(TypeClashContext::ComparisonOperator) => (
+            "This has type: ",
+            "But it's being compared to something of type: ",
+        ),
         Some(TypeClashContext::AssertCondition) => (
             "This has type: ",
             "But assertions must always be of type: ",
@@ -1760,6 +1764,9 @@ fn format_expr_type_clash_report(
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
         let message = format_array_type_clash_message(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_array_to_tuple(type_ctx, trace) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
@@ -1874,6 +1881,11 @@ fn append_extra_type_clash_help(
         message.push_str("Promise.resolve");
         message.push_str(RESET);
         message.push_str(" to convert the expression to a promise");
+    }
+
+    if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
+        message.push_str("\n\n");
+        message.push_str("You can only compare things of the same type.");
     }
 
     append_simple_conversion_help(type_ctx, trace, message);
