@@ -12914,9 +12914,15 @@ fn type_for_of(
         let typed = type_exp(tctx, env, iterable_expr, None)?;
         let iterable_ty = env.type_iterable(ctx, ty_elem);
         // Try iterable first.
-        match crate::types::ctype::unify(ctx, &mut tctx.unify_state, typed.exp_type, iterable_ty) {
+        match unify_expression_types(
+            tctx,
+            iterable_expr.pexp_loc,
+            typed.exp_type,
+            iterable_ty,
+            None,
+        ) {
             Ok(()) => typed,
-            Err(_) => {
+            Err(iterable_error) => {
                 // Fall back to array<'a> (matches OCaml's convenience path).
                 // We can't backtrack the failed unify perfectly, so peek at
                 // the head and decide based on its constructor — if it's
@@ -12930,23 +12936,20 @@ fn type_for_of(
                     _ => false,
                 };
                 if is_array {
-                    crate::types::ctype::unify(
-                        ctx,
-                        &mut tctx.unify_state,
+                    if unify_expression_types(
+                        tctx,
+                        iterable_expr.pexp_loc,
                         typed.exp_type,
                         array_ty,
+                        None,
                     )
-                    .map_err(|e| {
-                        TypeCoreError::Other(format!(
-                            "for-of array fallback unification failed: {:?}",
-                            e
-                        ))
-                    })?;
+                    .is_err()
+                    {
+                        return Err(iterable_error);
+                    }
                     typed
                 } else {
-                    return Err(TypeCoreError::Other(format!(
-                        "for...of expects an iterable<'a>, got a non-iterable type"
-                    )));
+                    return Err(iterable_error);
                 }
             }
         }
