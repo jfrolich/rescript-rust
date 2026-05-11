@@ -496,6 +496,39 @@ pub(crate) fn decl_manifest_aliases_path(
     })
 }
 
+fn registered_flattened_alias_rewrite(ctx: &TypeContext, path: &Path) -> Option<Path> {
+    let root = path_root_ident(path)?;
+    if !root.is_persistent() {
+        return None;
+    }
+
+    let root_path = Path::pident(root.clone());
+    let alias_path = in_process_module_resolution_env(ctx)
+        .as_ref()
+        .and_then(|pers| pers.qualified_alias_path_for_flattened_head(root.name()))
+        .or_else(|| ctx.find_flattened_alias_component_path(root.name()))?;
+    if alias_path.same(&root_path) {
+        return None;
+    }
+
+    rewrite_path_prefix(path, &root_path, &alias_path)
+}
+
+fn flattened_alias_rewrites_connect(ctx: &TypeContext, path1: &Path, path2: &Path) -> bool {
+    let rewrite1 = registered_flattened_alias_rewrite(ctx, path1);
+    let rewrite2 = registered_flattened_alias_rewrite(ctx, path2);
+    rewrite1
+        .as_ref()
+        .is_some_and(|rewritten| rewritten.same(path2))
+        || rewrite2
+            .as_ref()
+            .is_some_and(|rewritten| rewritten.same(path1))
+        || rewrite1
+            .as_ref()
+            .zip(rewrite2.as_ref())
+            .is_some_and(|(rewritten1, rewritten2)| rewritten1.same(rewritten2))
+}
+
 pub(crate) fn flattened_alias_paths_equivalent(
     ctx: &TypeContext,
     env: &Env,
@@ -503,97 +536,32 @@ pub(crate) fn flattened_alias_paths_equivalent(
     path2: &Path,
     arity: usize,
 ) -> bool {
-    fn underscore_joined_prefix_match(long: &[&str], short: &[&str]) -> bool {
-        if long.len() < 3 || short.len() != 2 || short[1] != long[long.len() - 1] {
-            return false;
-        }
-        let expected = long[..long.len() - 1].join("_");
-        short[0] == expected
-    }
-
-    fn concatenated_flatten_match(long: &[&str], short: &[&str]) -> bool {
-        if long.len() <= short.len() || short.is_empty() || long.last() != short.last() {
-            return false;
-        }
-
-        // Runtime/library flattened module heads often collapse a qualified
-        // prefix into `Head_Sub1Sub2...`, e.g. `Belt.Map.Dict.t` ->
-        // `Belt_MapDict.t`.
-        for collapse_end in 2..long.len() {
-            if 1 + (long.len() - collapse_end) != short.len() {
-                continue;
-            }
-
-            let mut flat_head = String::from(long[0]);
-            flat_head.push('_');
-            for seg in &long[1..collapse_end] {
-                flat_head.push_str(seg);
-            }
-
-            if flat_head == short[0] && short[1..] == long[collapse_end..] {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    let name1 = path1.name();
-    let name2 = path2.name();
-    let seg1: Vec<&str> = name1.split('.').collect();
-    let seg2: Vec<&str> = name2.split('.').collect();
-    let candidate = if seg1.len() == seg2.len() + 1
-        && seg1.len() >= 3
-        && seg2.len() >= 2
-        && format!("{}__{}", seg1[0], seg1[1]) == seg2[0]
-        && seg1[2..] == seg2[1..]
-    {
-        Some((path1, path2))
-    } else if seg2.len() == seg1.len() + 1
-        && seg2.len() >= 3
-        && seg1.len() >= 2
-        && format!("{}__{}", seg2[0], seg2[1]) == seg1[0]
-        && seg2[2..] == seg1[1..]
-    {
-        Some((path2, path1))
-    } else if underscore_joined_prefix_match(seg1.as_slice(), seg2.as_slice()) {
-        Some((path1, path2))
-    } else if underscore_joined_prefix_match(seg2.as_slice(), seg1.as_slice()) {
-        Some((path2, path1))
-    } else if concatenated_flatten_match(seg1.as_slice(), seg2.as_slice()) {
-        Some((path1, path2))
-    } else if concatenated_flatten_match(seg2.as_slice(), seg1.as_slice()) {
-        Some((path2, path1))
-    } else {
-        None
-    };
-    let Some((long_path, short_path)) = candidate else {
-        return false;
-    };
-
-    let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
-    let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
     // OCaml derives alias identity from declarations reached through
     // compiler/ml/env.ml:800-813 `find_type`, compiler/ml/subst.ml:87-100
     // `type_path`, and manifest expansion in compiler/ml/ctype.ml:1346-1372.
-    // A flattened/unflattened spelling match alone is not evidence of identity.
-    let (Some(long_decl), Some(short_decl)) = (long_decl, short_decl) else {
+    // The flattened-vs-qualified path relation itself must come from
+    // compiler/ml/env.ml:1517 alias scraping and env.ml:1530-1538 component
+    // prefixing, captured by Rust's registered component alias table. Do not infer
+    // it from `A_B`/`A.B` spelling, and do not treat arbitrary manifest aliases
+    // such as `Js.null = Js_null.t` as a flattened-module representative match.
+    if !flattened_alias_rewrites_connect(ctx, path1, path2) {
         return false;
     };
-    if (short_decl.type_manifest.is_none() && short_decl.type_path.is_none())
-        || (long_decl.type_manifest.is_none() && long_decl.type_path.is_none())
-    {
-        return true;
-    }
 
-    let result = decl_manifest_aliases_path(ctx, &short_decl, long_path, arity)
-        || decl_manifest_aliases_path(ctx, &long_decl, short_path, arity)
-        || long_decl
+    let (Some(decl1), Some(decl2)) = (
+        lookup_type_decl_for_path(ctx, env, path1),
+        lookup_type_decl_for_path(ctx, env, path2),
+    ) else {
+        return false;
+    };
+
+    decl_manifest_aliases_path(ctx, &decl1, path2, arity)
+        || decl_manifest_aliases_path(ctx, &decl2, path1, arity)
+        || decl1
             .type_path
             .as_ref()
-            .zip(short_decl.type_path.as_ref())
-            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name());
-    result
+            .zip(decl2.type_path.as_ref())
+            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name())
 }
 
 pub(crate) fn nullary_constr_paths_equivalent(
