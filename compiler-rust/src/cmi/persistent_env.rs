@@ -3313,6 +3313,24 @@ pub fn substitute_type_paths_in_child_sig(
 ) {
     let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
+    // OCaml compiler/ml/env.ml:1530 builds distinct type and module mappings
+    // with `prefix_idents`; compiler/ml/subst.ml:87-95 rewrites a module path
+    // only when that path names a substituted module identifier. If Rust sees a
+    // flattened backing head from the CMI reader (for example
+    // `AWS__DocumentClient.DocumentClient.t`), translate only the parent
+    // signature's module children through the selected component path. Direct
+    // parent type paths such as `Mistakes__Types.storyID` are not module
+    // substitutions in OCaml and must remain under the persistent backing unit.
+    for flat_head in ctx.flattened_alias_heads_for_component_path(parent_module_path) {
+        let flat_parent = Path::pident(Ident::create_persistent(&flat_head));
+        for item in parent_sig {
+            if let SignatureItem::SigModule(id, _, _) = item {
+                let old_prefix = Path::pdot(flat_parent.clone(), id.name());
+                let new_prefix = Path::pdot(parent_module_path.clone(), id.name());
+                rewrite_sig_by_path_prefix(child_sig, &old_prefix, &new_prefix, ctx);
+            }
+        }
+    }
     restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
 }
 
@@ -5277,25 +5295,19 @@ fn rewrite_inner_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Optio
 /// lower lookup priority than local bindings (e.g., Predef types like `int`
 /// are not shadowed when Pervasives.cmi is opened).
 ///
-/// When `as_opened` is true, items are added with lower priority (opened).
-/// When `as_opened` is false, items are added with normal priority (for `include`).
-pub fn add_signature_to_env(
+/// Add an already-built module component signature with opened-binding priority.
+pub fn open_signature_components_into_env(
     sig_items: &[SignatureItem],
     module_path: &Path,
     env: &mut Env,
     ctx: &TypeContext,
-    as_opened: bool,
 ) {
-    add_signature_to_env_with_options(
-        sig_items,
-        module_path,
-        env,
-        ctx,
-        as_opened,
-        true,
-        true,
-        None,
-    );
+    // OCaml compiler/ml/env.ml:1874-1877 implements `open_signature` by
+    // forcing `find_module_descr root` and passing the already-built component
+    // table to `add_components`. The component table was built by
+    // env.ml:1513-1588, including the env.ml:1530 `prefix_idents` substitution,
+    // so an `open` must not apply a second signature-wide substitution here.
+    add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, true, None);
 }
 
 fn add_signature_to_env_with_options(

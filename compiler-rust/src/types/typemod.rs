@@ -7624,12 +7624,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
                             ) {
-                                crate::cmi::persistent_env::add_signature_to_env(
+                                crate::cmi::persistent_env::open_signature_components_into_env(
                                     sig_items.as_ref(),
                                     &resolved_path,
                                     &mut sig_env,
                                     tctx.type_ctx,
-                                    true, // as_opened
                                 );
                             }
                         }
@@ -7996,12 +7995,11 @@ fn approx_modtype<'a>(
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
                     ) {
-                        crate::cmi::persistent_env::add_signature_to_env(
+                        crate::cmi::persistent_env::open_signature_components_into_env(
                             sig_items.as_ref(),
                             &resolved_path,
                             &mut sig_env,
                             tctx.type_ctx,
-                            true,
                         );
                     }
                 }
@@ -10628,12 +10626,11 @@ pub fn transl_signature<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 ) {
-                    crate::cmi::persistent_env::add_signature_to_env(
+                    crate::cmi::persistent_env::open_signature_components_into_env(
                         sig_items.as_ref(),
                         &resolved_path,
                         &mut sig_env,
                         tctx.type_ctx,
-                        true, // as_opened
                     );
                     resolved_path
                 } else {
@@ -14079,12 +14076,11 @@ fn type_structure_item<'a>(
             } else if let Some((resolved_path, sig_items)) =
                 env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
             {
-                crate::cmi::persistent_env::add_signature_to_env(
+                crate::cmi::persistent_env::open_signature_components_into_env(
                     sig_items.as_ref(),
                     &resolved_path,
                     &mut new_env,
                     tctx.type_ctx,
-                    true,
                 );
                 resolved_path
             } else {

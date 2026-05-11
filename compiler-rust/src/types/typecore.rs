@@ -15123,12 +15123,11 @@ fn type_open(
         &mut tctx.persistent_env,
         tctx.type_ctx,
     ) {
-        crate::cmi::persistent_env::add_signature_to_env(
+        crate::cmi::persistent_env::open_signature_components_into_env(
             sig_items.as_ref(),
             &resolved_path,
             &mut open_env,
             tctx.type_ctx,
-            true,
         );
         resolved_path
     } else {
@@ -24069,14 +24068,11 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         // selected path rather than the flattened backing unit.
         match target {
             Path::Pident(alias_id) => {
-                // OCaml compiler/ml/env.ml:1567-1579 stores child module
-                // declarations/components as separate lazy thunks, and
-                // compiler/ml/subst.ml:69-95,303-309,350-377 only rewrites
-                // paths reached through the `prefix_idents` substitution when
-                // those thunks are forced. Keep this alias-target root rewrite
-                // at the current signature level so nested module value types
-                // preserve explicit persistent paths until their own component
-                // thunk runs.
+                // OCaml compiler/ml/env.ml:1517 scrapes the persistent alias
+                // target, then env.ml:1530 builds the current component
+                // substitution with `prefix_idents`. Apply that substitution
+                // only at this signature level; nested child component thunks
+                // keep their own env.ml:1568/1573 lazy substitution boundary.
                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig_shallow(
                     &sig,
                     alias_id.name(),
@@ -24389,20 +24385,16 @@ fn build_module_signature_for_path<'a>(
                     None
                 }
             } else {
-                let raw_sig_with_modtype = if id.is_persistent() {
-                    ctx.with_raw_module_sig(id.name(), |raw_sig| {
-                        raw_sig
-                            .iter()
-                            .any(|item| {
-                                matches!(item, crate::types::decl::SignatureItem::SigModtype(_, _))
-                            })
-                            .then(|| raw_sig.clone())
-                    })
-                    .flatten()
+                let raw_sig = if id.is_persistent() {
+                    ctx.with_raw_module_sig(id.name(), |raw_sig| raw_sig.clone())
+                        .or_else(|| {
+                            ctx.get_or_load_raw_module_sig(id.name())
+                                .map(|sig| sig.as_ref().clone())
+                        })
                 } else {
                     None
                 };
-                if let Some(raw_sig) = raw_sig_with_modtype {
+                if let Some(raw_sig) = raw_sig {
                     // OCaml compiler/ml/env.ml:669-678 stores persistent
                     // `ps_comps` from the raw `sign` separately from the lazy
                     // `ps_sig = Subst.signature ...`; env.ml:1000-1007 returns

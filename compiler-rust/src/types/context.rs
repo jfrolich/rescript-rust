@@ -1911,6 +1911,24 @@ impl TypeContext {
         raw.get(name).map(|sig| f(sig.as_ref()))
     }
 
+    pub(crate) fn get_or_load_raw_module_sig(
+        &self,
+        module_name: &str,
+    ) -> Option<Arc<super::decl::Signature>> {
+        if let Some(sig) = self.raw_module_sigs.borrow().get(module_name).cloned() {
+            return Some(sig);
+        }
+        // OCaml compiler/ml/env.ml:669-678 creates persistent `ps_comps` from
+        // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
+        // those components for exact persistent `Pident` descriptor lookup. Load
+        // the component signature here without forcing the renamed `ps_sig` lazy.
+        let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
+        self.raw_module_sigs
+            .borrow_mut()
+            .insert(module_name.to_string(), sig.clone());
+        Some(sig)
+    }
+
     /// Trigger module signature renaming for a persistent module.
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
