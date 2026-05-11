@@ -158,7 +158,6 @@ Hard rule for this goal: never improve parity by adding a Rust-only compatibilit
 
 - **Path-spelling alias equivalence:** `flattened_alias_paths_equivalent` and call sites in `ctype.rs`, `typecore.rs`, and `typemod.rs` use spelling such as `__`, `_`, `.mlmap`, and flattened/unflattened paths to infer alias identity, including fallback success when declaration lookup fails. Alias identity should come from declarations, substitution, and component lookup.
 - **Signature-content child forcing:** `typecore.rs` currently forces implicit child components based on signature properties such as “only values” or “has manifest type.” OCaml forcing should be driven by the actual lookup/normalization path, not by scanning a signature and deciding it should force.
-- **Primitive_js_extern probe compensation:** `typemod.rs` contains an explicitly temporary `Primitive_js_extern` force until Rust match/backtracking is equivalent. Keep it tracked as debt; do not treat it as OCaml-aligned.
 - **Implicit Stdlib/Pervasives root special cases:** `ctype.rs`, `env_lazy.rs`, and `typecore.rs` still contain explicit `Stdlib`/`Pervasives` force-order branches. If these are needed, they must be justified by the OCaml implicit-open path (`compiler/core/res_compmisc.ml` plus `compiler/ml/env.ml`) rather than hard-coded parity observations.
 
 Completed for this goal:
@@ -178,6 +177,7 @@ Completed for this goal:
 - **Global force suppression guard removed:** `component_alias_sig_force_suppression` and its scoped wrappers were deleted. Probe-style component/type lookups now carry explicit `ComponentLookupCacheMode::Probe`, matching OCaml `compiler/ml/env.ml:781-813` descriptor/type lookups separately from `find_module`/`components_of_module_maker` forcing at `compiler/ml/env.ml:865-882` and `compiler/ml/env.ml:1516-1588`.
 - **Label root rewrite name fallback removed:** `typecore.rs` no longer rewrites label argument/result type paths by matching equal printed parent names. Direct record-label root rewriting now follows OCaml `compiler/ml/subst.ml:87-95` and `compiler/ml/env.ml:1542-1559`: apply explicit component substitution with `Path.same`, not path spelling.
 - **Value-only signature qualification shortcut removed:** `typecore.rs` no longer skips component-signature copying/substitution when a signature contains only values. Component signatures now follow OCaml `compiler/ml/env.ml:1530-1538` and `compiler/ml/subst.ml:303-309`: run `prefix_idents`/`Subst.value_description` shape consistently instead of deciding laziness from signature contents.
+- **Primitive_js_extern probe compensation removed:** `typemod.rs` no longer scans type manifests for a `Primitive_js_extern` root to decide whether to force constraint-match expansion. Type-declaration constraint side effects now stay on the OCaml-shaped path at `compiler/ml/typedecl.ml:767-781` and `compiler/ml/ctype.ml:2338-2344`: expand copied heads for the parameterized constructor currently being checked.
 
 ### Running Typedtree Sexp Parity Tests
 
