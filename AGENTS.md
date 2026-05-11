@@ -156,12 +156,14 @@ These are known high-risk areas from the seven-day parity review. Treat them as 
 
 Hard rule for this goal: never improve parity by adding a Rust-only compatibility layer. Any change that suppresses a force, rewrites a representative, matches path strings, scans signature contents to guess forcing, or branches lazy behavior on output mode must be treated as debt unless it directly mirrors the reference OCaml implementation at a cited source location.
 
-- **Alias representative patching:** `compiler-rust/src/types/typecore.rs` has `preserve_alias_unify_representative`, including selected-value, child-alias, flattened-alias, and `__` path heuristics. OCaml does not have this layer; representative choice should emerge from the `type_argument` -> `type_expect` -> `unify_exp` flow plus `ctype.ml` unification/expansion.
 - **Canonical typedtree mode altering semantics:** `preserve_canonical_typedtree` branches in `context.rs`, `env_lazy.rs`, `persistent_env.rs`, and `typecore.rs` currently make canonical output and normal compilation use different lazy behavior. OCaml has one lazy environment algorithm; output mode must not decide force order, thunk sharing, or signature copy depth.
 - **Global force suppression guards:** `component_alias_sig_force_suppression` and `component_alias_probe_cache_suppression` compensate after the fact. OCaml separates lookup APIs such as `find_module_descr`, `find_module`, `find_type`, and `components_of_module_maker`; Rust should move side effects into the corresponding lazy thunk and call paths rather than using global suppress flags.
 - **Path-spelling alias equivalence:** `flattened_alias_paths_equivalent` and call sites in `ctype.rs`, `typecore.rs`, and `typemod.rs` use spelling such as `__`, `_`, `.mlmap`, and flattened/unflattened paths to infer alias identity, including fallback success when declaration lookup fails. Alias identity should come from declarations, substitution, and component lookup.
 - **Signature-content child forcing:** `typecore.rs` currently forces implicit child components based on signature properties such as “only values” or “has manifest type.” OCaml forcing should be driven by the actual lookup/normalization path, not by scanning a signature and deciding it should force.
 - **Primitive_js_extern probe compensation:** `typemod.rs` contains an explicitly temporary `Primitive_js_extern` force until Rust match/backtracking is equivalent. Keep it tracked as debt; do not treat it as OCaml-aligned.
+
+Completed for this goal:
+- **Alias representative patching removed:** `preserve_alias_unify_representative` and its call sites were deleted. Do not reintroduce a typecore-side representative rewrite; representative choice must continue to emerge from the OCaml-aligned `type_argument` -> `type_expect` -> `unify_exp` flow plus `ctype.ml` unification/expansion.
 
 ### Running Typedtree Sexp Parity Tests
 
