@@ -9329,8 +9329,21 @@ fn type_application(
     // create a separate new arrow and record an arity alias so the sexp
     // serializer deduplicates them (matching OCaml's id-based dedup).
     if let Some(arity) = function_arity {
-        let applied_args = args.len() as i32 + consumed_optional_count as i32;
+        // OCaml update_uncurried_arity receives nargs = ignored optional
+        // arguments + syntactic arguments, but reports provided_arity from the
+        // syntactic arguments only.
+        let syntactic_args = args.len() as i32;
+        let applied_args = syntactic_args + consumed_optional_count as i32;
         let remaining_arity = arity - applied_args;
+        if total_app && remaining_arity > 0 {
+            return Err(TypeCoreError::UncurriedArityMismatch {
+                function_type: typed_funct.exp_type,
+                expected_arity: (syntactic_args + remaining_arity) as usize,
+                provided_arity: syntactic_args as usize,
+                provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
+                function_name: None,
+            });
+        }
         if remaining_arity > 0 {
             let result_repr = ctx.repr(result_ty);
             if let TypeDesc::Tarrow { arg, ret, .. } = &*ctx.get_desc(result_repr) {
