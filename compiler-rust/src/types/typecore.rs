@@ -4708,13 +4708,6 @@ fn force_qualified_value_type_paths<'a>(
             {
                 continue;
             }
-            if !flattened_alias_equivalent
-                && !crate::types::ctype::resolved_type_items_share_identity(
-                    ctx, env, &candidate, path, arity,
-                )
-            {
-                continue;
-            }
 
             return Some(candidate);
         }
@@ -5163,11 +5156,6 @@ fn force_qualified_value_type_paths<'a>(
                             path_root_ident(selected)
                                 .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
                         });
-                    let type_parent_is_selected_value_module = selected_module_path
-                        .is_some_and(|selected| parent.same(selected))
-                        || selected_alias_targets
-                            .iter()
-                            .any(|target| parent.same(target));
                     let type_parent_is_selected_alias_sibling =
                         selected_alias_targets.iter().any(|target| {
                             let Some(target_parent) = target.parent() else {
