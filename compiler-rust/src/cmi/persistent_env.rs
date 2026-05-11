@@ -600,8 +600,13 @@ pub struct PersistentEnv {
     prepared_cached_alias_rewrites: HashSet<String>,
 }
 
-fn should_register_lazy_raw_sig(name: &str) -> bool {
-    name.contains('_')
+fn should_register_lazy_raw_sig(name: &str, alias_rewrites: &AliasPrefixRewrites) -> bool {
+    // OCaml compiler/ml/env.ml:1516-1518 reaches alias backing signatures only
+    // through `scrape_alias` and the component tables built by env.ml:1530-1578.
+    // Rust keeps raw signatures for the same known backing heads; use the
+    // alias table populated by `collect_alias_rewrites` instead of guessing from
+    // flattened name spelling.
+    alias_rewrites.get(name).is_some()
 }
 
 impl PersistentEnv {
@@ -983,8 +988,10 @@ impl PersistentEnv {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
             }
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
-            if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
-                ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+            if should_register_lazy_raw_sig(&portable_key, &self.alias_prefix_rewrites)
+                && !ctx.has_raw_module_sig(&portable_key)
+            {
+                ctx.register_raw_module_sig(&portable_key, ps.ps_sig.clone());
             }
             self.prepared_cached_alias_rewrites
                 .insert(portable_key.clone());
@@ -1020,7 +1027,9 @@ impl PersistentEnv {
         if let Some(ps) = result.as_ref() {
             self.prepared_cached_alias_rewrites
                 .insert(load_name.clone());
-            if should_register_lazy_raw_sig(&load_name) && !ctx.has_raw_module_sig(&load_name) {
+            if should_register_lazy_raw_sig(&load_name, &self.alias_prefix_rewrites)
+                && !ctx.has_raw_module_sig(&load_name)
+            {
                 ctx.register_raw_module_sig(&load_name, ps.ps_sig.clone());
             }
         }
@@ -1056,7 +1065,9 @@ impl PersistentEnv {
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
         }
 
-        if should_register_lazy_raw_sig(cache_key) && !ctx.has_raw_module_sig(cache_key) {
+        if should_register_lazy_raw_sig(cache_key, &self.alias_prefix_rewrites)
+            && !ctx.has_raw_module_sig(cache_key)
+        {
             ctx.register_raw_module_sig(cache_key, ps.ps_sig.clone());
         }
     }
@@ -1095,7 +1106,7 @@ impl PersistentEnv {
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
         let signature = Arc::new(signature);
-        if should_register_lazy_raw_sig(name) {
+        if should_register_lazy_raw_sig(name, &self.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
         }
 
