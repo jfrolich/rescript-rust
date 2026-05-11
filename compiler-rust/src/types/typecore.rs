@@ -408,7 +408,11 @@ pub enum TypeCoreError {
     ApplyNonFunction(TypeExprRef),
 
     /// Wrong label in application.
-    ApplyWrongLabel(ArgLabel, TypeExprRef),
+    ApplyWrongLabel {
+        loc: LocIdx,
+        label: ArgLabel,
+        ty: TypeExprRef,
+    },
 
     /// Label defined multiple times.
     LabelMultiplyDefined {
@@ -8933,6 +8937,63 @@ fn type_application(
         level: i32,
     }
 
+    fn result_type_from_omitted(
+        ctx: &TypeContext,
+        omitted: &[OmittedArrow],
+        ignored: &[OmittedArrow],
+        ty_fun: TypeExprRef,
+    ) -> TypeExprRef {
+        let mut result = ty_fun;
+        for arrow in omitted.iter().chain(ignored.iter()) {
+            result = new_arrow_with_level(
+                ctx,
+                arrow.label.clone(),
+                arrow.arg_ty,
+                result,
+                arrow.level,
+                None,
+            );
+        }
+        result
+    }
+
+    fn type_has_label(
+        ctx: &TypeContext,
+        env: &Env,
+        arena: &ParseArena,
+        label: &ArgLabel,
+        ty_fun: TypeExprRef,
+    ) -> bool {
+        fn same_label_name(
+            type_label: &crate::types::ArgLabel,
+            arena: &ParseArena,
+            label: &ArgLabel,
+        ) -> bool {
+            match (type_label.label_name(), label) {
+                (None, ArgLabel::Nolabel) => true,
+                (Some(type_name), ArgLabel::Labelled(loc) | ArgLabel::Optional(loc)) => {
+                    type_name == arena.get_string(loc.txt)
+                }
+                _ => false,
+            }
+        }
+
+        let mut ty = ty_fun;
+        loop {
+            let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+            match &*ctx.get_desc(expanded) {
+                TypeDesc::Tvar(_) => return true,
+                TypeDesc::Tarrow { arg, ret, .. } => {
+                    if same_label_name(&arg.lbl, arena, label) {
+                        return true;
+                    }
+                    ty = *ret;
+                }
+                _ => return false,
+            }
+        }
+    }
+
     fn new_arrow_with_level(
         ctx: &TypeContext,
         label: crate::types::ArgLabel,
@@ -9173,6 +9234,11 @@ fn type_application(
         ExpressionDesc::Texp_ident(_, _, desc)
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
+    let is_identity_fn = matches!(
+        &typed_funct.exp_desc,
+        ExpressionDesc::Texp_ident(_, _, desc)
+            if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%identity")
+    );
 
     // Fast path for the overwhelmingly common non-labelled single-argument
     // application. This preserves OCaml's typecore.ml:4133-4197 staging by
@@ -9270,6 +9336,7 @@ fn type_application(
     let mut remaining_start = 0usize;
     let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
     let mut omitted: Vec<OmittedArrow> = Vec::new();
+    let mut ignored: Vec<OmittedArrow> = Vec::new();
     let mut consumed_optional_count = 0usize;
     let mut synthesized_optional_count = 0usize;
 
@@ -9357,6 +9424,14 @@ fn type_application(
 
             if fn_label.is_optional() && (total_app || has_nolabel_arg(args, remaining)) {
                 consumed_optional_count += 1;
+                ignored.insert(
+                    0,
+                    OmittedArrow {
+                        label: fn_label.clone(),
+                        arg_ty,
+                        level: ctx.get_level(ctx.repr(expanded_current_ty)),
+                    },
+                );
                 let option_ty = crate::types::instance(ctx, arg_ty);
                 // OCaml type_application: consumed omitted optional labels still appear
                 // in Texp_apply as explicit None arguments at Location.none.
@@ -9406,8 +9481,38 @@ fn type_application(
         }
 
         // type_unknown_args fallback: build an arrow from call-site label if needed.
+        let result_ty_with_omitted =
+            result_type_from_omitted(ctx, &omitted, &ignored, expanded_current_ty);
+        if matches!(
+            &*ctx.get_desc(ctx.repr(result_ty_with_omitted)),
+            TypeDesc::Tarrow { .. }
+        ) {
+            if pending_args.len() >= max_arity as usize {
+                return Err(TypeCoreError::ApplyWrongLabel {
+                    loc: arg_expr.pexp_loc,
+                    label: *label,
+                    ty: typed_funct.exp_type,
+                });
+            }
+            if !type_has_label(ctx, env, tctx.arena, label, expanded_current_ty) {
+                return Err(TypeCoreError::ApplyWrongLabel {
+                    loc: arg_expr.pexp_loc,
+                    label: *label,
+                    ty: result_ty_with_omitted,
+                });
+            }
+            return Err(TypeCoreError::IncoherentLabelOrder);
+        }
+
         let arg_ty = ctx.new_var(None);
         let ret_ty = ctx.new_var(None);
+        if force_tvar
+            && matches!(&*ctx.get_desc(expanded_current_ty), TypeDesc::Tvar(_))
+            && ctx.get_level(ctx.repr(expanded_current_ty)) >= ctx.get_level(ctx.repr(arg_ty))
+            && !is_identity_fn
+        {
+            tctx.report_warning(arg_expr.pexp_loc, Warning::UnusedArgument);
+        }
         let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
         let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
         unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
@@ -9441,6 +9546,15 @@ fn type_application(
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
             ) {
                 if fn_label.is_optional() {
+                    consumed_optional_count += 1;
+                    ignored.insert(
+                        0,
+                        OmittedArrow {
+                            label: fn_label.clone(),
+                            arg_ty,
+                            level: ctx.get_level(ctx.repr(expanded_current_ty)),
+                        },
+                    );
                     let option_ty = crate::types::instance(ctx, arg_ty);
                     pending_args.push(PendingApplyArg::SynthOptionalNone {
                         label: fn_label.clone(),

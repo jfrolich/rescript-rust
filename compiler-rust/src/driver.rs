@@ -26,8 +26,8 @@ use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena};
 use crate::parser::ast::{
-    Attribute, Constant, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc, Payload,
-    Signature, SignatureItemDesc, Structure, StructureItemDesc,
+    ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
+    ModuleExprDesc, Payload, Signature, SignatureItemDesc, Structure, StructureItemDesc,
 };
 use crate::parser::{Parser, code_frame, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
@@ -1743,6 +1743,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::ApplyWrongLabel { loc, label, ty }) => {
+            UserDiagnostic::new(
+                format_apply_wrong_label_report(type_ctx, arena, source, filename, *loc, label, *ty),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::WrongName {
             loc,
             kind,
@@ -2907,6 +2914,34 @@ fn format_function_arity_mismatch_report(
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
+fn format_apply_wrong_label_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &ParserArgLabel,
+    ty: TypeExprRef,
+) -> String {
+    let mut message = String::new();
+    match label {
+        ParserArgLabel::Nolabel => {
+            message.push_str("The argument at this position should be labelled.");
+        }
+        ParserArgLabel::Labelled(loc) | ParserArgLabel::Optional(loc) => {
+            message.push_str("This function does not take the argument ");
+            message.push('~');
+            message.push_str(arena.get_string(loc.txt));
+            message.push('.');
+        }
+    }
+    message.push('\n');
+    message.push_str("This function has type: ");
+    message.push_str(&format_type_expr(type_ctx, ty));
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
 fn format_field_not_optional_report(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -3383,11 +3418,14 @@ impl<'a> TypeExprPrinter<'a> {
     }
 
     fn format_arrow_arg(&mut self, label: &TypeArgLabel, ty: TypeExprRef) -> String {
-        let ty = self.format(ty);
         match label {
-            TypeArgLabel::Nolabel => ty,
-            TypeArgLabel::Labelled(label) => format!("~{}: {ty}", label.txt),
-            TypeArgLabel::Optional(label) => format!("?{}: {ty}", label.txt),
+            TypeArgLabel::Nolabel => self.format(ty),
+            TypeArgLabel::Labelled(label) => format!("~{}: {}", label.txt, self.format(ty)),
+            TypeArgLabel::Optional(label) => {
+                let inner_ty =
+                    crate::types::ctype::extract_option_type(self.type_ctx, ty).unwrap_or(ty);
+                format!("~{}: {}=?", label.txt, self.format(inner_ty))
+            }
         }
     }
 
@@ -3496,8 +3534,20 @@ pub fn compile_source_to_js_with_options(
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| type_mod_error_to_anyhow(e, &type_ctx, parser.arena(), source, filename))?;
+    let (typed_structure, final_env) =
+        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
+            Ok(result) => result,
+            Err(e) => {
+                emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                return Err(type_mod_error_to_anyhow(
+                    e,
+                    &type_ctx,
+                    parser.arena(),
+                    source,
+                    filename,
+                ));
+            }
+        };
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
