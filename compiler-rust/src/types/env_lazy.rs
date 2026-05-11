@@ -1422,13 +1422,11 @@ fn build_local_module_components<'a>(
                 // components without forcing env.ml:719-721 `ps_sig`; callers
                 // that are only probing typedecl.ml:767-779 constraints use
                 // this guard to keep the alias target lazy.
-                if ctx.preserve_canonical_typedtree()
-                    && !ctx.suppresses_component_alias_sig_force()
+                if !ctx.suppresses_component_alias_sig_force()
                     && let Some(pers) = pers_env.as_mut()
                 {
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
-                } else if ctx.preserve_canonical_typedtree()
-                    && access_path_is_direct_implicit_open_child(access_path)
+                } else if access_path_is_direct_implicit_open_child(access_path)
                     && !ctx.suppresses_component_alias_sig_force()
                     && env.find_module_with_origin(id.name()).is_err()
                 {
