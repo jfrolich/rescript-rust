@@ -1422,6 +1422,19 @@ fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> 
     UserDiagnostic::new(output, 1).into()
 }
 
+fn directive_payload_error_to_anyhow(
+    err: DirectivePayloadError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, err.loc, "expect string literal "),
+        2,
+    )
+    .into()
+}
+
 fn type_mod_error_to_anyhow(
     err: TypeModError,
     type_ctx: &TypeContext,
@@ -3070,7 +3083,8 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
-    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
+    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
+        .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
     let experimental_let_unwrap =
@@ -4691,7 +4705,7 @@ fn extract_single_string_payload(
 fn extract_file_directives_from_structure(
     structure: &Structure,
     arena: &crate::parse_arena::ParseArena,
-) -> Result<Vec<String>> {
+) -> std::result::Result<Vec<String>, DirectivePayloadError> {
     let mut directives = Vec::new();
 
     for item in structure {
@@ -4701,13 +4715,27 @@ fn extract_file_directives_from_structure(
         if arena.get_string(attr.0.txt) != "directive" {
             continue;
         }
-        let directive = extract_single_string_payload(&attr.1, arena)
-            .ok_or_else(|| anyhow!("Expected string literal payload in @@directive"))?;
+        let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
+            return Err(DirectivePayloadError { loc: item.pstr_loc });
+        };
         directives.push(directive);
     }
 
     Ok(directives)
 }
+
+#[derive(Debug, Clone, Copy)]
+struct DirectivePayloadError {
+    loc: LocIdx,
+}
+
+impl std::fmt::Display for DirectivePayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expect string literal ")
+    }
+}
+
+impl std::error::Error for DirectivePayloadError {}
 
 /// Extract `@@config({flags: [...]})` overrides from a parsed structure.
 pub fn extract_file_config_from_structure(
