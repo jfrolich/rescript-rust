@@ -2444,6 +2444,14 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But \x1b[1;33mif\x1b[0m conditions must always be of type: ",
         ),
+        Some(TypeClashContext::IfReturn) => (
+            "This has type: ",
+            "But this \x1b[1;33mif\x1b[0m statement is expected to return: ",
+        ),
+        Some(TypeClashContext::TernaryReturn) => (
+            "This has type: ",
+            "But this ternary is expected to return: ",
+        ),
         Some(TypeClashContext::WhileCondition) => (
             "This has type: ",
             "But a \x1b[1;33mwhile\x1b[0m loop condition must always be of type: ",
@@ -2482,6 +2490,12 @@ fn format_expr_type_clash_report(
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
         let message = format_array_type_clash_message(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(
+        context,
+        Some(TypeClashContext::IfReturn) | Some(TypeClashContext::TernaryReturn)
+    ) {
+        let message = format_type_clash_return_message(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
         context,
@@ -2678,6 +2692,30 @@ fn format_type_clash_message_with_empty_blank_lines(message: &str) -> String {
     output
 }
 
+fn format_type_clash_return_message(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().collect();
+    let mut output = String::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            if lines
+                .get(idx + 1)
+                .is_some_and(|next| next.starts_with("You can convert "))
+            {
+                output.push_str("  \n");
+            } else {
+                output.push('\n');
+            }
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
 fn append_extra_type_clash_help(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -2740,6 +2778,39 @@ fn append_extra_type_clash_help(
         message.push_str("bool");
         message.push_str(RESET);
         message.push('.');
+    }
+
+    if matches!(context, Some(TypeClashContext::IfReturn)) {
+        message.push_str("\n\n");
+        message.push_str(INFO);
+        message.push_str("if");
+        message.push_str(RESET);
+        message.push_str(" expressions must return the same type in all branches (");
+        message.push_str(INFO);
+        message.push_str("if");
+        message.push_str(RESET);
+        message.push_str(", ");
+        message.push_str(INFO);
+        message.push_str("else if");
+        message.push_str(RESET);
+        message.push_str(", ");
+        message.push_str(INFO);
+        message.push_str("else");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+
+    if matches!(context, Some(TypeClashContext::TernaryReturn)) {
+        message.push_str("\n\n");
+        message.push_str("Ternaries (");
+        message.push_str(INFO);
+        message.push('?');
+        message.push_str(RESET);
+        message.push_str(" and ");
+        message.push_str(INFO);
+        message.push(':');
+        message.push_str(RESET);
+        message.push_str(") must return the same type in both branches.");
     }
 
     if matches!(context, Some(TypeClashContext::StatementFunctionCall)) {

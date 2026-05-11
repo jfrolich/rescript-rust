@@ -53,6 +53,7 @@ const DICT_MAGIC_FIELD_NAME: &str = "dictValuesType";
 const DICT_TYPE_NAME: &str = "dict";
 const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
+const TERNARY_ATTRIBUTE: &str = "res.ternary";
 
 fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
     while x < n {
@@ -251,6 +252,12 @@ fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::A
     attrs
         .iter()
         .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
+}
+
+fn has_ternary_attribute(arena: &ParseArena, attrs: &[crate::parser::ast::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == TERNARY_ATTRIBUTE)
 }
 
 fn is_dict_type_path(path: &Path) -> bool {
@@ -618,6 +625,10 @@ pub enum TypeClashContext {
     Tuple,
     /// In an if condition.
     IfCondition,
+    /// In an if expression branch return.
+    IfReturn,
+    /// In a ternary expression branch return.
+    TernaryReturn,
     /// In a while loop condition.
     WhileCondition,
     /// In a for loop bound.
@@ -6363,6 +6374,12 @@ pub fn type_expect<'a>(
             let (ref cond_idx, ref then_idx, ref else_idx) = **inner;
             // If expression
             let bool_ty = env.type_bool(ctx);
+            let return_context =
+                Some(if has_ternary_attribute(tctx.arena, &expr.pexp_attributes) {
+                    TypeClashContext::TernaryReturn
+                } else {
+                    TypeClashContext::IfReturn
+                });
 
             // Condition should be bool
             let cond = tctx.arena.get_expr(*cond_idx);
@@ -6379,14 +6396,16 @@ pub fn type_expect<'a>(
             match else_branch {
                 Some(else_branch) => {
                     // OCaml keeps sharing by unifying else with then.exp_type.
-                    let typed_then = type_expect(tctx, env, then_branch, expected_ty, None)?;
-                    let typed_else = type_expect(tctx, env, else_branch, expected_ty, None)?;
+                    let typed_then =
+                        type_expect(tctx, env, then_branch, expected_ty, return_context.clone())?;
+                    let typed_else =
+                        type_expect(tctx, env, else_branch, expected_ty, return_context.clone())?;
                     unify_expression_types(
                         tctx,
                         loc,
                         typed_else.exp_type,
                         typed_then.exp_type,
-                        context,
+                        return_context,
                     )?;
                     let then_exp_type = typed_then.exp_type;
 
@@ -6408,7 +6427,8 @@ pub fn type_expect<'a>(
                     // The then-branch must be typed against the generic
                     // predef unit scheme itself, not a fresh unit instance,
                     // so inner applications/matches still instance it lazily.
-                    let typed_then = type_expect(tctx, env, then_branch, ctx.predef_unit(), None)?;
+                    let typed_then =
+                        type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
                     let then_exp_type = typed_then.exp_type;
                     rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
 
