@@ -1350,8 +1350,7 @@ fn build_local_module_components<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext,
 ) -> Option<QualifiedModuleComponents> {
-    if !ctx.preserve_canonical_typedtree()
-        && ctx.persistent_env_is_in_process()
+    if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
         | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
         && alias_id.is_persistent()
