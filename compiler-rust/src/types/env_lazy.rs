@@ -513,7 +513,6 @@ impl QualifiedModuleComponents {
             && (!source_prefixes.is_empty()
                 || flattened_component_head(&access_path).is_some_and(|head| {
                     head.is_persistent()
-                        && head.name().contains("__")
                         && ctx
                             .find_flattened_alias_component_path(head.name())
                             .is_some()
