@@ -13,7 +13,7 @@
 #   1. Run full suite once:    ./scripts/test_js_output_parity.sh
 #   2. Triage failures:        ./scripts/triage_js_failures.sh
 #   3. Fix a root cause
-#   4. Rebuild:                cargo build --release --manifest-path compiler-rust/Cargo.toml
+#   4. Rebuild:                cargo build --manifest-path compiler-rust/Cargo.toml
 #   5. Fast retest:            ./scripts/test_js_failing.sh
 #   6. Repeat 3-5 until category is clear
 #   7. Full suite to confirm:  ./scripts/test_js_output_parity.sh
@@ -23,7 +23,8 @@ set -e
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 project_root=$(cd "$script_dir/.."; pwd -P)
 
-RUST_BSC="$project_root/compiler-rust/target/${RUST_TARGET:-release}/bsc"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_BSC="$project_root/compiler-rust/target/$RUST_TARGET/bsc"
 RESCRIPT_CLI="$project_root/packages/@rescript/$($script_dir/platform.sh)/bin/rescript.exe"
 TESTS_DIR="$project_root/tests/tests"
 DIFF_DIR="$project_root/temp/rust-parity/diffs"

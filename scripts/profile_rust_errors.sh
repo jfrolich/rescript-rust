@@ -6,7 +6,8 @@ set -e
 
 scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
-RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_BSC="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc"
 RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
 OCAML_BSC="$PROJECT_ROOT/_build/install/default/bin/bsc"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
@@ -17,6 +18,8 @@ trap "rm -rf $TEMP_DIR" EXIT
 
 echo "Profiling Rust compiler errors..."
 echo "================================="
+echo "Rust bsc: $RUST_BSC"
+echo "Rust target: $RUST_TARGET"
 
 # Find all .res files
 find tests/tests/src -name "*.res" -type f 2>/dev/null | sort > "$TEMP_DIR/files.txt"

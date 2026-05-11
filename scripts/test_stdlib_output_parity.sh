@@ -43,7 +43,8 @@ PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUNTIME_DIR="$PROJECT_ROOT/packages/@rescript/runtime"
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/stdlib-output"
@@ -61,6 +62,8 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
     exit 1
 fi
 
@@ -91,6 +94,7 @@ echo "============================================"
 echo "Runtime project: $RUNTIME_DIR"
 echo "OCaml bsc:       $OCAML_BSC"
 echo "Rust bsc:        $RUST_BSC"
+echo "Rust target:     $RUST_TARGET"
 echo "Timeout:         ${TIMEOUT_SECONDS}s"
 echo "Artifact cache:  $CACHE_DIR"
 echo ""

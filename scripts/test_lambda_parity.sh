@@ -84,7 +84,8 @@ scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe}"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 BUILD_DIR="$TEST_PROJECT"
@@ -115,7 +116,8 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' to build the Rust compiler."
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' to build the debug Rust compiler."
+    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
     echo "For now, testing OCaml compiler only."
     RUST_AVAILABLE=false
 else
@@ -146,6 +148,7 @@ echo "============================================"
 echo "OCaml bsc: $OCAML_BSC"
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
     echo "Rust bsc:  $RUST_BSC"
+    echo "Rust target: $RUST_TARGET"
 else
     echo "Rust bsc:  (not available)"
 fi

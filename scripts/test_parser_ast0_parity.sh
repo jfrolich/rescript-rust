@@ -151,7 +151,8 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables
-RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/release/res_parser_rust"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 
 # Colors for output
@@ -180,7 +181,8 @@ fi
 
 if [[ ! -x "$RUST_PARSER" ]]; then
     echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
     exit 1
 fi
 
@@ -192,6 +194,7 @@ echo -e "${BOLD}AST0 Parity Test (PPX-compatible format)${RESET}"
 echo "============================================"
 echo "OCaml parser: $OCAML_PARSER"
 echo "Rust parser:  $RUST_PARSER"
+echo "Rust target:  $RUST_TARGET"
 echo "Timeout: ${TIMEOUT_SECONDS}s"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""

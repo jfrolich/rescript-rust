@@ -56,8 +56,10 @@ script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/release/bsc}"
-REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/release/rescript}"
+RUST_TARGET="${RUST_TARGET:-debug}"
+REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
@@ -77,13 +79,15 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}" >&2
-    echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first." >&2
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first." >&2
+    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries." >&2
     exit 2
 fi
 
 if [[ ! -x "$REWATCH_BIN" ]]; then
     echo -e "${RED}Error: rewatch binary not found at $REWATCH_BIN${RESET}" >&2
-    echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first." >&2
+    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
+    echo "Set REWATCH_TARGET=release and build with --release only when explicitly testing release binaries." >&2
     exit 2
 fi
 
@@ -170,6 +174,8 @@ echo "Build dir:       $TELLA_BUILD_DIR"
 echo "OCaml bsc:       $OCAML_BSC"
 echo "Rust bsc:        $RUST_BSC"
 echo "Rewatch:         $REWATCH_BIN"
+echo "Rust target:     $RUST_TARGET"
+echo "Rewatch target:  $REWATCH_TARGET"
 echo "Runtime:         $RESCRIPT_RUNTIME"
 echo "Artifact cache:  $CACHE_DIR"
 echo ""

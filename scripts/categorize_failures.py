@@ -26,7 +26,11 @@ from inspect_binary_ast import (
 
 # Binary paths
 OCAML_BSC = os.path.join(PROJECT_ROOT, "packages/@rescript/darwin-arm64/bin/bsc.exe")
-RUST_BSC = os.path.join(PROJECT_ROOT, "compiler-rust/target/release/bsc")
+RUST_TARGET = os.environ.get("RUST_TARGET", "debug")
+RUST_BSC = os.environ.get(
+    "RUST_BSC",
+    os.path.join(PROJECT_ROOT, "compiler-rust", "target", RUST_TARGET, "bsc"),
+)
 
 # Baseline file
 BASELINE_FILE = os.path.join(PROJECT_ROOT, "tests/parity_baselines/bsc_ast.txt")
