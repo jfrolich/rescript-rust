@@ -4,6 +4,7 @@
 //! JS IR codegen to produce JavaScript output.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,22 +23,56 @@ use crate::js_ir::{
     print_deps_program_with_directives_and_options,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::{
     Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
     SignatureItemDesc, Structure, StructureItemDesc,
 };
-use crate::parser::{Parser, jsx_ppx, module};
+use crate::parser::{Parser, code_frame, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure};
+use crate::types::typecore::TypeCoreError;
+use crate::types::typemod::TypeModError;
+use crate::types::{
+    ArgLabel as TypeArgLabel, TypeCheckContext, TypeContext, TypeDesc, TypeExprRef, initial_env,
+    transl_signature, type_structure,
+};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+pub struct UserDiagnostic {
+    output: String,
+    exit_code: i32,
+}
+
+impl UserDiagnostic {
+    fn new(output: String, exit_code: i32) -> Self {
+        Self { output, exit_code }
+    }
+
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+}
+
+impl fmt::Display for UserDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.output)
+    }
+}
+
+impl std::error::Error for UserDiagnostic {}
 
 /// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
 /// (Instant::now panics on WASM since time isn't implemented there).
@@ -1335,6 +1370,378 @@ fn preprocess_signature_for_typecheck(
     ppx::rewrite_signature(&signature, arena).map_err(|e| anyhow!("PPX rewrite failed: {e}"))
 }
 
+fn type_mod_error_to_anyhow(
+    err: TypeModError,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    match &err {
+        TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
+            loc,
+            function_type,
+            expected_arity,
+            provided_arity,
+            provided_args,
+            use_fallback_message,
+            ..
+        }) => UserDiagnostic::new(
+            format_uncurried_arity_mismatch_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *function_type,
+                *expected_arity,
+                *provided_arity,
+                provided_args,
+                *use_fallback_message,
+            ),
+            2,
+        )
+        .into(),
+        _ => anyhow!("Type checking failed: {err:?}"),
+    }
+}
+
+fn format_compiler_error_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_uncurried_arity_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    function_type: TypeExprRef,
+    expected_arity: usize,
+    provided_arity: usize,
+    provided_args: &[crate::parser::ast::ArgLabel],
+    use_fallback_message: bool,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let args_from_type = collect_function_arg_labels(type_ctx, function_type);
+    let args_from_type_unlabelled = args_from_type
+        .iter()
+        .filter(|arg| matches!(arg, TypeArgLabel::Nolabel))
+        .count();
+    let provided_unlabelled = provided_args
+        .iter()
+        .filter(|arg| matches!(arg, crate::parser::ast::ArgLabel::Nolabel))
+        .count();
+    let mismatch_in_unlabelled_args =
+        !use_fallback_message && args_from_type_unlabelled != provided_unlabelled;
+
+    let required_args = args_from_type
+        .iter()
+        .filter_map(|arg| match arg {
+            TypeArgLabel::Labelled(label) => Some(label.txt.clone()),
+            TypeArgLabel::Nolabel | TypeArgLabel::Optional(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let passed_named_args = provided_args
+        .iter()
+        .filter_map(|arg| parser_arg_label_name(arg, arena).map(str::to_string))
+        .collect::<Vec<_>>();
+    let missing_required_args = required_args
+        .iter()
+        .filter(|arg| !passed_named_args.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let named_args_of_fn_type = args_from_type
+        .iter()
+        .filter_map(|arg| match arg {
+            TypeArgLabel::Labelled(label) | TypeArgLabel::Optional(label) => {
+                Some(label.txt.clone())
+            }
+            TypeArgLabel::Nolabel => None,
+        })
+        .collect::<Vec<_>>();
+    let superfluous_args = passed_named_args
+        .iter()
+        .filter(|arg| !named_args_of_fn_type.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let is_fallback = use_fallback_message
+        || (missing_required_args.is_empty()
+            && superfluous_args.is_empty()
+            && !mismatch_in_unlabelled_args);
+
+    let mut message = String::new();
+    message.push_str("This function call is incorrect.\n");
+    message.push_str("The function has type:\n");
+    message.push_str(&format_type_expr(type_ctx, function_type));
+    message.push_str("\n\n");
+
+    if !missing_required_args.is_empty() {
+        message.push_str("- Missing arguments that must be provided: ");
+        message.push_str(
+            &missing_required_args
+                .iter()
+                .map(|arg| format!("~{arg}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        message.push('\n');
+        message.push_str("- Hint: Did you want to partially apply the function? You can do that by putting `...` just before the closing parens of the function call. Example: ");
+        message.push_str(INFO);
+        message.push_str("yourFn(~arg1=someVar, ...)");
+        message.push_str(RESET);
+        message.push('\n');
+    }
+
+    if !superfluous_args.is_empty() {
+        message.push_str("- Called with arguments it does not take: ");
+        message.push_str(&superfluous_args.join(", "));
+        message.push('\n');
+    }
+
+    if mismatch_in_unlabelled_args {
+        message.push_str("- The function takes ");
+        message.push_str(INFO);
+        message.push_str(&unlabelled_arg_count_message(
+            args_from_type_unlabelled,
+            provided_unlabelled,
+            CountPosition::Left,
+        ));
+        message.push_str(RESET);
+        message.push_str(" unlabelled argument");
+        if args_from_type_unlabelled != 1 {
+            message.push('s');
+        }
+        message.push_str(", but is called with ");
+        message.push_str(ERROR);
+        message.push_str(&unlabelled_arg_count_message(
+            provided_unlabelled,
+            args_from_type_unlabelled,
+            CountPosition::Right,
+        ));
+        message.push_str(RESET);
+    }
+
+    if is_fallback {
+        message.push_str("It is called with ");
+        message.push_str(ERROR);
+        message.push_str(&provided_arity.to_string());
+        message.push_str(RESET);
+        message.push_str(" argument");
+        if provided_arity != 1 {
+            message.push('s');
+        }
+        message.push_str(" but");
+        if provided_arity > expected_arity {
+            message.push_str(" just");
+        }
+        message.push_str(" requires ");
+        message.push_str(INFO);
+        message.push_str(&expected_arity.to_string());
+        message.push_str(RESET);
+        message.push('.');
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+#[derive(Clone, Copy)]
+enum CountPosition {
+    Left,
+    Right,
+}
+
+fn unlabelled_arg_count_message(
+    count: usize,
+    other_count: usize,
+    position: CountPosition,
+) -> String {
+    match (count, position) {
+        (0, CountPosition::Left) => "no".to_string(),
+        (0, CountPosition::Right) => "none".to_string(),
+        _ if count > other_count => count.to_string(),
+        _ => format!("just {count}"),
+    }
+}
+
+fn parser_arg_label_name<'a>(
+    label: &crate::parser::ast::ArgLabel,
+    arena: &'a ParseArena,
+) -> Option<&'a str> {
+    match label {
+        crate::parser::ast::ArgLabel::Nolabel => None,
+        crate::parser::ast::ArgLabel::Labelled(loc)
+        | crate::parser::ast::ArgLabel::Optional(loc) => Some(arena.get_string(loc.txt)),
+    }
+}
+
+fn collect_function_arg_labels(
+    type_ctx: &TypeContext,
+    function_type: TypeExprRef,
+) -> Vec<TypeArgLabel> {
+    let mut labels = Vec::new();
+    let mut current = function_type;
+    let mut seen = AHashSet::new();
+
+    loop {
+        let repr = type_ctx.repr(current);
+        if !seen.insert(repr) {
+            break;
+        }
+
+        match &*type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                labels.push(arg.lbl.clone());
+                current = *ret;
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+            _ => break,
+        }
+    }
+
+    labels
+}
+
+fn format_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    TypeExprPrinter::new(type_ctx).format(ty)
+}
+
+struct TypeExprPrinter<'a> {
+    type_ctx: &'a TypeContext,
+    vars: ahash::AHashMap<TypeExprRef, String>,
+    next_var: usize,
+}
+
+impl<'a> TypeExprPrinter<'a> {
+    fn new(type_ctx: &'a TypeContext) -> Self {
+        Self {
+            type_ctx,
+            vars: ahash::AHashMap::new(),
+            next_var: 0,
+        }
+    }
+
+    fn format(&mut self, ty: TypeExprRef) -> String {
+        let repr = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(repr) {
+            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
+            TypeDesc::Tarrow { .. } => self.format_arrow(repr),
+            TypeDesc::Ttuple(types) => {
+                let parts = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                format!("({})", parts.join(", "))
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let name = path.last().to_string();
+                if args.is_empty() {
+                    name
+                } else {
+                    let args = args.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                    format!("{name}<{}>", args.join(", "))
+                }
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
+            TypeDesc::Tpoly { body, .. } => self.format(*body),
+            TypeDesc::Tobject { .. } => "<object>".to_string(),
+            TypeDesc::Tfield { .. } => "<object-field>".to_string(),
+            TypeDesc::Tnil => "<object-end>".to_string(),
+            TypeDesc::Tvariant(_) => "<variant>".to_string(),
+            TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
+        }
+    }
+
+    fn format_arrow(&mut self, ty: TypeExprRef) -> String {
+        let mut args = Vec::new();
+        let mut current = ty;
+        let mut seen = AHashSet::new();
+
+        loop {
+            let repr = self.type_ctx.repr(current);
+            if !seen.insert(repr) {
+                break;
+            }
+
+            match &*self.type_ctx.get_desc(repr) {
+                TypeDesc::Tarrow { arg, ret, .. } => {
+                    args.push(self.format_arrow_arg(&arg.lbl, arg.typ));
+                    current = *ret;
+                }
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+                _ => break,
+            }
+        }
+
+        let ret = self.format(current);
+        if args.len() == 1 {
+            format!("{} => {ret}", args[0])
+        } else {
+            format!("({}) => {ret}", args.join(", "))
+        }
+    }
+
+    fn format_arrow_arg(&mut self, label: &TypeArgLabel, ty: TypeExprRef) -> String {
+        let ty = self.format(ty);
+        match label {
+            TypeArgLabel::Nolabel => ty,
+            TypeArgLabel::Labelled(label) => format!("~{}: {ty}", label.txt),
+            TypeArgLabel::Optional(label) => format!("~{}?: {ty}", label.txt),
+        }
+    }
+
+    fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
+        if let Some(name) = name {
+            if !name.is_empty() && name != "_" {
+                return format!("'{name}");
+            }
+        }
+
+        if let Some(existing) = self.vars.get(&ty) {
+            return existing.clone();
+        }
+
+        let name = generated_type_var_name(self.next_var);
+        self.next_var += 1;
+        self.vars.insert(ty, name.clone());
+        name
+    }
+}
+
+fn generated_type_var_name(idx: usize) -> String {
+    let letter = (b'a' + (idx % 26) as u8) as char;
+    if idx < 26 {
+        format!("'{letter}")
+    } else {
+        format!("'{letter}{}", idx / 26)
+    }
+}
+
 /// Compile ReScript source to JavaScript.
 pub fn compile_source_to_js(source: &str, filename: &str) -> Result<String> {
     compile_source_to_js_with_options(source, filename, &CompilerOptions::default())
@@ -1409,7 +1816,7 @@ pub fn compile_source_to_js_with_options(
     tctx.set_persistent_env(pers_env);
 
     let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+        .map_err(|e| type_mod_error_to_anyhow(e, &type_ctx, parser.arena(), source, filename))?;
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)

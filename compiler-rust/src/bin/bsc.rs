@@ -13,7 +13,7 @@ use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current, write_structure_ast_current,
 };
 use rescript_compiler::driver::{
-    CompilerOptions, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
     typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
@@ -54,7 +54,7 @@ fn default_runtime_path() -> Option<PathBuf> {
     // Case 2: local development — walk up from exe dir looking for packages/@rescript/runtime.
     // This handles various layouts:
     //   OCaml: _build/install/default/bin/bsc (4 levels)
-    //   Rust:  compiler-rust/target/release/bsc (3 levels)
+    //   Rust:  compiler-rust/target/debug/bsc (3 levels)
     let mut search_dir = dir.to_path_buf();
     for _ in 0..6 {
         let runtime = search_dir
@@ -129,6 +129,11 @@ fn main() {
                     std::process::exit(0);
                 }
                 Err(err) => {
+                    if let Some(diagnostic) = err.downcast_ref::<UserDiagnostic>() {
+                        eprint!("{}", diagnostic.output());
+                        let _ = std::io::stderr().flush();
+                        std::process::exit(diagnostic.exit_code());
+                    }
                     eprintln!("{err}");
                     let _ = std::io::stderr().flush();
                     std::process::exit(1);

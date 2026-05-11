@@ -521,11 +521,13 @@ pub enum TypeCoreError {
 
     /// Uncurried arity mismatch.
     UncurriedArityMismatch {
+        loc: LocIdx,
         function_type: TypeExprRef,
         expected_arity: usize,
         provided_arity: usize,
         provided_args: Vec<ArgLabel>,
         function_name: Option<Longident>,
+        use_fallback_message: bool,
     },
 
     /// Field not optional.
@@ -9337,11 +9339,13 @@ fn type_application(
         let remaining_arity = arity - applied_args;
         if total_app && remaining_arity > 0 {
             return Err(TypeCoreError::UncurriedArityMismatch {
+                loc: funct.pexp_loc,
                 function_type: typed_funct.exp_type,
                 expected_arity: (syntactic_args + remaining_arity) as usize,
                 provided_arity: syntactic_args as usize,
                 provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
                 function_name: None,
+                use_fallback_message: matches!(typed_funct.exp_desc, ExpressionDesc::Texp_send(..)),
             });
         }
         if remaining_arity > 0 {
