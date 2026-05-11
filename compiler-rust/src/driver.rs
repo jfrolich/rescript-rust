@@ -1440,6 +1440,30 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::BreakOutsideLoop { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "`break` can only be used directly inside a loop body.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ContinueOutsideLoop { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "`continue` can only be used inside a loop body.",
+                ),
+                2,
+            )
+            .into()
+        },
         TypeModError::CoreError(TypeCoreError::ExprTypeClash {
             loc,
             trace,

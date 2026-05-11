@@ -509,6 +509,12 @@ pub enum TypeCoreError {
     /// Not an extension constructor.
     NotAnExtensionConstructor,
 
+    /// Break outside a directly enclosing loop body.
+    BreakOutsideLoop { loc: LocIdx },
+
+    /// Continue outside a directly enclosing loop body.
+    ContinueOutsideLoop { loc: LocIdx },
+
     /// Literal overflow.
     LiteralOverflow(String),
 
@@ -759,6 +765,8 @@ pub struct TypeCheckContext<'a> {
     pub diagnostics: Vec<TypeCoreDiagnostic>,
     /// Collected warnings.
     pub warnings: Vec<TypeCoreWarning>,
+    /// Current loop nesting depth for validating break/continue.
+    pub loop_depth: usize,
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
@@ -831,6 +839,7 @@ impl<'a> TypeCheckContext<'a> {
             newtype_level: None,
             diagnostics: Vec::new(),
             warnings: Vec::new(),
+            loop_depth: 0,
             used_variables: HashMap::new(),
             type_variables: HashMap::new(),
             recursive_let_depth: 0,
@@ -929,6 +938,17 @@ impl<'a> TypeCheckContext<'a> {
             loc: lid.loc,
         }
     }
+}
+
+fn with_loop_depth<T>(
+    tctx: &mut TypeCheckContext<'_>,
+    f: impl FnOnce(&mut TypeCheckContext<'_>) -> TypeCoreResult<T>,
+) -> TypeCoreResult<T> {
+    let saved = tctx.loop_depth;
+    tctx.loop_depth = saved + 1;
+    let result = f(tctx);
+    tctx.loop_depth = saved;
+    result
 }
 
 // ============================================================================
@@ -6018,7 +6038,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_break => {
-            // break / continue both type as unit; semantics handled later in lowering.
+            if tctx.loop_depth == 0 {
+                return Err(TypeCoreError::BreakOutsideLoop { loc });
+            }
             let unit_ty = env.type_unit(ctx);
             let inst_expected = instance_if_generic(ctx, expected_ty);
             unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
@@ -6032,6 +6054,9 @@ pub fn type_expect<'a>(
         }
 
         ED::Pexp_continue => {
+            if tctx.loop_depth == 0 {
+                return Err(TypeCoreError::ContinueOutsideLoop { loc });
+            }
             let unit_ty = env.type_unit(ctx);
             let inst_expected = instance_if_generic(ctx, expected_ty);
             unify_expression_types(tctx, loc, inst_expected, unit_ty, context)?;
@@ -6188,7 +6213,7 @@ pub fn type_expect<'a>(
             let cond = tctx.arena.get_expr(*cond_idx);
             let typed_cond = type_expect(tctx, env, cond, bool_ty, None)?;
             let body = tctx.arena.get_expr(*body_idx);
-            let typed_body = type_statement(tctx, env, body)?;
+            let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, env, body))?;
 
             // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
             // Keep original argument order to preserve Tlink direction.
@@ -12291,6 +12316,8 @@ fn type_function(
     // variables (enabling cross-scope sharing like 'self in @this callbacks)
     // but additions inside the function don't leak back to the outer scope.
     let saved_type_variables = tctx.type_variables.clone();
+    let saved_loop_depth = tctx.loop_depth;
+    tctx.loop_depth = 0;
     let result = (|| -> TypeCoreResult<Expression> {
         // Convert arity to Option<i32> for the arrow type
         // Arity is now ArityIdx, look up from arena
@@ -12550,6 +12577,7 @@ fn type_function(
             attributes.to_vec().into(),
         ))
     })();
+    tctx.loop_depth = saved_loop_depth;
     tctx.type_variables = saved_type_variables;
     result
 }
@@ -12641,7 +12669,7 @@ fn type_for(
 
     // OCaml uses type_statement for for-loop bodies and instance_def(type_unit)
     // for the loop expression result.
-    let typed_body = type_statement(tctx, &body_env, body)?;
+    let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.
@@ -12785,7 +12813,7 @@ fn type_for_of(
         body_env.add_value(pv.id.clone(), desc);
     }
 
-    let typed_body = type_statement(tctx, &body_env, body)?;
+    let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
 
     // Result type is unit, matching OCaml `instance_def Predef.type_unit`.
     let result_unit_ty = env.type_unit(ctx);
