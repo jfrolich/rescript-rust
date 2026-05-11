@@ -18049,13 +18049,10 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
             let mut flat_heads = pers_env
                 .map(|pers| pers.flattened_alias_heads_for_path(&qualified_prefix))
                 .unwrap_or_default();
-            let mut flat_name = head.name().to_string();
-            for component in prefix_components {
-                flat_name.push('_');
-                flat_name.push_str(component);
-            }
-            if !flat_heads.iter().any(|item| item == &flat_name) {
-                flat_heads.push(flat_name);
+            for flat_head in ctx.flattened_alias_heads_for_component_path(&qualified_prefix) {
+                if !flat_heads.iter().any(|item| item == &flat_head) {
+                    flat_heads.push(flat_head);
+                }
             }
             let double_underscore_flat_name =
                 format!("{}__{}", head.name(), prefix_components.join("__"));
