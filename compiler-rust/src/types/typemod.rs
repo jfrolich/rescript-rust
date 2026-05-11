@@ -651,8 +651,27 @@ fn find_existing_loc_idx(arena: &ParseArena, target: &Location) -> Option<LocIdx
     None
 }
 
-fn include_module_flat_name(mod_expr: &ModuleExpr) -> Option<String> {
-    include_module_root_path(mod_expr).map(|path| path.name().replace('.', "_"))
+fn include_module_alias_heads(
+    mod_expr: &ModuleExpr,
+    pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Vec<String> {
+    let Some(root_path) = include_module_root_path(mod_expr) else {
+        return Vec::new();
+    };
+    // OCaml's include path localization follows the component paths produced by
+    // env.ml:1454-1481 `prefix_idents` and then freshened by
+    // subst.ml:327-364 `Subst.signature`; flattened ReScript heads are valid
+    // here only when the component table has registered them as aliases.
+    let mut heads = pers_env
+        .map(|pers| pers.flattened_alias_heads_for_path(&root_path))
+        .unwrap_or_default();
+    for head in ctx.flattened_alias_heads_for_component_path(&root_path) {
+        if !heads.iter().any(|existing| existing == &head) {
+            heads.push(head);
+        }
+    }
+    heads
 }
 
 fn include_module_root_path(mod_expr: &ModuleExpr) -> Option<Path> {
@@ -666,7 +685,7 @@ fn include_module_root_path(mod_expr: &ModuleExpr) -> Option<Path> {
 fn rewrite_included_path_to_local(
     path: &Path,
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     local_type_ids: &HashMap<String, Ident>,
     local_module_ids: &HashMap<String, Ident>,
     local_modtype_ids: &HashMap<String, Ident>,
@@ -680,13 +699,7 @@ fn rewrite_included_path_to_local(
     };
 
     match path {
-        Path::Pident(id) => {
-            if include_flat_name.is_some_and(|flat| id.name() == flat) {
-                None
-            } else {
-                None
-            }
-        }
+        Path::Pident(_) => None,
         Path::Pdot(prefix, name, pos) => {
             if include_root_path.is_some_and(|root| prefix.as_ref().same(root)) {
                 if let Some(rewritten) = rewrite_direct_child(name) {
@@ -695,7 +708,10 @@ fn rewrite_included_path_to_local(
             }
 
             if let Path::Pident(prefix_id) = prefix.as_ref() {
-                if include_flat_name.is_some_and(|flat| prefix_id.name() == flat) {
+                if include_alias_heads
+                    .iter()
+                    .any(|flat| prefix_id.name() == flat)
+                {
                     if let Some(rewritten) = rewrite_direct_child(name) {
                         return Some(rewritten);
                     }
@@ -705,7 +721,7 @@ fn rewrite_included_path_to_local(
             rewrite_included_path_to_local(
                 prefix,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -718,7 +734,7 @@ fn rewrite_included_path_to_local(
             let rewritten_functor = rewrite_included_path_to_local(
                 functor,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -726,7 +742,7 @@ fn rewrite_included_path_to_local(
             let rewritten_arg = rewrite_included_path_to_local(
                 arg,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -748,7 +764,7 @@ fn rewrite_included_path_to_local(
 fn included_path_is_direct_child(
     path: &Path,
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     child_name: &str,
 ) -> bool {
     match path {
@@ -757,7 +773,7 @@ fn included_path_is_direct_child(
                 || matches!(
                     prefix.as_ref(),
                     Path::Pident(prefix_id)
-                        if include_flat_name.is_some_and(|flat| prefix_id.name() == flat)
+                        if include_alias_heads.iter().any(|flat| prefix_id.name() == flat)
                 )
         }
         _ => false,
@@ -768,7 +784,7 @@ fn rewrite_included_type_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     ty_ref: TypeExprRef,
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     local_type_ids: &HashMap<String, Ident>,
     local_module_ids: &HashMap<String, Ident>,
     local_modtype_ids: &HashMap<String, Ident>,
@@ -787,7 +803,7 @@ fn rewrite_included_type_paths_to_local(
             if let Some(rewritten_path) = rewrite_included_path_to_local(
                 path,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -806,7 +822,7 @@ fn rewrite_included_type_paths_to_local(
                     ctx,
                     *arg,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -819,7 +835,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 arg.typ,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -829,7 +845,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *ret,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -842,7 +858,7 @@ fn rewrite_included_type_paths_to_local(
                     ctx,
                     *ty,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -855,7 +871,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *ty,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -867,7 +883,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *body,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -878,7 +894,7 @@ fn rewrite_included_type_paths_to_local(
                     ctx,
                     *var,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -891,7 +907,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *fields,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -903,7 +919,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *typ,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -913,7 +929,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 *rest,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -925,7 +941,7 @@ fn rewrite_included_type_paths_to_local(
                 ctx,
                 row.row_more,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -937,7 +953,7 @@ fn rewrite_included_type_paths_to_local(
                         ctx,
                         *ty,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -949,7 +965,7 @@ fn rewrite_included_type_paths_to_local(
                                 ctx,
                                 *ty,
                                 include_root_path,
-                                include_flat_name,
+                                include_alias_heads,
                                 local_type_ids,
                                 local_module_ids,
                                 local_modtype_ids,
@@ -967,7 +983,7 @@ fn rewrite_included_type_paths_to_local(
                     ctx,
                     *arg,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -984,7 +1000,7 @@ fn rewrite_included_type_decl_paths_to_local(
     id: &Ident,
     decl: &mut crate::types::decl::TypeDeclaration,
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     local_type_ids: &HashMap<String, Ident>,
     local_module_ids: &HashMap<String, Ident>,
     local_modtype_ids: &HashMap<String, Ident>,
@@ -996,7 +1012,7 @@ fn rewrite_included_type_decl_paths_to_local(
             ctx,
             *param,
             include_root_path,
-            include_flat_name,
+            include_alias_heads,
             local_type_ids,
             local_module_ids,
             local_modtype_ids,
@@ -1008,7 +1024,7 @@ fn rewrite_included_type_decl_paths_to_local(
             ctx,
             manifest,
             include_root_path,
-            include_flat_name,
+            include_alias_heads,
             local_type_ids,
             local_module_ids,
             local_modtype_ids,
@@ -1025,7 +1041,7 @@ fn rewrite_included_type_decl_paths_to_local(
                                 ctx,
                                 *arg,
                                 include_root_path,
-                                include_flat_name,
+                                include_alias_heads,
                                 local_type_ids,
                                 local_module_ids,
                                 local_modtype_ids,
@@ -1039,7 +1055,7 @@ fn rewrite_included_type_decl_paths_to_local(
                                 ctx,
                                 label.ld_type,
                                 include_root_path,
-                                include_flat_name,
+                                include_alias_heads,
                                 local_type_ids,
                                 local_module_ids,
                                 local_modtype_ids,
@@ -1053,7 +1069,7 @@ fn rewrite_included_type_decl_paths_to_local(
                         ctx,
                         res_ty,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -1068,7 +1084,7 @@ fn rewrite_included_type_decl_paths_to_local(
                     ctx,
                     label.ld_type,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -1084,7 +1100,7 @@ fn rewrite_included_module_type_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     mty: &mut crate::types::decl::ModuleType,
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     local_type_ids: &HashMap<String, Ident>,
     local_module_ids: &HashMap<String, Ident>,
     local_modtype_ids: &HashMap<String, Ident>,
@@ -1096,7 +1112,7 @@ fn rewrite_included_module_type_paths_to_local(
             if let Some(rewritten) = rewrite_included_path_to_local(
                 path,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -1109,7 +1125,7 @@ fn rewrite_included_module_type_paths_to_local(
                 ctx,
                 sig,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -1124,7 +1140,7 @@ fn rewrite_included_module_type_paths_to_local(
                     ctx,
                     param_type,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -1135,7 +1151,7 @@ fn rewrite_included_module_type_paths_to_local(
                 ctx,
                 result,
                 include_root_path,
-                include_flat_name,
+                include_alias_heads,
                 local_type_ids,
                 local_module_ids,
                 local_modtype_ids,
@@ -1149,7 +1165,7 @@ fn rewrite_included_signature_paths_to_local(
     ctx: &crate::types::context::TypeContext,
     sig: &mut [crate::types::decl::SignatureItem],
     include_root_path: Option<&Path>,
-    include_flat_name: Option<&str>,
+    include_alias_heads: &[String],
     local_type_ids: &HashMap<String, Ident>,
     local_module_ids: &HashMap<String, Ident>,
     local_modtype_ids: &HashMap<String, Ident>,
@@ -1163,7 +1179,7 @@ fn rewrite_included_signature_paths_to_local(
                     ctx,
                     desc.val_type,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -1176,7 +1192,7 @@ fn rewrite_included_signature_paths_to_local(
                     id,
                     decl,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -1187,7 +1203,7 @@ fn rewrite_included_signature_paths_to_local(
                 if let Some(rewritten) = rewrite_included_path_to_local(
                     &ext.ext_type_path,
                     include_root_path,
-                    include_flat_name,
+                    include_alias_heads,
                     local_type_ids,
                     local_module_ids,
                     local_modtype_ids,
@@ -1199,7 +1215,7 @@ fn rewrite_included_signature_paths_to_local(
                         ctx,
                         *param,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -1213,7 +1229,7 @@ fn rewrite_included_signature_paths_to_local(
                                 ctx,
                                 *arg,
                                 include_root_path,
-                                include_flat_name,
+                                include_alias_heads,
                                 local_type_ids,
                                 local_module_ids,
                                 local_modtype_ids,
@@ -1227,7 +1243,7 @@ fn rewrite_included_signature_paths_to_local(
                                 ctx,
                                 label.ld_type,
                                 include_root_path,
-                                include_flat_name,
+                                include_alias_heads,
                                 local_type_ids,
                                 local_module_ids,
                                 local_modtype_ids,
@@ -1241,7 +1257,7 @@ fn rewrite_included_signature_paths_to_local(
                         ctx,
                         ret_ty,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -1266,7 +1282,7 @@ fn rewrite_included_signature_paths_to_local(
                         included_path_is_direct_child(
                             path,
                             include_root_path,
-                            include_flat_name,
+                            include_alias_heads,
                             id.name(),
                         )
                     }
@@ -1277,7 +1293,7 @@ fn rewrite_included_signature_paths_to_local(
                         ctx,
                         &mut md.md_type,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -1291,7 +1307,7 @@ fn rewrite_included_signature_paths_to_local(
                         ctx,
                         mty,
                         include_root_path,
-                        include_flat_name,
+                        include_alias_heads,
                         local_type_ids,
                         local_module_ids,
                         local_modtype_ids,
@@ -14127,7 +14143,11 @@ fn type_structure_item<'a>(
                     tctx.type_ctx,
                 );
                 let include_root_path = include_module_root_path(&typed_mod);
-                let include_flat_name = include_module_flat_name(&typed_mod);
+                let include_alias_heads = include_module_alias_heads(
+                    &typed_mod,
+                    tctx.persistent_env.as_ref(),
+                    tctx.type_ctx,
+                );
                 let local_include_types: HashMap<String, Ident> = sig
                     .iter()
                     .filter_map(|item| match item {
@@ -14160,7 +14180,7 @@ fn type_structure_item<'a>(
                     tctx.type_ctx,
                     &mut sig,
                     include_root_path.as_ref(),
-                    include_flat_name.as_deref(),
+                    &include_alias_heads,
                     &local_include_types,
                     &local_include_modules,
                     &local_include_modtypes,
