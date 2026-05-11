@@ -402,12 +402,16 @@ pub enum TypeCoreError {
 
     /// Label defined multiple times.
     LabelMultiplyDefined {
+        /// Location of the duplicate label.
+        loc: LocIdx,
         label: String,
         jsx_component_info: Option<JsxPropErrorInfo>,
     },
 
     /// Missing labels in record.
     LabelsMissing {
+        /// Location of the record literal.
+        loc: LocIdx,
         labels: Vec<String>,
         jsx_component_info: Option<JsxPropErrorInfo>,
     },
@@ -13637,6 +13641,8 @@ fn type_record(
         build_record_label_descriptions_info(disambiguation_ty, env, &mut tctx.persistent_env, ctx);
     let expected_label_descriptions =
         build_record_label_descriptions_info(expected_ty, env, &mut tctx.persistent_env, ctx);
+    let jsx_component_error_info = record_opath_ty
+        .and_then(|record_ty| jsx_prop_error_info_for_record_ty(tctx, env, record_ty));
 
     // OCaml builds record definitions by label position over the full label set.
     // Keep explicit overrides keyed by lbl_pos so we can reconstruct full fields.
@@ -13980,6 +13986,17 @@ fn type_record(
             RecordLabelDefinition::Overridden(field.lid.clone(), final_expr),
             false, // OCaml Texp_record always uses false for this flag
         );
+        if let Some(Some((_prev_lid, prev_label_desc, _prev_def, _prev_opt))) =
+            explicit_entries.last()
+        {
+            if prev_label_desc.lbl_pos == label_desc.lbl_pos {
+                return Err(TypeCoreError::LabelMultiplyDefined {
+                    loc: field.lid.loc,
+                    label: prev_label_desc.lbl_name.clone(),
+                    jsx_component_info: jsx_component_error_info.clone(),
+                });
+            }
+        }
 
         let entry_idx = explicit_entries.len();
         explicit_entries.push(Some(entry));
@@ -14107,8 +14124,9 @@ fn type_record(
             };
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
+                    loc,
                     labels: labels_missing,
-                    jsx_component_info: None,
+                    jsx_component_info: jsx_component_error_info.clone(),
                 });
             }
             all_label_descriptions = Some(Arc::new(Vec::new()));
@@ -14122,8 +14140,9 @@ fn type_record(
                         .collect();
                     if !labels_missing.is_empty() {
                         return Err(TypeCoreError::LabelsMissing {
+                            loc,
                             labels: labels_missing,
-                            jsx_component_info: None,
+                            jsx_component_info: jsx_component_error_info.clone(),
                         });
                     }
                     all_labels = Some(Vec::new());
@@ -14188,8 +14207,9 @@ fn type_record(
 
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
+                    loc,
                     labels: labels_missing,
-                    jsx_component_info: None,
+                    jsx_component_info: jsx_component_error_info.clone(),
                 });
             }
 
@@ -14294,8 +14314,9 @@ fn type_record(
 
             if !labels_missing.is_empty() {
                 return Err(TypeCoreError::LabelsMissing {
+                    loc,
                     labels: labels_missing,
-                    jsx_component_info: None,
+                    jsx_component_info: jsx_component_error_info.clone(),
                 });
             }
 
@@ -14445,8 +14466,9 @@ fn type_record(
 
         if !labels_missing.is_empty() {
             return Err(TypeCoreError::LabelsMissing {
+                loc,
                 labels: labels_missing,
-                jsx_component_info: None,
+                jsx_component_info: jsx_component_error_info.clone(),
             });
         }
 
@@ -14645,6 +14667,35 @@ fn jsx_component_name_from_props_path(path: &Path) -> Option<String> {
     }
 }
 
+fn jsx_prop_error_info_from_record_parts(
+    path: &Path,
+    labels: &[crate::types::decl::LabelDeclaration],
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<JsxPropErrorInfo> {
+    (path.head_name() == "props" && attributes_include_jsx_component_props(attrs)).then(|| {
+        JsxPropErrorInfo {
+            component_name: jsx_component_name_from_props_path(path),
+            props: labels
+                .iter()
+                .map(|label| label.ld_id.name().to_string())
+                .collect(),
+        }
+    })
+}
+
+fn jsx_prop_error_info_for_record_ty(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    record_ty: TypeExprRef,
+) -> Option<JsxPropErrorInfo> {
+    let (path, _args, decl) =
+        extract_concrete_record_type_info(record_ty, env, &mut tctx.persistent_env, tctx.type_ctx)?;
+    let crate::types::TypeKind::TypeRecord(labels, _repr) = &decl.type_kind else {
+        return None;
+    };
+    jsx_prop_error_info_from_record_parts(&path, labels, &decl.type_attributes)
+}
+
 fn wrong_record_field_name_error(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -14661,12 +14712,8 @@ fn wrong_record_field_name_error(
         .iter()
         .map(|label| label.ld_id.name().to_string())
         .collect::<Vec<_>>();
-    let jsx_component_info = (path.head_name() == "props"
-        && attributes_include_jsx_component_props(&decl.type_attributes))
-    .then(|| JsxPropErrorInfo {
-        component_name: jsx_component_name_from_props_path(&path),
-        props: alternatives.clone(),
-    });
+    let jsx_component_info =
+        jsx_prop_error_info_from_record_parts(&path, labels, &decl.type_attributes);
 
     Some(TypeCoreError::WrongName {
         loc,

@@ -1514,6 +1514,38 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::LabelMultiplyDefined {
+            loc,
+            label,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_label_multiply_defined_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                label,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::LabelsMissing {
+            loc,
+            labels,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_labels_missing_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                labels,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnboundRecordField {
             loc,
             field_name,
@@ -1693,7 +1725,7 @@ fn format_wrong_name_report(
     expected: &str,
     path: &crate::types::Path,
     name: &str,
-    _alternatives: &[String],
+    alternatives: &[String],
     jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
@@ -1724,6 +1756,19 @@ fn format_wrong_name_report(
             message.push(' ');
         }
         message.push_str("\n\n\n");
+        if let Some(hint) = spellcheck_hint(name, alternatives) {
+            let mut raw_message = format_message_with_compiler_indentation(&message);
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push_str("?\n");
+            return format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                loc,
+                &raw_message,
+            );
+        }
         return format_compiler_error_report(arena, source, filename, loc, &message);
     }
 
@@ -1745,6 +1790,150 @@ fn format_wrong_name_report(
     message.push_str(INFO);
     message.push_str(&format_type_expr(type_ctx, ty));
     message.push_str(RESET);
+    if let Some(hint) = spellcheck_hint(name, alternatives) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push_str("?\n");
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_message_with_compiler_indentation(message: &str) -> String {
+    let mut output = String::new();
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn spellcheck_hint<'a>(name: &str, alternatives: &'a [String]) -> Option<&'a str> {
+    alternatives
+        .iter()
+        .filter_map(|candidate| {
+            let distance = edit_distance_at_most(name, candidate, 2)?;
+            Some((distance, candidate.as_str()))
+        })
+        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
+        .map(|(_, candidate)| candidate)
+}
+
+fn edit_distance_at_most(left: &str, right: &str, cutoff: usize) -> Option<usize> {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len().abs_diff(right.len()) > cutoff {
+        return None;
+    }
+
+    let mut prev: Vec<usize> = (0..=right.len()).collect();
+    let mut curr = vec![0; right.len() + 1];
+
+    for (i, left_byte) in left.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, right_byte) in right.iter().enumerate() {
+            let cost = usize::from(left_byte != right_byte);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+            row_min = row_min.min(curr[j + 1]);
+        }
+        if row_min > cutoff {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    (prev[right.len()] <= cutoff).then_some(prev[right.len()])
+}
+
+fn format_label_multiply_defined_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some(jsx_component_info) = jsx_component_info {
+        let mut message = String::new();
+        message.push_str("The prop ");
+        message.push_str(INFO);
+        message.push_str(label);
+        message.push_str(RESET);
+        message.push_str(" has already been passed to the component ");
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("You can't pass the same prop more than once.\n");
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The record field label {label} is defined several times"),
+    )
+}
+
+fn format_labels_missing_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    labels: &[String],
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    if let Some(jsx_component_info) = jsx_component_info {
+        message.push_str("The component ");
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+        message.push_str("is missing these required props:\n ");
+        message.push_str(&labels.join(" "));
+    } else {
+        message.push_str("Some required record fields are missing:");
+        for label in labels {
+            message.push(' ');
+            message.push_str(label);
+        }
+        message.push('.');
+    }
+
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
