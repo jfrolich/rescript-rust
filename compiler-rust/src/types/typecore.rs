@@ -17994,13 +17994,18 @@ fn copy_lookup_signature(
         .collect()
 }
 
-fn should_rewrite_nested_alias_self_path(old_name: &str, parent_path: &Path) -> bool {
-    let parent_name = parent_path.name();
-    if !parent_name.contains('.') {
-        return true;
-    }
-    let flat_parent = parent_name.replace('.', "_");
-    !old_name.starts_with(&(flat_parent + "_"))
+fn should_rewrite_nested_alias_self_path(
+    ctx: &crate::types::context::TypeContext,
+    old_name: &str,
+    parent_path: &Path,
+) -> bool {
+    // OCaml compiler/ml/env.ml:1517 discovers flattened backing units by
+    // scraping explicit aliases, then env.ml:1530 prefixes the selected
+    // component path. If the resolved name is already rooted in a registered
+    // backing unit for the parent component, leave it for that alias path.
+    !ctx.flattened_alias_heads_for_component_path(parent_path)
+        .into_iter()
+        .any(|flat_head| old_name == flat_head || old_name.starts_with(&(flat_head + "_")))
 }
 
 fn rewrite_flattened_alias_child_prefixes<'a>(
@@ -18950,8 +18955,11 @@ impl Env {
                                     ctx,
                                 );
                                 if let Some(ref old_name) = resolved_name {
-                                    if should_rewrite_nested_alias_self_path(old_name, &parent_path)
-                                    {
+                                    if should_rewrite_nested_alias_self_path(
+                                        ctx,
+                                        old_name,
+                                        &parent_path,
+                                    ) {
                                         crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                                             &sig, old_name, &sub_path, ctx,
                                         );
@@ -24386,7 +24394,7 @@ fn build_module_signature_for_path<'a>(
                 );
             }
             if let Some(ref old_name) = resolved_name {
-                if should_rewrite_nested_alias_self_path(old_name, &resolved_parent_path) {
+                if should_rewrite_nested_alias_self_path(ctx, old_name, &resolved_parent_path) {
                     crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
                         &sig,
                         old_name,
