@@ -2966,6 +2966,13 @@ pub enum TypeModError {
         loc: Location,
         reason: String,
     },
+    /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
+    AstUntaggedVariantError {
+        /// Source location to report.
+        loc: Location,
+        /// Specific attribute validation error.
+        error: AstUntaggedVariantError,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -3027,6 +3034,170 @@ fn check_untagged_variant_constructor_arities(
         }
     }
 
+    Ok(())
+}
+
+/// Error raised by the ReScript variant runtime-representation checks.
+#[derive(Debug, Clone)]
+pub enum AstUntaggedVariantError {
+    /// A variant `@as(...)` payload has an unsupported shape.
+    InvalidVariantAsAnnotation,
+    /// More than one `@as` attribute was found.
+    DuplicatedBsAs,
+    /// A variant `@tag(...)` payload is not a string.
+    InvalidVariantTagAnnotation,
+    /// An inline record field runtime name conflicts with the constructor tag.
+    TagFieldNameConflict {
+        /// Constructor source name.
+        constructor_name: String,
+        /// Inline record field source name.
+        field_name: String,
+        /// Runtime value shared by the constructor tag and inline field.
+        runtime_value: String,
+    },
+}
+
+impl AstUntaggedVariantError {
+    /// Return the message text used by OCaml's `Ast_untagged_variants.report_error`.
+    pub fn message_text(&self) -> String {
+        match self {
+            AstUntaggedVariantError::InvalidVariantAsAnnotation => {
+                "A variant case annotation @as(...) must be a string or integer, boolean, null, undefined".to_string()
+            }
+            AstUntaggedVariantError::DuplicatedBsAs => "duplicate @as ".to_string(),
+            AstUntaggedVariantError::InvalidVariantTagAnnotation => {
+                "A variant tag annotation @tag(...) must be a string".to_string()
+            }
+            AstUntaggedVariantError::TagFieldNameConflict {
+                constructor_name,
+                field_name,
+                runtime_value,
+            } => format!(
+                "Constructor \"{constructor_name}\": the @tag name \"{runtime_value}\" conflicts with the runtime value of inline record field \"{field_name}\". Use a different @tag name or rename the field."
+            ),
+        }
+    }
+}
+
+fn ast_untagged_variant_error(loc: Location, error: AstUntaggedVariantError) -> TypeModError {
+    TypeModError::AstUntaggedVariantError { loc, error }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum VariantRuntimeTag {
+    String(String),
+    Int(i32),
+    Float(String),
+    BigInt(String),
+    Bool(bool),
+    Null,
+    Undefined,
+}
+
+fn process_variant_as_attributes(
+    attrs: &[crate::types::decl::Attribute],
+) -> TypeModResult<Option<VariantRuntimeTag>> {
+    let mut tag = None;
+    for attr in attrs {
+        if attr.attr_name.txt != "as" {
+            continue;
+        }
+        if tag.is_some() {
+            return Err(ast_untagged_variant_error(
+                attr.attr_name.loc.clone(),
+                AstUntaggedVariantError::DuplicatedBsAs,
+            ));
+        }
+        tag = match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(value) => {
+                Some(VariantRuntimeTag::String(value.clone()))
+            }
+            crate::types::decl::AttributePayload::Int(value) => {
+                Some(VariantRuntimeTag::Int(*value))
+            }
+            crate::types::decl::AttributePayload::Float(value) => {
+                Some(VariantRuntimeTag::Float(value.clone()))
+            }
+            crate::types::decl::AttributePayload::BigInt(value) => {
+                Some(VariantRuntimeTag::BigInt(value.clone()))
+            }
+            crate::types::decl::AttributePayload::Bool(value) => {
+                Some(VariantRuntimeTag::Bool(*value))
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
+                Some(VariantRuntimeTag::Null)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(VariantRuntimeTag::Undefined)
+            }
+            _ => None,
+        };
+        if tag.is_none() {
+            return Err(ast_untagged_variant_error(
+                attr.attr_name.loc.clone(),
+                AstUntaggedVariantError::InvalidVariantAsAnnotation,
+            ));
+        }
+    }
+    Ok(tag)
+}
+
+fn process_variant_tag_name(
+    attrs: &[crate::types::decl::Attribute],
+) -> TypeModResult<Option<String>> {
+    let mut tag_name = None;
+    for attr in attrs {
+        if attr.attr_name.txt != "tag" {
+            continue;
+        }
+        if tag_name.is_some() {
+            return Err(ast_untagged_variant_error(
+                attr.attr_name.loc.clone(),
+                AstUntaggedVariantError::DuplicatedBsAs,
+            ));
+        }
+        if let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload {
+            tag_name = Some(value.clone());
+        }
+        if tag_name.is_none() {
+            return Err(ast_untagged_variant_error(
+                attr.attr_name.loc.clone(),
+                AstUntaggedVariantError::InvalidVariantTagAnnotation,
+            ));
+        }
+    }
+    Ok(tag_name)
+}
+
+fn check_variant_tag_field_conflicts(
+    constructors: &[crate::types::decl::ConstructorDeclaration],
+) -> TypeModResult<()> {
+    for constructor in constructors {
+        let constructor_name = constructor.cd_id.name().to_string();
+        let effective_tag_name = process_variant_tag_name(&constructor.cd_attributes)?
+            .unwrap_or_else(|| constructor_name.clone());
+        let crate::types::decl::ConstructorArguments::CstrRecord(fields) = &constructor.cd_args
+        else {
+            continue;
+        };
+        for field in fields {
+            let field_name = field.ld_id.name().to_string();
+            let effective_field_name = match process_variant_as_attributes(&field.ld_attributes)? {
+                Some(VariantRuntimeTag::String(as_name)) => as_name,
+                Some(_) | None => field_name.clone(),
+            };
+            if effective_field_name == effective_tag_name {
+                return Err(ast_untagged_variant_error(
+                    constructor.cd_loc.clone(),
+                    AstUntaggedVariantError::TagFieldNameConflict {
+                        constructor_name,
+                        field_name,
+                        runtime_value: effective_field_name,
+                    },
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3148,20 +3319,94 @@ fn get_untagged_constructor_block_type(
     }
 }
 
-fn check_untagged_variant_well_formed(
+fn variant_tag_literal(constructor_name: &str, tag: &Option<VariantRuntimeTag>) -> (bool, String) {
+    match tag {
+        Some(VariantRuntimeTag::String(value)) => (true, value.clone()),
+        Some(VariantRuntimeTag::Int(value)) => (false, value.to_string()),
+        Some(VariantRuntimeTag::Float(value)) => (false, value.clone()),
+        Some(VariantRuntimeTag::BigInt(value)) => (false, value.clone()),
+        Some(VariantRuntimeTag::Bool(value)) => {
+            (false, if *value { "true" } else { "false" }.to_string())
+        }
+        Some(VariantRuntimeTag::Null) => (false, "null".to_string()),
+        Some(VariantRuntimeTag::Undefined) => (false, "undefined".to_string()),
+        None => (true, constructor_name.to_string()),
+    }
+}
+
+fn add_variant_literal(
+    loc: &Location,
+    tag: &Option<VariantRuntimeTag>,
+    constructor_name: &str,
+    string_literals: &mut HashSet<String>,
+    nonstring_literals: &mut HashSet<String>,
+) -> TypeModResult<()> {
+    let (is_string, literal) = variant_tag_literal(constructor_name, tag);
+    let set = if is_string {
+        string_literals
+    } else {
+        nonstring_literals
+    };
+    if set.contains(&literal) {
+        return Err(invalid_untagged_variant_definition(
+            loc.clone(),
+            format!("Duplicate literal {literal}."),
+        ));
+    }
+    set.insert(literal);
+    Ok(())
+}
+
+fn check_variant_well_formed(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     constructors: &[crate::types::decl::ConstructorDeclaration],
+    is_untagged_def: bool,
 ) -> TypeModResult<()> {
-    let blocks: Vec<_> = constructors
-        .iter()
-        .filter(|constructor| {
-            !matches!(
-                &constructor.cd_args,
-                crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty()
-            )
-        })
-        .collect();
+    check_variant_tag_field_conflicts(constructors)?;
+
+    let mut consts = Vec::new();
+    let mut blocks = Vec::new();
+    for constructor in constructors {
+        let tag = process_variant_as_attributes(&constructor.cd_attributes)?;
+        let name = constructor.cd_id.name().to_string();
+        if matches!(
+            &constructor.cd_args,
+            crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty()
+        ) {
+            consts.push((constructor.cd_loc.clone(), name, tag));
+        } else {
+            let block_type = get_untagged_constructor_block_type(ctx, env, constructor);
+            blocks.push((constructor.cd_loc.clone(), name, tag, block_type));
+        }
+    }
+
+    let mut string_literals_consts = HashSet::default();
+    let mut nonstring_literals_consts = HashSet::default();
+    for (loc, name, tag) in &consts {
+        add_variant_literal(
+            loc,
+            tag,
+            name,
+            &mut string_literals_consts,
+            &mut nonstring_literals_consts,
+        )?;
+    }
+
+    if !is_untagged_def {
+        let mut string_literals_blocks = HashSet::default();
+        let mut nonstring_literals_blocks = HashSet::default();
+        for (loc, name, tag, _) in &blocks {
+            add_variant_literal(
+                loc,
+                tag,
+                name,
+                &mut string_literals_blocks,
+                &mut nonstring_literals_blocks,
+            )?;
+        }
+        return Ok(());
+    }
 
     let mut instance_types: HashMap<String, usize> = HashMap::default();
     let mut function_types = 0usize;
@@ -3172,11 +3417,11 @@ fn check_untagged_variant_well_formed(
     let mut boolean_types = 0usize;
     let mut unknown_types = 0usize;
 
-    for constructor in &blocks {
-        let Some(block_type) = get_untagged_constructor_block_type(ctx, env, constructor) else {
+    for (loc, name, _tag, block_type) in &blocks {
+        let Some(block_type) = block_type else {
             continue;
         };
-        match &block_type {
+        match block_type {
             UntaggedVariantBlockType::Unknown => unknown_types += 1,
             UntaggedVariantBlockType::Object => object_types += 1,
             UntaggedVariantBlockType::Instance(instance) => {
@@ -3189,19 +3434,17 @@ fn check_untagged_variant_well_formed(
             UntaggedVariantBlockType::String => string_types += 1,
         }
 
-        let loc = constructor.cd_loc;
-        let constructor_name = constructor.cd_id.name();
         if unknown_types != 0 && blocks.len() != 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 format!(
-                    "Case {constructor_name} has a payload that is not of one of the recognized shapes (object, array, etc). Then it must be the only case with payloads."
+                    "Case {name} has a payload that is not of one of the recognized shapes (object, array, etc). Then it must be the only case with payloads."
                 ),
             ));
         }
         if object_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be an object type.",
             ));
         }
@@ -3213,38 +3456,42 @@ fn check_untagged_variant_well_formed(
                     format!("a {instance}")
                 };
                 return Err(invalid_untagged_variant_definition(
-                    loc,
+                    loc.clone(),
                     format!("At most one case can be {instance_description} type."),
                 ));
             }
         }
         if function_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be a function type.",
             ));
         }
         if string_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be a string type.",
             ));
         }
         if number_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be a number type (int or float).",
             ));
         }
         if bigint_types > 1 {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be a bigint type.",
             ));
         }
-        if boolean_types > 1 {
+        if boolean_types > 1
+            || (boolean_types > 0
+                && (nonstring_literals_consts.contains("true")
+                    || nonstring_literals_consts.contains("false")))
+        {
             return Err(invalid_untagged_variant_definition(
-                loc,
+                loc.clone(),
                 "At most one case can be a boolean type.",
             ));
         }
@@ -13077,9 +13324,12 @@ fn type_structure_item<'a>(
                             }
                         }
 
-                        if decl_has_unboxed_attr {
-                            check_untagged_variant_well_formed(ctx, &temp_env, &internal_cstrs)?;
-                        }
+                        check_variant_well_formed(
+                            ctx,
+                            &temp_env,
+                            &internal_cstrs,
+                            decl_has_unboxed_attr,
+                        )?;
 
                         (
                             crate::types::TypeKind::TypeVariant(internal_cstrs),
@@ -15274,9 +15524,12 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         });
                     }
 
-                    if decl_has_unboxed_attr {
-                        check_untagged_variant_well_formed(ctx, &temp_env, &internal_cstrs)?;
-                    }
+                    check_variant_well_formed(
+                        ctx,
+                        &temp_env,
+                        &internal_cstrs,
+                        decl_has_unboxed_attr,
+                    )?;
 
                     (
                         crate::types::TypeKind::TypeVariant(internal_cstrs),

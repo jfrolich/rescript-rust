@@ -1625,6 +1625,14 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::AstUntaggedVariantError { loc, error } => {
+            let message = error.message_text();
+            UserDiagnostic::new(
+                format_compiler_error_report_from_location(source, filename, loc, &message),
+                2,
+            )
+            .into()
+        }
         _ => anyhow!("Type checking failed: {err:?}"),
     }
 }
