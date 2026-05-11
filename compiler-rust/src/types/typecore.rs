@@ -8633,29 +8633,12 @@ fn unify_expression_types(
                 }
             }
 
-            // Retry a narrow module-flatten alias case after unification failure:
-            // treat `A.B.X.t` and `A__B.X.t` as equivalent nullary constructors.
-            let flatten_alias_match = |lhs: &str, rhs: &str| -> bool {
-                let seg_lhs: Vec<&str> = lhs.split('.').collect();
-                let seg_rhs: Vec<&str> = rhs.split('.').collect();
-                if seg_lhs.len() == seg_rhs.len() + 1
-                    && seg_lhs.len() >= 4
-                    && seg_rhs.len() >= 3
-                    && format!("{}__{}", seg_lhs[0], seg_lhs[1]) == seg_rhs[0]
-                    && seg_lhs[2..] == seg_rhs[1..]
-                {
-                    return true;
-                }
-                if seg_rhs.len() == seg_lhs.len() + 1
-                    && seg_rhs.len() >= 4
-                    && seg_lhs.len() >= 3
-                    && format!("{}__{}", seg_rhs[0], seg_rhs[1]) == seg_lhs[0]
-                    && seg_rhs[2..] == seg_lhs[1..]
-                {
-                    return true;
-                }
-                false
-            };
+            // OCaml compiler/ml/env.ml:1517 and env.ml:1530-1538 derive
+            // flattened-vs-qualified module aliases from component tables, while
+            // compiler/ml/ctype.ml:2338-2364 expands both heads before choosing a
+            // representative. Do not infer `A.B`/`A__B` equivalence from path
+            // spelling here; the ctype/env alias evidence path above must handle
+            // real flattened component aliases.
             let flatten_drop_outer_match = |lhs: &str, rhs: &str| -> bool {
                 let dropped = |name: &str| -> Option<String> {
                     let mut segs: Vec<&str> = name.split('.').collect();
@@ -8719,15 +8702,6 @@ fn unify_expression_types(
                 },
             ) = (&*desc1, &*desc2)
             {
-                if args1.is_empty()
-                    && args2.is_empty()
-                    && flatten_alias_match(&path1.name(), &path2.name())
-                {
-                    drop(desc1);
-                    drop(desc2);
-                    crate::types::ctype::link_type(tctx.type_ctx, repr1, repr2);
-                    return Ok(());
-                }
                 if args1.is_empty()
                     && args2.is_empty()
                     && flatten_drop_outer_match(&path1.name(), &path2.name())
