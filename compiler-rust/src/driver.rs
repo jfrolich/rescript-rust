@@ -1439,6 +1439,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
+            format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                *loc,
+                &crate::types::includemod::format_error(type_ctx, filename, error),
+            ),
+            2,
+        )
+        .into(),
         _ => anyhow!("Type checking failed: {err:?}"),
     }
 }
@@ -1464,6 +1475,31 @@ fn format_compiler_error_report(
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compiler_error_report_raw_message(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+    output.push_str(message);
+    if !message.ends_with('\n') {
         output.push('\n');
     }
     output.push('\n');

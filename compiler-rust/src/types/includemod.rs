@@ -22,6 +22,7 @@ use crate::types::env::Env;
 use crate::types::type_expr::TypeDesc;
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
+use crate::{parser::code_frame, types::ArgLabel};
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 // ============================================================================
@@ -50,8 +51,21 @@ pub enum IncludeModError {
     },
     /// Type declaration mismatch.
     TypeMismatch { name: Ident, reason: String },
+    /// Type declaration mismatch with enough context to print OCaml's report.
+    TypeDeclarationMismatch {
+        name: Ident,
+        actual: TypeDeclaration,
+        expected: TypeDeclaration,
+        detail: String,
+    },
     /// Module type mismatch.
     ModuleTypeMismatch { name: Ident, reason: String },
+    /// Nested module types do not include one another.
+    ModuleTypesMismatch {
+        actual: Box<ModuleType>,
+        expected: Box<ModuleType>,
+        error: Box<IncludeModError>,
+    },
     /// Functor parameter mismatch.
     FunctorParamMismatch(String),
     /// Functor result mismatch.
@@ -60,6 +74,411 @@ pub enum IncludeModError {
     NotAFunctor,
     /// Signature mismatch with details.
     SignatureMismatch(Vec<IncludeModError>),
+}
+
+pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
+    let mut output = String::new();
+    output.push_str("  Signature mismatch:\n");
+    format_include_error(type_ctx, filename, error, &mut output);
+    output
+}
+
+fn format_include_error(
+    type_ctx: &TypeContext,
+    filename: &str,
+    error: &IncludeModError,
+    output: &mut String,
+) {
+    match error {
+        IncludeModError::SignatureMismatch(errors) => {
+            for error in errors {
+                format_include_error(type_ctx, filename, error, output);
+            }
+        }
+        IncludeModError::ModuleTypesMismatch {
+            actual,
+            expected,
+            error,
+        } => {
+            let actual = format_module_type(type_ctx, actual);
+            let expected = format_module_type(type_ctx, expected);
+            if should_elide_module_mismatch(&actual, &expected) {
+                output.push_str("  ...\n");
+            } else {
+                output.push_str("  Modules do not match:\n");
+                output.push_str("    ");
+                output.push_str(&actual);
+                output.push('\n');
+                output.push_str("  is not included in\n");
+                output.push_str("    ");
+                output.push_str(&expected);
+                output.push('\n');
+            }
+            format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::TypeDeclarationMismatch {
+            name,
+            actual,
+            expected,
+            detail,
+        } => {
+            output.push_str("  Type declarations do not match:\n");
+            output.push_str("    ");
+            output.push_str(&format_type_declaration(type_ctx, name, actual));
+            output.push('\n');
+            output.push_str("  is not included in\n");
+            output.push_str("    ");
+            output.push_str(&format_type_declaration(type_ctx, name, expected));
+            output.push('\n');
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &expected.type_loc.loc_start,
+                &expected.type_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Expected declaration\n");
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &actual.type_loc.loc_start,
+                &actual.type_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Actual declaration\n");
+            output.push_str("  ");
+            output.push_str(detail);
+            output.push('\n');
+        }
+        IncludeModError::MissingValue(id) => {
+            output.push_str("  The value `");
+            output.push_str(id.name());
+            output.push_str("' is required but not provided\n");
+        }
+        IncludeModError::MissingType(id) => {
+            output.push_str("  The type `");
+            output.push_str(id.name());
+            output.push_str("' is required but not provided\n");
+        }
+        IncludeModError::MissingModule(id) => {
+            output.push_str("  The module `");
+            output.push_str(id.name());
+            output.push_str("' is required but not provided\n");
+        }
+        IncludeModError::MissingModuleType(id) => {
+            output.push_str("  The module type `");
+            output.push_str(id.name());
+            output.push_str("' is required but not provided\n");
+        }
+        IncludeModError::ValueTypeMismatch { name, .. } => {
+            output.push_str("  Values do not match: ");
+            output.push_str(name.name());
+            output.push('\n');
+        }
+        IncludeModError::TypeMismatch { name, reason } => {
+            output.push_str("  Type declarations do not match: ");
+            output.push_str(name.name());
+            output.push_str("\n  ");
+            output.push_str(reason);
+            output.push('\n');
+        }
+        IncludeModError::ModuleTypeMismatch { name, reason } => {
+            output.push_str("  Modules do not match: ");
+            output.push_str(name.name());
+            output.push_str("\n  ");
+            output.push_str(reason);
+            output.push('\n');
+        }
+        IncludeModError::FunctorParamMismatch(reason)
+        | IncludeModError::FunctorResultMismatch(reason) => {
+            output.push_str("  ");
+            output.push_str(reason);
+            output.push('\n');
+        }
+        IncludeModError::NotAFunctor => {
+            output.push_str("  Not a functor.\n");
+        }
+    }
+}
+
+fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
+    actual.len() + expected.len() > 120
+}
+
+fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    match mty {
+        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => path.name(),
+        ModuleType::MtySignature(sig) => {
+            if sig.is_empty() {
+                "{}".to_string()
+            } else {
+                let items = sig
+                    .iter()
+                    .map(|item| format!("  {}", format_signature_item(type_ctx, item)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{{\n{items}\n}}")
+            }
+        }
+        ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let param_type = param_type
+                .as_ref()
+                .map(|mty| format_module_type(type_ctx, mty))
+                .unwrap_or_else(|| "_".to_string());
+            let result = format_module_type(type_ctx, result);
+            format!("({}: {}) => {}", param.name(), param_type, result)
+        }
+    }
+}
+
+fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String {
+    match item {
+        SignatureItem::SigType(id, decl, _) => format_type_declaration(type_ctx, id, decl),
+        SignatureItem::SigValue(id, desc) => {
+            format!(
+                "let {}: {}",
+                id.name(),
+                TypeExprErrorPrinter::new(type_ctx).format(desc.val_type)
+            )
+        }
+        SignatureItem::SigModule(id, decl, _) => {
+            format!(
+                "module {}: {}",
+                id.name(),
+                format_module_type(type_ctx, &decl.md_type)
+            )
+        }
+        SignatureItem::SigModtype(id, decl) => match &decl.mtd_type {
+            Some(mty) => format!(
+                "module type {} = {}",
+                id.name(),
+                format_module_type(type_ctx, mty)
+            ),
+            None => format!("module type {}", id.name()),
+        },
+        SignatureItem::SigTypext(id, _, _) => format!("type {} += ...", id.name()),
+        SignatureItem::SigClass => "class ...".to_string(),
+        SignatureItem::SigClassType => "class type ...".to_string(),
+    }
+}
+
+fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
+    let mut printer = TypeExprErrorPrinter::new(type_ctx);
+    let name = id.name();
+    let params = format_type_params(&mut printer, &decl.type_params);
+    let head = if params.is_empty() {
+        format!("type {name}")
+    } else {
+        format!("type {name}<{params}>")
+    };
+
+    match &decl.type_kind {
+        TypeKind::TypeAbstract => match decl.type_manifest {
+            Some(manifest) => format!("{head} = {}", printer.format(manifest)),
+            None => head,
+        },
+        TypeKind::TypeRecord(labels, _) => {
+            let mut fields = Vec::with_capacity(labels.len());
+            for label in labels {
+                fields.push(format_label_declaration(&mut printer, label));
+            }
+            let fields = fields.join(", ");
+            format!("{head} = {{{fields}}}")
+        }
+        TypeKind::TypeVariant(constructors) => {
+            if constructors.is_empty() {
+                format!("{head} = |")
+            } else {
+                let mut formatted_constructors = Vec::with_capacity(constructors.len());
+                for constructor in constructors {
+                    formatted_constructors
+                        .push(format_constructor_declaration(&mut printer, constructor));
+                }
+                let constructors = formatted_constructors.join(" | ");
+                format!("{head} = {constructors}")
+            }
+        }
+        TypeKind::TypeOpen => format!("{head} = .."),
+    }
+}
+
+fn format_constructor_declaration(
+    printer: &mut TypeExprErrorPrinter<'_>,
+    constructor: &ConstructorDeclaration,
+) -> String {
+    match &constructor.cd_args {
+        ConstructorArguments::CstrTuple(args) if args.is_empty() => {
+            constructor.cd_id.name().to_string()
+        }
+        ConstructorArguments::CstrTuple(args) => {
+            let mut formatted_args = Vec::with_capacity(args.len());
+            for arg in args {
+                formatted_args.push(printer.format(*arg));
+            }
+            let args = formatted_args.join(", ");
+            format!("{}({args})", constructor.cd_id.name())
+        }
+        ConstructorArguments::CstrRecord(labels) => {
+            let mut fields = Vec::with_capacity(labels.len());
+            for label in labels {
+                fields.push(format_label_declaration(printer, label));
+            }
+            let fields = fields.join(", ");
+            format!("{}({{{fields}}})", constructor.cd_id.name())
+        }
+    }
+}
+
+fn format_type_params(printer: &mut TypeExprErrorPrinter<'_>, params: &[TypeExprRef]) -> String {
+    params
+        .iter()
+        .map(|param| printer.format(*param))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_label_declaration(
+    printer: &mut TypeExprErrorPrinter<'_>,
+    label: &LabelDeclaration,
+) -> String {
+    let optional = if label.ld_optional { "?" } else { "" };
+    let field_type = if label.ld_optional {
+        optional_field_payload_type(printer.type_ctx, label.ld_type)
+    } else {
+        label.ld_type
+    };
+    format!(
+        "{}{}: {}",
+        label.ld_id.name(),
+        optional,
+        printer.format(field_type)
+    )
+}
+
+fn optional_field_payload_type(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, args, .. } if path.last() == "option" && args.len() == 1 => {
+            args[0]
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            optional_field_payload_type(type_ctx, *next)
+        }
+        _ => ty,
+    }
+}
+
+struct TypeExprErrorPrinter<'a> {
+    type_ctx: &'a TypeContext,
+    vars: HashMap<TypeExprRef, String>,
+    next_var: usize,
+}
+
+impl<'a> TypeExprErrorPrinter<'a> {
+    fn new(type_ctx: &'a TypeContext) -> Self {
+        Self {
+            type_ctx,
+            vars: HashMap::new(),
+            next_var: 0,
+        }
+    }
+
+    fn format(&mut self, ty: TypeExprRef) -> String {
+        let repr = self.type_ctx.repr(ty);
+        match &*self.type_ctx.get_desc(repr) {
+            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
+            TypeDesc::Tarrow { .. } => self.format_arrow(repr),
+            TypeDesc::Ttuple(types) => {
+                let parts = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                format!("({})", parts.join(", "))
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let name = path.last().to_string();
+                if args.is_empty() {
+                    name
+                } else {
+                    let args = args.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                    format!("{name}<{}>", args.join(", "))
+                }
+            }
+            TypeDesc::Tobject { .. } => "<object>".to_string(),
+            TypeDesc::Tfield { .. } => "<object-field>".to_string(),
+            TypeDesc::Tnil => "<object-end>".to_string(),
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
+            TypeDesc::Tvariant(_) => "<variant>".to_string(),
+            TypeDesc::Tpoly { body, .. } => self.format(*body),
+            TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
+        }
+    }
+
+    fn format_arrow(&mut self, ty: TypeExprRef) -> String {
+        let mut args = Vec::new();
+        let mut current = ty;
+        let mut seen = HashSet::new();
+
+        loop {
+            let repr = self.type_ctx.repr(current);
+            if !seen.insert(repr) {
+                break;
+            }
+
+            match &*self.type_ctx.get_desc(repr) {
+                TypeDesc::Tarrow { arg, ret, .. } => {
+                    args.push(self.format_arrow_arg(&arg.lbl, arg.typ));
+                    current = *ret;
+                }
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+                _ => break,
+            }
+        }
+
+        let ret = self.format(current);
+        if args.len() == 1 {
+            format!("{} => {ret}", args[0])
+        } else {
+            format!("({}) => {ret}", args.join(", "))
+        }
+    }
+
+    fn format_arrow_arg(&mut self, label: &ArgLabel, ty: TypeExprRef) -> String {
+        let ty = self.format(ty);
+        match label {
+            ArgLabel::Nolabel => ty,
+            ArgLabel::Labelled(label) => format!("~{}: {ty}", label.txt),
+            ArgLabel::Optional(label) => format!("~{}?: {ty}", label.txt),
+        }
+    }
+
+    fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
+        if let Some(name) = name
+            && !name.is_empty()
+            && name != "_"
+        {
+            return format!("'{name}");
+        }
+
+        if let Some(existing) = self.vars.get(&ty) {
+            return existing.clone();
+        }
+
+        let name = generated_type_var_name(self.next_var);
+        self.next_var += 1;
+        self.vars.insert(ty, name.clone());
+        name
+    }
+}
+
+fn generated_type_var_name(idx: usize) -> String {
+    let letter = (b'a' + (idx % 26) as u8) as char;
+    if idx < 26 {
+        format!("'{letter}")
+    } else {
+        format!("'{letter}{}", idx / 26)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -153,7 +572,13 @@ pub fn modtypes<'a>(
     mty_sig: &ModuleType,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, false)
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, false).map_err(|error| {
+        IncludeModError::ModuleTypesMismatch {
+            actual: Box::new(mty_impl.clone()),
+            expected: Box::new(mty_sig.clone()),
+            error: Box::new(error),
+        }
+    })
 }
 
 /// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
@@ -921,7 +1346,12 @@ fn check_paired_signature_items<'a>(
                     &sig_mod_decl.md_type,
                     nested_sig_access_path.as_ref(),
                     false,
-                )?;
+                )
+                .map_err(|error| IncludeModError::ModuleTypesMismatch {
+                    actual: Box::new(impl_mty.clone()),
+                    expected: Box::new(sig_mod_decl.md_type.clone()),
+                    error: Box::new(error),
+                })?;
                 coercions.push((pair.runtime_pos, coercion));
             }
             (
@@ -1688,6 +2118,50 @@ fn type_declarations<'a>(
         // Abstract in signature allows any implementation
         (_, crate::types::decl::TypeKind::TypeAbstract) => Ok(()),
 
+        (
+            crate::types::decl::TypeKind::TypeRecord(impl_labels, _),
+            crate::types::decl::TypeKind::TypeRecord(sig_labels, _),
+        ) => {
+            if let Some(detail) = compare_record_declarations(
+                type_ctx,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_labels,
+                sig_labels,
+            ) {
+                Err(IncludeModError::TypeDeclarationMismatch {
+                    name: id,
+                    actual: impl_decl.clone(),
+                    expected: sig_decl.clone(),
+                    detail,
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        (
+            crate::types::decl::TypeKind::TypeVariant(impl_constructors),
+            crate::types::decl::TypeKind::TypeVariant(sig_constructors),
+        ) => {
+            if let Some(detail) = compare_variant_declarations(
+                type_ctx,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_constructors,
+                sig_constructors,
+            ) {
+                Err(IncludeModError::TypeDeclarationMismatch {
+                    name: id,
+                    actual: impl_decl.clone(),
+                    expected: sig_decl.clone(),
+                    detail,
+                })
+            } else {
+                Ok(())
+            }
+        }
+
         // Same kind is fine
         (k1, k2) if std::mem::discriminant(k1) == std::mem::discriminant(k2) => {
             // Would need deeper checking for record/variant fields
@@ -1698,6 +2172,313 @@ fn type_declarations<'a>(
             name: id,
             reason: "incompatible type kinds".to_string(),
         }),
+    }
+}
+
+fn compare_record_declarations(
+    type_ctx: &TypeContext,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+    impl_labels: &[LabelDeclaration],
+    sig_labels: &[LabelDeclaration],
+) -> Option<String> {
+    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
+    let mut index = 0usize;
+    let len = impl_labels.len().min(sig_labels.len());
+
+    while index < len {
+        let impl_label = &impl_labels[index];
+        let sig_label = &sig_labels[index];
+        if impl_label.ld_id.name() != sig_label.ld_id.name() {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                index,
+                impl_label.ld_id.name(),
+                sig_label.ld_id.name()
+            ));
+        }
+        if impl_label.ld_mutable != sig_label.ld_mutable {
+            return Some(format!(
+                "The mutability of field {} is different.",
+                impl_label.ld_id.name()
+            ));
+        }
+        if impl_label.ld_optional != sig_label.ld_optional {
+            return Some(format!(
+                "The optional attribute of field {} is different.",
+                impl_label.ld_id.name()
+            ));
+        }
+        if !type_exprs_equal_for_inclusion(
+            type_ctx,
+            &param_map,
+            impl_label.ld_type,
+            sig_label.ld_type,
+        ) {
+            return Some(format!(
+                "The types for field {} are not equal.",
+                impl_label.ld_id.name()
+            ));
+        }
+        index += 1;
+    }
+
+    if let Some(label) = sig_labels.get(index) {
+        return Some(format!(
+            "The field {} is only present in the second declaration.",
+            label.ld_id.name()
+        ));
+    }
+    if let Some(label) = impl_labels.get(index) {
+        return Some(format!(
+            "The field {} is only present in the first declaration.",
+            label.ld_id.name()
+        ));
+    }
+
+    None
+}
+
+fn compare_variant_declarations(
+    type_ctx: &TypeContext,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+    impl_constructors: &[ConstructorDeclaration],
+    sig_constructors: &[ConstructorDeclaration],
+) -> Option<String> {
+    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
+    let mut index = 0usize;
+    let len = impl_constructors.len().min(sig_constructors.len());
+
+    while index < len {
+        let impl_constructor = &impl_constructors[index];
+        let sig_constructor = &sig_constructors[index];
+        if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                index,
+                impl_constructor.cd_id.name(),
+                sig_constructor.cd_id.name()
+            ));
+        }
+
+        match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
+            (
+                ConstructorArguments::CstrRecord(impl_labels),
+                ConstructorArguments::CstrRecord(sig_labels),
+            ) => {
+                if let Some(detail) = compare_record_declarations(
+                    type_ctx,
+                    impl_params,
+                    sig_params,
+                    impl_labels,
+                    sig_labels,
+                ) {
+                    return Some(detail);
+                }
+            }
+            (
+                ConstructorArguments::CstrTuple(impl_args),
+                ConstructorArguments::CstrTuple(sig_args),
+            ) if impl_args.len() != sig_args.len() => {
+                return Some(format!(
+                    "The arities for field {} differ.",
+                    impl_constructor.cd_id.name()
+                ));
+            }
+            (
+                ConstructorArguments::CstrTuple(impl_args),
+                ConstructorArguments::CstrTuple(sig_args),
+            ) => {
+                for (impl_arg, sig_arg) in impl_args.iter().zip(sig_args.iter()) {
+                    if !type_exprs_equal_for_inclusion(type_ctx, &param_map, *impl_arg, *sig_arg) {
+                        return Some(format!(
+                            "The types for field {} are not equal.",
+                            impl_constructor.cd_id.name()
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "The types for field {} are not equal.",
+                    impl_constructor.cd_id.name()
+                ));
+            }
+        }
+
+        index += 1;
+    }
+
+    if let Some(constructor) = sig_constructors.get(index) {
+        return Some(format!(
+            "The field {} is only present in the second declaration.",
+            constructor.cd_id.name()
+        ));
+    }
+    if let Some(constructor) = impl_constructors.get(index) {
+        return Some(format!(
+            "The field {} is only present in the first declaration.",
+            constructor.cd_id.name()
+        ));
+    }
+
+    None
+}
+
+fn build_type_param_map(
+    type_ctx: &TypeContext,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+) -> HashMap<TypeExprRef, TypeExprRef> {
+    impl_params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(impl_param, sig_param)| (type_ctx.repr(*impl_param), type_ctx.repr(*sig_param)))
+        .collect()
+}
+
+fn type_exprs_equal_for_inclusion(
+    type_ctx: &TypeContext,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_ty: TypeExprRef,
+    sig_ty: TypeExprRef,
+) -> bool {
+    let mut seen = HashSet::new();
+    type_exprs_equal_for_inclusion_inner(type_ctx, param_map, impl_ty, sig_ty, &mut seen)
+}
+
+fn type_exprs_equal_for_inclusion_inner(
+    type_ctx: &TypeContext,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_ty: TypeExprRef,
+    sig_ty: TypeExprRef,
+    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+) -> bool {
+    let impl_ty = type_ctx.repr(impl_ty);
+    let sig_ty = type_ctx.repr(sig_ty);
+
+    if !seen.insert((impl_ty, sig_ty)) {
+        return true;
+    }
+
+    if let Some(mapped_sig) = param_map.get(&impl_ty) {
+        return type_ctx.repr(*mapped_sig) == sig_ty;
+    }
+    if param_map
+        .values()
+        .any(|mapped_sig| type_ctx.repr(*mapped_sig) == sig_ty)
+    {
+        return false;
+    }
+
+    match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
+        (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
+        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
+        (
+            TypeDesc::Tarrow {
+                arg: impl_arg,
+                ret: impl_ret,
+                ..
+            },
+            TypeDesc::Tarrow {
+                arg: sig_arg,
+                ret: sig_ret,
+                ..
+            },
+        ) => {
+            arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
+                && type_exprs_equal_for_inclusion_inner(
+                    type_ctx,
+                    param_map,
+                    impl_arg.typ,
+                    sig_arg.typ,
+                    seen,
+                )
+                && type_exprs_equal_for_inclusion_inner(
+                    type_ctx, param_map, *impl_ret, *sig_ret, seen,
+                )
+        }
+        (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(sig_items)) => {
+            impl_items.len() == sig_items.len()
+                && impl_items
+                    .iter()
+                    .zip(sig_items.iter())
+                    .all(|(impl_item, sig_item)| {
+                        type_exprs_equal_for_inclusion_inner(
+                            type_ctx, param_map, *impl_item, *sig_item, seen,
+                        )
+                    })
+        }
+        (
+            TypeDesc::Tconstr {
+                path: impl_path,
+                args: impl_args,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: sig_path,
+                args: sig_args,
+                ..
+            },
+        ) => {
+            impl_path.same(sig_path)
+                && impl_args.len() == sig_args.len()
+                && impl_args
+                    .iter()
+                    .zip(sig_args.iter())
+                    .all(|(impl_arg, sig_arg)| {
+                        type_exprs_equal_for_inclusion_inner(
+                            type_ctx, param_map, *impl_arg, *sig_arg, seen,
+                        )
+                    })
+        }
+        (TypeDesc::Tlink(impl_next), _) | (TypeDesc::Tsubst(impl_next), _) => {
+            type_exprs_equal_for_inclusion_inner(type_ctx, param_map, *impl_next, sig_ty, seen)
+        }
+        (_, TypeDesc::Tlink(sig_next)) | (_, TypeDesc::Tsubst(sig_next)) => {
+            type_exprs_equal_for_inclusion_inner(type_ctx, param_map, impl_ty, *sig_next, seen)
+        }
+        (
+            TypeDesc::Tpoly {
+                body: impl_body, ..
+            },
+            TypeDesc::Tpoly { body: sig_body, .. },
+        ) => type_exprs_equal_for_inclusion_inner(type_ctx, param_map, *impl_body, *sig_body, seen),
+        (
+            TypeDesc::Tpackage {
+                path: impl_path,
+                args: impl_args,
+                ..
+            },
+            TypeDesc::Tpackage {
+                path: sig_path,
+                args: sig_args,
+                ..
+            },
+        ) => {
+            impl_path.same(sig_path)
+                && impl_args.len() == sig_args.len()
+                && impl_args
+                    .iter()
+                    .zip(sig_args.iter())
+                    .all(|(impl_arg, sig_arg)| {
+                        type_exprs_equal_for_inclusion_inner(
+                            type_ctx, param_map, *impl_arg, *sig_arg, seen,
+                        )
+                    })
+        }
+        (TypeDesc::Tnil, TypeDesc::Tnil) => true,
+        _ => impl_ty == sig_ty,
+    }
+}
+
+fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
+    match (left, right) {
+        (ArgLabel::Nolabel, ArgLabel::Nolabel) => true,
+        (ArgLabel::Labelled(left), ArgLabel::Labelled(right))
+        | (ArgLabel::Optional(left), ArgLabel::Optional(right)) => left.txt == right.txt,
+        _ => false,
     }
 }
 

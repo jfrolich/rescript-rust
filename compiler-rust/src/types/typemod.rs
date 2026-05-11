@@ -2893,7 +2893,10 @@ pub enum TypeModError {
     /// Module not found.
     ModuleNotFound(String),
     /// Signature mismatch.
-    SignatureMismatch { expected: String, found: String },
+    SignatureMismatch {
+        loc: LocIdx,
+        error: crate::types::includemod::IncludeModError,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -9866,10 +9869,7 @@ fn type_module_expr_with_alias<'a>(
                     &md.mod_type,
                     &simplified,
                 )
-                .map_err(|err| TypeModError::SignatureMismatch {
-                    expected: format!("{simplified:?}"),
-                    found: format!("{err:?}"),
-                })?;
+                .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(md),
@@ -10211,10 +10211,11 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     mod_loc: LocIdx,
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
+    let error_loc = arg.mod_loc;
     let coercion = crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &decl_mty)
         .map_err(|err| TypeModError::SignatureMismatch {
-            expected: format!("{decl_mty:?}"),
-            found: format!("{err:?}"),
+            loc: error_loc,
+            error: err,
         })?;
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
