@@ -1271,12 +1271,6 @@ impl Default for CompilerOptions {
     }
 }
 
-impl CompilerOptions {
-    fn preserve_canonical_typedtree(&self) -> bool {
-        self.dump_typed_sexp || self.dump_typed_sexp_locs || self.capture_intermediates
-    }
-}
-
 pub fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
@@ -1384,7 +1378,6 @@ pub fn compile_source_to_js_with_options(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -1962,7 +1955,6 @@ pub fn typecheck_interface_source(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -2235,7 +2227,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -2289,7 +2280,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         let mut env = initial_env(&type_ctx);
@@ -3056,7 +3046,6 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3102,7 +3091,6 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -3698,7 +3686,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -4124,7 +4111,6 @@ pub fn typecheck_preprocessed_signature_in_process(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);
@@ -4227,7 +4213,6 @@ pub fn typecheck_implementation_in_process(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
     let mut env = initial_env(&type_ctx);

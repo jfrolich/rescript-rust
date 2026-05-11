@@ -19306,27 +19306,10 @@ impl Env {
                 // OCaml compiler/ml/env.ml:1573-1578 builds child component
                 // tables from the selected alias path. Rust can additionally
                 // see flattened backing paths such as `Layout__Types.Component`;
-                // when that happens while resolving an alias component, inspect
-                // the parent signature below instead of forcing env.ml:865-882's
-                // `find_module` path for the backing child declaration.
+                // keep those on the component-table lookup path below so normal
+                // compilation and typedtree dumping follow the same lazy order.
                 let flattened_alias_component_child =
                     flattened_alias_component_parent(parent, pers_env.as_ref(), ctx);
-                if !ctx.preserve_canonical_typedtree()
-                    && matches!(parent.as_ref(), Path::Pident(id) if id.is_persistent())
-                    && let Some(parent_sig) =
-                        raw_signature_for_persistent_path(parent, pers_env, ctx)
-                    && let Some(child_md) = raw_qualified_child_module_decl(
-                        parent,
-                        &parent_sig,
-                        submod_name.as_str(),
-                        ctx,
-                    )
-                {
-                    let result =
-                        resolve_module_type_inner(env, &child_md.md_type, pers_env, ctx, visiting);
-                    visiting.remove(path);
-                    return result;
-                }
 
                 if !flattened_alias_component_child
                     && let Some((_, access_path, sub_md)) = lookup_module_in_resolved_path(

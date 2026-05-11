@@ -259,12 +259,6 @@ pub struct TypeContext {
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
 
-    /// Preserve canonical typedtree side effects for debug/parity output.
-    ///
-    /// Normal JS compilation can skip eager signature-renaming work that exists
-    /// only to keep typedtree identity and traversal order stable for dumps.
-    preserve_canonical_typedtree: Cell<bool>,
-
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
 
@@ -492,7 +486,6 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
-            preserve_canonical_typedtree: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -567,14 +560,6 @@ impl TypeContext {
     /// Resolve a typedtree environment reference.
     pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
-    }
-
-    pub(crate) fn set_preserve_canonical_typedtree(&self, preserve: bool) {
-        self.preserve_canonical_typedtree.set(preserve);
-    }
-
-    pub(crate) fn preserve_canonical_typedtree(&self) -> bool {
-        self.preserve_canonical_typedtree.get()
     }
 
     #[inline]
