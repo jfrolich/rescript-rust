@@ -3160,6 +3160,11 @@ pub enum TypeModError {
         /// Functor expression location to report.
         loc: LocIdx,
     },
+    /// Fresh module-local types are not allowed in applicative functor bodies.
+    NotAllowedInFunctorBody {
+        /// Module expression location to report.
+        loc: LocIdx,
+    },
     /// A module was opened where a structure signature was expected.
     StructureExpected {
         /// Module path location to report.
@@ -11126,6 +11131,49 @@ where
 // Module Expression Type Checking
 // ============================================================================
 
+fn module_type_contains_type(env: &Env, mty: &crate::types::decl::ModuleType) -> bool {
+    match mty {
+        crate::types::decl::ModuleType::MtyIdent(path) => env
+            .lookup_modtype(path)
+            .ok()
+            .and_then(|mtd| mtd.mtd_type.as_ref())
+            .is_none_or(|mty| module_type_contains_type(env, mty)),
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            sig.iter().any(|item| signature_item_contains_type(env, item))
+        }
+        crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
+            module_type_contains_type(env, result)
+        }
+        crate::types::decl::ModuleType::MtyAlias(_, _) => false,
+    }
+}
+
+fn signature_item_contains_type(
+    env: &Env,
+    item: &crate::types::decl::SignatureItem,
+) -> bool {
+    match item {
+        crate::types::decl::SignatureItem::SigType(_, decl, _) => {
+            decl.type_manifest.is_none()
+                || (matches!(decl.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+                    && matches!(decl.type_private, crate::types::PrivateFlag::Private))
+        }
+        crate::types::decl::SignatureItem::SigModtype(_, _) => true,
+        crate::types::decl::SignatureItem::SigTypext(_, ext, _) => {
+            matches!(
+                ext.ext_args,
+                crate::types::decl::ConstructorArguments::CstrRecord(_)
+            )
+        }
+        crate::types::decl::SignatureItem::SigModule(_, md, _) => {
+            module_type_contains_type(env, &md.md_type)
+        }
+        crate::types::decl::SignatureItem::SigValue(_, _)
+        | crate::types::decl::SignatureItem::SigClass
+        | crate::types::decl::SignatureItem::SigClassType => false,
+    }
+}
+
 fn type_module_expr_with_alias<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -11387,7 +11435,14 @@ fn type_module_expr_with_alias<'a>(
 
             // Type check the functor body with the extended environment
             let body = arena.get_mod_expr(*body_idx);
-            let typed_body = type_module_expr_with_alias(tctx, &functor_env, arena, body, false)?;
+            let previous_applicative_functor_body_depth = tctx.applicative_functor_body_depth;
+            if typed_param_type.is_some() {
+                tctx.applicative_functor_body_depth += 1;
+            }
+            let typed_body_result =
+                type_module_expr_with_alias(tctx, &functor_env, arena, body, false);
+            tctx.applicative_functor_body_depth = previous_applicative_functor_body_depth;
+            let typed_body = typed_body_result?;
             let functor_mty = crate::types::decl::ModuleType::MtyFunctor {
                 param: param_id.clone(),
                 param_type: typed_param_type
@@ -11447,6 +11502,17 @@ fn type_module_expr_with_alias<'a>(
                 return Err(TypeModError::ApplyGenerative {
                     loc: functor.pmod_loc,
                 });
+            }
+            if matches!(
+                &functor_mty,
+                crate::types::decl::ModuleType::MtyFunctor {
+                    param_type: None,
+                    ..
+                }
+            ) && tctx.applicative_functor_body_depth > 0
+                && module_type_contains_type(env, &typed_functor.mod_type)
+            {
+                return Err(TypeModError::NotAllowedInFunctorBody { loc });
             }
             let env_ref = tctx.type_ctx.store_typed_env(env);
             let coercion = match &functor_mty {
@@ -11592,6 +11658,11 @@ fn type_module_expr_with_alias<'a>(
                     });
                 }
             };
+            if tctx.applicative_functor_body_depth > 0
+                && module_type_contains_type(env, &unpack_mty)
+            {
+                return Err(TypeModError::NotAllowedInFunctorBody { loc });
+            }
             let env_ref = tctx.type_ctx.store_typed_env(env);
             tctx.module_expr_semantic_types
                 .insert(mod_expr.pmod_loc, unpack_mty.clone());

@@ -339,6 +339,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/cases/interface_not_compiled.res`.
 - `Not_allowed_in_functor_body`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/not_allowed_in_functor_body.res`.
 - `Not_a_packed_module`
 - `Incomplete_packed_module`
 - `Scoping_pack`

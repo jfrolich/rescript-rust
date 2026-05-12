@@ -1043,6 +1043,9 @@ pub struct TypeCheckContext<'a> {
     /// application reuses the types with correct path substitutions.
     pub(crate) module_expr_semantic_types:
         HashMap<crate::parse_arena::LocIdx, crate::types::decl::ModuleType>,
+    /// Depth inside applicative functor bodies.
+    /// Mirrors typemod.ml's `funct_body` flag for rejecting fresh module types.
+    pub(crate) applicative_functor_body_depth: usize,
     /// Registry of @comptime functions for compile-time specialization.
     pub comptime_functions: HashMap<String, crate::types::comptime::ComptimeFunction>,
     /// Comptime-known variable bindings (from @typeInfo destructuring, inline for, etc.)
@@ -1097,6 +1100,7 @@ impl<'a> TypeCheckContext<'a> {
             experimental_let_unwrap: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
+            applicative_functor_body_depth: 0,
             comptime_functions: HashMap::new(),
             comptime_bindings: HashMap::new(),
             monomorph_cache: crate::types::comptime::MonomorphCache::new(),

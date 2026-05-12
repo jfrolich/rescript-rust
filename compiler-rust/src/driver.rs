@@ -2743,6 +2743,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::NotAllowedInFunctorBody { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This expression creates fresh types.\nIt is not allowed inside applicative functors.",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
             format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
             2,
