@@ -3120,6 +3120,14 @@ pub enum TypeModError {
         name: String,
         ty: TypeExprRef,
     },
+    /// Invalid type declaration attribute usage.
+    InvalidAttribute { loc: LocIdx, message: String },
+    /// `@unboxed` was used on a declaration shape that cannot be unboxed.
+    BadUnboxedAttribute { loc: LocIdx, message: String },
+    /// Both `@boxed` and `@unboxed` were used on the same type declaration.
+    BoxedAndUnboxed { loc: LocIdx },
+    /// `@immediate` was used on a type that can contain pointer values.
+    BadImmediateAttribute { loc: LocIdx },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
         /// Source location to report.
@@ -3307,6 +3315,84 @@ fn check_untagged_variant_constructor_arities(
     }
 
     Ok(())
+}
+
+fn check_not_undefined_type_attribute(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+) -> TypeModResult<()> {
+    if !parser_attrs_have_name(arena, &decl.ptype_attributes, "notUndefined") {
+        return Ok(());
+    }
+
+    if matches!(
+        (&decl.ptype_kind, decl.ptype_manifest),
+        (crate::parser::ast::TypeKind::Ptype_abstract, None)
+    ) {
+        Ok(())
+    } else {
+        Err(TypeModError::InvalidAttribute {
+            loc: decl.ptype_loc,
+            message: "@notUndefined can only be used on abstract types".to_string(),
+        })
+    }
+}
+
+fn check_unboxed_type_attributes(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+) -> TypeModResult<()> {
+    let has_unboxed = parser_attrs_have_name(arena, &decl.ptype_attributes, "unboxed");
+    let has_boxed = parser_attrs_have_name(arena, &decl.ptype_attributes, "boxed");
+
+    if has_boxed && has_unboxed {
+        return Err(TypeModError::BoxedAndUnboxed {
+            loc: decl.ptype_loc,
+        });
+    }
+
+    if !has_unboxed {
+        return Ok(());
+    }
+
+    check_untagged_variant_constructor_arities(arena, decl)?;
+
+    match &decl.ptype_kind {
+        crate::parser::ast::TypeKind::Ptype_abstract => Err(TypeModError::BadUnboxedAttribute {
+            loc: decl.ptype_loc,
+            message: "it is abstract".to_string(),
+        }),
+        crate::parser::ast::TypeKind::Ptype_record(labels) => match labels.as_slice() {
+            [label]
+                if matches!(
+                    label.pld_mutable,
+                    crate::parser::ast::MutableFlag::Immutable
+                ) =>
+            {
+                Ok(())
+            }
+            [label]
+                if matches!(
+                    label.pld_mutable,
+                    crate::parser::ast::MutableFlag::Mutable
+                ) =>
+            {
+                Err(TypeModError::BadUnboxedAttribute {
+                    loc: decl.ptype_loc,
+                    message: "it is mutable".to_string(),
+                })
+            }
+            _ => Err(TypeModError::BadUnboxedAttribute {
+                loc: decl.ptype_loc,
+                message: "it has more than one field".to_string(),
+            }),
+        },
+        crate::parser::ast::TypeKind::Ptype_open => Err(TypeModError::BadUnboxedAttribute {
+            loc: decl.ptype_loc,
+            message: "extensible variant types cannot be unboxed".to_string(),
+        }),
+        crate::parser::ast::TypeKind::Ptype_variant(_) => Ok(()),
+    }
 }
 
 fn check_duplicate_constructor_declarations(
@@ -13956,6 +14042,8 @@ fn type_structure_item<'a>(
                 let type_id = declared_type_ids[decl_idx].clone();
                 let saved_type_variables = std::mem::take(&mut tctx.type_variables);
 
+                check_not_undefined_type_attribute(arena, decl)?;
+
                 // Create the type path for self-reference
                 let type_path = Path::pident(type_id.clone());
 
@@ -14026,12 +14114,13 @@ fn type_structure_item<'a>(
                     typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
                 }
 
+                check_unboxed_type_attributes(arena, decl)?;
+
                 // Check for @unboxed attribute (only applies to single-constructor variants)
                 let decl_has_unboxed_attr = decl
                     .ptype_attributes
                     .iter()
                     .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
-                check_untagged_variant_constructor_arities(arena, decl)?;
 
                 // OCaml compiler/ml/typedecl.ml:449-607 translates the kind
                 // first, creating variant constructor identifiers at
@@ -15240,6 +15329,11 @@ fn type_structure_item<'a>(
                     &type_attributes,
                     &type_unboxed,
                 );
+                if decl_attrs_mark_immediate(&type_attributes) && !type_immediate {
+                    return Err(TypeModError::BadImmediateAttribute {
+                        loc: decl.ptype_loc,
+                    });
+                }
 
                 let type_private = match decl.ptype_private {
                     crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
@@ -16853,6 +16947,8 @@ fn transl_sig_type_declarations_with_ids<'a>(
             let type_name_str = arena.get_string(type_name);
             let type_id = declared_type_ids[decl_idx].clone();
 
+            check_not_undefined_type_attribute(arena, decl)?;
+
             // OCaml: reset_type_variables() before each type declaration
             tctx.type_variables.clear();
 
@@ -16920,6 +17016,8 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
             }
 
+            check_unboxed_type_attributes(arena, decl)?;
+
             // Convert manifest type (type alias)
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
@@ -16944,7 +17042,6 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 .ptype_attributes
                 .iter()
                 .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
-            check_untagged_variant_constructor_arities(arena, decl)?;
 
             // Preserve signature type kind like OCaml transl_signature -> Typedecl.transl_type_decl.
             let (internal_type_kind, typed_tree_kind) = match &decl.ptype_kind {
@@ -17299,6 +17396,11 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 &type_attributes,
                 &type_unboxed,
             );
+            if decl_attrs_mark_immediate(&type_attributes) && !type_immediate {
+                return Err(TypeModError::BadImmediateAttribute {
+                    loc: decl.ptype_loc,
+                });
+            }
 
             // Keep internal declaration shape aligned with parsed signature declaration.
             let internal_decl = crate::types::TypeDeclaration {

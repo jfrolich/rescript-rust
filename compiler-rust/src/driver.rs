@@ -3560,6 +3560,46 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::InvalidAttribute { loc, message } => UserDiagnostic::new(
+            format_compiler_error_report(arena, source, filename, *loc, message),
+            2,
+        )
+        .into(),
+        TypeModError::BadUnboxedAttribute { loc, message } => {
+            let report = if message == "extensible variant types cannot be unboxed" {
+                "This type cannot be unboxed because\nextensible variant types cannot be unboxed."
+                    .to_string()
+            } else {
+                format!("This type cannot be unboxed because {message}.")
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, &report),
+                2,
+            )
+            .into()
+        }
+        TypeModError::BoxedAndUnboxed { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "A type cannot be boxed and unboxed at the same time.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::BadImmediateAttribute { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Types marked with the immediate attribute must be\nnon-pointer types like int or bool",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::AstUntaggedVariantError { loc, error } => {
             let message = error.message_text();
             UserDiagnostic::new(

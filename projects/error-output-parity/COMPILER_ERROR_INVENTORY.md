@@ -315,10 +315,25 @@ with a reason after checking raise sites.
 - `Varying_anonymous`
 - `Val_in_structure`
 - `Invalid_attribute`
+  - Covered for `@notUndefined` misuse by
+    `tests/error_output_parity/compiler/fixtures/invalid_not_undefined_attribute.res`.
 - `Bad_immediate_attribute`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bad_immediate_attribute.res`.
 - `Bad_unboxed_attribute`
+  - Covered for abstract, mutable record, multi-field record, and extensible
+    variant declarations by
+    `tests/error_output_parity/compiler/fixtures/bad_unboxed_abstract.res`,
+    `tests/error_output_parity/compiler/fixtures/bad_unboxed_mutable_record.res`,
+    `tests/error_output_parity/compiler/fixtures/bad_unboxed_multi_field_record.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/bad_unboxed_extensible_variant.res`.
 - `Boxed_and_unboxed`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/boxed_and_unboxed.res`.
 - `Nonrec_gadt`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/nonrec_gadt.res`.
 - `Variant_runtime_representation_mismatch`
 - `Variant_spread_fail`
 
