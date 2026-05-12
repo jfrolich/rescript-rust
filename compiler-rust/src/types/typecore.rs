@@ -554,6 +554,12 @@ pub enum TypeCoreError {
         expected: TypeExprRef,
     },
 
+    /// Type constructor argument does not satisfy its declared parameter constraint.
+    TypeMismatch {
+        loc: LocIdx,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -1916,49 +1922,26 @@ fn transl_type_inner(
                 }
             };
             let params = crate::types::ctype::instance_list(ctx, &decl.type_params);
-            for (param_ty, arg_ty) in params.iter().zip(arg_refs.iter()) {
-                let param_ty = ctx.repr(*param_ty);
-                let arg_ty = ctx.repr(*arg_ty);
-
-                if use_unify_var {
-                    if param_ty == arg_ty {
-                        continue;
-                    }
-                    match (&*ctx.get_desc(param_ty), &*ctx.get_desc(arg_ty)) {
-                        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
-                            if crate::types::ctype::deep_occur(ctx, param_ty, arg_ty) =>
-                        {
-                            crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
-                                .map_err(|_| TypeCoreError::PatternTypeClash {
-                                loc: Some(loc),
-                                trace: vec![(param_ty, arg_ty)],
-                            })?;
-                        }
-                        (TypeDesc::Tvar(_), _) => {
-                            if crate::types::occurs(ctx, param_ty, arg_ty) {
-                                return Err(TypeCoreError::PatternTypeClash {
-                                    loc: Some(loc),
-                                    trace: vec![(param_ty, arg_ty)],
-                                });
-                            }
-                            crate::types::ctype::update_level(ctx, ctx.get_level(param_ty), arg_ty);
-                            crate::types::ctype::link_type(ctx, param_ty, arg_ty);
-                        }
-                        _ => {
-                            crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
-                                .map_err(|_| TypeCoreError::PatternTypeClash {
-                                loc: Some(loc),
-                                trace: vec![(param_ty, arg_ty)],
-                            })?;
-                        }
-                    }
+            for ((param_ty, arg_ty), arg) in
+                params.iter().zip(arg_refs.iter()).zip(parsed_args.iter())
+            {
+                let result = if use_unify_var {
+                    crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, *param_ty, *arg_ty)
                 } else {
-                    crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty).map_err(
-                        |_| TypeCoreError::PatternTypeClash {
-                            loc: Some(loc),
-                            trace: vec![(param_ty, arg_ty)],
-                        },
-                    )?;
+                    crate::types::unify(ctx, &mut tctx.unify_state, *param_ty, *arg_ty)
+                };
+                if let Err(err) = result {
+                    let trace = match err {
+                        TypeError::Unify(trace) => trace
+                            .into_iter()
+                            .map(|(left, right)| (right, left))
+                            .collect(),
+                        _ => vec![(*arg_ty, *param_ty)],
+                    };
+                    return Err(TypeCoreError::TypeMismatch {
+                        loc: arg.ptyp_loc,
+                        trace,
+                    });
                 }
             }
 

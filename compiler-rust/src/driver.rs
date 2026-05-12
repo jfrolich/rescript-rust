@@ -3036,6 +3036,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::TypeMismatch { loc, trace }) => {
+            UserDiagnostic::new(
+                format_type_mismatch_report(type_ctx, arena, source, filename, *loc, trace),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3187,6 +3194,11 @@ fn type_mod_error_to_anyhow(
                 *loc,
                 &crate::types::includemod::format_error(type_ctx, filename, error),
             ),
+            2,
+        )
+        .into(),
+        TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
+            format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
             2,
         )
         .into(),
@@ -3774,6 +3786,30 @@ fn format_method_mismatch_report(
     )
 }
 
+fn format_type_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This type {} should be an instance of type {}",
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        ),
+    )
+}
+
 fn format_type_arity_mismatch_report(
     arena: &ParseArena,
     source: &str,
@@ -3792,6 +3828,26 @@ fn format_type_arity_mismatch_report(
         format!(
             "The type constructor {name} expects {expected} argument(s),\nbut is here applied to {provided} argument(s)"
         )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_inconsistent_constraint_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let message = if let Some((actual, expected)) = trace.first().copied() {
+        format!(
+            "The type constraints are not consistent.\nType {} is not compatible with type {}",
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        )
+    } else {
+        "The type constraints are not consistent.".to_string()
     };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

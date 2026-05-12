@@ -3046,6 +3046,11 @@ pub enum TypeModError {
         loc: LocIdx,
         error: crate::types::includemod::IncludeModError,
     },
+    /// Type declaration constraints are inconsistent.
+    InconsistentConstraint {
+        loc: LocIdx,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
     /// Invalid untagged variant definition.
     InvalidUntaggedVariantDefinition { loc: Location, reason: String },
     /// A variant type spread could not resolve its source type.
@@ -3141,6 +3146,31 @@ impl From<TypeCoreError> for TypeModError {
     fn from(err: TypeCoreError) -> Self {
         TypeModError::CoreError(err)
     }
+}
+
+fn unify_type_declaration_constraints(
+    tctx: &mut TypeCheckContext<'_>,
+    constraints: &[(TypedCoreType, TypedCoreType, LocIdx)],
+) -> TypeModResult<()> {
+    let ctx = tctx.type_ctx;
+    for (cty, cty_prime, loc) in constraints {
+        crate::types::unify(
+            ctx,
+            &mut tctx.unify_state,
+            cty.ctyp_type,
+            cty_prime.ctyp_type,
+        )
+        .map_err(|err| match err {
+            crate::types::TypeError::Unify(trace) => {
+                TypeModError::InconsistentConstraint { loc: *loc, trace }
+            }
+            _ => TypeModError::InconsistentConstraint {
+                loc: *loc,
+                trace: vec![(cty.ctyp_type, cty_prime.ctyp_type)],
+            },
+        })?;
+    }
+    Ok(())
 }
 
 fn union_variance_rows(lhs: &[TypesVariance], rhs: &[TypesVariance]) -> Vec<TypesVariance> {
@@ -14389,6 +14419,11 @@ fn type_structure_item<'a>(
                     }
                 };
 
+                // OCaml Typedecl.transl_declaration unifies declaration
+                // constraints before end_def/generalization, so constrained
+                // parameters are linked in the stored declaration.
+                unify_type_declaration_constraints(tctx, &typ_cstrs)?;
+
                 let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
                 let type_unboxed = if decl_has_unboxed_attr && constructors.len() <= 1 {
                     crate::types::UnboxedStatus::TRUE_FALSE
@@ -16070,6 +16105,11 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 }
                 None => (None, None),
             };
+            // OCaml Typedecl.transl_declaration unifies declaration
+            // constraints before end_def/generalization, so constrained
+            // parameters are linked in the stored declaration.
+            unify_type_declaration_constraints(tctx, &typ_cstrs)?;
+
             let decl_has_unboxed_attr = decl
                 .ptype_attributes
                 .iter()

@@ -203,6 +203,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/type_arity_mismatch.res`
   and
   `tests/error_output_parity/compiler/fixtures/type_arity_mismatch_nongeneric.res`.
+- `Type_mismatch`: covered for constrained type constructor arguments by
+  `tests/error_output_parity/compiler/fixtures/typetexp_type_mismatch.res`.
 - `Invalid_variable_name`: covered for type parameters and type expressions by
   `tests/error_output_parity/compiler/fixtures/invalid_type_parameter_name.res`
   and
