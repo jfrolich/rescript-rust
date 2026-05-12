@@ -4602,7 +4602,6 @@ fn force_qualified_value_type_paths<'a>(
         path: &Path,
         value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
-        infer_stdlib_root_from_flat_parent: bool,
     ) -> Option<Path> {
         fn module_signature_declares_type_component(
             ctx: &TypeContext,
@@ -4647,16 +4646,9 @@ fn force_qualified_value_type_paths<'a>(
             .as_ref()
             .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_parent.name()))
             .or_else(|| ctx.find_flattened_alias_component_path(flat_parent.name()))?;
-        if !infer_stdlib_root_from_flat_parent {
-            let root = value_access_root?;
-            if !root.is_persistent()
-                || !path_root_ident(&registered_parent)
-                    .is_some_and(|candidate| candidate.same(root))
-            {
-                return None;
-            }
-        } else if !path_root_ident(&registered_parent)
-            .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
+        let root = value_access_root?;
+        if !root.is_persistent()
+            || !path_root_ident(&registered_parent).is_some_and(|candidate| candidate.same(root))
         {
             return None;
         }
@@ -4665,32 +4657,10 @@ fn force_qualified_value_type_paths<'a>(
             // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
             // exactly the selected component table, and compiler/ml/subst.ml:303-309
             // applies that substitution to value descriptions. Keep that
-            // selected-module restriction for ordinary aliases. OCaml
-            // compiler/ml/env.ml:1517 scrapes aliases before the component
-            // substitution, while compiler/ml/mtype.ml:41-50 leaves value
-            // descriptions untouched when strengthening an alias target; a
-            // selected value that only mentions an unrelated `Stdlib_*` scheme
-            // keeps that flattened path until compiler/ml/ctype.ml:666-695
-            // reaches it through `get_level`.
+            // selected-module restriction instead of inferring additional
+            // implicit-open rewrites from flattened path spelling.
             if let Some(selected_module_path) = selected_module_path {
-                let selected_module_root_is_stdlib = path_root_ident(selected_module_path)
-                    .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
-                // OCaml compiler/ml/env.ml:1530-1538 prefixes exactly the
-                // selected component table, and compiler/ml/subst.ml:303-309
-                // applies that substitution to value descriptions. Keep
-                // implicit Stdlib rewrites to the enclosing component table of
-                // the selected value; unrelated non-Stdlib value schemes keep
-                // scraped `Stdlib_*` paths until compiler/ml/ctype.ml:666-695
-                // reaches them through `get_level`.
-                let implicit_stdlib_component_selected_parent = selected_module_path
-                    .parent()
-                    .is_some_and(|parent| candidate_parent.same(&parent));
-                let implicit_stdlib_component = infer_stdlib_root_from_flat_parent
-                    && !selected_module_root_is_stdlib
-                    && path_root_ident(&candidate_parent)
-                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-                    && implicit_stdlib_component_selected_parent;
-                if !candidate_parent.same(selected_module_path) && !implicit_stdlib_component {
+                if !candidate_parent.same(selected_module_path) {
                     continue;
                 }
             }
@@ -4953,8 +4923,6 @@ fn force_qualified_value_type_paths<'a>(
         value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
         selected_alias_targets: &[Path],
-        allow_stdlib_flat_parent_inference: bool,
-        allow_non_stdlib_implicit_stdlib_inference: bool,
         defer_selected_value_final_result: bool,
         seen: &mut TypeExprRefSet,
     ) {
@@ -4973,46 +4941,15 @@ fn force_qualified_value_type_paths<'a>(
                 // OCaml compiler/ml/env.ml:1091-1100 returns selected values as
                 // `Pdot(p, s, pos)`, and env.ml:1530-1538 builds those
                 // component values with compiler/ml/subst.ml:303-309
-                // `Subst.value_description`. For non-Stdlib persistent modules,
-                // the selected value scheme can expose implicit `Stdlib.*`
-                // component paths on either side of the arrow. Keep the
-                // argument-side allowance from typecore.ml:4171-4192 separate
-                // from the return-side implicit-Stdlib rewrite below so
-                // result-side side effects still run like OCaml. For selected
-                // `Stdlib` functions, leave the return side lazy until
-                // typecore.ml:4219-4224 returns the application result and the
-                // caller's `rue` unifies it with the expected type. OCaml
-                // compiler/ml/env.ml:1517 scrapes aliases before
-                // env.ml:1530-1538 prefixes component values, and
-                // compiler/ml/mtype.ml:41-49 leaves value descriptions
-                // unchanged when strengthening an alias target. That keeps
-                // selected `Stdlib.JSON.Encode.*` value result types on the
-                // flattened `Stdlib_JSON.t` scheme until later unification
-                // forces them.
-                let selected_module_root_is_stdlib = selected_module_path.is_some_and(|selected| {
-                    path_root_ident(selected)
-                        .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-                });
-                let arg_is_function_type = {
-                    let arg_repr = ctx.repr(arg_ty);
-                    let arg_desc = ctx.get_desc(arg_repr);
-                    matches!(*arg_desc, TypeDesc::Tarrow { .. })
-                };
+                // `Subst.value_description`. typecore.ml:4171-4192 then walks
+                // source arguments through `type_argument`, while
+                // typecore.ml:4219-4224 leaves the final application result for
+                // the caller's unification/expansion.
                 let ret_is_arrow = {
                     let ret_repr = ctx.repr(ret_ty);
                     let ret_desc = ctx.get_desc(ret_repr);
                     matches!(*ret_desc, TypeDesc::Tarrow { .. })
                 };
-                // OCaml compiler/ml/typecore.ml:4171-4192 calls `type_argument`
-                // once for each source argument. A function-typed argument is then
-                // typed by typecore.ml:2404-2457 against that expected function
-                // type; keep traversal side effects, but do not apply Rust's
-                // non-Stdlib implicit `Stdlib_*` compensation to callback internals.
-                let arg_allow_stdlib_flat_parent_inference = !arg_is_function_type;
-                let arg_allow_non_stdlib_implicit_stdlib_inference =
-                    allow_non_stdlib_implicit_stdlib_inference && !arg_is_function_type;
-                let ret_allow_stdlib_flat_parent_inference =
-                    allow_stdlib_flat_parent_inference || selected_module_root_is_stdlib;
                 visit(
                     tctx,
                     env,
@@ -5021,8 +4958,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    arg_allow_stdlib_flat_parent_inference,
-                    arg_allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5057,8 +4992,6 @@ fn force_qualified_value_type_paths<'a>(
                             value_access_root,
                             selected_module_path,
                             selected_alias_targets,
-                            ret_allow_stdlib_flat_parent_inference,
-                            allow_non_stdlib_implicit_stdlib_inference,
                             false,
                             seen,
                         );
@@ -5077,8 +5010,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        ret_allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         defer_selected_value_final_result && ret_is_arrow,
                         seen,
                     );
@@ -5096,8 +5027,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         false,
                         seen,
                     );
@@ -5193,20 +5122,6 @@ fn force_qualified_value_type_paths<'a>(
                         ));
                     }
                 }
-                // Keep `allow_stdlib_flat_parent_inference` available inside
-                // callback arrows for the lazy selected-value path behavior
-                // above, but require the separate gate before applying Rust's
-                // non-Stdlib implicit `Stdlib_*` rewrite. OCaml
-                // compiler/ml/typecore.ml:4171-4192 only calls
-                // `type_argument` at the source argument boundary; callback
-                // internals are then typed by typecore.ml:2404-2457.
-                let allow_implicit_stdlib_flat_parent_inference =
-                    allow_non_stdlib_implicit_stdlib_inference
-                        && (allow_stdlib_flat_parent_inference
-                            || selected_non_stdlib_persistent_module(
-                                selected_module_path,
-                                value_access_root_is_local,
-                            ));
                 let rewritten_path = selected_opened_alias_type_path(
                     &path,
                     value_access_root_is_local,
@@ -5292,23 +5207,7 @@ fn force_qualified_value_type_paths<'a>(
                         &path,
                         value_access_root,
                         selected_module_path,
-                        false,
                     )
-                })
-                .or_else(|| {
-                    allow_implicit_stdlib_flat_parent_inference
-                        .then(|| {
-                            persistent_nested_type_path(
-                                ctx,
-                                env,
-                                &tctx.persistent_env,
-                                &path,
-                                value_access_root,
-                                selected_module_path,
-                                true,
-                            )
-                        })
-                        .flatten()
                 });
                 if let Some(rewritten_path) = rewritten_path {
                     ctx.set_desc(
@@ -5329,8 +5228,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         false,
                         seen,
                     );
@@ -5348,8 +5245,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5363,8 +5258,6 @@ fn force_qualified_value_type_paths<'a>(
                             value_access_root,
                             selected_module_path,
                             selected_alias_targets,
-                            allow_stdlib_flat_parent_inference,
-                            allow_non_stdlib_implicit_stdlib_inference,
                             false,
                             seen,
                         );
@@ -5383,8 +5276,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5396,8 +5287,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5413,8 +5302,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5440,8 +5327,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5454,8 +5339,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         false,
                         seen,
                     );
@@ -5473,8 +5356,6 @@ fn force_qualified_value_type_paths<'a>(
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
-                    allow_stdlib_flat_parent_inference,
-                    allow_non_stdlib_implicit_stdlib_inference,
                     false,
                     seen,
                 );
@@ -5487,8 +5368,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         false,
                         seen,
                     );
@@ -5506,8 +5385,6 @@ fn force_qualified_value_type_paths<'a>(
                         value_access_root,
                         selected_module_path,
                         selected_alias_targets,
-                        allow_stdlib_flat_parent_inference,
-                        allow_non_stdlib_implicit_stdlib_inference,
                         false,
                         seen,
                     );
@@ -5625,8 +5502,6 @@ fn force_qualified_value_type_paths<'a>(
         value_access_root,
         selected_module_path,
         selected_alias_targets.as_slice(),
-        false,
-        true,
         true,
         &mut seen,
     );
