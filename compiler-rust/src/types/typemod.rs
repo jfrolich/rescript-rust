@@ -9523,7 +9523,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
     };
     use crate::types::typedtree::ModuleTypeDesc as TypedMtyDesc;
     use crate::types::typedtree::TypedSignatureItemDesc as TypedSigDesc;
-    use crate::types::typemod::path_from_longident;
 
     match &*mty.pmty_desc {
         PMtyDesc::Pmty_signature(sig_items) => {
@@ -10239,7 +10238,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            .ok_or_else(|| {
+                TypeModError::CoreError(TypeCoreError::UnboundModule {
+                    loc: arena.none_loc(),
+                    name: tctx.longident_to_string(&longident),
+                })
+            })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
         PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
@@ -10478,7 +10482,12 @@ fn approx_modtype<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            .ok_or_else(|| {
+                TypeModError::CoreError(TypeCoreError::UnboundModule {
+                    loc: arena.none_loc(),
+                    name: tctx.longident_to_string(&longident),
+                })
+            })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
         PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(approx_signature(
@@ -13195,7 +13204,12 @@ fn transl_modtype<'a>(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
             )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            .ok_or_else(|| {
+                TypeModError::CoreError(TypeCoreError::UnboundModule {
+                    loc: arena.none_loc(),
+                    name: tctx.longident_to_string(&longident),
+                })
+            })?;
             TMtyDesc::Tmty_alias(path, lid.clone())
         }
         PMtyDesc::Pmty_extension(_) => TMtyDesc::Tmty_placeholder,
