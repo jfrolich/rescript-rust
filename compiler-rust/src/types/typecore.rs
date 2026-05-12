@@ -463,7 +463,7 @@ pub enum TypeCoreError {
     },
 
     /// Attempting to mutate immutable field.
-    LabelNotMutable(Longident),
+    LabelNotMutable { loc: LocIdx, lid: Longident },
 
     /// Wrong name in expression.
     WrongName {
@@ -17068,6 +17068,13 @@ fn type_setfield(
         field_name: field_context_name,
     });
     let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
+
+    if label_desc.lbl_mut == crate::types::MutableFlag::Immutable {
+        return Err(TypeCoreError::LabelNotMutable {
+            loc,
+            lid: resolved_lid,
+        });
+    }
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.

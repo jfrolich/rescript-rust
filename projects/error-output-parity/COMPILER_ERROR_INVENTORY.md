@@ -70,6 +70,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
   `tests/error_output_parity/compiler/fixtures/orpat_vars.res`.
+- `Label_multiply_defined`: covered by
+  `tests/error_output_parity/compiler/fixtures/label_multiply_defined.res`.
+- `Labels_missing`: covered by
+  `tests/error_output_parity/compiler/fixtures/labels_missing.res`.
+- `Label_not_mutable`: covered by
+  `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`.
 - `Uncurried_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by

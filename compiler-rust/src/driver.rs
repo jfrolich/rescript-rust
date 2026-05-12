@@ -2897,6 +2897,22 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::LabelNotMutable { loc, lid }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "The record field {} is not mutable",
+                        format_longident_for_report(arena, lid)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundRecordField {
             loc,
             field_name,
