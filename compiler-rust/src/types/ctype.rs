@@ -1485,11 +1485,8 @@ fn resolve_module_type_through_env_path<'a>(
         }
         Path::Pdot(parent, name, _) => {
             let mut persistent_env = in_process_module_resolution_env(ctx);
-            let parent_root_name = path_root_ident(parent).map(|id| id.name());
-            let parent_is_implicit_stdlib_component =
-                matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
-                    && matches!(parent.as_ref(), Path::Pdot(_, _, _));
-            if parent_is_implicit_stdlib_component {
+            let parent_is_opened_component = env.path_starts_with_opened_component(parent);
+            if parent_is_opened_component {
                 let selected_child_path = Path::pdot(parent.as_ref().clone(), name.to_string());
                 if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                     &selected_child_path,
@@ -1500,9 +1497,9 @@ fn resolve_module_type_through_env_path<'a>(
                     // OCaml compiler/ml/env.ml:1094-1100 value lookup uses
                     // `lookup_module_descr`, which descends through
                     // env.ml:781-793's `comp_components`; that does not force
-                    // env.ml:1568's child `comp_modules` thunk. When Rust only
-                    // needs the signature for an implicit Stdlib component,
-                    // reuse the selected component signature and leave the
+                    // env.ml:1568's child `comp_modules` thunk. For any path
+                    // whose first dotted component came from an open, reuse
+                    // the selected component signature and leave the
                     // module-declaration force to env.ml:865-882-equivalent
                     // callers that actually ask for `find_module`.
                     return Some(super::decl::ModuleType::MtySignature(sig));
@@ -1526,11 +1523,9 @@ fn resolve_module_type_through_env_path<'a>(
             {
                 match &md.md_type {
                     super::decl::ModuleType::MtySignature(_) => {
-                        let parent_root_name = path_root_ident(parent).map(|id| id.name());
-                        let parent_is_implicit_stdlib_component =
-                            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
-                                && matches!(parent.as_ref(), Path::Pdot(_, _, _));
-                        let preferred_child_path = (!parent_is_implicit_stdlib_component)
+                        let parent_is_opened_component =
+                            env.path_starts_with_opened_component(parent);
+                        let preferred_child_path = (!parent_is_opened_component)
                             .then(|| parent_alias_target.as_ref())
                             .flatten()
                             .map(|target_parent_path| {
@@ -1538,12 +1533,11 @@ fn resolve_module_type_through_env_path<'a>(
                             });
                         // OCaml compiler/ml/env.ml:1094-1100 resolves value
                         // prefixes through `lookup_module_descr`; for dotted
-                        // implicit-Stdlib components that path reads
-                        // env.ml:781-793's selected `comp_components` table.
-                        // Do not immediately rebuild the flattened alias
-                        // target (`Stdlib_JSON.Classify`) after selecting
-                        // `Stdlib.JSON.Classify`; OCaml only forces the
-                        // selected component module declaration at
+                        // opened components that path reads env.ml:781-793's
+                        // selected `comp_components` table. Do not
+                        // immediately rebuild the flattened alias target after
+                        // selecting an opened component path; OCaml only
+                        // forces the selected component module declaration at
                         // env.ml:865-882 when normalization explicitly asks
                         // for it.
                         crate::types::typecore::resolve_module_signature_for_path(
@@ -2182,10 +2176,8 @@ fn normalize_path_full_inner<'a>(
     }
 
     if let Path::Pdot(parent, module_name, _) = path {
-        let parent_root_name = path_root_ident(parent).map(|id| id.name());
-        let parent_is_implicit_root =
-            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"));
-        if !parent_is_implicit_root
+        let path_starts_with_opened_component = env.path_starts_with_opened_component(path);
+        if !path_starts_with_opened_component
             && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
             && !alias_path.same(path)
         {
@@ -2193,11 +2185,10 @@ fn normalize_path_full_inner<'a>(
             // navigate persistent components through `ps_comps`, and
             // env.ml:876-880 reads a dotted module from those components before
             // alias normalization continues. Preserve that component-level
-            // alias for roots such as `Js.Json`, while leaving
-            // `Pervasives`/`Stdlib` to the recursive path below because Rust's
-            // qualified-lookup root bindings are not present in OCaml's
-            // implicit opens at compiler/core/res_compmisc.ml:61-62 and
-            // compiler/ml/env.ml:1874-1877.
+            // alias for ordinary roots, while leaving opened-component paths
+            // to the recursive path below because OCaml opens installed by
+            // compiler/core/res_compmisc.ml:56-62 and compiler/ml/env.ml:1874-1877
+            // add components without adding the opened root as a module binding.
             return normalize_path_full_inner(
                 ctx,
                 env,
@@ -2217,10 +2208,10 @@ fn normalize_path_full_inner<'a>(
         Path::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
             // prefix before `find_module ~alias:true` inspects the path at
-            // env.ml:865-882. For implicit `Pervasives`/`Stdlib` roots, keep
-            // component-alias shortcuts below this point so persistent roots
-            // still force `ps_sig` at env.ml:872-874 when `expand_abbrev_gen`
-            // reaches `Env.normalize_path`.
+            // env.ml:865-882. For opened-component paths, keep component-alias
+            // shortcuts below this point so persistent roots still force
+            // `ps_sig` at env.ml:872-874 when `expand_abbrev_gen` reaches
+            // `Env.normalize_path`.
             let p_norm = normalize_path_full_inner(
                 ctx,
                 env,

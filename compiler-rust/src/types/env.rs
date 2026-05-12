@@ -980,6 +980,38 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    fn first_dotted_component_path(path: &Path) -> Option<Path> {
+        match path {
+            Path::Pdot(parent, name, pos) => match parent.as_ref() {
+                Path::Pident(_) => {
+                    Some(Path::pdot_pos(parent.as_ref().clone(), name.clone(), *pos))
+                }
+                _ => Self::first_dotted_component_path(parent),
+            },
+            Path::Pident(_) | Path::Papply(_, _) => None,
+        }
+    }
+
+    pub(crate) fn path_starts_with_opened_component(&self, path: &Path) -> bool {
+        // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
+        // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
+        // opened components without a root module binding. Detect those
+        // component-origin paths from the Env binding itself, not by spelling
+        // roots such as `Stdlib` or `Pervasives`.
+        let Some(component_path) = Self::first_dotted_component_path(path) else {
+            return false;
+        };
+        self.find_module_with_origin(component_path.last())
+            .ok()
+            .is_some_and(|(_, md, is_local)| {
+                !is_local
+                    && md
+                        .md_path
+                        .as_ref()
+                        .is_some_and(|opened_path| opened_path.same(&component_path))
+            })
+    }
+
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
         self.modules.find_by_ident(id).is_some()
     }
