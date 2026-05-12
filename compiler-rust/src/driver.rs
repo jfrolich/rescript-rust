@@ -3381,6 +3381,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::DefinitionMismatch { loc, ty, detail } => UserDiagnostic::new(
+            format_definition_mismatch_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *ty,
+                detail.as_deref(),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::BadVariance {
             loc,
             param_index,
@@ -4466,6 +4479,28 @@ fn format_inconsistent_constraint_report(
             "The type constraints are not consistent.",
         )
     }
+}
+
+fn format_definition_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    detail: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "This variant or record definition does not match that of type {}",
+        format_type_expr(type_ctx, ty)
+    );
+    if let Some(detail) = detail {
+        if !detail.is_empty() {
+            message.push('\n');
+            message.push_str(detail);
+        }
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn variance_suffix(n: usize) -> &'static str {

@@ -296,6 +296,10 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/cycle_in_def.res`.
 - `Definition_mismatch`
+  - Covered for constructor-name and constructor-payload mismatches in an
+    equation plus variant representation by
+    `tests/error_output_parity/compiler/fixtures/definition_mismatch.res` and
+    `tests/error_output_parity/compiler/fixtures/definition_mismatch_payload.res`.
 - `Constraint_failed`
 - `Inconsistent_constraint`
   - Covered by

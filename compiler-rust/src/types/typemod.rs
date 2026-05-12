@@ -3076,6 +3076,12 @@ pub enum TypeModError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// A manifest type and explicit record/variant representation do not agree.
+    DefinitionMismatch {
+        loc: LocIdx,
+        ty: TypeExprRef,
+        detail: Option<String>,
+    },
     /// A type parameter variance annotation is not satisfied by the declaration.
     BadVariance {
         loc: LocIdx,
@@ -3403,6 +3409,223 @@ fn check_type_decl_variance_requirements(
             });
         }
     }
+    Ok(())
+}
+
+fn type_kind_needs_coherence_check(kind: &crate::types::decl::TypeKind) -> bool {
+    matches!(
+        kind,
+        crate::types::decl::TypeKind::TypeVariant(_)
+            | crate::types::decl::TypeKind::TypeRecord(_, _)
+            | crate::types::decl::TypeKind::TypeOpen
+    )
+}
+
+fn compare_definition_record_labels(
+    ctx: &crate::types::context::TypeContext,
+    expected_params: &[TypeExprRef],
+    actual_params: &[TypeExprRef],
+    expected: &[crate::types::decl::LabelDeclaration],
+    actual: &[crate::types::decl::LabelDeclaration],
+) -> Option<String> {
+    let len = expected.len().min(actual.len());
+    for idx in 0..len {
+        let expected_label = &expected[idx];
+        let actual_label = &actual[idx];
+        if expected_label.ld_id.name() != actual_label.ld_id.name() {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                idx + 1,
+                expected_label.ld_id.name(),
+                actual_label.ld_id.name()
+            ));
+        }
+        if !crate::types::includemod::type_exprs_equal_for_type_declaration(
+            ctx,
+            expected_params,
+            actual_params,
+            expected_label.ld_type,
+            actual_label.ld_type,
+        ) {
+            return Some(format!(
+                "The types for field {} are not equal.",
+                expected_label.ld_id.name()
+            ));
+        }
+    }
+
+    if let Some(label) = expected.get(len) {
+        return Some(format!(
+            "The field {} is only present in the original definition.",
+            label.ld_id.name()
+        ));
+    }
+    if let Some(label) = actual.get(len) {
+        return Some(format!(
+            "The field {} is only present in this definition.",
+            label.ld_id.name()
+        ));
+    }
+
+    None
+}
+
+fn compare_definition_constructors(
+    ctx: &crate::types::context::TypeContext,
+    expected_params: &[TypeExprRef],
+    actual_params: &[TypeExprRef],
+    expected: &[crate::types::decl::ConstructorDeclaration],
+    actual: &[crate::types::decl::ConstructorDeclaration],
+) -> Option<String> {
+    let len = expected.len().min(actual.len());
+    for idx in 0..len {
+        let expected_constructor = &expected[idx];
+        let actual_constructor = &actual[idx];
+        if expected_constructor.cd_id.name() != actual_constructor.cd_id.name() {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                idx + 1,
+                expected_constructor.cd_id.name(),
+                actual_constructor.cd_id.name()
+            ));
+        }
+        match (&expected_constructor.cd_args, &actual_constructor.cd_args) {
+            (
+                crate::types::decl::ConstructorArguments::CstrRecord(expected_labels),
+                crate::types::decl::ConstructorArguments::CstrRecord(actual_labels),
+            ) => {
+                if let Some(detail) = compare_definition_record_labels(
+                    ctx,
+                    expected_params,
+                    actual_params,
+                    expected_labels,
+                    actual_labels,
+                ) {
+                    return Some(detail);
+                }
+            }
+            (
+                crate::types::decl::ConstructorArguments::CstrTuple(expected_args),
+                crate::types::decl::ConstructorArguments::CstrTuple(actual_args),
+            ) if expected_args.len() != actual_args.len() => {
+                return Some(format!(
+                    "The arities for field {} differ.",
+                    expected_constructor.cd_id.name()
+                ));
+            }
+            (
+                crate::types::decl::ConstructorArguments::CstrTuple(expected_args),
+                crate::types::decl::ConstructorArguments::CstrTuple(actual_args),
+            ) => {
+                for (expected_arg, actual_arg) in expected_args.iter().zip(actual_args.iter()) {
+                    if !crate::types::includemod::type_exprs_equal_for_type_declaration(
+                        ctx,
+                        expected_params,
+                        actual_params,
+                        *expected_arg,
+                        *actual_arg,
+                    ) {
+                        return Some(format!(
+                            "The types for field {} are not equal.",
+                            expected_constructor.cd_id.name()
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Some(format!(
+                    "The types for field {} are not equal.",
+                    expected_constructor.cd_id.name()
+                ));
+            }
+        }
+    }
+
+    if let Some(constructor) = expected.get(len) {
+        return Some(format!(
+            "The constructor {} is only present in the original definition.",
+            constructor.cd_id.name()
+        ));
+    }
+    if let Some(constructor) = actual.get(len) {
+        return Some(format!(
+            "The constructor {} is only present in this definition.",
+            constructor.cd_id.name()
+        ));
+    }
+
+    None
+}
+
+fn definition_mismatch_detail(
+    ctx: &crate::types::context::TypeContext,
+    expected: &crate::types::decl::TypeDeclaration,
+    actual: &crate::types::decl::TypeDeclaration,
+) -> Option<String> {
+    match (&expected.type_kind, &actual.type_kind) {
+        (
+            crate::types::decl::TypeKind::TypeRecord(expected_labels, _),
+            crate::types::decl::TypeKind::TypeRecord(actual_labels, _),
+        ) => compare_definition_record_labels(
+            ctx,
+            &expected.type_params,
+            &actual.type_params,
+            expected_labels,
+            actual_labels,
+        ),
+        (
+            crate::types::decl::TypeKind::TypeVariant(expected_constructors),
+            crate::types::decl::TypeKind::TypeVariant(actual_constructors),
+        ) => compare_definition_constructors(
+            ctx,
+            &expected.type_params,
+            &actual.type_params,
+            expected_constructors,
+            actual_constructors,
+        ),
+        _ => None,
+    }
+}
+
+fn check_type_declaration_coherence(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> TypeModResult<()> {
+    if !type_kind_needs_coherence_check(&decl.type_kind) {
+        return Ok(());
+    }
+
+    let Some(manifest) = decl.type_manifest else {
+        return Ok(());
+    };
+
+    let manifest_repr = ctx.repr(manifest);
+    let manifest_desc = ctx.get_desc(manifest_repr);
+    let TypeDesc::Tconstr { path, .. } = &*manifest_desc else {
+        return Err(TypeModError::DefinitionMismatch {
+            loc,
+            ty: manifest,
+            detail: None,
+        });
+    };
+
+    let Ok(expected_decl) = env.lookup_type(path) else {
+        return Ok(());
+    };
+    let detail = definition_mismatch_detail(ctx, expected_decl, decl);
+    if detail.is_some()
+        || std::mem::discriminant(&expected_decl.type_kind)
+            != std::mem::discriminant(&decl.type_kind)
+    {
+        return Err(TypeModError::DefinitionMismatch {
+            loc,
+            ty: manifest,
+            detail,
+        });
+    }
+
     Ok(())
 }
 
@@ -15801,6 +16024,15 @@ fn type_structure_item<'a>(
                 }
             }
 
+            for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+                check_type_declaration_coherence(
+                    ctx,
+                    &new_env,
+                    decls[idx].ptype_loc,
+                    internal_decl,
+                )?;
+            }
+
             let item_sig = sig_type_rec_statuses(*rec_flag, typed_tree_decls.as_slice())
                 .into_iter()
                 .zip(typed_tree_decls.iter())
@@ -17940,6 +18172,10 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 internal_decl.type_variance = variance_row.clone();
             }
         }
+    }
+
+    for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+        check_type_declaration_coherence(ctx, &variance_env, decls[idx].ptype_loc, internal_decl)?;
     }
 
     Ok(typed_tree_decls)
