@@ -2240,10 +2240,16 @@ fn format_message_with_compiler_indentation(message: &str) -> String {
 }
 
 fn spellcheck_hint<'a>(name: &str, alternatives: &'a [String]) -> Option<&'a str> {
+    let cutoff = match name.len() {
+        1 | 2 => 0,
+        3 | 4 => 1,
+        5 | 6 => 2,
+        _ => 3,
+    };
     alternatives
         .iter()
         .filter_map(|candidate| {
-            let distance = edit_distance_at_most(name, candidate, 2)?;
+            let distance = edit_distance_at_most(name, candidate, cutoff)?;
             Some((distance, candidate.as_str()))
         })
         .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
