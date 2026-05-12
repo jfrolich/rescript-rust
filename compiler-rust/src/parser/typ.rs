@@ -789,12 +789,19 @@ fn parse_type_constr_with_start(
                 let token = Token::Uident(Cow::Owned(name.to_string()));
                 path_parts.push(name.to_string());
                 p.next();
+                let token_after_ident = p.token.clone();
                 if p.token == Token::Dot {
                     p.next();
                     continue;
                 }
                 p.err_at(token_start, token_end, DiagnosticCategory::Lident(token));
                 p.next();
+                if token_after_ident == Token::Rparen && p.token == Token::Dot {
+                    p.next();
+                    if matches!(p.token, Token::Lident(_)) {
+                        p.next();
+                    }
+                }
                 break;
             }
             _ => break,
