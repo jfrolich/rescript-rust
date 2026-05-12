@@ -17751,49 +17751,6 @@ impl Env {
                         return Ok(result);
                     }
 
-                    // OCaml compiler/ml/env.ml:800-812 ultimately searches the
-                    // resolved module signature when its component table exists.
-                    // Rust's optimized EnvLazy cache can miss for implicit
-                    // Stdlib aliases whose source-level path is kept as
-                    // `Stdlib.Date.UTC` while the signature comes from the
-                    // flattened backing unit. Fall back to the strict branch's
-                    // signature scan without forcing an AST/CMI disk read.
-                    if let Some((mod_path, sig)) =
-                        self.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
-                    {
-                        for sig_item in sig.iter().rev() {
-                            if let crate::types::decl::SignatureItem::SigValue(id, vd) = sig_item
-                                && id.name() == value_name
-                            {
-                                // OCaml compiler/ml/env.ml:800-813 reads
-                                // component values through `find_module_descr`,
-                                // whose tables were built by env.ml:1530-1538
-                                // `prefix_idents`; compiler/ml/subst.ml:303-309
-                                // then applies `Subst.value_description`.
-                                // This raw-signature fallback is used only when
-                                // Rust's optimized component cache cannot recover
-                                // the implicit Stdlib component path, so apply the
-                                // same value-level substitution to the copied
-                                // description before returning it.
-                                let mut vd = copy_lookup_value_description_for_subst(vd, ctx);
-                                crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
-                                    &mut vd,
-                                    sig.as_ref(),
-                                    &mod_path,
-                                    ctx,
-                                );
-                                let result = (Path::pdot_pos(mod_path.clone(), value_name, 0), vd);
-                                ctx.register_resolved_module_value(
-                                    &module_path,
-                                    value_name,
-                                    result.0.clone(),
-                                    result.1.clone(),
-                                );
-                                return Ok(result);
-                            }
-                        }
-                    }
-
                     return Err(TypeCoreError::UndefinedMethod {
                         ty: TypeExprRef(0),
                         method: lid_str,
@@ -17936,18 +17893,6 @@ impl Env {
             }
             Longident::Lapply(_, _) => None,
         }
-    }
-
-    /// Resolve a module longident without mutating type paths inside the returned signature.
-    /// This matches OCaml's non-destructive behavior needed for pure type-path lookup.
-    fn resolve_module_lid_raw<'b>(
-        &self,
-        lid: &Longident,
-        arena: &crate::parse_arena::ParseArena,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'b crate::types::context::TypeContext,
-    ) -> Option<(Path, Arc<crate::types::decl::Signature>)> {
-        self.resolve_module_lid_impl(lid, arena, pers_env, ctx, false)
     }
 
     fn signature_has_package_self_manifests(
