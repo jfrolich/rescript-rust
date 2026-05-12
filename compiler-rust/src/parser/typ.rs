@@ -38,8 +38,14 @@ pub fn substitute_type_vars(
     arena: &mut crate::parse_arena::ParseArena,
     typ: CoreType,
     vars: &HashSet<String>,
-) -> CoreType {
+) -> Result<CoreType, LocIdx> {
     let new_desc = match *typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_var(name) => {
+            if vars.contains(name.as_ref().as_ref()) {
+                return Err(typ.ptyp_loc);
+            }
+            CoreTypeDesc::Ptyp_var(name)
+        }
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (lid, args) = *inner;
             // Check if this is a simple Lident that matches a type variable
@@ -51,11 +57,11 @@ pub fn substitute_type_vars(
                         let name = Cow::Owned(name.to_string());
                         arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
-                        return CoreType {
+                        return Ok(CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                             ptyp_loc: typ.ptyp_loc,
                             ptyp_attributes: typ.ptyp_attributes,
-                        };
+                        });
                     }
                 }
             }
@@ -64,19 +70,19 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|arg_idx| {
                     let arg_type = arena.get_core_type(arg_idx).clone();
-                    let substituted = substitute_type_vars(arena, arg_type, vars);
-                    arena.push_core_type(substituted)
+                    substitute_type_vars(arena, arg_type, vars)
+                        .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, arity) = *inner;
             let ret_type = arena.get_core_type(ret).clone();
-            let substituted_ret = substitute_type_vars(arena, ret_type, vars);
+            let substituted_ret = substitute_type_vars(arena, ret_type, vars)?;
             let new_ret = arena.push_core_type(substituted_ret);
             let arg_type = arena.get_core_type(arg.typ).clone();
-            let substituted_arg = substitute_type_vars(arena, arg_type, vars);
+            let substituted_arg = substitute_type_vars(arena, arg_type, vars)?;
             let new_arg_typ = arena.push_core_type(substituted_arg);
             CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(TypeArg {
@@ -93,10 +99,10 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|e_idx| {
                     let e_type = arena.get_core_type(e_idx).clone();
-                    let substituted = substitute_type_vars(arena, e_type, vars);
-                    arena.push_core_type(substituted)
+                    substitute_type_vars(arena, e_type, vars)
+                        .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect(),
+                .collect::<Result<_, _>>()?,
         )),
         CoreTypeDesc::Ptyp_poly(inner) => CoreTypeDesc::Ptyp_poly(inner),
         CoreTypeDesc::Ptyp_alias(inner) => CoreTypeDesc::Ptyp_alias(inner),
@@ -107,16 +113,18 @@ pub fn substitute_type_vars(
                 .map(|field| match field {
                     ObjectField::Otag(name, attrs, inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        ObjectField::Otag(name, attrs, arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            ObjectField::Otag(name, attrs, arena.push_core_type(substituted))
+                        })
                     }
                     ObjectField::Oinherit(inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        ObjectField::Oinherit(arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            ObjectField::Oinherit(arena.push_core_type(substituted))
+                        })
                     }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_object(Box::new((new_fields, closed)))
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
@@ -129,19 +137,20 @@ pub fn substitute_type_vars(
                             .into_iter()
                             .map(|t_idx| {
                                 let t_type = arena.get_core_type(t_idx).clone();
-                                let substituted = substitute_type_vars(arena, t_type, vars);
-                                arena.push_core_type(substituted)
+                                substitute_type_vars(arena, t_type, vars)
+                                    .map(|substituted| arena.push_core_type(substituted))
                             })
-                            .collect();
-                        RowField::Rtag(name, attrs, empty, new_types)
+                            .collect::<Result<_, _>>()?;
+                        Ok(RowField::Rtag(name, attrs, empty, new_types))
                     }
                     RowField::Rinherit(inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        RowField::Rinherit(arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            RowField::Rinherit(arena.push_core_type(substituted))
+                        })
                     }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_variant(Box::new((new_rows, closed, labels)))
         }
         CoreTypeDesc::Ptyp_package(pkg_inner) => {
@@ -150,20 +159,20 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|(c_lid, c_typ_idx)| {
                     let c_type = arena.get_core_type(c_typ_idx).clone();
-                    let substituted = substitute_type_vars(arena, c_type, vars);
-                    (c_lid, arena.push_core_type(substituted))
+                    substitute_type_vars(arena, c_type, vars)
+                        .map(|substituted| (c_lid, arena.push_core_type(substituted)))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_package(Box::new((lid, new_constraints)))
         }
         // These don't contain nested types, return as-is
         other => other,
     };
-    CoreType {
+    Ok(CoreType {
         ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: typ.ptyp_attributes,
-    }
+    })
 }
 
 // ============================================================================

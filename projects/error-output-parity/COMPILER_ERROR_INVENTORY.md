@@ -544,6 +544,8 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`.
 - `compiler/ml/syntaxerr.ml`
   - `Variable_in_scope`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/variable_in_scope.res`.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by

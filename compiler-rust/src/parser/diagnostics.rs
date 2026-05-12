@@ -45,6 +45,8 @@ pub enum DiagnosticCategory {
     UnclosedComment,
     /// Unknown character.
     UnknownUchar(char),
+    /// OCaml `Syntaxerr.Error(_)` escaping from parser helpers.
+    FatalSyntaxerr,
 }
 
 /// A category of parser warning.
@@ -217,6 +219,8 @@ impl ParserDiagnostic {
             DiagnosticCategory::UnknownUchar(ch) => {
                 format!("Not sure what to do with this character: \"{}\".", ch)
             }
+            DiagnosticCategory::FatalSyntaxerr => "Fatal error: exception Syntaxerr.Error(_)"
+                .to_string(),
         }
     }
 }

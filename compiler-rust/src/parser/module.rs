@@ -2503,7 +2503,18 @@ fn parse_let_bindings(
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                     let ct_clone = p.arena().get_core_type(ct_idx).clone();
                     let substituted_inner =
-                        typ::substitute_type_vars(p.arena_mut(), ct_clone, &var_set);
+                        match typ::substitute_type_vars(p.arena_mut(), ct_clone.clone(), &var_set)
+                        {
+                            Ok(substituted_inner) => substituted_inner,
+                            Err(loc) => {
+                                p.err_at(
+                                    p.loc_start(loc),
+                                    p.loc_end(loc),
+                                    DiagnosticCategory::FatalSyntaxerr,
+                                );
+                                ct_clone
+                            }
+                        };
 
                     // Rebuild the Ptyp_poly with the substituted body
                     let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);

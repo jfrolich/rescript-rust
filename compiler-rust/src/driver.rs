@@ -1867,6 +1867,16 @@ fn is_valid_hash_number_label(value: &str) -> bool {
 }
 
 fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
+    if parser.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic.category,
+            crate::parser::diagnostics::DiagnosticCategory::FatalSyntaxerr
+        )
+    }) {
+        return UserDiagnostic::new("Fatal error: exception Syntaxerr.Error(_)\n".to_string(), 2)
+            .into();
+    }
+
     let mut output = String::new();
     for diagnostic in parser.diagnostics() {
         output.push_str(&code_frame::format_error(

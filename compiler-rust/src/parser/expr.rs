@@ -4852,8 +4852,21 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
                 // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                 let inner_ct = p.arena().get_core_type(*inner_idx).clone();
-                let substituted_inner =
-                    super::typ::substitute_type_vars(p.arena_mut(), inner_ct, &var_set);
+                let substituted_inner = match super::typ::substitute_type_vars(
+                    p.arena_mut(),
+                    inner_ct.clone(),
+                    &var_set,
+                ) {
+                    Ok(substituted_inner) => substituted_inner,
+                    Err(loc) => {
+                        p.err_at(
+                            p.loc_start(loc),
+                            p.loc_end(loc),
+                            DiagnosticCategory::FatalSyntaxerr,
+                        );
+                        inner_ct
+                    }
+                };
 
                 // Rebuild the Ptyp_poly with the substituted body
                 let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
