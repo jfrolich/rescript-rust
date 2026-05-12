@@ -346,6 +346,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`.
 - `Apply_generative`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/apply_generative_functor.res`.
 - `Cannot_scrape_alias`
 
 ## Other Compiler Error Surfaces

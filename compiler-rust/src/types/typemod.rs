@@ -3155,6 +3155,11 @@ pub enum TypeModError {
         /// Module expression location to report.
         loc: LocIdx,
     },
+    /// A generative functor was applied to an argument other than `()`.
+    ApplyGenerative {
+        /// Functor expression location to report.
+        loc: LocIdx,
+    },
     /// A module was opened where a structure signature was expected.
     StructureExpected {
         /// Module path location to report.
@@ -11429,6 +11434,20 @@ fn type_module_expr_with_alias<'a>(
                 tctx.type_ctx,
             )
             .unwrap_or(functor_mty);
+            if matches!(
+                &functor_mty,
+                crate::types::decl::ModuleType::MtyFunctor {
+                    param_type: None,
+                    ..
+                }
+            ) && !matches!(
+                &*arg.pmod_desc,
+                ParsedModuleExprDesc::Pmod_structure(items) if items.is_empty()
+            ) {
+                return Err(TypeModError::ApplyGenerative {
+                    loc: functor.pmod_loc,
+                });
+            }
             let env_ref = tctx.type_ctx.store_typed_env(env);
             let coercion = match &functor_mty {
                 crate::types::decl::ModuleType::MtyFunctor { param_type, .. } => {
