@@ -753,157 +753,6 @@ impl QualifiedModuleComponents {
         }
     }
 
-    fn value_mentions_local_component_type(
-        &self,
-        desc: &ValueDescription,
-        ctx: &super::context::TypeContext,
-    ) -> bool {
-        // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions
-        // before compiler/ml/subst.ml:303-309 rewrites value descriptions.
-        // Keep the optimized Rust value lookup lazy by detecting the rare
-        // signatures that still need that substitution.
-        // OCaml compiler/ml/env.ml:1530-1538 builds a substitution for both
-        // type and module binders in the selected component signature, and
-        // compiler/ml/subst.ml:305 applies it to value descriptions. Include
-        // module binders here because subst.ml:226-235 also rewrites
-        // polymorphic-variant row_name paths such as `Types.Color.value`.
-        let component_types = self
-            .signature
-            .iter()
-            .filter_map(|item| match item {
-                SignatureItem::SigType(id, _, _) => Some((id.stamp(), id.name())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let component_modules = self
-            .signature
-            .iter()
-            .filter_map(|item| match item {
-                SignatureItem::SigModule(id, _, _) => Some((id.stamp(), id.name())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if component_types.is_empty() && component_modules.is_empty() {
-            return false;
-        }
-
-        fn path_mentions_component_module(path: &Path, component_modules: &[(i32, &str)]) -> bool {
-            match path {
-                Path::Pident(id) => component_modules.iter().any(|(stamp, name)| {
-                    if id.stamp() != 0 && *stamp != 0 {
-                        id.stamp() == *stamp
-                    } else {
-                        id.name() == *name
-                    }
-                }),
-                Path::Pdot(parent, _, _) | Path::Papply(parent, _) => {
-                    path_mentions_component_module(parent, component_modules)
-                }
-            }
-        }
-
-        fn visit(
-            ty: super::type_expr::TypeExprRef,
-            component_types: &[(i32, &str)],
-            component_modules: &[(i32, &str)],
-            ctx: &super::context::TypeContext,
-            seen: &mut std::collections::HashSet<usize>,
-        ) -> bool {
-            let ty = ctx.repr(ty);
-            if !seen.insert(ty.index()) {
-                return false;
-            }
-
-            let desc = ctx.get_desc(ty);
-            match &*desc {
-                super::type_expr::TypeDesc::Tconstr { path, args, .. } => {
-                    if path_mentions_component_module(path, component_modules) {
-                        return true;
-                    }
-                    if let Path::Pident(id) = path {
-                        let mentions_component_type =
-                            component_types.iter().any(|(stamp, name)| {
-                                if id.stamp() != 0 && *stamp != 0 {
-                                    id.stamp() == *stamp
-                                } else {
-                                    id.name() == *name
-                                }
-                            });
-                        if mentions_component_type {
-                            return true;
-                        }
-                    }
-                    args.iter()
-                        .any(|arg| visit(*arg, component_types, component_modules, ctx, seen))
-                }
-                super::type_expr::TypeDesc::Tarrow { arg, ret, .. } => {
-                    visit(arg.typ, component_types, component_modules, ctx, seen)
-                        || visit(*ret, component_types, component_modules, ctx, seen)
-                }
-                super::type_expr::TypeDesc::Ttuple(args) => args
-                    .iter()
-                    .any(|arg| visit(*arg, component_types, component_modules, ctx, seen)),
-                super::type_expr::TypeDesc::Tobject { fields, name } => {
-                    visit(*fields, component_types, component_modules, ctx, seen)
-                        || name.as_ref().is_some_and(|(_, args)| {
-                            args.iter().any(|arg| {
-                                visit(*arg, component_types, component_modules, ctx, seen)
-                            })
-                        })
-                }
-                super::type_expr::TypeDesc::Tfield { typ, rest, .. } => {
-                    visit(*typ, component_types, component_modules, ctx, seen)
-                        || visit(*rest, component_types, component_modules, ctx, seen)
-                }
-                super::type_expr::TypeDesc::Tlink(inner)
-                | super::type_expr::TypeDesc::Tsubst(inner) => {
-                    visit(*inner, component_types, component_modules, ctx, seen)
-                }
-                super::type_expr::TypeDesc::Tvariant(row) => {
-                    visit(row.row_more, component_types, component_modules, ctx, seen)
-                        || row.row_name.as_ref().is_some_and(|(path, args)| {
-                            path_mentions_component_module(path, component_modules)
-                                || args.iter().any(|arg| {
-                                    visit(*arg, component_types, component_modules, ctx, seen)
-                                })
-                        })
-                        || row.row_fields.iter().any(|(_, field)| match field {
-                            super::type_expr::RowField::Rpresent(Some(arg)) => {
-                                visit(*arg, component_types, component_modules, ctx, seen)
-                            }
-                            super::type_expr::RowField::Reither { types, .. } => {
-                                types.iter().any(|arg| {
-                                    visit(*arg, component_types, component_modules, ctx, seen)
-                                })
-                            }
-                            super::type_expr::RowField::Rpresent(None)
-                            | super::type_expr::RowField::Rabsent => false,
-                        })
-                }
-                super::type_expr::TypeDesc::Tpoly { body, vars } => {
-                    visit(*body, component_types, component_modules, ctx, seen)
-                        || vars
-                            .iter()
-                            .any(|var| visit(*var, component_types, component_modules, ctx, seen))
-                }
-                super::type_expr::TypeDesc::Tpackage { args, .. } => args
-                    .iter()
-                    .any(|arg| visit(*arg, component_types, component_modules, ctx, seen)),
-                super::type_expr::TypeDesc::Tvar(_)
-                | super::type_expr::TypeDesc::Tunivar(_)
-                | super::type_expr::TypeDesc::Tnil => false,
-            }
-        }
-
-        visit(
-            desc.val_type,
-            component_types.as_slice(),
-            component_modules.as_slice(),
-            ctx,
-            &mut std::collections::HashSet::new(),
-        )
-    }
-
     pub(crate) fn lookup_value_for_access(
         &self,
         name: &str,
@@ -917,28 +766,20 @@ impl QualifiedModuleComponents {
         }
 
         let (runtime_pos, id, desc) = self.lookup_value(name)?;
-        let needs_component_subst = self.value_mentions_local_component_type(desc, ctx);
-        let desc = if needs_component_subst {
-            let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
-            // OCaml compiler/ml/env.ml:1435-1444 follows module aliases with
-            // `scrape_alias`, then compiler/ml/env.ml:1530-1538 applies
-            // `Subst.value_description` using only the substitution produced
-            // by `prefix_idents`. compiler/ml/mtype.ml:41-49 deliberately
-            // leaves value descriptions unchanged while strengthening the
-            // alias target, so do not rewrite every path under
-            // `value_source_prefix` to this selected access path.
-            if needs_component_subst {
-                crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
-                    &mut desc,
-                    self.signature.as_ref(),
-                    self.access_path(),
-                    ctx,
-                );
-            }
-            desc
-        } else {
-            desc.clone()
-        };
+        let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
+        // OCaml compiler/ml/env.ml:1530-1538 builds `prefix_idents` for the
+        // selected component path, then env.ml:1537 always applies
+        // compiler/ml/subst.ml:303-309 `Subst.value_description` to component
+        // values before typecore.ml:2421-2457 instances `desc.val_type`.
+        // Keep the alias-strengthening boundary from compiler/ml/mtype.ml:41-49:
+        // only the component substitution is applied here; alias target value
+        // descriptions are not rewritten wholesale.
+        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
+            &mut desc,
+            self.signature.as_ref(),
+            self.access_path(),
+            ctx,
+        );
         // OCaml compiler/ml/env.ml:1513-1516 memoizes the whole
         // `components_of_module_maker` result, and env.ml:1537 stores the
         // `Subst.value_description` output in `comp_values`. Cache the
