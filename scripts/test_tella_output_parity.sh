@@ -80,14 +80,14 @@ fi
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}" >&2
     echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first." >&2
-    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries." >&2
+    echo "This output parity script expects debug Rust artifacts for iteration." >&2
     exit 2
 fi
 
 if [[ ! -x "$REWATCH_BIN" ]]; then
     echo -e "${RED}Error: rewatch binary not found at $REWATCH_BIN${RESET}" >&2
     echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
-    echo "Set REWATCH_TARGET=release and build with --release only when explicitly testing release binaries." >&2
+    echo "This output parity script expects debug rewatch artifacts for iteration." >&2
     exit 2
 fi
 

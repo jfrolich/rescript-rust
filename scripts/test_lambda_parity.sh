@@ -117,7 +117,7 @@ fi
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
     echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' to build the debug Rust compiler."
-    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
+    echo "This parity script expects debug artifacts for iteration."
     echo "For now, testing OCaml compiler only."
     RUST_AVAILABLE=false
 else

@@ -182,7 +182,7 @@ fi
 if [[ ! -x "$RUST_PARSER" ]]; then
     echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
     echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
-    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
+    echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
 

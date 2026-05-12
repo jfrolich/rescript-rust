@@ -19,7 +19,7 @@ if [[ "$PARSER" == "rust" ]]; then
   if [[ ! -x "$RES_PARSER" ]]; then
     echo "Error: Rust parser not found at $RES_PARSER"
     echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
-    echo "Set RUST_TARGET=release and build with --release only when explicitly testing release binaries."
+    echo "This syntax script expects debug artifacts for iteration."
     exit 1
   fi
   echo "Using Rust parser: $RES_PARSER"
