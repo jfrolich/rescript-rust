@@ -2138,45 +2138,12 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             };
             let typ = typ::parse_typ_expr(p);
 
-            // Parse type constraints: constraint 'a = int constraint 'b = string
-            // Note: type variables can be uppercase ('X) or lowercase ('a)
-            let mut cstrs = vec![];
-            while p.token == Token::Constraint {
-                let cstr_start_idx = p.start_pos_idx();
-                p.next();
-                p.expect(Token::SingleQuote);
-                // Accept both Lident ('a) and Uident ('X) as type variable names
-                let var = match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        let name = extend_cow_lifetime(name.clone());
-                        // OCaml: ident_loc spans from 'constraint' keyword to end of identifier
-                        let loc = p.mk_loc_idx_to_end(cstr_start_idx);
-                        p.next();
-                        CoreType {
-                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                            ptyp_loc: loc,
-                            ptyp_attributes: Attributes::new(),
-                        }
-                    }
-                    _ => break,
-                };
-                p.expect(Token::Equal);
-                let cstr_typ = typ::parse_typ_expr(p);
-                let var_idx = p.arena_mut().push_core_type(var);
-                let cstr_typ_idx = p.arena_mut().push_core_type(cstr_typ);
-                cstrs.push((
-                    var_idx,
-                    cstr_typ_idx,
-                    p.mk_loc_idx_to_prev_end(cstr_start_idx),
-                ));
-            }
-
             let typ_idx = p.arena_mut().push_core_type(typ);
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
                 ptype_params: params,
-                ptype_cstrs: cstrs,
+                ptype_cstrs: vec![],
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
                 ptype_manifest: Some(typ_idx),
