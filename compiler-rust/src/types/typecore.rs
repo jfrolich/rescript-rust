@@ -17467,26 +17467,37 @@ fn type_field(
         RecArg::Allowed,
     )?;
     let ty_exp = typed_record.exp_type;
-    if extract_type_path_from_expected_with_persistent_env(
+    // OCaml typecore.ml:3648-3669 computes `opath` with
+    // `extract_concrete_typedecl`, but only keeps it for concrete records
+    // (and the dict record special-case). Non-record constructors such as
+    // option/array must not drive label disambiguation; if a label with the
+    // requested name is in scope, OCaml selects it and lets the receiver
+    // unification report the type clash.
+    let record_type_info = extract_concrete_record_type_info(
         ty_exp,
         env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
-    )
-    .is_some_and(|path| is_dict_type_path(&path))
+    );
+    if record_type_info
+        .as_ref()
+        .is_some_and(|(path, _, _)| is_dict_type_path(path))
     {
         return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
     }
+    let label_expected_record_ty = record_type_info.as_ref().map(|_| ty_exp);
 
-    if let Some(err) = qualified_label_name_type_mismatch(
-        field_lid.loc,
-        &resolved_lid,
-        tctx.arena,
-        env,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-        ty_exp,
-    ) {
+    if let Some(err) = label_expected_record_ty.and_then(|expected_record_ty| {
+        qualified_label_name_type_mismatch(
+            field_lid.loc,
+            &resolved_lid,
+            tctx.arena,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+            expected_record_ty,
+        )
+    }) {
         return Err(err);
     }
 
@@ -17497,13 +17508,13 @@ fn type_field(
         env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
-        Some(ty_exp),
+        label_expected_record_ty,
         None,
     )
     .or_else(|| {
         disambiguate_label(
             &field_name,
-            ty_exp,
+            label_expected_record_ty.unwrap_or_else(|| tctx.type_ctx.new_var(None)),
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
