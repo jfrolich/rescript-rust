@@ -340,6 +340,8 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_variance.res`.
 - `Unavailable_type_constructor`
 - `Bad_fixed_type`
+  - Covered for fixed polymorphic variant rows without a row variable by
+    `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res`.
 - `Unbound_type_var_ext`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.

@@ -59,17 +59,24 @@ fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::Cor
     }
 }
 
+fn type_decl_is_fixed_type(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    manifest: &crate::parser::ast::CoreType,
+) -> bool {
+    matches!(
+        &decl.ptype_kind,
+        crate::parser::ast::TypeKind::Ptype_abstract
+    ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
+        && core_type_has_row_var(arena, manifest)
+}
+
 fn type_decl_manifest_uses_fixed_type_variables(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
     manifest: &crate::parser::ast::CoreType,
 ) -> bool {
-    let is_fixed_type = matches!(
-        &decl.ptype_kind,
-        crate::parser::ast::TypeKind::Ptype_abstract
-    ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
-        && core_type_has_row_var(arena, manifest);
-    !is_fixed_type
+    !type_decl_is_fixed_type(arena, decl, manifest)
 }
 
 fn check_type_variable_name(loc: LocIdx, name: &str) -> TypeModResult<()> {
@@ -3082,6 +3089,8 @@ pub enum TypeModError {
         ty: TypeExprRef,
         detail: Option<String>,
     },
+    /// A private fixed row type has an invalid manifest.
+    BadFixedType { loc: LocIdx, reason: String },
     /// A type parameter variance annotation is not satisfied by the declaration.
     BadVariance {
         loc: LocIdx,
@@ -3627,6 +3636,91 @@ fn check_type_declaration_coherence(
     }
 
     Ok(())
+}
+
+fn object_field_rest(ctx: &crate::types::context::TypeContext, fields: TypeExprRef) -> TypeExprRef {
+    let mut current = ctx.repr(fields);
+    loop {
+        let desc = ctx.get_desc(current);
+        let next = match &*desc {
+            TypeDesc::Tfield { rest, .. } => Some(ctx.repr(*rest)),
+            _ => None,
+        };
+        drop(desc);
+        let Some(next) = next else {
+            return current;
+        };
+        current = next;
+    }
+}
+
+fn link_fixed_row_variable(
+    ctx: &crate::types::context::TypeContext,
+    loc: LocIdx,
+    path: &Path,
+    params: &[TypeExprRef],
+    row_var: TypeExprRef,
+) -> TypeModResult<()> {
+    if !crate::types::btype::is_tvar(ctx, row_var) {
+        return Err(TypeModError::BadFixedType {
+            loc,
+            reason: "has no row variable".to_string(),
+        });
+    }
+
+    let replacement = ctx.new_constr(path.clone(), params.to_vec());
+    let replacement_desc = ctx.get_desc(replacement).clone();
+    ctx.set_desc(row_var, replacement_desc);
+    Ok(())
+}
+
+fn set_fixed_row(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    path: &Path,
+    params: &[TypeExprRef],
+    manifest: TypeExprRef,
+) -> TypeModResult<()> {
+    let expanded = crate::types::ctype::expand_head(ctx, env, manifest);
+    let manifest_repr = ctx.repr(expanded);
+    enum FixedRowTarget {
+        Variant(crate::types::type_expr::RowDesc),
+        Object(TypeExprRef),
+        Other,
+    }
+    let target = {
+        let desc = ctx.get_desc(manifest_repr);
+        match &*desc {
+            TypeDesc::Tvariant(row) => FixedRowTarget::Variant(crate::types::btype::row_repr(
+                ctx, row,
+            )),
+            TypeDesc::Tobject { fields, .. } => FixedRowTarget::Object(*fields),
+            _ => FixedRowTarget::Other,
+        }
+    };
+
+    let row_var = match target {
+        FixedRowTarget::Variant(mut row) => {
+            let row_var = if crate::types::btype::static_row(ctx, &row) {
+                ctx.new_type(TypeDesc::Tnil)
+            } else {
+                crate::types::btype::row_more(ctx, &row)
+            };
+            row.row_fixed = true;
+            ctx.set_desc(manifest_repr, TypeDesc::Tvariant(row));
+            row_var
+        }
+        FixedRowTarget::Object(fields) => object_field_rest(ctx, fields),
+        FixedRowTarget::Other => {
+            return Err(TypeModError::BadFixedType {
+                loc,
+                reason: "is not an object or variant".to_string(),
+            });
+        }
+    };
+
+    link_fixed_row_variable(ctx, loc, path, params, row_var)
 }
 
 fn has_decl_attr(attrs: &[crate::types::decl::Attribute], name: &str) -> bool {
@@ -15792,6 +15886,7 @@ fn type_structure_item<'a>(
                     match &decl.ptype_manifest {
                         Some(manifest) => {
                             let manifest_ct = arena.get_core_type(*manifest);
+                            let is_fixed_type = type_decl_is_fixed_type(arena, decl, manifest_ct);
                             let (typed_manifest, type_ref) =
                                 if type_decl_manifest_uses_fixed_type_variables(
                                     arena,
@@ -15803,6 +15898,16 @@ fn type_structure_item<'a>(
                                     transl_type(tctx, &temp_env, manifest_ct)?
                                 };
                             touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
+                            if is_fixed_type {
+                                set_fixed_row(
+                                    ctx,
+                                    &temp_env,
+                                    decl.ptype_loc,
+                                    &type_path,
+                                    &internal_type_params,
+                                    type_ref,
+                                )?;
+                            }
                             (Some(typed_manifest), Some(type_ref))
                         }
                         None => (None, None),
@@ -17626,6 +17731,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
             let type_name = decl.ptype_name.txt;
             let type_name_str = arena.get_string(type_name);
             let type_id = declared_type_ids[decl_idx].clone();
+            let type_path = Path::pident(type_id.clone());
 
             check_not_undefined_type_attribute(arena, decl)?;
 
@@ -17702,6 +17808,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
                     let manifest_ct = arena.get_core_type(*manifest);
+                    let is_fixed_type = type_decl_is_fixed_type(arena, decl, manifest_ct);
                     let (typed_manifest, manifest_ref) =
                         if type_decl_manifest_uses_fixed_type_variables(arena, decl, manifest_ct) {
                             transl_type_fixed(tctx, env, manifest_ct)?
@@ -17709,6 +17816,16 @@ fn transl_sig_type_declarations_with_ids<'a>(
                             transl_type(tctx, env, manifest_ct)?
                         };
                     touch_manifest_cyclic_abbrev_check(ctx, env, manifest_ref);
+                    if is_fixed_type {
+                        set_fixed_row(
+                            ctx,
+                            env,
+                            decl.ptype_loc,
+                            &type_path,
+                            &internal_type_params,
+                            manifest_ref,
+                        )?;
+                    }
                     (Some(typed_manifest), Some(manifest_ref))
                 }
                 None => (None, None),
@@ -18099,7 +18216,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 type_immediate,
                 type_unboxed,
                 type_inlined_types: vec![],
-                type_path: Some(Path::pident(type_id.clone())),
+                type_path: Some(type_path),
             };
             internal_decls_for_generalize.push(internal_decl.clone());
 

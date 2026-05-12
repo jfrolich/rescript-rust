@@ -3394,6 +3394,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::BadFixedType { loc, reason } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("This fixed type {reason}"),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::BadVariance {
             loc,
             param_index,
