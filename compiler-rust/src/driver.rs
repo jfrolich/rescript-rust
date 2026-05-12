@@ -2453,6 +2453,10 @@ fn format_expr_type_clash_report(
             "This has type: ",
             "But it's being compared to something of type: ",
         ),
+        Some(TypeClashContext::RecordField { .. }) => (
+            "This has type: ",
+            "But the record field ",
+        ),
         Some(TypeClashContext::IfCondition) => (
             "This has type: ",
             "But \x1b[1;33mif\x1b[0m conditions must always be of type: ",
@@ -2490,15 +2494,31 @@ fn format_expr_type_clash_report(
         &mut message,
     );
     message.push('\n');
-    message.push_str(expected_text);
-    append_type_clash_type(
-        type_ctx,
-        trace,
-        false,
-        INFO,
-        expected,
-        &mut message,
-    );
+    if let Some(TypeClashContext::RecordField { field_name, .. }) = context {
+        message.push_str(expected_text);
+        message.push_str(INFO);
+        message.push_str(field_name);
+        message.push_str(RESET);
+        message.push_str(" is expected to have type: ");
+        append_type_clash_type(
+            type_ctx,
+            trace,
+            false,
+            INFO,
+            expected,
+            &mut message,
+        );
+    } else {
+        message.push_str(expected_text);
+        append_type_clash_type(
+            type_ctx,
+            trace,
+            false,
+            INFO,
+            expected,
+            &mut message,
+        );
+    }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {

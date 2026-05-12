@@ -619,6 +619,8 @@ pub enum TypeClashContext {
     BracedIdent,
     /// In a record spread.
     RecordSpread,
+    /// In a record field value.
+    RecordField { field_name: String, optional: bool },
     /// In an array literal.
     ArrayLiteral,
     /// In a tuple.
@@ -14352,17 +14354,27 @@ fn type_record(
                     )
                 };
 
+            let field_context = Some(TypeClashContext::RecordField {
+                field_name: field_name.to_string(),
+                optional: false,
+            });
             let typed_expr = type_expect(
                 tctx,
                 env,
                 tctx.arena.get_expr(field.expr),
                 field_input_ty,
-                None,
+                field_context.clone(),
             )?;
             // OCaml `type_argument`: after typing against `ty_expected'`, unify with
             // a fresh `instance` of that type to preserve sharing behavior.
             let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
-            unify_expression_types(tctx, loc, typed_expr.exp_type, field_input_ty_inst, None)?;
+            unify_expression_types(
+                tctx,
+                loc,
+                typed_expr.exp_type,
+                field_input_ty_inst,
+                field_context,
+            )?;
             Ok((label_desc, field_input_ty, poly_vars, typed_expr))
         })();
         ctx.end_def();
