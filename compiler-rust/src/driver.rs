@@ -9035,7 +9035,9 @@ impl<'a> TypeExprPrinter<'a> {
     fn format_path_name(&self, path: &crate::types::Path) -> String {
         let name = path.name();
         let name = name
-            .strip_prefix("Stdlib.")
+            .strip_prefix("Pervasives.")
+            .or_else(|| name.strip_prefix("Stdlib."))
+            .or_else(|| name.strip_prefix("Pervasives_"))
             .or_else(|| name.strip_prefix("Stdlib_"))
             .unwrap_or(&name)
             .to_string();
