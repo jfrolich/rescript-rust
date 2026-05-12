@@ -14080,6 +14080,20 @@ fn type_function(
                     ctx.new_var(None),
                     arity_opt,
                 );
+                let expected_head = crate::types::ctype::expand_head_unif(ctx, env, expected_ty);
+                let expected_desc = ctx.get_desc(ctx.repr(expected_head));
+                let labels_mismatch = matches!(
+                    &*expected_desc,
+                    TypeDesc::Tarrow { arg, .. } if !arg.lbl.same_label(&ctx_label)
+                );
+                drop(expected_desc);
+                if labels_mismatch {
+                    return Err(TypeCoreError::ExprTypeClash {
+                        loc,
+                        trace: vec![(fun_t, expected_ty)],
+                        context: None,
+                    });
+                }
                 unify_expression_types(tctx, loc, fun_t, expected_ty, None)?;
                 fun_t
             }

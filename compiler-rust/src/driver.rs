@@ -3973,7 +3973,15 @@ fn format_expr_type_clash_report(
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let missing_parameters = collect_expected_function_arguments(type_ctx, expected);
+    let actual_is_function = matches!(
+        &*type_ctx.get_desc(type_ctx.repr(actual)),
+        TypeDesc::Tarrow { .. }
+    );
+    let missing_parameters = if actual_is_function {
+        Vec::new()
+    } else {
+        collect_expected_function_arguments(type_ctx, expected)
+    };
     let mut message = String::new();
 
     if !missing_parameters.is_empty() {

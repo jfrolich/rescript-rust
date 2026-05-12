@@ -69,7 +69,9 @@ with a reason after checking raise sites.
 - `Pattern_type_clash`: covered by
   `tests/error_output_parity/compiler/fixtures/pattern_type_clash.res`.
 - `Expr_type_clash`: covered by
-  `tests/error_output_parity/compiler/fixtures/expr_type_clash.res`.
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash.res`
+  and the function label mismatch subcase in
+  `tests/error_output_parity/compiler/fixtures/function_label_mismatch.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
