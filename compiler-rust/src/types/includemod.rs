@@ -47,8 +47,8 @@ pub enum IncludeModError {
     /// Value type mismatch.
     ValueTypeMismatch {
         name: Ident,
-        expected: TypeExprRef,
-        found: TypeExprRef,
+        actual: ValueDescription,
+        expected: ValueDescription,
     },
     /// Type declaration mismatch.
     TypeMismatch { name: Ident, reason: String },
@@ -183,10 +183,34 @@ fn format_include_error(
             output.push_str(id.name());
             output.push_str("' is required but not provided\n");
         }
-        IncludeModError::ValueTypeMismatch { name, .. } => {
+        IncludeModError::ValueTypeMismatch {
+            name,
+            actual,
+            expected,
+        } => {
+            let actual_text = format_value_description(type_ctx, name, actual);
+            let expected_text = format_value_description(type_ctx, name, expected);
             output.push_str("  Values do not match: ");
-            output.push_str(name.name());
+            output.push_str(&actual_text);
+            output.push_str(" is not included in ");
+            output.push_str(&expected_text);
             output.push('\n');
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &expected.val_loc.loc_start,
+                &expected.val_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Expected declaration\n");
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &actual.val_loc.loc_start,
+                &actual.val_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Actual declaration\n");
         }
         IncludeModError::TypeMismatch { name, reason } => {
             output.push_str("  Type declarations do not match: ");
@@ -251,13 +275,7 @@ pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> St
 fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String {
     match item {
         SignatureItem::SigType(id, decl, _) => format_type_declaration(type_ctx, id, decl),
-        SignatureItem::SigValue(id, desc) => {
-            format!(
-                "let {}: {}",
-                id.name(),
-                TypeExprErrorPrinter::new(type_ctx).format(desc.val_type)
-            )
-        }
+        SignatureItem::SigValue(id, desc) => format_value_description(type_ctx, id, desc),
         SignatureItem::SigModule(id, decl, _) => {
             format!(
                 "module {}: {}",
@@ -277,6 +295,18 @@ fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String
         SignatureItem::SigClass => "class ...".to_string(),
         SignatureItem::SigClassType => "class type ...".to_string(),
     }
+}
+
+fn format_value_description(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    desc: &ValueDescription,
+) -> String {
+    format!(
+        "let {}: {}",
+        id.name(),
+        TypeExprErrorPrinter::new(type_ctx).format(desc.val_type)
+    )
 }
 
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
@@ -1579,10 +1609,12 @@ fn value_descriptions<'a>(
     // shifts subsequent Ident stamps.
     let moregeneral = ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
     if !moregeneral {
+        let mut expected_desc = sig_desc.clone();
+        expected_desc.val_type = expected_ty;
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            expected: expected_ty,
-            found: impl_desc.val_type,
+            actual: impl_desc.clone(),
+            expected: expected_desc,
         });
     }
 

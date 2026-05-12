@@ -8621,7 +8621,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         ),
                                     )
                                 },
-                                val_loc: crate::location::Location::none(),
+                                val_loc: arena.to_location(vd.pval_loc),
                                 val_attributes: vec![],
                                 val_path: None,
                             },
@@ -9749,7 +9749,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                     ValueDescription {
                         val_type: vd.val_desc.ctyp_type,
                         val_kind,
-                        val_loc: crate::location::Location::none(),
+                        val_loc: arena.to_location(vd.val_loc),
                         val_attributes: parser_attrs_to_decl_attrs(arena, &vd.val_attributes),
                         val_path: None,
                     },

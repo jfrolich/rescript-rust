@@ -308,6 +308,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/cannot_apply_module.res`.
 - `Not_included`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`.
 - `Cannot_eliminate_dependency`
 - `Signature_expected`
   - Covered by
@@ -377,7 +379,8 @@ Coverage should include representative include mismatch symptoms rather than
 only the wrapper variant:
 
 - missing values
-- value description mismatch
+- value description mismatch (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
 - type declaration mismatch
 - extension constructor mismatch
 - module mismatch
