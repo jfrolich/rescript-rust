@@ -536,6 +536,13 @@ pub enum TypeCoreError {
     /// A present polymorphic variant constructor has no row field.
     PresentHasNoType { loc: LocIdx, label: String },
 
+    /// A polymorphic variant constructor is duplicated with an incompatible type.
+    ConstructorMismatch {
+        loc: LocIdx,
+        actual: TypeExprRef,
+        expected: TypeExprRef,
+    },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -2306,6 +2313,8 @@ fn transl_type_inner(
             let mut row_field_insertions: Vec<crate::types::asttypes::Label> = Vec::new();
 
             fn add_row_field(
+                tctx: &mut TypeCheckContext<'_>,
+                loc: LocIdx,
                 row_field_map: &mut HashMap<
                     crate::types::asttypes::Label,
                     crate::types::type_expr::RowField,
@@ -2313,11 +2322,35 @@ fn transl_type_inner(
                 row_field_insertions: &mut Vec<crate::types::asttypes::Label>,
                 label: crate::types::asttypes::Label,
                 field: crate::types::type_expr::RowField,
-            ) {
-                if !row_field_map.contains_key(&label) {
+            ) -> TypeCoreResult<()> {
+                if let Some(existing_field) = row_field_map.get(&label) {
+                    let ctx = tctx.type_ctx;
+                    let actual = ctx.new_variant(crate::types::type_expr::RowDesc {
+                        row_fields: vec![(label.clone(), field)],
+                        row_more: ctx.new_var(None),
+                        row_closed: true,
+                        row_fixed: false,
+                        row_name: None,
+                    });
+                    let expected = ctx.new_variant(crate::types::type_expr::RowDesc {
+                        row_fields: vec![(label, existing_field.clone())],
+                        row_more: ctx.new_var(None),
+                        row_closed: true,
+                        row_fixed: false,
+                        row_name: None,
+                    });
+                    crate::types::unify(ctx, &mut tctx.unify_state, actual, expected).map_err(
+                        |_| TypeCoreError::ConstructorMismatch {
+                            loc,
+                            actual,
+                            expected,
+                        },
+                    )?;
+                } else {
                     row_field_insertions.push(label.clone());
                     row_field_map.insert(label, field);
                 }
+                Ok(())
             }
 
             for row in rows {
@@ -2361,11 +2394,13 @@ fn transl_type_inner(
                             }
                         };
                         add_row_field(
+                            tctx,
+                            loc,
                             &mut row_field_map,
                             &mut row_field_insertions,
                             label.txt.to_string().into(),
                             row_field,
-                        );
+                        )?;
 
                         let typed_label = Located {
                             txt: label.txt.to_string(),
@@ -2440,11 +2475,13 @@ fn transl_type_inner(
                                     inherited_field
                                 };
                                 add_row_field(
+                                    tctx,
+                                    inherit_ct.ptyp_loc,
                                     &mut row_field_map,
                                     &mut row_field_insertions,
                                     label_name,
                                     resolved_field,
-                                );
+                                )?;
                             }
                         }
                         typed_rows.push(crate::types::typedtree::RowFieldType {

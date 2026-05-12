@@ -5751,6 +5751,7 @@ fn unify_types<'a>(
 
         // Variant types
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            let original_desc1 = (*desc1).clone();
             let row1 = row1.clone();
             let row2 = row2.clone();
             drop(desc1);
@@ -5759,8 +5760,11 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            unify_rows(ctx, state, &row1, &row2)?;
-            Ok(())
+            let result = unify_rows(ctx, state, &row1, &row2);
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
+            }
+            result
         }
 
         // Object types

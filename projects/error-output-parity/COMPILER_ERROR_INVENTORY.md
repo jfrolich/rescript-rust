@@ -213,6 +213,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/present_variant_has_conjunction.res`.
 - `Present_has_no_type`: covered by
   `tests/error_output_parity/compiler/fixtures/present_variant_has_no_type.res`.
+- `Constructor_mismatch`: covered by
+  `tests/error_output_parity/compiler/fixtures/polyvariant_constructor_mismatch.res`.
 
 ## `compiler/ml/typetexp.ml`
 

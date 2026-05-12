@@ -3008,6 +3008,17 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::ConstructorMismatch {
+            loc,
+            actual,
+            expected,
+        }) => UserDiagnostic::new(
+            format_constructor_mismatch_report(
+                type_ctx, arena, source, filename, *loc, *actual, *expected,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3677,6 +3688,30 @@ fn format_present_has_no_type_report(
         filename,
         loc,
         &format!("The present constructor {label} has no type"),
+    )
+}
+
+fn format_constructor_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> String {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    let actual = printer.format(actual);
+    let expected = printer.format(expected);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This variant type contains a constructor {} which should be\n{}",
+            actual, expected
+        ),
     )
 }
 
@@ -4767,12 +4802,17 @@ fn append_type_clash_type(
 
     let original_ty = ty;
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
+    let ty_text = format_type_expr(type_ctx, ty);
     message.push_str(color);
-    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(&ty_text);
     message.push_str(RESET);
 
     if ty == original_ty
         && let Some(expansion) = rendered_alias_expansion(type_ctx, ty, trace, actual_side)
+        && {
+            let expansion_text = format_type_expr(type_ctx, expansion);
+            expansion_text != ty_text || !type_is_polyvariant(type_ctx, expansion)
+        }
     {
         message.push(' ');
         message.push_str(DIM);
