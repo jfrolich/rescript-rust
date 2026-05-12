@@ -102,6 +102,7 @@ struct Options {
     cross_module_inline: bool,
     no_assert_false: bool,
     make_runtime: bool,
+    read_cmi: bool,
 }
 
 impl Options {
@@ -238,8 +239,8 @@ fn run() -> Result<()> {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
+                "-bs-read-cmi" => opts.read_cmi = true,
                 "-absname"
-                | "-bs-read-cmi"
                 | "-no-alias-deps"
                 | "-bs-no-implicit-stdlib"
                 | "-unsafe"
@@ -316,6 +317,7 @@ fn run() -> Result<()> {
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
+        assume_compiled_interface: opts.read_cmi,
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,

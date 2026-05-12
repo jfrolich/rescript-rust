@@ -26,7 +26,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
-use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena};
+use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
     ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
@@ -1443,6 +1443,8 @@ pub struct CompilerOptions {
     pub package_name: Option<String>,
     /// Compile the runtime package (`-make-runtime`).
     pub make_runtime: bool,
+    /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
+    pub assume_compiled_interface: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1488,6 +1490,7 @@ impl Default for CompilerOptions {
             module_name: None,
             package_name: None,
             make_runtime: false,
+            assume_compiled_interface: false,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
@@ -3584,6 +3587,42 @@ fn format_non_generalizable_module_report(
     output.push_str(RESET);
     output.push_str("\n\n");
     output
+}
+
+fn format_interface_not_compiled_report(
+    source: &str,
+    filename: &str,
+    file_name_idx: StrIdx,
+    interface_name: &str,
+) -> String {
+    let loc = Location::in_file(file_name_idx);
+    let message =
+        format!("Could not find the .cmi file for interface\n{interface_name}.");
+    format_compiler_error_report_from_location(source, filename, &loc, &message)
+}
+
+fn interface_source_name(source_file: &str) -> String {
+    let mut intf = std::path::PathBuf::from(source_file);
+    intf.set_extension("resi");
+    intf.to_string_lossy().into_owned()
+}
+
+fn source_has_interface(options: &CompilerOptions, source_file: &str) -> bool {
+    options.assume_compiled_interface || std::path::Path::new(&format!("{source_file}i")).exists()
+}
+
+fn compiled_interface_file_exists(options: &CompilerOptions, source_file: &str) -> bool {
+    let module_name = module_name_from_source_filename(source_file);
+    let filename = format!("{module_name}.cmi");
+    let uncapitalized = filename
+        .chars()
+        .next()
+        .map(|ch| ch.to_lowercase().collect::<String>() + &filename[ch.len_utf8()..])
+        .unwrap_or_else(|| filename.clone());
+
+    build_load_path(options).iter().any(|dir| {
+        dir.join(&uncapitalized).exists() || dir.join(&filename).exists()
+    })
 }
 
 fn push_compiler_error_report_header_from_location(
@@ -9358,19 +9397,36 @@ pub fn compile_source_to_js_with_options(
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 
+    let source_file_for_interface = options.source_filename.as_deref().unwrap_or(filename);
+    let has_resi = source_file_for_interface.ends_with(".res")
+        && source_has_interface(options, source_file_for_interface);
+    if options.assume_compiled_interface
+        && source_file_for_interface.ends_with(".res")
+        && !compiled_interface_file_exists(options, source_file_for_interface)
+    {
+        let intf_name = interface_source_name(source_file_for_interface);
+        return Err(UserDiagnostic::new(
+            format_interface_not_compiled_report(source, filename, parser.filename(), &intf_name),
+            2,
+        )
+        .into());
+    }
+
     // Apply interface constraints: moregen linking for non-generic Tvars.
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, None);
+    apply_moregen_constraints(
+        &mut tctx,
+        &type_ctx,
+        &typed_structure,
+        options,
+        Some(has_resi),
+    );
 
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
     // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    let has_resi = options
-        .source_filename
-        .as_ref()
-        .is_some_and(|f| f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists());
     if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
@@ -9437,7 +9493,7 @@ pub fn compile_source_to_js_with_options(
         &env,
         &typed_structure,
         options,
-        None,
+        Some(has_resi),
     );
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
