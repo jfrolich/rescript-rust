@@ -11818,10 +11818,11 @@ fn type_record(
         }
     }
 
-    // OCaml compiler/ml/typecore.ml:2833-2842 stores every omitted optional
-    // field as an `option_none` entry. Keep that typedtree contract at
-    // serialization time, but store large closed regular records sparsely
-    // inside Rust so JSX prop bags don't copy hundreds of label descriptions.
+    // Intentional Rust performance representation: OCaml compiler/ml/typecore.ml:2833-2842
+    // stores every omitted optional field as an `option_none` entry. Keep that
+    // external typedtree contract at serialization/lambda boundaries, but store
+    // large closed regular records sparsely inside Rust so JSX prop bags don't
+    // copy hundreds of label descriptions.
     let sparse_all_label_descriptions = if typed_base.is_none() && !fields.is_empty() {
         all_label_descriptions.as_ref().and_then(|labels| {
             let all_regular = all_label_descriptions_summary.as_ref().map_or_else(

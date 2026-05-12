@@ -156,6 +156,13 @@ These are known high-risk areas from the seven-day parity review. Treat them as 
 
 Hard rule for this goal: never improve parity by adding a Rust-only compatibility layer. Any change that suppresses a force, rewrites a representative, matches path strings, scans signature contents to guess forcing, or branches lazy behavior on output mode must be treated as debt unless it directly mirrors the reference OCaml implementation at a cited source location.
 
+### Intentional Rust Performance Representations
+
+Do not remove these while cleaning parity debt. They are explicit Rust storage/layout optimizations that must preserve OCaml-equivalent external typedtree, lambda, and JavaScript behavior, but they do not have to use OCaml's exact in-memory representation.
+
+- **Sparse typedtree extras:** `typedtree::SparseExtras<T>` stores the common empty extras case without an inline empty `Vec`. This preserves the same slice/iterator behavior as OCaml's `exp_extra = []` / `pat_extra = []`, while reducing per-node memory.
+- **Sparse large regular records:** `ExpressionDesc::Texp_record_sparse` and `RecordLabelDefinition::OmittedOptionalNone` avoid allocating hundreds of cloned label descriptions and full `Texp_construct None` nodes for large JSX prop records. The boundary must remain equivalent to OCaml `compiler/ml/typecore.ml:297-300`, `compiler/ml/typecore.ml:2833-2842`, and `compiler/ml/translcore.ml:1139-1191`: serializers and lambda lowering expand over the complete `lbl_all` order and produce the same external shape.
+
 Completed for this goal:
 - **Alias representative patching removed:** `preserve_alias_unify_representative` and its call sites were deleted. Do not reintroduce a typecore-side representative rewrite; representative choice must continue to emerge from the OCaml-aligned `type_argument` -> `type_expect` -> `unify_exp` flow plus `ctype.ml` unification/expansion.
 - **Canonical typedtree mode altering semantics removed:** `preserve_canonical_typedtree` and its driver/typecore branches were deleted. Normal compilation and typedtree dumping now use one lazy component-resolution path; output mode must stay out of force order, thunk sharing, and signature copy depth.
