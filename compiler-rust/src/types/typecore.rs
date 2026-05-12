@@ -4773,12 +4773,7 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     fn path_is_promise_constructor(path: &Path) -> bool {
-        if path.same(&crate::types::predef::path_promise()) {
-            return true;
-        }
-        path.flatten().is_ok_and(|(root, components)| {
-            root.is_persistent() && root.name() == "Stdlib" && components == ["Promise", "t"]
-        })
+        path.same(&crate::types::predef::path_promise())
     }
 
     #[derive(Clone, Copy, Default)]
