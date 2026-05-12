@@ -5401,12 +5401,6 @@ fn force_qualified_value_type_paths<'a>(
         _ => None,
     };
     let ctx = tctx.type_ctx;
-    let selected_module_is_implicit_stdlib_path =
-        selected_module_path.as_ref().is_some_and(|path| {
-            !value_access_root_is_local
-                && path_root_ident(path)
-                    .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-        });
     let selected_module_is_opened_component_path =
         selected_module_path.as_ref().is_some_and(|path| {
             selected_module_is_opened_component_path(env, path)
@@ -5418,7 +5412,6 @@ fn force_qualified_value_type_paths<'a>(
         matches!(selected_module_path.as_ref(), Some(Path::Pdot(..)));
     let should_collect_selected_alias_targets = value_access_root_is_local
         || matches!(selected_module_path.as_ref(), Some(Path::Pident(_)))
-        || selected_module_is_implicit_stdlib_path
         || selected_module_is_opened_component_path
         || selected_module_is_dotted_component_path;
     let selected_alias_targets = if should_collect_selected_alias_targets {
@@ -5427,8 +5420,7 @@ fn force_qualified_value_type_paths<'a>(
         // declaration thunk. Alias-target recovery is only needed for local
         // aliases selected from env.ml:665-676's local module table, for
         // exact root modules whose declaration is read directly by env.ml:800-813,
-        // for `Stdlib` paths coming from compiler/core/res_compmisc.ml:58-62's
-        // implicit open, or for dotted component paths whose raw
+        // or for dotted component paths whose raw
         // env.ml:1573-1578 child component still points at a scraped alias
         // target. In the latter case, compiler/ml/env.ml:1530-1538 and
         // compiler/ml/subst.ml:303-309 expose the selected component prefix in
