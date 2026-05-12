@@ -1444,18 +1444,6 @@ fn substitute_module_type_paths_no_freshen(
     }
 }
 
-fn substitute_module_declaration_paths(
-    _type_ctx: &TypeContext,
-    md: &ModuleDeclaration,
-    subst: &InclusionSubst,
-) -> ModuleDeclaration {
-    // OCaml compiler/ml/includemod.ml:396-413 does not call
-    // `Subst.module_declaration` here. It passes the current substitution into
-    // the recursive `modtypes` check, so this boundary only rewrites paths that
-    // Rust cannot currently thread lazily through the recursion.
-    substitute_module_declaration_paths_no_freshen(_type_ctx, md, subst)
-}
-
 fn substitute_module_declaration_paths_no_freshen(
     type_ctx: &TypeContext,
     md: &ModuleDeclaration,
