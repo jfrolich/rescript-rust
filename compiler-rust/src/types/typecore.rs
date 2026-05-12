@@ -21036,22 +21036,6 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         }
     }
 
-    fn flatten_alias_head(path: &Path) -> Option<String> {
-        let Ok((head, components)) = path.flatten() else {
-            return None;
-        };
-        if components.is_empty() {
-            return None;
-        }
-
-        let mut flat = head.name().to_string();
-        for component in components {
-            flat.push('_');
-            flat.push_str(component);
-        }
-        Some(flat)
-    }
-
     fn path_has_suffix(path: &Path, suffix: &Path) -> bool {
         let Ok((path_head, path_components)) = path.flatten() else {
             return false;
@@ -21094,9 +21078,6 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
     ) -> Option<Path> {
         let mut flat_heads = Vec::new();
-        if let Some(flat) = flatten_alias_head(alias_path) {
-            flat_heads.push(flat);
-        }
         for flat in flattened_alias_heads_from_persistent(pers_env, alias_path) {
             if !flat_heads.iter().any(|existing| existing == &flat) {
                 flat_heads.push(flat);
