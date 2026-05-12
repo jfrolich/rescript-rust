@@ -2755,6 +2755,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::LabelMismatch { loc, lid, trace }) => {
+            UserDiagnostic::new(
+                format_label_mismatch_report(type_ctx, arena, source, filename, *loc, lid, trace),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::NotSubtype {
             loc,
             trace,
@@ -4403,6 +4410,28 @@ fn format_or_pattern_type_clash_report(
     ));
     message.push_str(RESET);
 
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_label_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let message = format!(
+        "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
+        format_longident_for_report(arena, lid),
+        format_type_expr(type_ctx, actual),
+        format_type_expr(type_ctx, expected)
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

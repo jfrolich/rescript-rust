@@ -401,7 +401,11 @@ pub enum TypeCoreError {
     },
 
     /// Label mismatch in record pattern.
-    LabelMismatch(Longident, Vec<(TypeExprRef, TypeExprRef)>),
+    LabelMismatch {
+        loc: LocIdx,
+        lid: Longident,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
 
     /// Pattern type clash.
     PatternTypeClash {
@@ -4370,7 +4374,11 @@ fn type_pattern_record(
                 }
                 return Err(match err {
                     TypeCoreError::PatternTypeClash { trace, .. } => {
-                        TypeCoreError::LabelMismatch(field_lid_for_error, trace)
+                        TypeCoreError::LabelMismatch {
+                            loc: field.lid.loc,
+                            lid: field_lid_for_error,
+                            trace,
+                        }
                     }
                     err => err,
                 });
