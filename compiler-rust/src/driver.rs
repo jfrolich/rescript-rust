@@ -2828,6 +2828,25 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::UndefinedMethod {
+            loc: Some(loc),
+            ty,
+            method,
+            alternatives: _,
+        }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "This expression has type {}\nIt has no field {method}",
+                    format_type_expr(type_ctx, *ty)
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnboundValue {
             loc,
             name,

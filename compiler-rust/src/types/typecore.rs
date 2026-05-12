@@ -488,6 +488,7 @@ pub enum TypeCoreError {
 
     /// Undefined method.
     UndefinedMethod {
+        loc: Option<LocIdx>,
         ty: TypeExprRef,
         method: String,
         alternatives: Option<Vec<String>>,
@@ -17795,6 +17796,7 @@ fn type_send(
             let alternatives =
                 collect_public_methods_from_object_type(ctx, env, typed_obj.exp_type);
             return Err(TypeCoreError::UndefinedMethod {
+                loc: Some(obj_expr.pexp_loc),
                 ty: typed_obj.exp_type,
                 method: method.txt.to_string(),
                 alternatives,
@@ -21296,6 +21298,7 @@ impl Env {
                         Ok((path, desc.clone()))
                     }
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
+                        loc: None,
                         ty: TypeExprRef(0),
                         method: name.to_string(),
                         alternatives: None,
@@ -21418,6 +21421,7 @@ impl Env {
                     }
 
                     return Err(TypeCoreError::UndefinedMethod {
+                        loc: None,
                         ty: TypeExprRef(0),
                         method: lid_str,
                         alternatives: None,
@@ -21465,6 +21469,7 @@ impl Env {
                         Ok((path, desc.clone()))
                     }
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
+                        loc: None,
                         ty: TypeExprRef(0),
                         method: lid_str,
                         alternatives: None,
@@ -21472,6 +21477,7 @@ impl Env {
                 }
             }
             Longident::Lapply(_, _) => Err(TypeCoreError::UndefinedMethod {
+                loc: None,
                 ty: TypeExprRef(0),
                 method: "(functor application)".to_string(),
                 alternatives: None,
