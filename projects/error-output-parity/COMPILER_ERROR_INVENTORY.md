@@ -66,6 +66,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
 - `Constructor_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/constructor_arity_mismatch.res`.
+- `Pattern_type_clash`: covered by
+  `tests/error_output_parity/compiler/fixtures/pattern_type_clash.res`.
+- `Expr_type_clash`: covered by
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
