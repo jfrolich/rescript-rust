@@ -4956,7 +4956,6 @@ fn force_qualified_value_type_paths<'a>(
         allow_stdlib_flat_parent_inference: bool,
         allow_non_stdlib_implicit_stdlib_inference: bool,
         defer_selected_value_final_result: bool,
-        suppress_selected_value_forces: bool,
         seen: &mut TypeExprRefSet,
     ) {
         let ctx = tctx.type_ctx;
@@ -5025,7 +5024,6 @@ fn force_qualified_value_type_paths<'a>(
                     arg_allow_stdlib_flat_parent_inference,
                     arg_allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
                 if defer_selected_value_final_result && !ret_is_arrow {
@@ -5062,7 +5060,6 @@ fn force_qualified_value_type_paths<'a>(
                             ret_allow_stdlib_flat_parent_inference,
                             allow_non_stdlib_implicit_stdlib_inference,
                             false,
-                            false,
                             seen,
                         );
                     }
@@ -5083,7 +5080,6 @@ fn force_qualified_value_type_paths<'a>(
                         ret_allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         defer_selected_value_final_result && ret_is_arrow,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5103,7 +5099,6 @@ fn force_qualified_value_type_paths<'a>(
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         false,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5174,9 +5169,8 @@ fn force_qualified_value_type_paths<'a>(
                                 selected_module_path,
                                 value_access_root_is_local,
                             );
-                    if !(suppress_selected_value_forces
-                        || (nested_inside_selected_module
-                            && !selected_module_is_implicit_stdlib_path)
+                    if !((nested_inside_selected_module
+                        && !selected_module_is_implicit_stdlib_path)
                         || type_parent_is_selected_alias_sibling
                         || type_parent_is_implicit_stdlib_for_non_stdlib_value)
                     {
@@ -5244,9 +5238,6 @@ fn force_qualified_value_type_paths<'a>(
                     )
                 })
                 .or_else(|| {
-                    if suppress_selected_value_forces {
-                        return None;
-                    }
                     if value_access_root_is_local {
                         // OCaml compiler/ml/typecore.ml:2421-2457 only
                         // instances the value description returned by
@@ -5294,22 +5285,18 @@ fn force_qualified_value_type_paths<'a>(
                     None
                 })
                 .or_else(|| {
-                    (!suppress_selected_value_forces)
-                        .then(|| {
-                            persistent_nested_type_path(
-                                ctx,
-                                env,
-                                &tctx.persistent_env,
-                                &path,
-                                value_access_root,
-                                selected_module_path,
-                                false,
-                            )
-                        })
-                        .flatten()
+                    persistent_nested_type_path(
+                        ctx,
+                        env,
+                        &tctx.persistent_env,
+                        &path,
+                        value_access_root,
+                        selected_module_path,
+                        false,
+                    )
                 })
                 .or_else(|| {
-                    (!suppress_selected_value_forces && allow_implicit_stdlib_flat_parent_inference)
+                    allow_implicit_stdlib_flat_parent_inference
                         .then(|| {
                             persistent_nested_type_path(
                                 ctx,
@@ -5345,7 +5332,6 @@ fn force_qualified_value_type_paths<'a>(
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         false,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5365,7 +5351,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
                 if let Some(args) = name_args {
@@ -5381,7 +5366,6 @@ fn force_qualified_value_type_paths<'a>(
                             allow_stdlib_flat_parent_inference,
                             allow_non_stdlib_implicit_stdlib_inference,
                             false,
-                            suppress_selected_value_forces,
                             seen,
                         );
                     }
@@ -5402,7 +5386,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
                 visit(
@@ -5416,7 +5399,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
             }
@@ -5434,7 +5416,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
             }
@@ -5462,7 +5443,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
                 for arg in field_args {
@@ -5477,7 +5457,6 @@ fn force_qualified_value_type_paths<'a>(
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         false,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5497,7 +5476,6 @@ fn force_qualified_value_type_paths<'a>(
                     allow_stdlib_flat_parent_inference,
                     allow_non_stdlib_implicit_stdlib_inference,
                     false,
-                    suppress_selected_value_forces,
                     seen,
                 );
                 for var in vars {
@@ -5512,7 +5490,6 @@ fn force_qualified_value_type_paths<'a>(
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         false,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5532,7 +5509,6 @@ fn force_qualified_value_type_paths<'a>(
                         allow_stdlib_flat_parent_inference,
                         allow_non_stdlib_implicit_stdlib_inference,
                         false,
-                        suppress_selected_value_forces,
                         seen,
                     );
                 }
@@ -5652,7 +5628,6 @@ fn force_qualified_value_type_paths<'a>(
         false,
         true,
         true,
-        false,
         &mut seen,
     );
 }
