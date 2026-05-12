@@ -17588,13 +17588,30 @@ fn should_rewrite_nested_alias_self_path(
     old_name: &str,
     parent_path: &Path,
 ) -> bool {
+    fn same_or_descendant(path: &Path, prefix: &Path) -> bool {
+        if path.same(prefix) {
+            return true;
+        }
+        match path {
+            Path::Pdot(parent, _, _) => same_or_descendant(parent, prefix),
+            Path::Pident(_) | Path::Papply(_, _) => false,
+        }
+    }
+
     // OCaml compiler/ml/env.ml:1517 discovers flattened backing units by
     // scraping explicit aliases, then env.ml:1530 prefixes the selected
-    // component path. If the resolved name is already rooted in a registered
-    // backing unit for the parent component, leave it for that alias path.
-    !ctx.flattened_alias_heads_for_component_path(parent_path)
+    // component path. env.ml:1573-1578 stores child components under that
+    // selected path. If the resolved name is a registered backing unit for the
+    // parent component, or for one of its selected child components, leave it
+    // for that alias path; do not infer descendants from flattened spelling.
+    let old_name_is_parent_head = ctx
+        .flattened_alias_heads_for_component_path(parent_path)
         .into_iter()
-        .any(|flat_head| old_name == flat_head || old_name.starts_with(&(flat_head + "_")))
+        .any(|flat_head| old_name == flat_head);
+    let old_name_is_registered_component_child = ctx
+        .find_flattened_alias_component_path(old_name)
+        .is_some_and(|component_path| same_or_descendant(&component_path, parent_path));
+    !(old_name_is_parent_head || old_name_is_registered_component_child)
 }
 
 fn rewrite_flattened_alias_child_prefixes<'a>(
