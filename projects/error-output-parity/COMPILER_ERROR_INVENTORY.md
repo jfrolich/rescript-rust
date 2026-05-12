@@ -538,6 +538,8 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/cases/illegal_renaming.res`.
   - `Inconsistent_import`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/inconsistent_import.res`.
   - `Missing_module`
   - `Illegal_value_name`
 - `compiler/ml/rec_check.ml`

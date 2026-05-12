@@ -3810,8 +3810,30 @@ fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> 
         } => format!(
             "You referred to the module {expected}, but we've found one called {actual} instead.\nIs the name's casing right?"
         ),
+        PersistentEnvError::InconsistentImport {
+            name,
+            source1,
+            source2,
+        } => {
+            let source1 = format_persistent_env_path(&source1);
+            let source2 = format_persistent_env_path(&source2);
+            format!(
+                "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
+            )
+        }
     };
     UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
+}
+
+fn format_persistent_env_path(path: &str) -> String {
+    let path_buf = PathBuf::from(path);
+    if path_buf.is_absolute()
+        && let Ok(cwd) = std::env::current_dir()
+        && let Ok(relative) = path_buf.strip_prefix(cwd)
+    {
+        return relative.to_string_lossy().into_owned();
+    }
+    path.to_string()
 }
 
 fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {

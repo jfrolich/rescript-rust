@@ -600,6 +600,8 @@ pub struct PersistentEnv {
     prepared_cached_alias_rewrites: HashSet<String>,
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
+    /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
+    crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
 }
 
 /// Errors reported by OCaml's `Env` persistent interface loader.
@@ -613,6 +615,15 @@ pub enum PersistentEnvError {
         actual: String,
         /// Path to the mismatched `.cmi`.
         filename: String,
+    },
+    /// Two loaded CMIs disagree on the digest for an imported interface.
+    InconsistentImport {
+        /// Interface whose digest assumptions differ.
+        name: String,
+        /// File that made the first assumption.
+        source1: String,
+        /// File that made the conflicting assumption.
+        source2: String,
     },
 }
 
@@ -643,6 +654,7 @@ impl PersistentEnv {
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
             last_error: Arc::new(Mutex::new(None)),
+            crc_units: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -672,6 +684,7 @@ impl PersistentEnv {
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
             last_error: Arc::new(Mutex::new(None)),
+            crc_units: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -697,6 +710,38 @@ impl PersistentEnv {
             });
             false
         }
+    }
+
+    fn check_cmi_consistency(
+        &self,
+        crcs: &[(String, Option<Vec<u8>>)],
+        unit_name: &str,
+        filename: &str,
+    ) -> bool {
+        let mut crc_units = self.crc_units.lock().unwrap();
+        for (name, crc) in crcs {
+            if name == unit_name {
+                continue;
+            }
+            let Some(crc) = crc else {
+                continue;
+            };
+            match crc_units.get(name) {
+                Some((old_crc, old_source)) if old_crc != crc => {
+                    self.record_error(PersistentEnvError::InconsistentImport {
+                        name: name.clone(),
+                        source1: old_source.clone(),
+                        source2: filename.to_string(),
+                    });
+                    return false;
+                }
+                Some(_) => {}
+                None => {
+                    crc_units.insert(name.clone(), (crc.clone(), filename.to_string()));
+                }
+            }
+        }
+        true
     }
 
     fn cache_lookup(&self, name: &str) -> Option<Option<Arc<PersStruct>>> {
@@ -1361,6 +1406,7 @@ impl PersistentEnv {
             hidden_modules: self.hidden_modules.clone(),
             prepared_cached_alias_rewrites: HashSet::new(),
             last_error: self.last_error.clone(),
+            crc_units: self.crc_units.clone(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
@@ -1542,6 +1588,9 @@ impl PersistentEnv {
             if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
                 return None;
             }
+            if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &full_path) {
+                return None;
+            }
 
             let mut sig_ctx = SigReadContext::new(ctx);
             let signature = sig_ctx.read_signature(&cmi.cmi_sign);
@@ -1624,6 +1673,9 @@ impl PersistentEnv {
         if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
             return None;
         }
+        if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &full_path) {
+            return None;
+        }
         let mut sig_ctx = SigReadContext::new(ctx);
         Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
     }
@@ -1642,13 +1694,6 @@ impl PersistentEnv {
     /// Returns the full path if found.
     fn find_in_path_uncap(&self, filename: &str) -> Option<String> {
         for dir in self.load_path.iter() {
-            // Try exact case first
-            let exact = dir.join(filename);
-            if exact.exists() {
-                return Some(exact.to_string_lossy().into_owned());
-            }
-
-            // Try uncapitalized
             if let Some(first_char) = filename.chars().next() {
                 if first_char.is_ascii_uppercase() {
                     let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
@@ -1657,6 +1702,11 @@ impl PersistentEnv {
                         return Some(uncap_path.to_string_lossy().into_owned());
                     }
                 }
+            }
+
+            let exact = dir.join(filename);
+            if exact.exists() {
+                return Some(exact.to_string_lossy().into_owned());
             }
         }
         None
