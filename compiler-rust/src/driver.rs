@@ -3473,6 +3473,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::RepeatedParameter { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "A type parameter occurs several times",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::DuplicateConstructor { loc, name } => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,

@@ -278,8 +278,14 @@ with a reason after checking raise sites.
 ## `compiler/ml/typedecl.ml`
 
 - `Repeated_parameter`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/repeated_type_parameter.res`.
 - `Duplicate_constructor`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/duplicate_constructor.res`.
 - `Duplicate_label`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/duplicate_label.res`.
 - `Object_spread_with_record_field`
 - `Recursive_abbrev`
 - `Cycle_in_def`

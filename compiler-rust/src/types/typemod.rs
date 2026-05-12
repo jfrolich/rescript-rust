@@ -3076,6 +3076,8 @@ pub enum TypeModError {
     VariantSpreadUnboxedMismatch { loc: LocIdx, source_unboxed: bool },
     /// Variant type spread source and target have different @tag configuration.
     VariantSpreadTagMismatch { loc: LocIdx },
+    /// A type declaration repeats the same type parameter.
+    RepeatedParameter { loc: LocIdx },
     /// Duplicate constructor in a variant type declaration.
     DuplicateConstructor {
         /// Source location to report.
@@ -8913,7 +8915,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         tctx.type_ctx.new_var(Some("_".to_string()))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                                        let name = name.as_ref().as_ref();
                                         check_type_variable_name(param_ty.ptyp_loc, name)?;
+                                        if tctx.type_variables.contains_key(name) {
+                                            return Err(TypeModError::RepeatedParameter {
+                                                loc: param_ty.ptyp_loc,
+                                            });
+                                        }
                                         tctx.type_ctx.new_var(Some(name.to_string()))
                                     }
                                     _ => {
@@ -13759,7 +13767,13 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                            let name = name.as_ref().as_ref();
                             check_type_variable_name(core_type.ptyp_loc, name)?;
+                            if tctx.type_variables.contains_key(name) {
+                                return Err(TypeModError::RepeatedParameter {
+                                    loc: core_type.ptyp_loc,
+                                });
+                            }
                             let type_ref = ctx.new_var(Some(name.to_string()));
                             (
                                 TypedCoreType {
@@ -16638,7 +16652,13 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         )
                     }
                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                        let name = name.as_ref().as_ref();
                         check_type_variable_name(core_type.ptyp_loc, name)?;
+                        if tctx.type_variables.contains_key(name) {
+                            return Err(TypeModError::RepeatedParameter {
+                                loc: core_type.ptyp_loc,
+                            });
+                        }
                         let type_ref = ctx.new_var(Some(name.to_string()));
                         (
                             TypedCoreType {
