@@ -2959,6 +2959,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::AccessFunctorAsStructure { loc, lid }) => {
+            UserDiagnostic::new(
+                format_access_functor_as_structure_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundConstructor { loc, lid }) => {
             UserDiagnostic::new(
                 format_unbound_constructor_report(arena, source, filename, *loc, lid),
@@ -4366,6 +4373,23 @@ fn format_unbound_module_report(
         "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?\n\n"
     );
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_access_functor_as_structure_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The module {name} is a functor, not a structure"),
+    )
 }
 
 fn format_unbound_constructor_report(

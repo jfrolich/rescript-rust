@@ -515,6 +515,9 @@ pub enum TypeCoreError {
     /// Unbound module identifier.
     UnboundModule { loc: LocIdx, name: String },
 
+    /// A functor was used as if it were a structure.
+    AccessFunctorAsStructure { loc: LocIdx, lid: Longident },
+
     /// Unbound constructor identifier.
     UnboundConstructor { loc: LocIdx, lid: Longident },
 
@@ -19084,21 +19087,31 @@ fn unbound_module_prefix_error(
     let Longident::Ldot(prefix, _) = lid else {
         return None;
     };
-    if env
-        .resolve_module_access_path_for_lid(
-            prefix,
-            tctx.arena,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
+    let Some(module_path) = env.resolve_module_access_path_for_lid(
+        prefix,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    ) else {
+        return Some(TypeCoreError::UnboundModule {
+            loc,
+            name: tctx.longident_to_string(prefix),
+        });
+    };
+
+    if let Ok(md) = env.lookup_module(&module_path)
+        && matches!(
+            md.md_type,
+            crate::types::decl::ModuleType::MtyFunctor { .. }
         )
-        .is_some()
     {
-        return None;
+        return Some(TypeCoreError::AccessFunctorAsStructure {
+            loc,
+            lid: prefix.as_ref().clone(),
+        });
     }
-    Some(TypeCoreError::UnboundModule {
-        loc,
-        name: tctx.longident_to_string(prefix),
-    })
+
+    None
 }
 
 fn unbound_value_alternatives(

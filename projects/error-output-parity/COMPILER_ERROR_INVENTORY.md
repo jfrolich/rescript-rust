@@ -234,6 +234,8 @@ with a reason after checking raise sites.
   scope by `tests/error_output_parity/compiler/fixtures/unbound_label.res`.
 - `Unbound_modtype`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_modtype.res`.
+- `Access_functor_as_structure`: covered by
+  `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`.
 
 ## `compiler/ml/typetexp.ml`
 
