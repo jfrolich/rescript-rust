@@ -382,7 +382,8 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_missing_value.res`)
 - value description mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
-- type declaration mismatch
+- type declaration mismatch (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_type_mismatch.res`)
 - extension constructor mismatch
 - module mismatch
 - module type mismatch
