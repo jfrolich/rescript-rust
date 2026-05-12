@@ -13,7 +13,7 @@
 #
 # OPTIONS:
 #   -q, --quick       Stop on first failure (useful for quick iteration)
-#   -j, --parallel N  Run N tests in parallel (default: 16)
+#   -j, --parallel N  Run N tests in parallel (default: 8)
 #   -v, --verbose     Show progress for each file
 #   -l, --locs        Test with locations (-dlambda-sexp-locs)
 #   -r, --raw         Test unoptimized lambda printer output (-drawlambda)
@@ -31,7 +31,7 @@
 set -e
 
 QUICK_MODE=false
-PARALLEL_JOBS=16
+PARALLEL_JOBS=8
 VERBOSE=false
 TEST_LOCS=false
 TEST_RAW=false
