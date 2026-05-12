@@ -77,7 +77,9 @@ with a reason after checking raise sites.
 - `Expr_type_clash`: covered by
   `tests/error_output_parity/compiler/fixtures/expr_type_clash.res`
   and the function label mismatch subcase in
-  `tests/error_output_parity/compiler/fixtures/function_label_mismatch.res`.
+  `tests/error_output_parity/compiler/fixtures/function_label_mismatch.res`,
+  plus the local module escape note subcase in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by

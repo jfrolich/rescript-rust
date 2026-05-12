@@ -18454,7 +18454,6 @@ fn replace_letmodule_local_paths<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ty: TypeExprRef,
     module_id: &Ident,
-    replacements: &mut HashMap<String, TypeExprRef>,
     seen: &mut HashSet<TypeExprRef>,
 ) {
     let ty = ctx.repr(ty);
@@ -18482,7 +18481,6 @@ fn replace_letmodule_local_paths<'a>(
                     pers_env,
                     expanded,
                     module_id,
-                    replacements,
                     seen,
                 );
                 return;
@@ -18508,7 +18506,6 @@ fn replace_letmodule_local_paths<'a>(
                     pers_env,
                     rewritten_ty,
                     module_id,
-                    replacements,
                     seen,
                 );
                 return;
@@ -18529,23 +18526,19 @@ fn replace_letmodule_local_paths<'a>(
                     pers_env,
                     rewritten_ty,
                     module_id,
-                    replacements,
                     seen,
                 );
                 return;
             }
         }
 
-        // If no manifest expansion is available, keep the existing fallback:
-        // abstract this module-rooted constructor with a shared fresh variable.
-        let key = local_path.name();
-        let replacement_ty = *replacements.entry(key).or_insert_with(|| ctx.new_var(None));
-        crate::types::link_type(ctx, ty, replacement_ty);
+        // OCaml keeps truly local abstract types visible here so the scoping
+        // check can report that the type constructor would escape.
         return;
     }
 
     crate::types::iter_type_expr(ctx, ty, |child| {
-        replace_letmodule_local_paths(ctx, env, pers_env, child, module_id, replacements, seen);
+        replace_letmodule_local_paths(ctx, env, pers_env, child, module_id, seen);
     });
 }
 
@@ -18558,7 +18551,6 @@ fn apply_letmodule_local_path_cleanup<'a>(
     rewritten_ty: TypeExprRef,
     expected_ty: TypeExprRef,
 ) {
-    let mut replacements: HashMap<String, TypeExprRef> = HashMap::new();
     let mut seen: HashSet<TypeExprRef> = HashSet::new();
     replace_letmodule_local_paths(
         ctx,
@@ -18566,7 +18558,6 @@ fn apply_letmodule_local_path_cleanup<'a>(
         pers_env,
         rewritten_ty,
         module_id,
-        &mut replacements,
         &mut seen,
     );
     replace_letmodule_local_paths(
@@ -18575,7 +18566,6 @@ fn apply_letmodule_local_path_cleanup<'a>(
         pers_env,
         expected_ty,
         module_id,
-        &mut replacements,
         &mut seen,
     );
     for (_id, value_desc) in env.iter_values() {
@@ -18585,10 +18575,36 @@ fn apply_letmodule_local_path_cleanup<'a>(
             pers_env,
             value_desc.val_type,
             module_id,
-            &mut replacements,
             &mut seen,
         );
     }
+}
+
+fn letmodule_local_escape_path(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    module_id: &Ident,
+    seen: &mut HashSet<TypeExprRef>,
+) -> Option<Path> {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return None;
+    }
+
+    let desc = ctx.get_desc(ty).clone();
+    if let TypeDesc::Tconstr { path, .. } = &desc
+        && letmodule_path_root_is_module(path, module_id)
+    {
+        return Some(path.clone());
+    }
+
+    let mut found = None;
+    crate::types::iter_type_expr(ctx, ty, |child| {
+        if found.is_none() {
+            found = letmodule_local_escape_path(ctx, child, module_id, seen);
+        }
+    });
+    found
 }
 
 fn unbound_value_error(
@@ -18861,7 +18877,6 @@ fn type_letmodule(
         env: &Env,
         ty: TypeExprRef,
         module_id: &Ident,
-        replacements: &mut HashMap<String, TypeExprRef>,
         seen: &mut HashSet<TypeExprRef>,
     ) {
         let ty = ctx.repr(ty);
@@ -18888,7 +18903,6 @@ fn type_letmodule(
                         env,
                         expanded,
                         module_id,
-                        replacements,
                         seen,
                     );
                     return;
@@ -18907,23 +18921,19 @@ fn type_letmodule(
                         env,
                         rewritten_ty,
                         module_id,
-                        replacements,
                         seen,
                     );
                     return;
                 }
             }
 
-            // If no manifest expansion is available, keep the existing fallback:
-            // abstract this module-rooted constructor with a shared fresh variable.
-            let key = local_path.name();
-            let replacement_ty = *replacements.entry(key).or_insert_with(|| ctx.new_var(None));
-            crate::types::link_type(ctx, ty, replacement_ty);
+            // OCaml keeps truly local abstract types visible here so the
+            // scoping check can report that the type constructor would escape.
             return;
         }
 
         crate::types::iter_type_expr(ctx, ty, |child| {
-            replace_letmodule_local_paths(ctx, env, child, module_id, replacements, seen);
+            replace_letmodule_local_paths(ctx, env, child, module_id, seen);
         });
     }
 
@@ -19032,6 +19042,13 @@ fn type_letmodule(
             rewritten_ty,
             expected_ty,
         );
+        if letmodule_local_escape_path(ctx, rewritten_ty, &mod_id, &mut HashSet::new()).is_some() {
+            return Err(TypeCoreError::ExprTypeClash {
+                loc: typed_body.exp_loc,
+                trace: vec![(rewritten_ty, letmodule_ty)],
+                context: None,
+            });
+        }
         // NOTE: OCaml does NOT unify body.exp_type with ty_expected here.
         // type_expect already connected them internally. Unifying here would
         // merge the Pexp_tuple's result_ty with the filter_arrow's return_ty,

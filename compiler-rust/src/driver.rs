@@ -5227,6 +5227,14 @@ fn append_extra_type_clash_help(
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
+    if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
+        message.push('\n');
+        message.push_str("The type constructor ");
+        message.push_str(&path);
+        message.push_str(" would escape its scope");
+        return;
+    }
+
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
         message.push_str("\n\n");
         message.push_str("Arrays can only contain items of the same type.\n\n");
@@ -5457,6 +5465,43 @@ fn append_extra_type_clash_help(
         append_dict_literal_help(type_ctx, trace, message);
     }
     append_simple_conversion_help(type_ctx, arena, source, loc, trace, message);
+}
+
+fn type_clash_escape_constructor_path(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<String> {
+    for (actual, expected) in trace.iter().rev() {
+        if let Some(path) = escaped_constructor_path(type_ctx, *actual, *expected) {
+            return Some(path);
+        }
+        if let Some(path) = escaped_constructor_path(type_ctx, *expected, *actual) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn escaped_constructor_path(
+    type_ctx: &TypeContext,
+    constr_ty: TypeExprRef,
+    var_ty: TypeExprRef,
+) -> Option<String> {
+    let constr_ty = type_ctx.repr(constr_ty);
+    let var_ty = type_ctx.repr(var_ty);
+    if !matches!(&*type_ctx.get_desc(var_ty), TypeDesc::Tvar(_)) {
+        return None;
+    }
+
+    let var_level = type_ctx.get_level(var_ty);
+    let constr_desc = type_ctx.get_desc(constr_ty);
+    let TypeDesc::Tconstr { path, .. } = &*constr_desc else {
+        return None;
+    };
+    if var_level < path.binding_time() {
+        return Some(path.name());
+    }
+    None
 }
 
 fn append_math_operator_help(
