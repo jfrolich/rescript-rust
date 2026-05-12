@@ -2143,15 +2143,16 @@ pub fn load_pervasives<'a>(
         if pers_env.open_module("Pervasives", env, ctx) {
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
             // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
-            // builds, the persistent registry remains available for explicit
-            // `Pervasives.X` lookup, so avoid cloning the whole raw signature a
-            // second time just to add a top-level module binding.
+            // and standalone builds alike, that reaches Env.open_signature at
+            // compiler/ml/env.ml:1874-1877, which adds opened components but
+            // not a root `Pervasives` module binding. Keep the raw signature
+            // registered for ps_comps-style descriptor lookup without changing
+            // source module lookup shape.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                         ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
                     }
-                    env.add_module(Ident::create_persistent("Pervasives"), md);
                 }
             }
         }
@@ -2159,13 +2160,12 @@ pub fn load_pervasives<'a>(
         // Try to load and open Stdlib
         if pers_env.open_module("Stdlib", env, ctx) {
             // Same implicit-open behavior as above; keep the opened bindings,
-            // but let explicit module lookup use the in-process registry.
+            // but let explicit module lookup use the persistent registry.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                         ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
                     }
-                    env.add_module(Ident::create_persistent("Stdlib"), md);
                 }
             }
         }

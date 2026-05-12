@@ -2265,12 +2265,10 @@ fn normalize_path_full_inner<'a>(
     // compiler/ml/env.ml:865-875/env.ml:903-914: `normalize_path` calls
     // `find_module ~alias:true`, which forces a persistent structure's
     // `ps_sig` unless the exact module id is already present in `env.modules`.
-    // Rust keeps implicit `Pervasives`/`Stdlib` root bindings for qualified
-    // lookup even though OCaml's implicit open in
-    // compiler/core/res_compmisc.ml:61-62 and compiler/ml/env.ml:1874-1877
-    // exposes components, not root module bindings. Keep the compensation so
-    // paths like `Pervasives.ref` and `Stdlib.Iterator.result` consume
-    // compiler/ml/env.ml:865-875 `ps_sig` stamps at the same point.
+    // Implicit opens in compiler/core/res_compmisc.ml:61-62 go through
+    // compiler/ml/env.ml:1874-1877 `open_signature`, which exposes opened
+    // components but not root module bindings, so implicit `Pervasives` and
+    // `Stdlib` roots naturally take the persistent force path here.
     if let Path::Pident(id) = &path {
         let has_local_module = env.find_module_same(id).is_ok();
         let has_component_cache = {
@@ -2288,7 +2286,7 @@ fn normalize_path_full_inner<'a>(
         // earlier full-signature force than OCaml observes.
         let should_force_persistent_sig = id.is_persistent()
             && !(id.name() == "Belt" && has_component_cache)
-            && (!has_local_module || id.name() == "Pervasives" || id.name() == "Stdlib");
+            && !has_local_module;
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
