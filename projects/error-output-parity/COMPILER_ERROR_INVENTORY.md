@@ -569,6 +569,7 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
 - module type mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_modtype_mismatch.res`)
-- invalid module alias
+- invalid module alias / functor-argument alias requirement (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`)
 - unbound module path
 - unbound module type path

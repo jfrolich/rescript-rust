@@ -83,6 +83,13 @@ pub enum IncludeModError {
         name: Ident,
         error: Box<IncludeModError>,
     },
+    /// Nested include error reported in a functor result context.
+    InFunctorBody {
+        param: Ident,
+        actual: Box<ModuleType>,
+        expected: Box<ModuleType>,
+        error: Box<IncludeModError>,
+    },
     /// Nested include error reported in a module type position.
     AtModtype {
         name: Ident,
@@ -153,6 +160,22 @@ fn format_include_error(
             output.push_str(name.name());
             output.push_str(":\n");
             format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::InFunctorBody {
+            param,
+            actual,
+            expected,
+            error,
+        } => {
+            output.push_str("  At position functor (");
+            output.push_str(param.name());
+            output.push_str(") -> <here>\n");
+            output.push_str("  Modules do not match: ");
+            output.push_str(&format_module_type(type_ctx, actual));
+            output.push_str(" is not included in ");
+            output.push_str(&format_module_type(type_ctx, expected));
+            output.push('\n');
+            format_functor_body_error(type_ctx, filename, param, error, output);
         }
         IncludeModError::AtModtype { name, error } => {
             output.push_str("  At position module type ");
@@ -312,6 +335,42 @@ fn format_include_error(
     }
 }
 
+fn format_functor_body_error(
+    type_ctx: &TypeContext,
+    filename: &str,
+    param: &Ident,
+    error: &IncludeModError,
+    output: &mut String,
+) {
+    if let IncludeModError::InModule { name, error } = error {
+        if let IncludeModError::ModuleTypesMismatch {
+            actual, expected, ..
+        } = error.as_ref()
+        {
+            output.push_str("  At position functor (");
+            output.push_str(param.name());
+            output.push_str(") -> sig module ");
+            output.push_str(name.name());
+            output.push_str(" : <here> end\n");
+            output.push_str("  Modules do not match: ");
+            output.push_str(&format_module_type_for_context_leaf(type_ctx, actual));
+            output.push_str(" is not included in ");
+            output.push_str(&format_module_type_for_context_leaf(type_ctx, expected));
+            output.push('\n');
+            return;
+        }
+    }
+
+    format_include_error(type_ctx, filename, error, output);
+}
+
+fn format_module_type_for_context_leaf(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    match mty {
+        ModuleType::MtyAlias(_, _) => String::new(),
+        _ => format_module_type(type_ctx, mty),
+    }
+}
+
 fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
     actual.len() + expected.len() > 120
 }
@@ -338,7 +397,7 @@ fn format_module_type_with_options(
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => path.name(),
         ModuleType::MtySignature(sig) => {
             if sig.is_empty() {
-                "{}".to_string()
+                String::new()
             } else {
                 let items = sig
                     .iter()
@@ -382,11 +441,20 @@ fn format_signature_item(
             format_value_description_with_options(type_ctx, id, desc, weak_names, full_paths)
         }
         SignatureItem::SigModule(id, decl, _) => {
-            format!(
-                "module {}: {}",
-                id.name(),
-                format_module_type_with_options(type_ctx, &decl.md_type, weak_names, full_paths)
-            )
+            match &decl.md_type {
+                ModuleType::MtyAlias(_, path) => {
+                    format!("module {} = {}", id.name(), path.name())
+                }
+                mty => {
+                    let rendered =
+                        format_module_type_with_options(type_ctx, mty, weak_names, full_paths);
+                    if rendered.is_empty() {
+                        format!("module {}:", id.name())
+                    } else {
+                        format!("module {}: {}", id.name(), rendered)
+                    }
+                }
+            }
         }
         SignatureItem::SigModtype(id, decl) => match &decl.mtd_type {
             Some(mty) => format!(
@@ -1127,36 +1195,6 @@ fn modtypes_inner<'a>(
             }
         }
 
-        // Alias on the signature side - expand and check
-        (mty_impl, ModuleType::MtyAlias(_, path)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    mty_impl,
-                    expanded,
-                    sig_access_path,
-                    aliasable,
-                )
-            }) {
-                return result;
-            }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    mty_impl,
-                    &expanded,
-                    sig_access_path,
-                    aliasable,
-                )
-            } else {
-                Ok(ModuleCoercion::Tcoerce_none)
-            }
-        }
-
         // Signature matching
         (ModuleType::MtySignature(sig_impl), ModuleType::MtySignature(sig_sig)) => {
             signatures_with_subst(type_ctx, env, subst, sig_access_path, sig_impl, sig_sig)
@@ -1227,7 +1265,13 @@ fn modtypes_inner<'a>(
                 result_sig,
                 sig_access_path,
                 false,
-            )?;
+            )
+            .map_err(|error| IncludeModError::InFunctorBody {
+                param: param_impl.clone(),
+                actual: result_impl.clone(),
+                expected: result_sig.clone(),
+                error: Box::new(error),
+            })?;
 
             // If both parameter and result coercions are identity, return identity
             if matches!(

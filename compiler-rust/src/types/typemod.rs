@@ -10128,7 +10128,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 None => None,
             };
             let mut result_env = env.clone();
-            result_env.add_module(
+            result_env.add_module_arg(
                 param_id.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: param_decl
@@ -10491,7 +10491,7 @@ fn approx_modtype<'a>(
                 .transpose()?;
             let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let mut result_env = env.clone();
-            result_env.add_module(
+            result_env.add_module_arg(
                 param_id.clone(),
                 empty_module_decl(default_module_type(param_decl.clone())),
             );
@@ -12387,8 +12387,20 @@ fn type_module_expr_with_alias<'a>(
                 tctx.type_ctx,
             )
             .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
-            let mod_type = if alias {
+            let aliasable = !env.is_functor_arg_path(&path);
+            let mod_type = if alias && aliasable {
                 None
+            } else if alias {
+                // Match compiler/ml/typemod.ml:1238-1260: aliases rooted in
+                // functor parameters are not aliasable, so OCaml falls back
+                // to the module declaration type from Env.find_module.
+                lookup_module_type_by_lid(
+                    &longident,
+                    arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
             } else {
                 // OCaml compiler/ml/typemod.ml:1227-1255 keeps
                 // `Typetexp.lookup_module` path lookup separate from the later
@@ -12446,7 +12458,7 @@ fn type_module_expr_with_alias<'a>(
                     mod_type,
                     Some(crate::types::decl::ModuleType::MtyAlias(_, _))
                 );
-            let semantic_mod_type = if alias {
+            let semantic_mod_type = if alias && aliasable {
                 alias_mod_type.clone()
             } else if wraps_alias {
                 // OCaml compiler/ml/typemod.ml:1227-1255 builds the inner
@@ -12607,7 +12619,7 @@ fn type_module_expr_with_alias<'a>(
             // Extend environment with the functor parameter module
             let mut functor_env = env.clone();
             if let Some(param_decl_type) = param_decl_type {
-                functor_env.add_module(
+                functor_env.add_module_arg(
                     param_id.clone(),
                     crate::types::decl::ModuleDeclaration {
                         md_type: param_decl_type,
@@ -12751,7 +12763,7 @@ fn type_module_expr_with_alias<'a>(
                                 (**result).clone()
                             } else {
                                 let mut nondep_env = env.clone();
-                                nondep_env.add_module(
+                                nondep_env.add_module_arg(
                                     param.clone(),
                                     crate::types::decl::ModuleDeclaration {
                                         md_type: arg_mty.clone(),
@@ -13126,7 +13138,7 @@ fn transl_modtype<'a>(
             let param_decl = typed_param.as_ref().map(|mty| mty.mty_type.clone());
             let param_id = tctx.type_ctx.create_ident(arena.get_string(name.txt));
             let mut result_env = env.clone();
-            result_env.add_module(
+            result_env.add_module_arg(
                 param_id.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: param_decl
@@ -13879,7 +13891,7 @@ fn closed_modtype(
             result,
         } => {
             let mut functor_env = env.clone_preserve_id();
-            functor_env.add_module(
+            functor_env.add_module_arg(
                 param.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: default_module_type(param_type.as_deref().cloned()),

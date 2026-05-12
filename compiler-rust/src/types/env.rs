@@ -386,6 +386,10 @@ pub struct Env {
     /// Module type bindings.
     modtypes: BindingTable<Arc<ModtypeDeclaration>>,
 
+    /// Module identifiers that are functor parameters.
+    /// Mirrors OCaml `Env.functor_args` and drives aliasability checks.
+    functor_args: HashSet<Ident>,
+
     /// Active local module aliases keyed by the current visible binding set.
     /// This is computed lazily because the env_lazy-backed module-components
     /// cache key logic consults it frequently in module-heavy files.
@@ -427,6 +431,7 @@ impl Clone for Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            functor_args: self.functor_args.clone(),
             // These are Rust-only memo tables derived from the binding tables.
             // Do not duplicate them when snapshotting environments for unifier
             // state; OCaml Env snapshots carry semantic bindings, not copied
@@ -462,6 +467,7 @@ impl Env {
             modules: BindingTable::new(),
             module_components: BindingTable::new(),
             modtypes: BindingTable::new(),
+            functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             summary: EnvSummary::Empty,
@@ -489,6 +495,7 @@ impl Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            functor_args: self.functor_args.clone(),
             // These are Rust-only memo tables derived from the binding tables.
             // Do not duplicate them when snapshotting environments for unifier
             // state; OCaml Env snapshots carry semantic bindings, not copied
@@ -943,6 +950,21 @@ impl Env {
     /// Add a module binding.
     pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module_with_component_path(id.clone(), decl, Path::pident(id));
+    }
+
+    /// Add a functor-parameter module binding.
+    pub fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
+        self.add_module(id.clone(), decl);
+        self.functor_args.insert(id);
+    }
+
+    /// Check whether a module path is rooted in a functor parameter.
+    pub fn is_functor_arg_path(&self, path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => self.functor_args.iter().any(|arg| arg.same(id)),
+            Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
+            Path::Papply(_, _) => true,
+        }
     }
 
     /// Add a module binding from an opened module (lower priority than local bindings).
