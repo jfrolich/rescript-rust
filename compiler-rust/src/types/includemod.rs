@@ -57,6 +57,12 @@ pub enum IncludeModError {
         expected: TypeDeclaration,
         detail: String,
     },
+    /// Extension constructor mismatch.
+    ExtensionConstructorMismatch {
+        name: Ident,
+        actual: ExtensionConstructor,
+        expected: ExtensionConstructor,
+    },
     /// Module type mismatch.
     ModuleTypeMismatch { name: Ident, reason: String },
     /// Module type declaration mismatch.
@@ -189,6 +195,36 @@ fn format_include_error(
                 output.push_str(line);
                 output.push('\n');
             }
+        }
+        IncludeModError::ExtensionConstructorMismatch {
+            name,
+            actual,
+            expected,
+        } => {
+            output.push_str("  Extension declarations do not match:\n");
+            output.push_str("    ");
+            output.push_str(&format_extension_constructor(type_ctx, name, actual));
+            output.push('\n');
+            output.push_str("  is not included in\n");
+            output.push_str("    ");
+            output.push_str(&format_extension_constructor(type_ctx, name, expected));
+            output.push('\n');
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &expected.ext_loc.loc_start,
+                &expected.ext_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Expected declaration\n");
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &actual.ext_loc.loc_start,
+                &actual.ext_loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Actual declaration\n");
         }
         IncludeModError::MissingField { id, loc, kind } => {
             output.push_str("  The ");
@@ -329,7 +365,7 @@ fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String
             ),
             None => format!("module type {}", id.name()),
         },
-        SignatureItem::SigTypext(id, _, _) => format!("type {} += ...", id.name()),
+        SignatureItem::SigTypext(id, ext, _) => format_type_extension_item(type_ctx, id, ext),
         SignatureItem::SigClass => "class ...".to_string(),
         SignatureItem::SigClassType => "class type ...".to_string(),
     }
@@ -412,6 +448,51 @@ fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclar
         }
         TypeKind::TypeOpen => format!("{head} = .."),
     }
+}
+
+fn format_extension_constructor(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    ext: &ExtensionConstructor,
+) -> String {
+    format_type_extension(type_ctx, id, ext, "  ")
+}
+
+fn format_type_extension_item(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    ext: &ExtensionConstructor,
+) -> String {
+    format_type_extension(type_ctx, id, ext, " ")
+}
+
+fn format_type_extension(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    ext: &ExtensionConstructor,
+    spacing: &str,
+) -> String {
+    let mut printer = TypeExprErrorPrinter::new(type_ctx);
+    let constructor = match &ext.ext_args {
+        ConstructorArguments::CstrTuple(args) if args.is_empty() => id.name().to_string(),
+        ConstructorArguments::CstrTuple(args) => {
+            let args = args
+                .iter()
+                .map(|arg| printer.format(*arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({args})", id.name())
+        }
+        ConstructorArguments::CstrRecord(labels) => {
+            let fields = labels
+                .iter()
+                .map(|label| format_label_declaration(&mut printer, label))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({{{fields}}})", id.name())
+        }
+    };
+    format!("type {} +={spacing}{constructor}", ext.ext_type_path.last())
 }
 
 fn format_constructor_declaration(
@@ -1464,6 +1545,7 @@ fn check_paired_signature_items<'a>(
                     impl_id.clone(),
                     impl_ext_constr,
                     sig_ext_constr,
+                    subst,
                 )?;
                 coercions.push((pair.runtime_pos, ModuleCoercion::Tcoerce_none));
             }
@@ -2731,22 +2813,95 @@ fn force_package_manifest_inclusion_side_effects<'a>(
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
 fn extension_constructors<'a>(
     type_ctx: &'a TypeContext,
-    env: &Env,
+    _env: &Env,
     id: Ident,
     impl_ext: &ExtensionConstructor,
     sig_ext: &ExtensionConstructor,
+    subst: &InclusionSubst,
 ) -> IncludeModResult<()> {
-    // Check that the extension type paths match
-    if impl_ext.ext_type_path != sig_ext.ext_type_path {
-        return Err(IncludeModError::TypeMismatch {
-            name: id,
-            reason: "extension type path mismatch".to_string(),
-        });
+    let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
+    let mismatch = || IncludeModError::ExtensionConstructorMismatch {
+        name: id.clone(),
+        actual: impl_ext.clone(),
+        expected: sig_ext.clone(),
+    };
+
+    if !impl_ext.ext_type_path.same(&sig_ext.ext_type_path) {
+        return Err(mismatch());
     }
 
-    // Check that the argument types match
-    // This would require deeper type checking in a full implementation
+    let param_map = build_type_param_map(
+        type_ctx,
+        &impl_ext.ext_type_params,
+        &sig_ext.ext_type_params,
+    );
+    if impl_ext.ext_type_params.len() != sig_ext.ext_type_params.len()
+        || impl_ext
+            .ext_type_params
+            .iter()
+            .zip(sig_ext.ext_type_params.iter())
+            .any(|(impl_param, sig_param)| {
+                !type_exprs_equal_for_inclusion(type_ctx, &param_map, *impl_param, *sig_param)
+            })
+    {
+        return Err(mismatch());
+    }
+
+    if !constructor_arguments_equal_for_inclusion(
+        type_ctx,
+        &param_map,
+        &impl_ext.ext_args,
+        &sig_ext.ext_args,
+    ) {
+        return Err(mismatch());
+    }
+
+    match (impl_ext.ext_ret_type, sig_ext.ext_ret_type) {
+        (Some(impl_ret), Some(sig_ret))
+            if !type_exprs_equal_for_inclusion(type_ctx, &param_map, impl_ret, sig_ret) =>
+        {
+            return Err(mismatch());
+        }
+        (Some(_), None) | (None, Some(_)) => return Err(mismatch()),
+        _ => {}
+    }
+
+    if impl_ext.ext_private == crate::types::asttypes::PrivateFlag::Private
+        && sig_ext.ext_private == crate::types::asttypes::PrivateFlag::Public
+    {
+        return Err(mismatch());
+    }
+
     Ok(())
+}
+
+fn constructor_arguments_equal_for_inclusion(
+    type_ctx: &TypeContext,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_args: &ConstructorArguments,
+    sig_args: &ConstructorArguments,
+) -> bool {
+    match (impl_args, sig_args) {
+        (
+            ConstructorArguments::CstrTuple(impl_items),
+            ConstructorArguments::CstrTuple(sig_items),
+        ) => {
+            impl_items.len() == sig_items.len()
+                && impl_items
+                    .iter()
+                    .zip(sig_items.iter())
+                    .all(|(impl_item, sig_item)| {
+                        type_exprs_equal_for_inclusion(type_ctx, param_map, *impl_item, *sig_item)
+                    })
+        }
+        (
+            ConstructorArguments::CstrRecord(impl_labels),
+            ConstructorArguments::CstrRecord(sig_labels),
+        ) => {
+            compare_record_declarations(type_ctx, &[], &[], impl_labels, sig_labels).is_none()
+        }
+        _ => false,
+    }
 }
 
 /// Check if module type declaration `impl_decl` is compatible with `sig_decl`.

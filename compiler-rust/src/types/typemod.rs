@@ -15082,7 +15082,7 @@ fn type_structure_item<'a>(
                         ext_args,
                         ext_ret_type: None,
                         ext_private: crate::types::PrivateFlag::Public,
-                        ext_loc: arena.to_location(loc),
+                        ext_loc: arena.to_location(ec.pext_loc),
                         ext_attributes: vec![],
                         ext_is_exception: false,
                     },
