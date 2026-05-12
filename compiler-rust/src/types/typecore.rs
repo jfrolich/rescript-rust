@@ -19694,26 +19694,6 @@ fn label_result_path<'a>(
     }
 }
 
-fn implicit_open_predef_duplicate_type_path(left: &Path, right: &Path) -> bool {
-    fn dotted_implicit_predef_pair(dotted: &Path, ident: &Path) -> bool {
-        let Path::Pdot(parent, type_name, _) = dotted else {
-            return false;
-        };
-        let Path::Pident(id) = ident else {
-            return false;
-        };
-        id.is_persistent()
-            && id.stamp() == 0
-            && id.name() == type_name
-            && matches!(
-                path_root_module(parent),
-                Path::Pident(root) if root.name() == "Pervasives" || root.name() == "Stdlib"
-            )
-    }
-
-    dotted_implicit_predef_pair(left, right) || dotted_implicit_predef_pair(right, left)
-}
-
 fn force_ambiguous_label_type_path_side_effects<'a>(
     selected_label: &crate::types::LabelDescription,
     labels_in_scope_order: impl Iterator<Item = &'a crate::types::LabelDescription>,
@@ -19739,15 +19719,6 @@ fn force_ambiguous_label_type_path_side_effects<'a>(
         // env.ml:865-875. Keep that force order for generated record-field
         // accesses with no expected record path.
         let already_seen = unique_paths.iter().any(|seen_path| {
-            // OCaml's implicit opens come from compiler/core/res_compmisc.ml:61-62
-            // and compiler/ml/env.ml:1874-1877. A duplicate predef label such as
-            // `Pervasives.ref.contents` versus initial-env `ref.contents` is
-            // already represented by the opened component table; treating it as
-            // the same type avoids a Rust-only full ps_sig force while preserving
-            // the later compare_type_path force for non-predef alternatives.
-            if implicit_open_predef_duplicate_type_path(&label_path, seen_path) {
-                return true;
-            }
             compare_type_paths_for_label_disambiguation(&label_path, seen_path, env, pers_env, ctx)
         });
         if !already_seen {
@@ -21225,7 +21196,6 @@ fn disambiguate_label<'a>(
 
     // Find all labels with this name
     let all_labels = env.find_all_labels(lookup_name);
-
     if all_labels.is_empty() {
         let mut selected =
             lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);

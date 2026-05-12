@@ -2023,34 +2023,6 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         );
     }
 
-    // ref('a) = { mutable contents: 'a }
-    {
-        let tvar = ctx.new_generic_var(None);
-        let contents_label = crate::types::decl::LabelDeclaration {
-            ld_id: Ident::create_persistent("contents"),
-            ld_mutable: MutableFlag::Mutable,
-            ld_optional: false,
-            ld_type: tvar,
-            ld_loc: Location::none(),
-            ld_attributes: vec![],
-        };
-        add_type_with_constrs(
-            &mut env,
-            Ident::create_persistent("ref"),
-            TypeDeclaration {
-                type_params: vec![tvar],
-                type_arity: 1,
-                type_kind: TypeKind::TypeRecord(
-                    vec![contents_label],
-                    crate::types::decl::RecordRepresentation::RecordRegular,
-                ),
-                type_variance: vec![crate::types::variance::Variance::invariant()],
-                ..decl_abstr(1, false)
-            },
-            ctx,
-        );
-    }
-
     // char = int (private manifest)
     add_type_with_constrs(
         &mut env,
