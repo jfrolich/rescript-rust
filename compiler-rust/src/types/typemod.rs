@@ -6738,6 +6738,53 @@ pub fn modtype_of_package<'b>(
     )
 }
 
+pub(crate) fn package_modtype_signature_expected<'b>(
+    env: &Env,
+    package_path: &Path,
+    package_lids: &[Longident],
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext,
+) -> bool {
+    if package_lids.is_empty() {
+        return false;
+    }
+
+    let found_mty = match package_path {
+        Path::Pident(_) => env.lookup_modtype(package_path).ok().map(|mtd| mtd.mtd_type.clone()),
+        Path::Pdot(parent, modtype_name, _) => {
+            crate::types::typecore::lookup_modtype_in_resolved_path(
+                parent,
+                modtype_name,
+                env,
+                pers_env,
+                ctx,
+            )
+            .map(|(_, mtd)| mtd.mtd_type)
+            .or_else(|| env.lookup_modtype(package_path).ok().map(|mtd| mtd.mtd_type.clone()))
+        }
+        Path::Papply(_, _) => return false,
+    };
+
+    let Some(mtd_type) = found_mty else {
+        return false;
+    };
+    let Some(base_mty) = mtd_type else {
+        return true;
+    };
+
+    match scrape_alias_module_type(&base_mty, env, pers_env, ctx) {
+        Some(crate::types::decl::ModuleType::MtySignature(_)) => false,
+        // Keep unresolved aliases for the separate Cannot_scrape_alias branch
+        // instead of conflating them with Signature_expected.
+        Some(
+            crate::types::decl::ModuleType::MtyAlias(_, _)
+            | crate::types::decl::ModuleType::MtyIdent(_),
+        )
+        | None => false,
+        Some(_) => true,
+    }
+}
+
 fn parent_path_for_module_type(mty: &crate::types::decl::ModuleType) -> Option<Path> {
     use crate::types::decl::ModuleType as DeclMty;
 

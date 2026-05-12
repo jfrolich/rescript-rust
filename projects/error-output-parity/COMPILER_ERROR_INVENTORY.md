@@ -310,6 +310,8 @@ with a reason after checking raise sites.
 - `Not_included`
 - `Cannot_eliminate_dependency`
 - `Signature_expected`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`.
 - `Structure_expected`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`.

@@ -543,6 +543,9 @@ pub enum TypeCoreError {
     /// Multiple constraints on the same package type.
     MultipleConstraintsOnType { loc: LocIdx, lid: Longident },
 
+    /// A package type with constraints references a module type that is not a signature.
+    SignatureExpected { loc: LocIdx },
+
     /// A present polymorphic variant constructor has a conjunctive type.
     PresentHasConjunction { loc: LocIdx, label: String },
 
@@ -2691,6 +2694,15 @@ fn transl_type_inner(
                 .iter()
                 .map(|(field_lid, _, _)| field_lid.clone())
                 .collect();
+            if crate::types::typemod::package_modtype_signature_expected(
+                env,
+                &pack_path,
+                &package_lids,
+                &mut tctx.persistent_env,
+                ctx,
+            ) {
+                return Err(TypeCoreError::SignatureExpected { loc });
+            }
             // OCaml compiler/ml/typetexp.ml:547-562 calls
             // `create_package_mty true`, translates that fake module type,
             // then translates the visible package fields. The fake nested

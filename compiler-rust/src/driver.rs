@@ -3037,6 +3037,17 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::SignatureExpected { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This module type is not a signature",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::PresentHasConjunction { loc, label }) => {
             UserDiagnostic::new(
                 format_present_has_conjunction_report(arena, source, filename, *loc, label),
