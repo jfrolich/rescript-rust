@@ -574,7 +574,7 @@ pub enum TypeCoreError {
     RecursiveLocalConstraint(Vec<(TypeExprRef, TypeExprRef)>),
 
     /// Unexpected existential.
-    UnexpectedExistential,
+    UnexpectedExistential { loc: LocIdx },
 
     /// Unqualified GADT pattern.
     UnqualifiedGadtPattern {
@@ -1085,7 +1085,9 @@ impl<'a> TypeCheckContext<'a> {
     /// Get the newtype level.
     pub fn get_newtype_level(&self) -> TypeCoreResult<i32> {
         self.newtype_level
-            .ok_or(TypeCoreError::UnexpectedExistential)
+            .ok_or(TypeCoreError::UnexpectedExistential {
+                loc: LocIdx::none(),
+            })
     }
 
     /// Resolve a LidentIdx to a Longident reference.
@@ -2847,10 +2849,42 @@ pub fn type_pattern(
     mode: PatternMode,
     state: &mut PatternState,
 ) -> TypeCoreResult<Pattern> {
+    type_pattern_with_existentials(tctx, env, pat, expected_ty, mode, true, state)
+}
+
+fn type_pattern_without_existentials(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &ParsedPattern,
+    expected_ty: TypeExprRef,
+    mode: PatternMode,
+    state: &mut PatternState,
+) -> TypeCoreResult<Pattern> {
+    type_pattern_with_existentials(tctx, env, pat, expected_ty, mode, false, state)
+}
+
+fn type_pattern_with_existentials(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &ParsedPattern,
+    expected_ty: TypeExprRef,
+    mode: PatternMode,
+    allow_existentials: bool,
+    state: &mut PatternState,
+) -> TypeCoreResult<Pattern> {
     // Match OCaml's type_pat: set newtype_level for GADT existential support
     let old_newtype_level = tctx.newtype_level;
     tctx.newtype_level = Some(tctx.type_ctx.current_level());
-    let result = type_pattern_inner(tctx, env, pat, expected_ty, mode, state, 0);
+    let result = type_pattern_inner(
+        tctx,
+        env,
+        pat,
+        expected_ty,
+        mode,
+        allow_existentials,
+        state,
+        0,
+    );
     if result.is_ok() {
         for field_ty in state.take_deferred_label_arg_path_forces() {
             // OCaml compiler/ml/typecore.ml:1192-1198 resolves and sorts record
@@ -2879,6 +2913,7 @@ fn type_pattern_inner(
     pat: &ParsedPattern,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     _explode: i32,
 ) -> TypeCoreResult<Pattern> {
@@ -2954,8 +2989,16 @@ fn type_pattern_inner(
             // Type check each element
             let mut typed_pats = Vec::new();
             for (p, ty) in pats.iter().zip(elem_types.iter()) {
-                let typed_pat =
-                    type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), *ty, mode, state, 0)?;
+                let typed_pat = type_pattern_inner(
+                    tctx,
+                    env,
+                    tctx.arena.get_pat(*p),
+                    *ty,
+                    mode,
+                    allow_existentials,
+                    state,
+                    0,
+                )?;
                 typed_pats.push(typed_pat);
             }
 
@@ -2984,8 +3027,16 @@ fn type_pattern_inner(
                 };
             let inner_pat = expanded_inner.as_ref().unwrap_or(inner_pat);
 
-            let typed_inner =
-                type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
+            let typed_inner = type_pattern_inner(
+                tctx,
+                env,
+                inner_pat,
+                expected_ty,
+                mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
 
             // Build the as-type.
             // OCaml wraps in begin_def/end_def/generalize (typecore.ml:1288-1295).
@@ -3033,7 +3084,16 @@ fn type_pattern_inner(
 
             // Type check first branch
             let p1 = tctx.arena.get_pat(*p1_idx);
-            let typed_p1 = type_pattern_inner(tctx, env, p1, expected_ty, inner_mode, state, 0)?;
+            let typed_p1 = type_pattern_inner(
+                tctx,
+                env,
+                p1,
+                expected_ty,
+                inner_mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
 
             // Save p1's variables
             let p1_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
@@ -3045,7 +3105,16 @@ fn type_pattern_inner(
 
             // Type check second branch
             let p2 = tctx.arena.get_pat(*p2_idx);
-            let typed_p2 = type_pattern_inner(tctx, env, p2, expected_ty, inner_mode, state, 0)?;
+            let typed_p2 = type_pattern_inner(
+                tctx,
+                env,
+                p2,
+                expected_ty,
+                inner_mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
 
             // Get p2's variables
             let p2_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
@@ -3080,8 +3149,16 @@ fn type_pattern_inner(
 
             let mut typed_pats = Vec::new();
             for p in pats.iter() {
-                let typed_pat =
-                    type_pattern_inner(tctx, env, tctx.arena.get_pat(*p), elem_ty, mode, state, 0)?;
+                let typed_pat = type_pattern_inner(
+                    tctx,
+                    env,
+                    tctx.arena.get_pat(*p),
+                    elem_ty,
+                    mode,
+                    allow_existentials,
+                    state,
+                    0,
+                )?;
                 typed_pats.push(typed_pat);
             }
 
@@ -3104,6 +3181,7 @@ fn type_pattern_inner(
                 (*arg).map(|idx| tctx.arena.get_pat(idx)),
                 expected_ty,
                 mode,
+                allow_existentials,
                 state,
                 pat,
             )
@@ -3120,6 +3198,7 @@ fn type_pattern_inner(
                 (*arg).map(|idx| tctx.arena.get_pat(idx)),
                 expected_ty,
                 mode,
+                allow_existentials,
                 state,
                 pat,
             )
@@ -3136,6 +3215,7 @@ fn type_pattern_inner(
                 *closed_flag,
                 expected_ty,
                 mode,
+                allow_existentials,
                 state,
                 pat,
             )
@@ -3160,6 +3240,7 @@ fn type_pattern_inner(
                     core_ty,
                     expected_ty,
                     mode,
+                    allow_existentials,
                     state,
                     pat,
                 )
@@ -3172,6 +3253,7 @@ fn type_pattern_inner(
                     core_ty,
                     expected_ty,
                     mode,
+                    allow_existentials,
                     state,
                     pat,
                 )
@@ -3201,6 +3283,7 @@ fn type_pattern_inner(
                 inner_pat,
                 expected_ty,
                 mode,
+                allow_existentials,
                 state,
                 pat,
             )
@@ -3904,6 +3987,7 @@ fn type_pattern_construct(
     arg: Option<&ParsedPattern>,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
@@ -4018,6 +4102,10 @@ fn type_pattern_construct(
         }
     };
 
+    if !allow_existentials && !cstr_desc.cstr_existentials.is_empty() {
+        return Err(TypeCoreError::UnexpectedExistential { loc });
+    }
+
     let provided_arity = match arg {
         None => 0,
         Some(arg_pat) => match &*arg_pat.ppat_desc {
@@ -4077,7 +4165,16 @@ fn type_pattern_construct(
     let typed_args = match (inst_arg_types.as_slice(), arg) {
         (arg_types, Some(arg_pat)) if arg_types.len() == 1 => {
             // Single argument
-            let typed_arg = type_pattern_inner(tctx, env, arg_pat, arg_types[0], mode, state, 0)?;
+            let typed_arg = type_pattern_inner(
+                tctx,
+                env,
+                arg_pat,
+                arg_types[0],
+                mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
             vec![typed_arg]
         }
         (arg_types, Some(arg_pat)) if arg_types.len() > 1 => {
@@ -4087,8 +4184,16 @@ fn type_pattern_construct(
                     // OCaml replicates Ppat_any for each constructor arg
                     let mut args = Vec::new();
                     for &arg_ty in arg_types {
-                        let typed_arg =
-                            type_pattern_inner(tctx, env, arg_pat, arg_ty, mode, state, 0)?;
+                        let typed_arg = type_pattern_inner(
+                            tctx,
+                            env,
+                            arg_pat,
+                            arg_ty,
+                            mode,
+                            allow_existentials,
+                            state,
+                            0,
+                        )?;
                         args.push(typed_arg);
                     }
                     args
@@ -4096,8 +4201,16 @@ fn type_pattern_construct(
                 _ => {
                     // Tuple pattern - extract individual elements
                     let tuple_ty = ctx.new_tuple(arg_types.to_vec());
-                    let typed_tuple =
-                        type_pattern_inner(tctx, env, arg_pat, tuple_ty, mode, state, 0)?;
+                    let typed_tuple = type_pattern_inner(
+                        tctx,
+                        env,
+                        arg_pat,
+                        tuple_ty,
+                        mode,
+                        allow_existentials,
+                        state,
+                        0,
+                    )?;
                     match &typed_tuple.pat_desc {
                         PatternDesc::Tpat_tuple(elements) => elements.clone(),
                         _ => vec![typed_tuple],
@@ -4131,8 +4244,16 @@ fn type_pattern_construct(
         }
         (_, Some(arg_pat)) => {
             // Inlined record - type check as-is
-            let typed_arg =
-                type_pattern_inner(tctx, env, arg_pat, ctx.new_var(None), mode, state, 0)?;
+            let typed_arg = type_pattern_inner(
+                tctx,
+                env,
+                arg_pat,
+                ctx.new_var(None),
+                mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
             vec![typed_arg]
         }
     };
@@ -4182,6 +4303,7 @@ fn type_pattern_variant(
     arg: Option<&ParsedPattern>,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
@@ -4218,7 +4340,14 @@ fn type_pattern_variant(
 
     let typed_arg = match (arg, arg_ty) {
         (Some(arg_pat), Some(arg_ty)) => Some(Box::new(type_pattern_inner(
-            tctx, env, arg_pat, arg_ty, mode, state, 0,
+            tctx,
+            env,
+            arg_pat,
+            arg_ty,
+            mode,
+            allow_existentials,
+            state,
+            0,
         )?)),
         _ => None,
     };
@@ -4279,6 +4408,7 @@ fn type_pattern_record(
     closed_flag: crate::parser::ast::ClosedFlag,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
@@ -4470,7 +4600,16 @@ fn type_pattern_record(
             // field_ty is option<T> — extract T to type-check the inner pattern
             let inner_ty =
                 crate::types::ctype::extract_option_type(ctx, field_ty).unwrap_or(field_ty);
-            let typed_inner = type_pattern_inner(tctx, env, parsed_pat, inner_ty, mode, state, 0)?;
+            let typed_inner = type_pattern_inner(
+                tctx,
+                env,
+                parsed_pat,
+                inner_ty,
+                mode,
+                allow_existentials,
+                state,
+                0,
+            )?;
             // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>
             let some_lid = Located {
                 txt: tctx.arena.some_lid(),
@@ -4485,7 +4624,16 @@ fn type_pattern_record(
                 Attributes::new(),
             )
         } else {
-            type_pattern_inner(tctx, env, parsed_pat, field_ty, mode, state, 0)?
+            type_pattern_inner(
+                tctx,
+                env,
+                parsed_pat,
+                field_ty,
+                mode,
+                allow_existentials,
+                state,
+                0,
+            )?
         };
         if force_label_arg_paths {
             // OCaml compiler/ml/typecore.ml:1192-1198 and
@@ -4575,6 +4723,7 @@ fn type_pattern_constraint(
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
@@ -4594,7 +4743,16 @@ fn type_pattern_constraint(
 
     unify_pattern_types(tctx, loc, constraint_ty, expected_ty)?;
 
-    let typed_inner = type_pattern_inner(tctx, env, inner_pat, inner_expected_ty, mode, state, 0)?;
+    let typed_inner = type_pattern_inner(
+        tctx,
+        env,
+        inner_pat,
+        inner_expected_ty,
+        mode,
+        allow_existentials,
+        state,
+        0,
+    )?;
 
     // OCaml uses inner pattern attributes for Tpat_constraint extra.
     let constraint_extra = (
@@ -4654,6 +4812,7 @@ fn type_pattern_constraint_poly_var(
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
     _mode: PatternMode,
+    _allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
@@ -4723,6 +4882,7 @@ fn type_pattern_constraint_poly_var(
                 core_type,
                 expected_ty,
                 _mode,
+                _allow_existentials,
                 state,
                 pat,
             )
@@ -4818,12 +4978,22 @@ fn type_pattern_open(
     inner_pat: &ParsedPattern,
     expected_ty: TypeExprRef,
     mode: PatternMode,
+    allow_existentials: bool,
     state: &mut PatternState,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     // For now, just type check the inner pattern without opening the module
     // Full implementation would look up the module and extend the environment
-    let typed_inner = type_pattern_inner(tctx, env, inner_pat, expected_ty, mode, state, 0)?;
+    let typed_inner = type_pattern_inner(
+        tctx,
+        env,
+        inner_pat,
+        expected_ty,
+        mode,
+        allow_existentials,
+        state,
+        0,
+    )?;
 
     // Create the open pattern
     let mod_lid_txt = tctx.arena.get_longident(mod_lid.txt);
@@ -20372,7 +20542,7 @@ fn type_let_bindings(
             state.reset(true);
 
             // Type check pattern
-            let typed_pat = type_pattern(
+            let typed_pat = type_pattern_without_existentials(
                 tctx,
                 &typing_env,
                 tctx.arena.get_pat(binding.pvb_pat),

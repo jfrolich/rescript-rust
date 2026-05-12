@@ -2804,6 +2804,19 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::UnexpectedExistential { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Unexpected existential",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::NotAVariantType { loc, lid }) => {
             UserDiagnostic::new(
                 format_not_a_variant_type_report(arena, source, filename, *loc, lid),
