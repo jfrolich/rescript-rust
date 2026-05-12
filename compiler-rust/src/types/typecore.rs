@@ -4686,18 +4686,6 @@ fn force_qualified_value_type_paths<'a>(
         None
     }
 
-    fn selected_non_stdlib_persistent_module(
-        selected_module_path: Option<&Path>,
-        value_access_root_is_local: bool,
-    ) -> bool {
-        !value_access_root_is_local
-            && selected_module_path.is_some_and(|selected| {
-                path_root_ident(selected).is_some_and(|root| {
-                    root.is_persistent() && root.name() != "Stdlib" && root.name() != "Pervasives"
-                })
-            })
-    }
-
     fn selected_module_is_opened_component_path(env: &Env, selected_module_path: &Path) -> bool {
         env.find_module_with_origin(selected_module_path.last())
             .ok()
@@ -5087,30 +5075,16 @@ fn force_qualified_value_type_paths<'a>(
                             };
                             type_parent_parent.same(&target_parent) && !parent.same(target)
                         });
-                    let type_parent_root_is_implicit_stdlib =
-                        path_root_ident(parent).is_some_and(|root| {
-                            root.is_persistent()
-                                && (root.name() == "Stdlib" || root.name() == "Pervasives")
-                        });
-                    let type_parent_is_implicit_stdlib_for_non_stdlib_value =
-                        type_parent_root_is_implicit_stdlib
-                            && selected_non_stdlib_persistent_module(
-                                selected_module_path,
-                                value_access_root_is_local,
-                            );
                     if !((nested_inside_selected_module
                         && !selected_module_is_implicit_stdlib_path)
-                        || type_parent_is_selected_alias_sibling
-                        || type_parent_is_implicit_stdlib_for_non_stdlib_value)
+                        || type_parent_is_selected_alias_sibling)
                     {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
                         // reads the selected value description from
                         // compiler/ml/env.ml:1091-1100's component value
                         // table. It does not force env.ml:1568 child module
                         // declarations for nested type paths in that value
-                        // type, sibling modules under the selected alias target,
-                        // nor unrelated implicit Stdlib/Pervasives component
-                        // roots mentioned by a non-Stdlib value scheme;
+                        // type or sibling modules under the selected alias target;
                         // compiler/ml/ctype.ml:666-695 reaches those later through
                         // `get_level` while lowering arguments.
                         drop(lookup_type_decl_in_resolved_path(
