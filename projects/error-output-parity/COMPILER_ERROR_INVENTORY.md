@@ -421,6 +421,30 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/apply_generative_functor.res`.
 - `Cannot_scrape_alias`
 
+## Ast_untagged_variants Coverage Notes
+
+- `InvalidVariantAsAnnotation`: covered by
+  `tests/error_output_parity/compiler/fixtures/untagged_invalid_as_annotation.res`.
+- `Duplicated_bs_as`: covered by
+  `tests/error_output_parity/compiler/fixtures/untagged_duplicate_as.res`.
+- `InvalidVariantTagAnnotation`: covered by
+  `tests/error_output_parity/compiler/fixtures/untagged_invalid_tag_annotation.res`.
+- `TagFieldNameConflict`: covered by
+  `tests/error_output_parity/compiler/fixtures/untagged_tag_field_conflict.res`.
+- `InvalidUntaggedVariantDefinition`: covered across the reachable subcases by
+  `tests/error_output_parity/compiler/fixtures/untagged_constructor_more_than_one_arg.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_duplicate_string_literal.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_duplicate_nonstring_literal.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_only_one_unknown.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_object.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_array.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_function.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_string.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_number.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_bigint.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_boolean.res`.
+
 ## Other Compiler Error Surfaces
 
 - `compiler/ml/env.ml`
@@ -438,12 +462,6 @@ with a reason after checking raise sites.
   - `Fragile_pattern_in_toplevel`
 - `compiler/ml/transl_recmodule.ml`
   - `Circular_dependency`
-- `compiler/ml/ast_untagged_variants.ml`
-  - `InvalidVariantAsAnnotation`
-  - `Duplicated_bs_as`
-  - `InvalidVariantTagAnnotation`
-  - `InvalidUntaggedVariantDefinition`
-  - `TagFieldNameConflict`
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
   - `Wrong_version_interface`
