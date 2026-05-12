@@ -298,6 +298,8 @@ with a reason after checking raise sites.
 - `Definition_mismatch`
 - `Constraint_failed`
 - `Inconsistent_constraint`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/inconsistent_type_constraint.res`.
 - `Type_clash`
 - `Parameters_differ`
 - `Null_arity_external`

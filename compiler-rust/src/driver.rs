@@ -4426,16 +4426,28 @@ fn format_inconsistent_constraint_report(
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> String {
-    let message = if let Some((actual, expected)) = trace.first().copied() {
-        format!(
-            "The type constraints are not consistent.\nType {} is not compatible with type {}",
-            format_type_expr(type_ctx, actual),
-            format_type_expr(type_ctx, expected)
+    if let Some((actual, expected)) = trace.first().copied() {
+        format_compiler_error_report_with_unindented_break(
+            arena,
+            source,
+            filename,
+            loc,
+            "The type constraints are not consistent.",
+            &format!(
+                "Type {} is not compatible with type {}",
+                format_type_expr(type_ctx, actual),
+                format_type_expr(type_ctx, expected)
+            ),
         )
     } else {
-        "The type constraints are not consistent.".to_string()
-    };
-    format_compiler_error_report(arena, source, filename, loc, &message)
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            "The type constraints are not consistent.",
+        )
+    }
 }
 
 fn format_compiler_error_report_with_bare_reset_lines(
