@@ -14283,20 +14283,6 @@ fn transl_sig_type_declarations_with_ids<'a>(
                 typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
             }
 
-            // Convert manifest type (type alias)
-            let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
-                Some(manifest) => {
-                    // OCaml compiler/ml/typedecl.ml:1484 builds `temp_env`
-                    // with the recursive group, then typedecl.ml:1511-1513
-                    // passes it to `transl_declaration`; manifest translation
-                    // must see the same forward type identifiers.
-                    let (typed_manifest, manifest_ref) =
-                        transl_type(tctx, &temp_env, arena.get_core_type(*manifest))?;
-                    touch_manifest_cyclic_abbrev_check(ctx, &temp_env, manifest_ref);
-                    (Some(typed_manifest), Some(manifest_ref))
-                }
-                None => (None, None),
-            };
             let decl_has_unboxed_attr = decl
                 .ptype_attributes
                 .iter()
@@ -14608,6 +14594,20 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         TypedTypeKind::Ttype_variant(typed_tree_cstrs),
                     )
                 }
+            };
+
+            // OCaml compiler/ml/typedecl.ml:449-607 translates the kind
+            // before typedecl.ml:692-698 translates the manifest. The same
+            // temp_env from typedecl.ml:1484 and :1511-1513 is used here so
+            // recursive manifests see forward type identifiers.
+            let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
+                Some(manifest) => {
+                    let (typed_manifest, manifest_ref) =
+                        transl_type(tctx, &temp_env, arena.get_core_type(*manifest))?;
+                    touch_manifest_cyclic_abbrev_check(ctx, &temp_env, manifest_ref);
+                    (Some(typed_manifest), Some(manifest_ref))
+                }
+                None => (None, None),
             };
 
             let typ_private = decl.ptype_private;
