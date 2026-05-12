@@ -385,12 +385,22 @@ pub struct Env {
     /// Module type bindings.
     modtypes: BindingTable<Arc<ModtypeDeclaration>>,
 
-    /// Active local module aliases keyed by the current visible binding set.
-    /// This is computed lazily because the env_lazy-backed module-components
-    /// cache key logic consults it frequently in module-heavy files.
+    /// Intentional Rust performance cache for active local module aliases.
+    ///
+    /// OCaml walks the current Env tables when resolving module components
+    /// (compiler/ml/env.ml:781-813, 1516-1538). Rust memoizes that derived
+    /// view per immutable Env instance because the env_lazy-backed
+    /// module-components cache key logic consults it frequently in
+    /// module-heavy files. This cache must stay derived from bindings only; it
+    /// must not become a path-spelling alias-equivalence shortcut.
     local_module_aliases_cache: RefCell<Option<Vec<(Ident, Path)>>>,
 
-    /// Memoized env-scope decisions for qualified module-component cache keys.
+    /// Intentional Rust performance cache for env-scoped component cache keys.
+    ///
+    /// This preserves OCaml's lookup boundary from find_module_descr/find_type
+    /// into components_of_module_maker (compiler/ml/env.ml:781-813,
+    /// 1516-1538) but avoids recomputing the same alias-scope predicate for
+    /// every qualified component lookup.
     module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
 
     /// Persistent roots opened by the initial environment.
@@ -524,6 +534,9 @@ impl Env {
     }
 
     fn invalidate_module_alias_caches(&self) {
+        // These caches are purely derived from visible bindings. Every Env
+        // mutation that can change OCaml component lookup visibility must drop
+        // them before later lookups rebuild the same derived view.
         self.local_module_aliases_cache.borrow_mut().take();
         self.module_path_requires_env_scoped_cache_cache
             .borrow_mut()

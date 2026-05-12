@@ -242,6 +242,13 @@ pub enum TypeDesc {
 
 /// A reference to a type expression.
 ///
+/// Intentional Rust performance representation for OCaml type-node identity.
+///
+/// OCaml stores a type node as `{mutable desc; mutable level; id}`
+/// (compiler/ml/types.ml:22) and relies on physical identity plus the `id`.
+/// Rust keeps that identity as an arena index instead of a pointer-shaped
+/// object handle.
+///
 /// In the arena-based design, this is an index or pointer.
 /// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
 /// reduces typedtree and type descriptor memory traffic.
