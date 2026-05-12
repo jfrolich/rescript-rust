@@ -1329,16 +1329,7 @@ fn format_react_component_with_props_external_report(
 ) -> String {
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(
-        filename,
-        &loc.loc_start,
-        &loc.loc_end,
-    ));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
-    output.push('\n');
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
 
     for (idx, line) in REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG.lines().enumerate() {
         if idx == 0 {
@@ -3180,6 +3171,51 @@ fn format_non_generalizable_module_report(
     format_compiler_error_report_from_location(source, filename, loc, &message)
 }
 
+fn push_compiler_error_report_header_from_location(
+    output: &mut String,
+    source: &str,
+    filename: &str,
+    loc: &Location,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(
+            filename,
+            &loc.loc_start,
+            &loc.loc_end,
+        ));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+        output.push('\n');
+    }
+}
+
+fn push_compiler_error_report_header(
+    output: &mut String,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    if arena.loc_ghost(loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print(source, start_pos, end_pos));
+        output.push('\n');
+    }
+}
+
 fn format_compiler_error_report_from_location(
     source: &str,
     filename: &str,
@@ -3188,16 +3224,7 @@ fn format_compiler_error_report_from_location(
 ) -> String {
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(
-        filename,
-        &loc.loc_start,
-        &loc.loc_end,
-    ));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
-    output.push('\n');
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
 
     for line in message.lines() {
         output.push_str("  ");
@@ -3215,16 +3242,9 @@ fn format_compiler_error_report(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     for line in message.lines() {
         output.push_str("  ");
@@ -3243,16 +3263,9 @@ fn format_compiler_error_report_with_unindented_break(
     first_line: &str,
     second_line: &str,
 ) -> String {
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
     output.push_str("  ");
     output.push_str(first_line);
     output.push('\n');
@@ -3304,16 +3317,9 @@ fn format_compiler_error_report_with_bare_reset_lines(
 ) -> String {
     const RESET: &str = "\x1b[0m";
 
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     for line in message.lines() {
         if line == RESET {
@@ -3408,16 +3414,9 @@ fn format_compiler_error_report_raw_message(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
     output.push_str(message);
     if !message.ends_with('\n') {
         output.push('\n');
@@ -4712,16 +4711,9 @@ fn format_compiler_error_report_with_empty_blank_lines(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     for line in message.lines() {
         if !line.is_empty() {
@@ -4741,16 +4733,9 @@ fn format_compiler_error_report_for_subtype_context(
     loc: LocIdx,
     message: &str,
 ) -> String {
-    let start_pos = arena.loc_start(loc);
-    let end_pos = arena.loc_end(loc);
     let mut output = String::new();
 
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print(source, start_pos, end_pos));
-    output.push('\n');
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     let mut blank_lines = 0;
     for line in message.lines() {

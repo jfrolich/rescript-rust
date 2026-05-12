@@ -120,6 +120,11 @@ with a reason after checking raise sites.
 - `Continue_outside_loop`: covered by
   `tests/error_output_parity/compiler/fixtures/continue_outside_loop.res`.
 
+## Typetexp Coverage Notes
+
+- `Unbound_module`: covered for the generated JSX `ReactDOM` lookup by
+  `tests/error_output_parity/compiler/fixtures/jsx_generated_unbound_reactdom.res`.
+
 ## `compiler/ml/typetexp.ml`
 
 - `Unbound_type_variable`
