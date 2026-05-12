@@ -3041,6 +3041,13 @@ pub enum TypeModError {
     CoreError(TypeCoreError),
     /// Module not found.
     ModuleNotFound(String),
+    /// Module type not found.
+    UnboundModtype {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Missing module type path.
+        lid: Longident,
+    },
     /// Signature mismatch.
     SignatureMismatch {
         loc: LocIdx,
@@ -5212,6 +5219,22 @@ pub fn lookup_modtype_path_by_lid<'b>(
         }
         Longident::Lapply(_, _) => None,
     }
+}
+
+fn lookup_modtype_path_or_error<'b>(
+    lid: &crate::parser::longident::Longident,
+    loc: LocIdx,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext,
+) -> TypeModResult<Path> {
+    lookup_modtype_path_by_lid(lid, arena, env, pers_env, ctx).ok_or_else(|| {
+        TypeModError::UnboundModtype {
+            loc,
+            lid: lid.clone(),
+        }
+    })
 }
 
 fn alias_of_module_type(
@@ -8933,17 +8956,15 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             ))
         }
         PMtyDesc::Pmty_ident(lid) => {
-            // Match OCaml transl_modtype: keep an identifier path and let later
-            // signature scraping resolve aliases/expansions.
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let path = lookup_modtype_path_by_lid(
+            let path = lookup_modtype_path_or_error(
                 &longident,
+                lid.loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            )?;
             Ok(DeclMty::MtyIdent(path))
         }
         PMtyDesc::Pmty_functor(args) => {
@@ -9299,14 +9320,14 @@ fn approx_modtype<'a>(
     match &*mty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let path = lookup_modtype_path_by_lid(
+            let path = lookup_modtype_path_or_error(
                 &longident,
+                lid.loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            )?;
             Ok(DeclMty::MtyIdent(path))
         }
         PMtyDesc::Pmty_alias(lid) => {
@@ -11588,14 +11609,14 @@ fn transl_modtype<'a>(
     let desc = match &*smty.pmty_desc {
         PMtyDesc::Pmty_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let path = lookup_modtype_path_by_lid(
+            let path = lookup_modtype_path_or_error(
                 &longident,
+                lid.loc,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            )?;
             TMtyDesc::Tmty_ident(path, lid.clone())
         }
         PMtyDesc::Pmty_signature(sig_items) => {

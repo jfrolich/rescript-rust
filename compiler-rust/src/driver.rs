@@ -3206,6 +3206,11 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::UnboundModtype { loc, lid } => UserDiagnostic::new(
+            format_unbound_modtype_report(arena, source, filename, *loc, lid),
+            2,
+        )
+        .into(),
         TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
             format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
             2,
@@ -3660,6 +3665,23 @@ fn format_unbound_type_variable_report(
     );
     report.push('\n');
     report
+}
+
+fn format_unbound_modtype_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("Unbound module type {name}"),
+    )
 }
 
 fn format_invalid_variable_name_report(

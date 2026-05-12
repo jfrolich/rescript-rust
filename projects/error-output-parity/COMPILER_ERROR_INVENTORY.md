@@ -225,6 +225,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typetexp_not_an_object.res`.
 - `Method_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_method_mismatch.res`.
+- `Unbound_modtype`: covered by
+  `tests/error_output_parity/compiler/fixtures/unbound_modtype.res`.
 
 ## `compiler/ml/typetexp.ml`
 
