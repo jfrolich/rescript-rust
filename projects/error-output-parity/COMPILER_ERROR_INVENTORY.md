@@ -106,6 +106,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/apply_wrong_label.res`.
 - `Incoherent_label_order`: covered by
   `tests/error_output_parity/compiler/fixtures/incoherent_label_order.res`.
+- `Less_general`: covered for field values and explicitly polymorphic
+  definitions by
+  `tests/error_output_parity/compiler/fixtures/less_general_field_value.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/less_general_definition.res`.
 - `Too_many_arguments`: covered by
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
 - `Abstract_wrong_label`: covered by

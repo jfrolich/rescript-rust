@@ -555,7 +555,11 @@ pub enum TypeCoreError {
     IncoherentLabelOrder { loc: LocIdx },
 
     /// Less general type.
-    LessGeneral(String, Vec<(TypeExprRef, TypeExprRef)>),
+    LessGeneral {
+        loc: LocIdx,
+        kind: String,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
 
     /// Modules not allowed.
     ModulesNotAllowed { loc: LocIdx },
@@ -15721,11 +15725,12 @@ fn type_record(
         let field_result = (|| -> TypeCoreResult<(
             crate::types::LabelDescription,
             TypeExprRef,
+            TypeExprRef,
             Vec<TypeExprRef>,
             Expression,
         )> {
             // Build label description (prefer env-disambiguated metadata).
-            let (label_desc, field_input_ty, poly_vars) =
+            let (label_desc, field_input_ty, less_general_expected_ty, poly_vars) =
                 if let Some(env_label) = disambiguated {
                     let expected_label = expected_label_descriptions
                         .as_ref()
@@ -15784,6 +15789,7 @@ fn type_record(
                             typ: env_label.lbl_res,
                         });
                     }
+                    let original_label_arg = env_label.lbl_arg;
 
                     let separate = env.has_local_constraints();
                     if separate {
@@ -15847,6 +15853,7 @@ fn type_record(
                             lbl_attributes: env_label.lbl_attributes.clone(),
                         },
                         input_ty,
+                        original_label_arg,
                         poly_vars,
                     )
                 } else {
@@ -15871,6 +15878,7 @@ fn type_record(
                             lbl_loc: tctx.arena.to_location(field.lid.loc),
                             lbl_attributes: vec![],
                         },
+                        lbl_arg,
                         lbl_arg,
                         vec![],
                     )
@@ -15900,14 +15908,24 @@ fn type_record(
                 field_input_ty_inst,
                 field_context,
             )?;
-            Ok((label_desc, field_input_ty, poly_vars, typed_expr))
+            Ok((label_desc, field_input_ty, less_general_expected_ty, poly_vars, typed_expr))
         })();
         ctx.end_def();
-        let (label_desc, _field_input_ty, poly_vars, typed_expr) = field_result?;
+        let (label_desc, _field_input_ty, less_general_expected_ty, poly_vars, typed_expr) =
+            field_result?;
 
         // OCaml check_univars: convert fresh Tvars back to Tunivar for poly fields
+        // or report Less_general if a universal variable was specialized.
         if !poly_vars.is_empty() {
-            crate::types::ctype::check_univars(ctx, &poly_vars);
+            check_univars_or_less_general(
+                tctx,
+                env,
+                true,
+                "field value",
+                &typed_expr,
+                less_general_expected_ty,
+                &poly_vars,
+            )?;
         }
 
         // process_optional_label: wrap optional fields in Some(...) only when the
@@ -19746,6 +19764,99 @@ fn is_nonexpansive_module_expr(
     }
 }
 
+fn check_univars_or_less_general(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    expans: bool,
+    kind: &str,
+    exp: &Expression,
+    ty_expected: TypeExprRef,
+    vars: &[TypeExprRef],
+) -> TypeCoreResult<()> {
+    let ctx = tctx.type_ctx;
+    if expans && !is_nonexpansive_expression(tctx, exp) {
+        crate::types::ctype::generalize_expansive(ctx, env, exp.exp_type);
+    }
+
+    let mut universal_vars = Vec::new();
+    for var in vars {
+        let var = ctx.repr(*var);
+        crate::types::ctype::generalize(ctx, var);
+        let var_name = {
+            let desc = ctx.get_desc(var);
+            match &*desc {
+                TypeDesc::Tvar(name)
+                    if ctx.get_level(var) == crate::types::type_expr::GENERIC_LEVEL =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(name) = var_name {
+            ctx.set_desc(var, TypeDesc::Tunivar(name));
+            universal_vars.push(var);
+        }
+    }
+
+    if universal_vars.len() == vars.len() {
+        Ok(())
+    } else {
+        let actual = ctx.new_generic_type(TypeDesc::Tpoly {
+            body: ctx.repr(exp.exp_type),
+            vars: universal_vars,
+        });
+        let expected = less_general_expected_type(ctx, ty_expected);
+        Err(TypeCoreError::LessGeneral {
+            loc: exp.exp_loc,
+            kind: kind.to_string(),
+            trace: vec![(actual, actual), (expected, expected)],
+        })
+    }
+}
+
+fn less_general_expected_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+    let desc = ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tpoly { vars, .. } if !vars.is_empty() => return ty,
+        _ => {}
+    }
+    drop(desc);
+
+    let mut vars = Vec::new();
+    let mut seen = HashSet::new();
+    collect_universal_vars(ctx, ty, &mut seen, &mut vars);
+    if vars.is_empty() {
+        ty
+    } else {
+        ctx.new_generic_type(TypeDesc::Tpoly { body: ty, vars })
+    }
+}
+
+fn collect_universal_vars(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    seen: &mut HashSet<TypeExprRef>,
+    vars: &mut Vec<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty);
+    if matches!(&*desc, TypeDesc::Tunivar(_)) {
+        vars.push(ty);
+        return;
+    }
+    drop(desc);
+
+    crate::types::iter_type_expr(ctx, ty, |child| {
+        collect_universal_vars(ctx, child, seen, vars);
+    });
+}
+
 /// OCaml typecore.ml `approx_type`: approximate a parsed core type for recursive let pre-unification.
 fn approx_type_for_rec_let(
     tctx: &mut TypeCheckContext<'_>,
@@ -20343,7 +20454,15 @@ fn type_let_bindings(
                     )?;
                     ctx.end_def();
                     // OCaml: check_univars env true "definition" exp pat.pat_type vars
-                    crate::types::ctype::check_univars(ctx, &inst_vars);
+                    check_univars_or_less_general(
+                        tctx,
+                        env,
+                        true,
+                        "definition",
+                        &exp,
+                        pat_ty,
+                        &inst_vars,
+                    )?;
                     // OCaml: {exp with exp_type = instance env exp.exp_type}
                     let new_exp_type = crate::types::ctype::instance(ctx, exp.exp_type);
                     Expression {
