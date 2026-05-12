@@ -94,6 +94,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/invalid_extension_constructor_payload.res`.
 - `Not_an_extension_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/not_an_extension_constructor.res`.
+- `Inlined_record_escape`: covered by
+  `tests/error_output_parity/compiler/fixtures/inlined_record_escape.res`.
 - `Typemod.Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`.
 - `Break_outside_loop`: covered by
