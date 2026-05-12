@@ -603,5 +603,6 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`)
 - lax module alias normalization through persistent components (covered by
   `tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res`)
-- unbound module path
+- unbound module path (covered by
+  `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`)
 - unbound module type path

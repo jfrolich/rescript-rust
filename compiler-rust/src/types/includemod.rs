@@ -78,6 +78,8 @@ pub enum IncludeModError {
         expected: Box<ModuleType>,
         error: Box<IncludeModError>,
     },
+    /// A module alias normalized to a path whose compiled interface is missing.
+    UnboundModulePath { path: Path },
     /// Nested include error reported in a module context.
     InModule {
         name: Ident,
@@ -154,6 +156,11 @@ fn format_include_error(
                 output.push('\n');
             }
             format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::UnboundModulePath { path } => {
+            output.push_str("  Unbound module ");
+            output.push_str(&path.name());
+            output.push('\n');
         }
         IncludeModError::InModule { name, error } => {
             output.push_str("  In module ");
@@ -985,12 +992,26 @@ pub fn modtypes<'a>(
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
     modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, false).map_err(|error| {
-        IncludeModError::ModuleTypesMismatch {
-            actual: Box::new(mty_impl.clone()),
-            expected: Box::new(mty_sig.clone()),
-            error: Box::new(error),
+        if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
+            error
+        } else {
+            IncludeModError::ModuleTypesMismatch {
+                actual: Box::new(mty_impl.clone()),
+                expected: Box::new(mty_sig.clone()),
+                error: Box::new(error),
+            }
         }
     })
+}
+
+fn module_type_error_is_alias_unbound_module(
+    mty_impl: &ModuleType,
+    mty_sig: &ModuleType,
+    error: &IncludeModError,
+) -> bool {
+    matches!(error, IncludeModError::UnboundModulePath { .. })
+        && (matches!(mty_impl, ModuleType::MtyAlias(..))
+            || matches!(mty_sig, ModuleType::MtyAlias(..)))
 }
 
 /// Check if `mty_impl` is a subtype of `mty_sig` with optional aliasability.
@@ -1126,11 +1147,20 @@ fn modtypes_inner<'a>(
         ctype::normalize_path_full(type_ctx, env, path)
     }
 
+    fn strict_normalized_alias_path(
+        type_ctx: &TypeContext,
+        env: &Env,
+        path: &Path,
+    ) -> IncludeModResult<Path> {
+        ctype::normalize_path_full_strict(type_ctx, env, path)
+            .map_err(|path| IncludeModError::UnboundModulePath { path })
+    }
+
     match (mty_impl, mty_sig) {
         (ModuleType::MtyAlias(pres_impl, impl_path), ModuleType::MtyAlias(pres_sig, sig_path)) => {
-            let impl_path = normalized_alias_path(type_ctx, env, impl_path);
-            let sig_path = normalized_alias_path(type_ctx, env, sig_path);
-            if !impl_path.same(&sig_path) {
+            let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
+            let lax_sig_path = normalized_alias_path(type_ctx, env, sig_path);
+            if !lax_impl_path.same(&lax_sig_path) {
                 return Err(IncludeModError::ModuleTypeMismatch {
                     name: Ident::create_local("module"),
                     reason: "module aliases do not match".to_string(),
@@ -1140,17 +1170,20 @@ fn modtypes_inner<'a>(
                 (
                     crate::types::decl::AliasPresence::MtaAbsent,
                     crate::types::decl::AliasPresence::MtaPresent,
-                ) => Ok(ModuleCoercion::Tcoerce_alias(
-                    type_ctx.store_typed_env(env),
-                    impl_path,
-                    Box::new(ModuleCoercion::Tcoerce_none),
-                )),
+                ) => {
+                    let impl_path = strict_normalized_alias_path(type_ctx, env, impl_path)?;
+                    Ok(ModuleCoercion::Tcoerce_alias(
+                        type_ctx.store_typed_env(env),
+                        impl_path,
+                        Box::new(ModuleCoercion::Tcoerce_none),
+                    ))
+                }
                 _ => Ok(ModuleCoercion::Tcoerce_none),
             }
         }
 
         (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
-            let impl_path = normalized_alias_path(type_ctx, env, impl_path);
+            let impl_path = strict_normalized_alias_path(type_ctx, env, impl_path)?;
             let coercion = if let Some(coercion) =
                 with_local_pident_module_type(env, &impl_path, |expanded| {
                     let expanded = ctype::strengthen_module_type_for_inclusion_path(
@@ -1749,16 +1782,27 @@ fn check_paired_signature_items<'a>(
                 )
                 .map_err(|error| {
                     let name = impl_id.clone();
-                    IncludeModError::InModule {
-                        name: name.clone(),
-                        error: Box::new(IncludeModError::ModuleTypesMismatch {
-                            actual: Box::new(impl_mty.clone()),
-                            expected: Box::new(sig_mod_decl.md_type.clone()),
-                            error: Box::new(IncludeModError::InModule {
-                                name,
-                                error: Box::new(error),
+                    if module_type_error_is_alias_unbound_module(
+                        &impl_mty,
+                        &sig_mod_decl.md_type,
+                        &error,
+                    ) {
+                        IncludeModError::InModule {
+                            name,
+                            error: Box::new(error),
+                        }
+                    } else {
+                        IncludeModError::InModule {
+                            name: name.clone(),
+                            error: Box::new(IncludeModError::ModuleTypesMismatch {
+                                actual: Box::new(impl_mty.clone()),
+                                expected: Box::new(sig_mod_decl.md_type.clone()),
+                                error: Box::new(IncludeModError::InModule {
+                                    name,
+                                    error: Box::new(error),
+                                }),
                             }),
-                        }),
+                        }
                     }
                 })?;
                 coercions.push((pair.runtime_pos, coercion));

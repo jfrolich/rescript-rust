@@ -10,6 +10,7 @@ tests/error_output_parity/compiler/cases/inconsistent_import.res	-w +A -bs-jsx 4
 tests/error_output_parity/compiler/cases/missing_module.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
 tests/error_output_parity/compiler/cases/illegal_value_name.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/illegal_value_name_cmis
 tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
+tests/error_output_parity/compiler/cases/include_unbound_module_path.res	-w +A -bs-jsx 4 -color never -I tests/error_output_parity/compiler/cases/missing_module_cmis
 tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi	-color never
 tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi	-color never
 tests/error_output_parity/compiler/cases/cmi_corrupted.cmi	-color never

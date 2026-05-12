@@ -2626,6 +2626,63 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     normalized
 }
 
+pub(crate) fn normalize_path_full_strict<'a>(
+    ctx: &'a TypeContext,
+    env: &Env,
+    path: &Path,
+) -> Result<Path, Path> {
+    // OCaml `Env.normalize_path (Some loc)` raises `Missing_module` when
+    // alias normalization lands on a persistent path with no compiled
+    // interface. The lax `None` form only returns the dangling path.
+    let normalized = normalize_path_full(ctx, env, path);
+    if module_path_exists_for_strict_normalize(ctx, env, &normalized) {
+        Ok(normalized)
+    } else {
+        Err(normalized)
+    }
+}
+
+fn module_path_exists_for_strict_normalize<'a>(
+    ctx: &'a TypeContext,
+    env: &Env,
+    path: &Path,
+) -> bool {
+    match path {
+        Path::Pident(id) => {
+            if env.find_module_same(id).is_ok() {
+                return true;
+            }
+            if !id.is_persistent() && id.stamp() != 0 {
+                return false;
+            }
+        }
+        Path::Pdot(parent, module_name, _) => {
+            let mut persistent_env = in_process_module_resolution_env(ctx);
+            if crate::types::typecore::lookup_module_in_resolved_path(
+                parent,
+                module_name,
+                env,
+                &mut persistent_env,
+                ctx,
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+        Path::Papply(_, _) => {}
+    }
+
+    let mut persistent_env = in_process_module_resolution_env(ctx);
+    crate::types::typecore::resolve_module_signature_for_path(
+        path,
+        env,
+        &mut persistent_env,
+        ctx,
+    )
+    .is_some()
+}
+
 pub(crate) fn force_normalize_path_full_side_effects<'a>(
     ctx: &'a TypeContext,
     env: &Env,
