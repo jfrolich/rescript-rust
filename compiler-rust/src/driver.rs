@@ -2831,6 +2831,24 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::ScopingPack { loc, lid, ty } => UserDiagnostic::new(
+            format_compiler_error_report_with_unindented_break(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The type {} in this module cannot be exported.",
+                    format_longident_for_report(arena, lid)
+                ),
+                &format!(
+                    "Its type contains local dependencies:\n{}",
+                    format_type_expr(type_ctx, *ty)
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
             format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
             2,
@@ -9844,7 +9862,7 @@ impl<'a> TypeExprPrinter<'a> {
     }
 
     fn format_path_name(&self, path: &crate::types::Path) -> String {
-        let name = path.name();
+        let name = self.format_path_name_raw(path);
         let name = name
             .strip_prefix("Pervasives.")
             .or_else(|| name.strip_prefix("Stdlib."))
@@ -9852,10 +9870,34 @@ impl<'a> TypeExprPrinter<'a> {
             .or_else(|| name.strip_prefix("Stdlib_"))
             .unwrap_or(&name)
             .to_string();
-        if name.starts_with('$') {
+        name
+    }
+
+    fn format_path_name_raw(&self, path: &crate::types::Path) -> String {
+        match path {
+            crate::types::Path::Pident(id) => self.format_path_component(id.name()),
+            crate::types::Path::Pdot(parent, name, _) => {
+                format!(
+                    "{}.{}",
+                    self.format_path_name_raw(parent),
+                    self.format_path_component(name)
+                )
+            }
+            crate::types::Path::Papply(functor, arg) => {
+                format!(
+                    "{}({})",
+                    self.format_path_name_raw(functor),
+                    self.format_path_name_raw(arg)
+                )
+            }
+        }
+    }
+
+    fn format_path_component(&self, name: &str) -> String {
+        if name.starts_with('$') || name.starts_with('%') {
             format!("\\\"{name}\"")
         } else {
-            name
+            name.to_string()
         }
     }
 

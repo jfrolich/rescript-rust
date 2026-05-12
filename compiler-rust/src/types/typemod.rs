@@ -3308,6 +3308,15 @@ pub enum TypeModError {
         /// Type of the packed module expression.
         ty: TypeExprRef,
     },
+    /// A packaged module constraint would export a local module dependency.
+    ScopingPack {
+        /// Packed module expression location to report.
+        loc: LocIdx,
+        /// Constrained type path inside the package.
+        lid: Longident,
+        /// Type that contains the local dependency.
+        ty: TypeExprRef,
+    },
     /// A module was opened where a structure signature was expected.
     StructureExpected {
         /// Module path location to report.

@@ -19613,6 +19613,137 @@ fn type_letmodule(
     ))
 }
 
+fn pack_type_path_has_local_module_dependency(
+    ctx: &TypeContext,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    path: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) -> bool {
+    if matches!(path, Path::Pdot(..))
+        && matches!(
+            path_root_module(path),
+            Path::Pident(id) if !id.is_persistent() && id.name() == "%M"
+        )
+    {
+        let Some(decl) = lookup_type_decl_for_path(path, env, pers_env, ctx) else {
+            return true;
+        };
+        let Some(manifest) = decl.type_manifest else {
+            return true;
+        };
+        return pack_type_contains_local_module_dependency(ctx, env, pers_env, manifest, visited);
+    }
+    false
+}
+
+fn pack_type_contains_local_module_dependency(
+    ctx: &TypeContext,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ty: TypeExprRef,
+    visited: &mut HashSet<TypeExprRef>,
+) -> bool {
+    let repr = ctx.repr(ty);
+    if !visited.insert(repr) {
+        return false;
+    }
+
+    let desc = ctx.get_desc(repr);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
+                || args.iter().any(|arg| {
+                    pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
+                })
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            pack_type_contains_local_module_dependency(ctx, env, pers_env, arg.typ, visited)
+                || pack_type_contains_local_module_dependency(ctx, env, pers_env, *ret, visited)
+        }
+        TypeDesc::Ttuple(items) => items.iter().any(|item| {
+            pack_type_contains_local_module_dependency(ctx, env, pers_env, *item, visited)
+        }),
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            pack_type_contains_local_module_dependency(ctx, env, pers_env, *target, visited)
+        }
+        TypeDesc::Tobject { fields, name } => {
+            if pack_type_contains_local_module_dependency(ctx, env, pers_env, *fields, visited) {
+                return true;
+            }
+            if let Some((path, args)) = name {
+                return pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
+                    || args.iter().any(|arg| {
+                        pack_type_contains_local_module_dependency(
+                            ctx, env, pers_env, *arg, visited,
+                        )
+                    });
+            }
+            false
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            pack_type_contains_local_module_dependency(ctx, env, pers_env, *typ, visited)
+                || pack_type_contains_local_module_dependency(ctx, env, pers_env, *rest, visited)
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(ty)) => {
+                        if pack_type_contains_local_module_dependency(
+                            ctx, env, pers_env, *ty, visited,
+                        ) {
+                            return true;
+                        }
+                    }
+                    RowField::Reither { types, .. } => {
+                        if types.iter().any(|ty| {
+                            pack_type_contains_local_module_dependency(
+                                ctx, env, pers_env, *ty, visited,
+                            )
+                        }) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if pack_type_contains_local_module_dependency(
+                ctx,
+                env,
+                pers_env,
+                row.row_more,
+                visited,
+            ) {
+                return true;
+            }
+            if let Some((path, args)) = &row.row_name {
+                return pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
+                    || args.iter().any(|arg| {
+                        pack_type_contains_local_module_dependency(
+                            ctx, env, pers_env, *arg, visited,
+                        )
+                    });
+            }
+            false
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            if pack_type_contains_local_module_dependency(ctx, env, pers_env, *body, visited) {
+                return true;
+            }
+            vars.iter().any(|var| {
+                pack_type_contains_local_module_dependency(ctx, env, pers_env, *var, visited)
+            })
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            pack_type_path_has_local_module_dependency(ctx, env, pers_env, path, visited)
+                || args.iter().any(|arg| {
+                    pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
+                })
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => false,
+    }
+}
+
 fn type_pack(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -19793,16 +19924,42 @@ fn type_pack(
             .env()
             .map(crate::types::env::Env::clone_preserve_id);
         tctx.unify_state.set_env(&package_env);
-        let package_arg_unify_result: crate::types::TypeResult<()> = (|| {
-            for package_arg in &pack_args {
-                crate::types::unify(ctx, &mut tctx.unify_state, *package_arg, ctx.new_var(None))?;
+        let mut package_arg_unify_result: TypeCoreResult<()> = Ok(());
+        for (lid, package_arg) in pack_lids.iter().zip(&pack_args) {
+            if crate::types::unify(ctx, &mut tctx.unify_state, *package_arg, ctx.new_var(None))
+                .is_err()
+            {
+                package_arg_unify_result = Err(TypeCoreError::ModuleError(Box::new(
+                    crate::types::typemod::TypeModError::ScopingPack {
+                        loc: module_expr.pmod_loc,
+                        lid: lid.clone(),
+                        ty: *package_arg,
+                    },
+                )));
+                break;
             }
-            Ok(())
-        })();
+        }
         if let Some(saved_env) = saved_unify_env {
             tctx.unify_state.set_env(&saved_env);
         }
-        package_arg_unify_result.map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+        package_arg_unify_result?;
+        for (lid, package_arg) in pack_lids.iter().zip(&pack_args) {
+            if pack_type_contains_local_module_dependency(
+                ctx,
+                &package_env,
+                &mut tctx.persistent_env,
+                *package_arg,
+                &mut HashSet::new(),
+            ) {
+                return Err(TypeCoreError::ModuleError(Box::new(
+                    crate::types::typemod::TypeModError::ScopingPack {
+                        loc: module_expr.pmod_loc,
+                        lid: lid.clone(),
+                        ty: *package_arg,
+                    },
+                )));
+            }
+        }
         package_mty
     };
     let constraint_arg_mty =
