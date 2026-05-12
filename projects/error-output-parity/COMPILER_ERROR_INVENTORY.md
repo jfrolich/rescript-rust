@@ -209,6 +209,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/invalid_type_variable_name.res`.
 - `Multiple_constraints_on_type`: covered for package type constraints by
   `tests/error_output_parity/compiler/fixtures/multiple_constraints_on_package_type.res`.
+- `Present_has_conjunction`: covered by
+  `tests/error_output_parity/compiler/fixtures/present_variant_has_conjunction.res`.
+- `Present_has_no_type`: covered by
+  `tests/error_output_parity/compiler/fixtures/present_variant_has_no_type.res`.
 
 ## `compiler/ml/typetexp.ml`
 

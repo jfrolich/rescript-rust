@@ -2994,6 +2994,20 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::PresentHasConjunction { loc, label }) => {
+            UserDiagnostic::new(
+                format_present_has_conjunction_report(arena, source, filename, *loc, label),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::PresentHasNoType { loc, label }) => {
+            UserDiagnostic::new(
+                format_present_has_no_type_report(arena, source, filename, *loc, label),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3631,6 +3645,38 @@ fn format_multiple_constraints_on_type_report(
             "Multiple constraints for type {}",
             format_longident_for_report(arena, lid)
         ),
+    )
+}
+
+fn format_present_has_conjunction_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The present constructor {label} has a conjunctive type"),
+    )
+}
+
+fn format_present_has_no_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The present constructor {label} has no type"),
     )
 }
 

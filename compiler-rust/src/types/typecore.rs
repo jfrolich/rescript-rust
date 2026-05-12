@@ -530,6 +530,12 @@ pub enum TypeCoreError {
     /// Multiple constraints on the same package type.
     MultipleConstraintsOnType { loc: LocIdx, lid: Longident },
 
+    /// A present polymorphic variant constructor has a conjunctive type.
+    PresentHasConjunction { loc: LocIdx, label: String },
+
+    /// A present polymorphic variant constructor has no row field.
+    PresentHasNoType { loc: LocIdx, label: String },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -2333,6 +2339,12 @@ fn transl_type_inner(
                                 .iter()
                                 .any(|present_lbl| present_lbl == label.txt.as_ref())
                         });
+                        if !is_reither && (args.len() > 1 || (*constant && !args.is_empty())) {
+                            return Err(TypeCoreError::PresentHasConjunction {
+                                loc,
+                                label: label.txt.to_string(),
+                            });
+                        }
                         let row_field = if is_reither {
                             crate::types::type_expr::RowField::Reither {
                                 constant: *constant,
@@ -2452,6 +2464,19 @@ fn transl_type_inner(
                 .into_iter()
                 .filter_map(|label| row_field_map.remove(&label).map(|field| (label, field)))
                 .collect::<Vec<_>>();
+            if let Some(present) = labels {
+                for label in present {
+                    if !row_fields
+                        .iter()
+                        .any(|(field_label, _)| field_label.as_str() == label.as_ref())
+                    {
+                        return Err(TypeCoreError::PresentHasNoType {
+                            loc,
+                            label: label.to_string(),
+                        });
+                    }
+                }
+            }
             let row_closed = *closed == crate::parser::ast::ClosedFlag::Closed;
             // Keep an explicit row variable for now to avoid over-constraining
             // polymorphic variant aliases in downstream application typing.
