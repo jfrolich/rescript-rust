@@ -88,6 +88,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/apply_non_function.res`.
 - `Apply_wrong_label`: covered by
   `tests/error_output_parity/compiler/fixtures/apply_wrong_label.res`.
+- `Incoherent_label_order`: covered by
+  `tests/error_output_parity/compiler/fixtures/incoherent_label_order.res`.
 - `Too_many_arguments`: covered by
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
 - `Uncurried_arity_mismatch`: covered by

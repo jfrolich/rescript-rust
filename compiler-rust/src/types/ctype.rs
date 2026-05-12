@@ -29,8 +29,8 @@ use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
-    TypeExprRefSet,
+    AbbrevMemo, AbbrevMemoRef, Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc,
+    TypeExprRef, TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
@@ -4924,14 +4924,14 @@ fn unify_types<'a>(
             TypeDesc::Tarrow {
                 arg: arg1,
                 ret: ret1,
+                commutable: c1,
                 arity: a1,
-                ..
             },
             TypeDesc::Tarrow {
                 arg: arg2,
                 ret: ret2,
+                commutable: c2,
                 arity: a2,
-                ..
             },
         ) => {
             // Check arities: if both have explicit arities, they must match
@@ -4945,8 +4945,10 @@ fn unify_types<'a>(
             let original_desc1 = (*desc1).clone();
             let arg1_typ = arg1.typ;
             let ret1 = *ret1;
+            let commutable1 = c1.clone();
             let arg2_typ = arg2.typ;
             let ret2 = *ret2;
+            let commutable2 = c2.clone();
             // Propagate arity: if one side has arity and the other doesn't,
             // we need to update the surviving side (t2) to carry the arity.
             let need_arity_update = a1.is_some() && a2.is_none();
@@ -4963,6 +4965,15 @@ fn unify_types<'a>(
                 unify(ctx, state, arg1_typ, arg2_typ)?;
                 // Unify return types
                 unify(ctx, state, ret1, ret2)?;
+
+                match (
+                    ctx.commutable_repr(&commutable1),
+                    ctx.commutable_repr(&commutable2),
+                ) {
+                    (Commutable::Clink(link), c2) => ctx.set_commutable(link, c2),
+                    (c1, Commutable::Clink(link)) => ctx.set_commutable(link, c1),
+                    _ => {}
+                }
 
                 // Propagate arity from t1 to t2 if t2 lacks it
                 if need_arity_update {
@@ -10328,6 +10339,24 @@ pub fn split_arrow_with_label(
     let desc = ctx.borrow_desc(ty);
     match &*desc {
         TypeDesc::Tarrow { arg, ret, .. } => Some((arg.lbl.clone(), arg.typ, *ret)),
+        _ => None,
+    }
+}
+
+/// Extract the argument type, label, return type, and commutability from an arrow type.
+pub fn split_arrow_with_label_and_commutable(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef, Commutable)> {
+    let ty = ctx.repr(ty);
+    let desc = ctx.borrow_desc(ty);
+    match &*desc {
+        TypeDesc::Tarrow {
+            arg,
+            ret,
+            commutable,
+            ..
+        } => Some((arg.lbl.clone(), arg.typ, *ret, commutable.clone())),
         _ => None,
     }
 }

@@ -1121,10 +1121,27 @@ impl TypeContext {
         arity: Option<i32>,
     ) -> TypeExprRef {
         let commutable = self.alloc_commutable(Commutable::Cok);
+        self.new_arrow_with_commutable(
+            arg_label,
+            arg_type,
+            ret_type,
+            Commutable::Clink(commutable),
+            arity,
+        )
+    }
+
+    pub(crate) fn new_arrow_with_commutable(
+        &self,
+        arg_label: ArgLabel,
+        arg_type: TypeExprRef,
+        ret_type: TypeExprRef,
+        commutable: Commutable,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
         self.new_type(TypeDesc::Tarrow {
             arg: TypeArg::new(arg_label, arg_type),
             ret: ret_type,
-            commutable: Commutable::Clink(commutable),
+            commutable,
             arity,
         })
     }
@@ -1791,6 +1808,34 @@ impl TypeContext {
         let idx = commutables.len();
         commutables.push(RefCell::new(c));
         CommutableRef::from_usize(idx)
+    }
+
+    pub(crate) fn get_commutable(&self, c: CommutableRef) -> Commutable {
+        let commutables = self.commutables.borrow();
+        commutables
+            .get(c.index())
+            .map(|cell| cell.borrow().clone())
+            .unwrap_or(Commutable::Cunknown)
+    }
+
+    pub(crate) fn set_commutable(&self, c: CommutableRef, value: Commutable) {
+        let commutables = self.commutables.borrow();
+        if let Some(cell) = commutables.get(c.index()) {
+            *cell.borrow_mut() = value;
+        }
+    }
+
+    pub(crate) fn commutable_repr(&self, c: &Commutable) -> Commutable {
+        match c {
+            Commutable::Clink(link) => {
+                let linked = self.get_commutable(*link);
+                match linked {
+                    Commutable::Cunknown => c.clone(),
+                    _ => self.commutable_repr(&linked),
+                }
+            }
+            _ => c.clone(),
+        }
     }
 
     // ========================================================================

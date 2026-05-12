@@ -2787,6 +2787,20 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::IncoherentLabelOrder { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This labeled function is applied to arguments",
+                    "in an order different from other calls.\nThis is only allowed when the real type is known.",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::WrongName {
             loc,
             kind,

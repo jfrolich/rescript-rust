@@ -538,7 +538,7 @@ pub enum TypeCoreError {
     NotAVariantType { loc: LocIdx, lid: Longident },
 
     /// Incoherent label order.
-    IncoherentLabelOrder,
+    IncoherentLabelOrder { loc: LocIdx },
 
     /// Less general type.
     LessGeneral(String, Vec<(TypeExprRef, TypeExprRef)>),
@@ -10044,10 +10044,17 @@ fn type_application(
             crate::types::ctype::expand_head(ctx, env, current_ty0)
         };
         if (pending_args.len() as i32) < max_arity
-            && let (Some((fn_label, arg_ty, ret_ty)), Some((_fn_label0, arg_ty0, ret_ty0))) = (
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty),
+            && let (
+                Some((fn_label, arg_ty, ret_ty, commutable)),
+                Some((_fn_label0, arg_ty0, ret_ty0)),
+            ) = (
+                crate::types::ctype::split_arrow_with_label_and_commutable(
+                    ctx,
+                    expanded_current_ty,
+                ),
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
             )
+            && matches!(ctx.commutable_repr(&commutable), Commutable::Cok)
         {
             // OCaml special case for optional-only applications:
             // after consuming omitted optional labels, a trailing `()` in call
@@ -10199,6 +10206,33 @@ fn type_application(
             }
         }
 
+        let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
+        // OCaml type_unknown_args still consumes matching arrows in source
+        // order after type_args rejects label reordering for non-Cok arrows.
+        if (pending_args.len() as i32) < max_arity
+            && let Some((fn_label, arg_ty, ret_ty)) =
+                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0)
+            && fn_label.same_label(&ctx_label)
+        {
+            pending_args.push(PendingApplyArg::Provided {
+                label: ctx_label,
+                expr: arg_expr,
+                expected_ty: arg_ty,
+                unify_ty: arg_ty,
+                context: type_clash_context_for_function_argument(
+                    &function_arg_context,
+                    label,
+                    tctx.arena,
+                    arg_expr,
+                ),
+                enforce_optional: label.is_optional(),
+                skip_post_unify: true,
+            });
+            current_ty = ret_ty;
+            current_ty0 = ret_ty;
+            continue;
+        }
+
         // type_unknown_args fallback: build an arrow from call-site label if needed.
         let result_ty_with_omitted =
             result_type_from_omitted(ctx, &omitted, &ignored, expanded_current_ty);
@@ -10220,7 +10254,9 @@ fn type_application(
                     ty: result_ty_with_omitted,
                 });
             }
-            return Err(TypeCoreError::IncoherentLabelOrder);
+            return Err(TypeCoreError::IncoherentLabelOrder {
+                loc: funct.pexp_loc,
+            });
         }
 
         let arg_ty = ctx.new_var(None);
@@ -10232,8 +10268,13 @@ fn type_application(
         {
             tctx.report_warning(arg_expr.pexp_loc, Warning::UnusedArgument);
         }
-        let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
-        let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
+        let arrow_ty = ctx.new_arrow_with_commutable(
+            ctx_label,
+            arg_ty,
+            ret_ty,
+            Commutable::Clink(ctx.alloc_commutable(Commutable::Cunknown)),
+            top_arity,
+        );
         unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
         top_arity = None;
 
