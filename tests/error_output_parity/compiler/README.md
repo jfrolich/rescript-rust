@@ -15,9 +15,10 @@ The harness compares OCaml `bsc` and Rust `bsc` directly. OCaml output is the
 oracle. Keep iteration on the debug Rust compiler and do not normalize output:
 exit status and captured stderr must match byte-for-byte.
 
-When a fixture exposes a mismatch, read the OCaml source for the raise site and
-reporter first. Rust fixes should follow the OCaml implementation 1:1 as much as
-the local architecture allows: match the error constructor, control flow,
-location choice, and renderer behavior before changing final text.
+Implementation rule: when a fixture exposes a mismatch, start from the OCaml
+source. The Rust change should model the OCaml implementation 1:1 where the
+local architecture permits: use the same error constructor, raise/report site,
+control flow, recovery behavior, location choice, and renderer before adjusting
+final text.
 
 Use `cases.tsv` when a fixture needs custom compiler flags.
