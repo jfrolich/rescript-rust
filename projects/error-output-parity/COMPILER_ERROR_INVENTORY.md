@@ -605,4 +605,10 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res`)
 - unbound module path (covered by
   `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`)
-- unbound module type path
+- unbound module type path is not reachable from normal `.res`/`.resi` source
+  found so far. `compiler/ml/includemod.ml` only calls `expand_module_path`
+  after `may_expand_module_path` has just succeeded against the same
+  `Env.find_modtype_expansion` lookup, and normal source references to missing
+  module types are rejected earlier as `Typetexp.Unbound_modtype`. Probes for
+  abstract structure module-type declarations also hit parser diagnostics before
+  inclusion.

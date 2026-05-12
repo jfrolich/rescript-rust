@@ -1,0 +1,12 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/structure/moduleTypeMissingEqual.res:2:16-3:1
+
+  1 │ module N = {
+  2 │   module type T
+  3 │ }
+  4 │ 
+
+  Did you forget a `=` here?
+
+module N = struct module type T  = sig  end end

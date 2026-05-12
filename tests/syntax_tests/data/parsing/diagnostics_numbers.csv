@@ -83,4 +83,5 @@ error,81,tests/syntax_tests/data/parsing/errors/typexpr/garbage.res,tests/syntax
 error,82,tests/syntax_tests/data/parsing/errors/typexpr/objectSpread.res,tests/syntax_tests/data/parsing/errors/typexpr/expected/objectSpread.res.txt
 error,83,tests/syntax_tests/data/parsing/errors/typexpr/typeConstructorArgs.res,tests/syntax_tests/data/parsing/errors/typexpr/expected/typeConstructorArgs.res.txt
 error,84,tests/syntax_tests/data/parsing/errors/typexpr/typeVar.res,tests/syntax_tests/data/parsing/errors/typexpr/expected/typeVar.res.txt
+error,85,tests/syntax_tests/data/parsing/errors/structure/moduleTypeMissingEqual.res,tests/syntax_tests/data/parsing/errors/structure/expected/moduleTypeMissingEqual.res.txt
 warning,22,tests/syntax_tests/data/ppx/react/warnings/optionalReactElement.res,tests/syntax_tests/data/ppx/react/warnings/expected/optionalReactElement.res.txt

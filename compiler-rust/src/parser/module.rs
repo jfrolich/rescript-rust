@@ -5251,7 +5251,16 @@ fn parse_module_type_declaration(
         }
     };
 
-    let typ = if p.token == Token::Equal {
+    let typ = if in_structure {
+        if p.token == Token::Equal {
+            p.next();
+            let mt = parse_module_type(p);
+            Some(p.arena_mut().push_mod_type(mt))
+        } else {
+            p.expect(Token::Equal);
+            Some(p.arena_mut().push_mod_type(recover::default_module_type()))
+        }
+    } else if p.token == Token::Equal {
         p.next();
         let mt = parse_module_type(p);
         Some(p.arena_mut().push_mod_type(mt))
