@@ -343,6 +343,8 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/not_allowed_in_functor_body.res`.
 - `Not_a_packed_module`
 - `Incomplete_packed_module`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/incomplete_packed_module.res`.
 - `Scoping_pack`
 - `Recursive_module_require_explicit_type`
   - Covered by

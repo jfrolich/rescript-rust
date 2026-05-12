@@ -26,7 +26,7 @@ use crate::parser::longident::Longident;
 use crate::types::Path;
 use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
-use crate::types::type_expr::TypeExprRef;
+use crate::types::type_expr::{LOWEST_LEVEL, TypeExprRef};
 use crate::types::typecore::{
     TypeCheckContext, TypeCoreError, transl_type, transl_type_fixed, type_binding, type_exp,
     type_expression,
@@ -3164,6 +3164,13 @@ pub enum TypeModError {
     NotAllowedInFunctorBody {
         /// Module expression location to report.
         loc: LocIdx,
+    },
+    /// A module unpack payload has package constraints with free type variables.
+    IncompletePackedModule {
+        /// Module expression location to report.
+        loc: LocIdx,
+        /// Type of the packed module expression.
+        ty: TypeExprRef,
     },
     /// A module was opened where a structure signature was expected.
     StructureExpected {
@@ -11174,6 +11181,41 @@ fn signature_item_contains_type(
     }
 }
 
+fn type_expr_has_free_variables(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+) -> bool {
+    // OCaml `Ctype.free_variables` only traverses unmarked nodes and reports
+    // `Tvar` nodes for this env-less call site.
+    fn loop_(
+        ctx: &crate::types::context::TypeContext,
+        ty: TypeExprRef,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let ty = ctx.repr(ty);
+        if ctx.get_level(ty) < LOWEST_LEVEL {
+            return false;
+        }
+        if !visited.insert(ty) {
+            return false;
+        }
+        match &*ctx.get_desc(ty) {
+            crate::types::type_expr::TypeDesc::Tvar(_) => true,
+            _ => {
+                let mut has_free = false;
+                crate::types::btype::iter_type_expr(ctx, ty, |child| {
+                    if !has_free && loop_(ctx, child, visited) {
+                        has_free = true;
+                    }
+                });
+                has_free
+            }
+        }
+    }
+
+    loop_(ctx, ty, &mut HashSet::default())
+}
+
 fn type_module_expr_with_alias<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -11629,6 +11671,15 @@ fn type_module_expr_with_alias<'a>(
                 crate::types::ctype::expand_head(tctx.type_ctx, env, typed_expr.exp_type);
             let unpack_mty = match &*tctx.type_ctx.get_desc(tctx.type_ctx.repr(expanded)) {
                 crate::types::type_expr::TypeDesc::Tpackage { path, lids, args } => {
+                    if args
+                        .iter()
+                        .any(|arg| type_expr_has_free_variables(tctx.type_ctx, *arg))
+                    {
+                        return Err(TypeModError::IncompletePackedModule {
+                            loc,
+                            ty: expanded,
+                        });
+                    }
                     module_type_from_typed_unpack_expr(tctx, env, arena, &typed_expr)
                         .unwrap_or_else(|| {
                             modtype_of_package(

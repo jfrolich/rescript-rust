@@ -2402,6 +2402,16 @@ fn type_mod_error_to_anyhow(
     suppress_info_style: bool,
 ) -> anyhow::Error {
     match &err {
+        TypeModError::CoreError(TypeCoreError::ModuleError(module_error)) => {
+            type_mod_error_to_anyhow(
+                (**module_error).clone(),
+                type_ctx,
+                arena,
+                source,
+                filename,
+                suppress_info_style,
+            )
+        }
         TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
             loc,
             function_type,
@@ -2750,6 +2760,18 @@ fn type_mod_error_to_anyhow(
                 filename,
                 *loc,
                 "This expression creates fresh types.\nIt is not allowed inside applicative functors.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::IncompletePackedModule { loc, ty } => UserDiagnostic::new(
+            format_compiler_error_report_with_unindented_break(
+                arena,
+                source,
+                filename,
+                *loc,
+                "The type of this packed module contains variables:",
+                &format_package_type_expr_for_error(type_ctx, arena, *ty),
             ),
             2,
         )
@@ -9026,6 +9048,34 @@ fn collect_function_arg_labels(
 
 fn format_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
     TypeExprPrinter::new(type_ctx).format(ty)
+}
+
+fn format_package_type_expr_for_error(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    ty: TypeExprRef,
+) -> String {
+    let repr = type_ctx.repr(ty);
+    let desc = (*type_ctx.get_desc(repr)).clone();
+    let TypeDesc::Tpackage { path, lids, args } = desc else {
+        return format_type_expr(type_ctx, ty);
+    };
+    if lids.is_empty() {
+        return format_type_expr(type_ctx, ty);
+    }
+
+    let constraints = lids
+        .iter()
+        .zip(args.iter())
+        .map(|(lid, arg)| {
+            format!(
+                "type {} = {}",
+                format_longident_for_report(arena, lid),
+                format_type_expr(type_ctx, *arg)
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("module({} with {})", path.name(), constraints.join(" and "))
 }
 
 fn format_non_generalizable_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {

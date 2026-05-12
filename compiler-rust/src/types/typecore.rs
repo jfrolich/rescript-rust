@@ -637,6 +637,9 @@ pub enum TypeCoreError {
         mty: crate::types::decl::ModuleType,
     },
 
+    /// A module typing error surfaced while typing an expression form.
+    ModuleError(Box<crate::types::typemod::TypeModError>),
+
     /// Recursive local constraint.
     RecursiveLocalConstraint(Vec<(TypeExprRef, TypeExprRef)>),
 
@@ -19420,7 +19423,7 @@ fn type_letmodule(
             module_expr,
             true,
         )
-        .map_err(|e| TypeCoreError::Other(format!("letmodule: {e:?}")))?;
+        .map_err(|e| TypeCoreError::ModuleError(Box::new(e)))?;
         let mut mod_sig = typed_mod.mod_type.clone();
 
         // Keep let-module member lookups stable for direct module aliases
@@ -19591,7 +19594,7 @@ fn type_pack(
         crate::types::typemod::TypeModError::CannotApply { loc, mty } => {
             TypeCoreError::CannotApplyModule { loc, mty }
         }
-        other => TypeCoreError::Other(format!("pack: {other:?}")),
+        other => TypeCoreError::ModuleError(Box::new(other)),
     });
     if typed_module_result.is_err() {
         ctx.end_def();
