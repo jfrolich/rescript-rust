@@ -501,6 +501,9 @@ pub enum TypeCoreError {
     /// Unbound module identifier.
     UnboundModule { loc: LocIdx, name: String },
 
+    /// Unbound constructor identifier.
+    UnboundConstructor { loc: LocIdx, lid: Longident },
+
     /// Private type.
     PrivateType(TypeExprRef),
 
@@ -14649,7 +14652,7 @@ fn type_construct(
                         desc.clone(),
                     ),
                     Err(_) => {
-                        return Err(TypeCoreError::NotAVariantType {
+                        return Err(TypeCoreError::UnboundConstructor {
                             loc,
                             lid: longident,
                         });
@@ -14678,7 +14681,7 @@ fn type_construct(
                 ) {
                     Some((path, desc)) => (path, desc),
                     None => {
-                        return Err(TypeCoreError::NotAVariantType {
+                        return Err(TypeCoreError::UnboundConstructor {
                             loc,
                             lid: longident,
                         });

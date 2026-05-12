@@ -123,7 +123,13 @@ with a reason after checking raise sites.
 ## Typetexp Coverage Notes
 
 - `Unbound_module`: covered for the generated JSX `ReactDOM` lookup by
-  `tests/error_output_parity/compiler/fixtures/jsx_generated_unbound_reactdom.res`.
+  `tests/error_output_parity/compiler/fixtures/jsx_generated_unbound_reactdom.res`
+  and for direct module access by
+  `tests/error_output_parity/compiler/fixtures/unbound_module.res`.
+- `Unbound_value`: covered by
+  `tests/error_output_parity/compiler/fixtures/unbound_value.res`.
+- `Unbound_constructor`: covered by
+  `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
 
 ## `compiler/ml/typetexp.ml`
 

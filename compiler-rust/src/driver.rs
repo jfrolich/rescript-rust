@@ -2801,6 +2801,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundConstructor { loc, lid }) => {
+            UserDiagnostic::new(
+                format_unbound_constructor_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::LabelMultiplyDefined {
             loc,
             label,
@@ -3663,6 +3670,24 @@ fn format_unbound_module_report(
 
     let message = format!(
         "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?\n\n"
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_unbound_constructor_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    let name = format_longident_for_report(arena, lid);
+    let message = format!(
+        "{INFO}The variant constructor {name} can't be found.{RESET}\n\n- If it's defined in another module or file, bring it into scope by:\n  - Prefixing it with said module name: {INFO}TheModule.{name}{RESET}\n  - Or specifying its type: {INFO}let theValue: TheModule.theType = {name}{RESET}\n- Constructors and modules are both capitalized. Did you want the latter?\n  Then instead of {DIM}let foo = Bar{RESET}, try {INFO}module Foo = Bar{RESET}."
     );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
