@@ -28,8 +28,8 @@ use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
 use crate::types::type_expr::{LOWEST_LEVEL, TypeExprRef};
 use crate::types::typecore::{
-    TypeCheckContext, TypeCoreError, transl_type, transl_type_fixed, type_binding, type_exp,
-    type_expression,
+    TypeCheckContext, TypeCoreError, resolve_type_constructor_path, transl_type,
+    transl_type_fixed, type_binding, type_exp, type_expression,
 };
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, IncludeDescription, ModuleBinding, ModuleCoercion,
@@ -14446,65 +14446,20 @@ fn type_structure_item<'a>(
                                                 }
                                                 Ok(source_cstrs)
                                             };
-                                        if let Ok((_typed_ct, type_ref)) =
-                                            transl_type(tctx, env, spread_core_type)
+                                        if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(
+                                            inner,
+                                        ) = &*spread_core_type.ptyp_desc
                                         {
-                                            // Extract the type declaration from the resolved type
-                                            let repr = ctx.repr(type_ref);
-                                            if let crate::types::type_expr::TypeDesc::Tconstr {
-                                                ref path,
-                                                ..
-                                            } = *ctx.get_desc(repr)
-                                            {
+                                            let spread_lid = tctx.resolve_lid(inner.0.txt).clone();
+                                            let (path, source_decl) =
+                                                resolve_type_constructor_path(tctx, env, &spread_lid);
+                                            if let Some(source_decl) = source_decl {
                                                 is_pdot = matches!(path, Path::Pdot(..));
-                                                // Try path-accurate lookup in the current env first.
-                                                // `Env.lookup_type` on Pdot falls back to leaf-name lookup,
-                                                // which can pick an unrelated `t` from opened modules.
-                                                // For spread (`...M.t`) we must resolve the parent module
-                                                // signature and then select the exact type item.
-                                                match path {
-                                                    Path::Pdot(parent, type_name, _) => {
-                                                        let mut visiting = HashSet::new();
-                                                        if let Some(parent_sig) =
-                                                            resolve_path_to_sig_impl(
-                                                                parent,
-                                                                Some(env),
-                                                                &mut tctx.persistent_env,
-                                                                tctx.type_ctx,
-                                                                &mut visiting,
-                                                            )
-                                                        {
-                                                            for item in &parent_sig {
-                                                                if let crate::types::decl::SignatureItem::SigType(
-                                                                    id,
-                                                                    decl,
-                                                                    _,
-                                                                ) = item
-                                                                    {
-                                                                        if id.name() == type_name.as_str() {
-                                                                            found = Some(handle_source_decl(
-                                                                                decl,
-                                                                                path.name(),
-                                                                            )?);
-                                                                            break;
-                                                                        }
-                                                                    }
-                                                            }
-                                                        }
-                                                    }
-                                                    _ => {
-                                                        if let Ok(source_decl) =
-                                                            env.lookup_type(path)
-                                                        {
-                                                            found = Some(handle_source_decl(
-                                                                &source_decl,
-                                                                path.name(),
-                                                            )?);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            if found.is_none() {
+                                                found = Some(handle_source_decl(
+                                                    &source_decl,
+                                                    tctx.longident_to_string(&spread_lid),
+                                                )?);
+                                            } else {
                                                 return Err(
                                                     TypeModError::VariantSpreadCouldNotFindType {
                                                         loc: spread_loc,

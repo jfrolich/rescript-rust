@@ -350,7 +350,18 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/nonrec_gadt.res`.
 - `Variant_runtime_representation_mismatch`
+  - Covered for spread-time unboxed and `@tag` mismatches by
+    `tests/error_output_parity/compiler/fixtures/variant_spread_unboxed_mismatch.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/variant_spread_tag_mismatch.res`.
 - `Variant_spread_fail`
+  - Covered for `CouldNotFindType`, `InvalidType`, `HasTypeParams`, and
+    `DuplicateConstructor` by
+    `tests/error_output_parity/compiler/fixtures/variant_spread_could_not_find_type.res`,
+    `tests/error_output_parity/compiler/fixtures/variant_spread_invalid_type.res`,
+    `tests/error_output_parity/compiler/fixtures/variant_spread_has_type_params.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/variant_spread_duplicate_constructor.res`.
 
 ## `compiler/ml/typemod.ml`
 
