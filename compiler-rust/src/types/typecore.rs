@@ -18108,25 +18108,12 @@ impl Env {
                         } else {
                             Path::pident(mod_id.clone())
                         };
-                        // If an alias was followed (resolved_name is Some),
-                        // rewrite type paths from the resolved module name
-                        // to the access path. This handles both:
-                        // - opened modules: Console from Stdlib → Pdot(Pident("Stdlib"), "Console")
-                        // - local aliases: module N = Belt.List → Pident("N")
-                        //
-                        // Skip deep copy when the signature has no type/module
-                        // definitions that need path substitution. This preserves
-                        // type node sharing for local module opens (e.g., %%private)
-                        // so that value-restriction Tvars remain shared between
-                        // pattern types and env types.
-                        let has_type_or_module_defs = sig.iter().any(|item| {
-                            matches!(
-                                item,
-                                crate::types::decl::SignatureItem::SigType(..)
-                                    | crate::types::decl::SignatureItem::SigModule(..)
-                                    | crate::types::decl::SignatureItem::SigModtype(..)
-                            )
-                        });
+                        // OCaml compiler/ml/env.ml:1530-1538 always builds a
+                        // component substitution with `prefix_idents`, and
+                        // compiler/ml/subst.ml:303-309 applies it to value
+                        // descriptions independently of whether the signature
+                        // also contains type or module declarations. Do not
+                        // decide copy/substitution from signature item shape.
                         let skip_self_manifest_subst =
                             apply_subst && Self::signature_has_package_self_manifests(&sig, ctx);
                         // Extract module alias targets for path-prefix rewriting.
@@ -18149,11 +18136,7 @@ impl Env {
                         } else {
                             (None, None)
                         };
-                        let needs_copy = apply_subst
-                            && (has_type_or_module_defs
-                                || resolved_name.is_some()
-                                || alias_target_pdot.is_some()
-                                || alias_target_pident.is_some());
+                        let needs_copy = apply_subst;
                         let (should_rebind_direct_type_family, allow_inferred_rebind_paths) =
                             if apply_subst {
                                 direct_sig_type_family_rebind_options(&md.md_type, &path)
@@ -18187,7 +18170,7 @@ impl Env {
                                     &mut sig, old_name, &path,
                                 );
                             }
-                            if has_type_or_module_defs && !skip_self_manifest_subst {
+                            if !skip_self_manifest_subst {
                                 crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                     &sig, &path, ctx,
                                 );
