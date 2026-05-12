@@ -2262,22 +2262,7 @@ fn normalize_path_full_inner<'a>(
     // `Stdlib` roots naturally take the persistent force path here.
     if let Path::Pident(id) = &path {
         let has_local_module = env.find_module_same(id).is_ok();
-        let has_component_cache = {
-            let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
-                path.clone(),
-                env.module_path_requires_env_scoped_cache(&path)
-                    .then_some(env.id()),
-            );
-            ctx.has_qualified_module_components(&key)
-        };
-        // OCaml compiler/ml/env.ml:1000-1007 and 1064-1073 can navigate
-        // `Belt`'s persistent `ps_comps` without forcing `ps_sig`. If Rust has
-        // already cached that component view, do not turn recursive
-        // normalize-path prefix handling for Belt collection aliases into an
-        // earlier full-signature force than OCaml observes.
-        let should_force_persistent_sig = id.is_persistent()
-            && !(id.name() == "Belt" && has_component_cache)
-            && !has_local_module;
+        let should_force_persistent_sig = id.is_persistent() && !has_local_module;
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
