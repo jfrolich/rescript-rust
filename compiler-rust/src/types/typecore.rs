@@ -530,6 +530,13 @@ pub enum TypeCoreError {
     /// Invalid type variable name.
     InvalidVariableName { loc: LocIdx, name: String },
 
+    /// A Ptyp_poly universal variable could not be generalized.
+    CannotQuantify {
+        loc: LocIdx,
+        name: String,
+        ty: TypeExprRef,
+    },
+
     /// Multiple constraints on the same package type.
     MultipleConstraintsOnType { loc: LocIdx, lid: Longident },
 
@@ -987,6 +994,10 @@ pub struct TypeCheckContext<'a> {
     /// Used type variables within the current type expression (for sharing).
     /// Maps type variable names to their TypeExprRef, matching OCaml's used_variables.
     pub used_variables: HashMap<String, TypeExprRef>,
+    /// Universal variables currently bound by Ptyp_poly.
+    /// This mirrors OCaml typetexp's `univars` stack, which is deliberately
+    /// separate from `used_variables`.
+    univars: Vec<(String, TypeExprRef)>,
     /// Bound type variables from the surrounding declaration context.
     /// This matches OCaml's typetexp `type_variables` table used by
     /// `globalize_used_variables` to link per-type-expression variables
@@ -1063,6 +1074,7 @@ impl<'a> TypeCheckContext<'a> {
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
+            univars: Vec::new(),
             type_variables: HashMap::new(),
             fixed_type_variables: false,
             recursive_let_depth: 0,
@@ -1580,6 +1592,7 @@ fn transl_type_with_options(
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
+    tctx.univars.clear();
     let old_fixed_type_variables = tctx.fixed_type_variables;
     tctx.fixed_type_variables = fixed_type_variables;
     let translated = transl_type_inner(tctx, env, styp);
@@ -1623,6 +1636,7 @@ fn transl_type_with_options(
     }
 
     tctx.used_variables.clear();
+    tctx.univars.clear();
     Ok(translated)
 }
 
@@ -1805,6 +1819,7 @@ fn transl_type_inner(
                 });
             }
             if tctx.fixed_type_variables
+                && !tctx.univars.iter().any(|(name, _)| name == &name_str)
                 && !tctx.used_variables.contains_key(&name_str)
                 && !tctx.type_variables.contains_key(&name_str)
             {
@@ -1813,7 +1828,11 @@ fn transl_type_inner(
                     name: format!("'{name_str}"),
                 });
             }
-            let ty = if let Some(&existing) = tctx.used_variables.get(&name_str) {
+            let ty = if let Some((_, existing)) =
+                tctx.univars.iter().find(|(name, _)| name == &name_str)
+            {
+                crate::types::instance(ctx, *existing)
+            } else if let Some(&existing) = tctx.used_variables.get(&name_str) {
                 crate::types::instance(ctx, existing)
             } else {
                 let v = ctx.new_var(Some(name_str.clone()));
@@ -2016,12 +2035,26 @@ fn transl_type_inner(
             let inner = tctx.arena.get_core_type(*inner_idx);
 
             // Match OCaml Typetexp.transl_type_aux Ptyp_alias:
+            // - reuse a Ptyp_poly universal directly, without instantiation
             // - reuse an existing alias binding via `instance` when present
             // - otherwise register a fresh alias in used_variables *before*
             //   translating the inner type, then instantiate and name its proxy.
+            let existing_univar = tctx
+                .univars
+                .iter()
+                .find(|(name, _)| name == &name_str)
+                .map(|(_, ty)| *ty);
             let existing_alias = tctx.used_variables.get(&name_str).copied();
 
-            let (inner_ctyp, alias_ty) = if let Some(existing_alias) = existing_alias {
+            let (inner_ctyp, alias_ty) = if let Some(univar_ty) = existing_univar {
+                let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
+                crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, univar_ty, inner_ty)
+                    .map_err(|err| TypeCoreError::AliasTypeMismatch {
+                        loc,
+                        trace: alias_type_mismatch_trace(err, inner_ty, univar_ty),
+                    })?;
+                (inner_ctyp, inner_ty)
+            } else if let Some(existing_alias) = existing_alias {
                 let alias_ty = crate::types::instance(ctx, existing_alias);
                 let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
                 crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
@@ -2096,8 +2129,8 @@ fn transl_type_inner(
 
             ctx.begin_def();
 
-            // Create type variables for each bound variable and register them
-            // in used_variables so body translation connects to these nodes.
+            // Create type variables for each bound variable and push them onto
+            // the separate universal-variable stack.
             // OCaml: new_univars = List.map (fun name -> (name, newvar ~name ())) vars
             let new_univars: Vec<(String, TypeExprRef)> = var_names
                 .iter()
@@ -2109,26 +2142,15 @@ fn transl_type_inner(
 
             // Save old univar state and prepend new ones
             // OCaml: univars := new_univars @ !univars
-            let old_used: Vec<(String, TypeExprRef)> = new_univars
-                .iter()
-                .filter_map(|(name, _)| tctx.used_variables.get(name).map(|v| (name.clone(), *v)))
-                .collect();
-            for (name, var) in &new_univars {
-                tctx.used_variables.insert(name.clone(), *var);
-            }
+            let old_univars = tctx.univars.clone();
+            tctx.univars = new_univars.clone();
+            tctx.univars.extend(old_univars.iter().cloned());
 
             let body = tctx.arena.get_core_type(*body_idx);
             let (body_ctyp, body_ty) = transl_type_inner(tctx, env, body)?;
 
-            // Restore old used_variables for the poly variable names
-            for (name, old_var) in &old_used {
-                tctx.used_variables.insert(name.clone(), *old_var);
-            }
-            for (name, _) in &new_univars {
-                if !old_used.iter().any(|(n, _)| n == name) {
-                    tctx.used_variables.remove(name);
-                }
-            }
+            // OCaml: univars := old_univars
+            tctx.univars = old_univars;
 
             ctx.end_def();
             crate::types::ctype::generalize(ctx, body_ty);
@@ -2136,7 +2158,7 @@ fn transl_type_inner(
             // OCaml: for each poly variable that deeply occurs in the body and is
             // at generic level, change Tvar→Tunivar (universalize)
             let mut ty_list = Vec::new();
-            for (_name, ty1) in new_univars.iter().rev() {
+            for (name, ty1) in &new_univars {
                 let v = crate::types::btype::proxy(ctx, *ty1);
                 if crate::types::ctype::deep_occur(ctx, v, body_ty) {
                     // Extract the name and check level before calling set_desc
@@ -2155,6 +2177,12 @@ fn transl_type_inner(
                     if let Some(name) = uni_name {
                         ctx.set_desc(v, TypeDesc::Tunivar(name));
                         ty_list.push(v);
+                    } else {
+                        return Err(TypeCoreError::CannotQuantify {
+                            loc,
+                            name: name.clone(),
+                            ty: v,
+                        });
                     }
                 }
             }

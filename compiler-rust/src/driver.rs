@@ -2997,6 +2997,15 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::CannotQuantify { loc, name, ty }) => {
+            UserDiagnostic::new(
+                format_cannot_quantify_report(
+                    type_ctx, arena, source, filename, *loc, name, *ty,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::MultipleConstraintsOnType { loc, lid }) => {
             UserDiagnostic::new(
                 format_multiple_constraints_on_type_report(arena, source, filename, *loc, lid),
@@ -3725,6 +3734,31 @@ fn format_invalid_variable_name_report(
         filename,
         loc,
         &format!("The type variable name {name} is not allowed in programs"),
+    )
+}
+
+fn format_cannot_quantify_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    ty: TypeExprRef,
+) -> String {
+    let reason = if crate::types::btype::is_tvar(type_ctx, ty) {
+        "it escapes its scope"
+    } else if crate::types::btype::is_tunivar(type_ctx, ty) {
+        "it is already bound to another variable"
+    } else {
+        "it is not a variable"
+    };
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The universal type variable '{name} cannot be generalized: {reason}."),
     )
 }
 
