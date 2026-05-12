@@ -64,8 +64,19 @@ with a reason after checking raise sites.
 
 - `Empty_record_literal`: covered by
   `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
+- `Uncurried_arity_mismatch`: covered by
+  `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
+- `Field_not_optional`: covered for pattern and expression raise sites by
+  `tests/error_output_parity/compiler/fixtures/field_not_optional_pattern.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/field_not_optional_inline_record.res`.
 - `Illegal_letrec_pat`: covered by
   `tests/error_output_parity/compiler/fixtures/illegal_letrec_pattern.res`.
+- `Modules_not_allowed`: unreachable from normal `.res` source in the current
+  OCaml code. The only raise is in `enter_variable ~is_module:true` when
+  `allow_modules` is false, but the normal pattern entry points found in
+  `compiler/ml/typecore.ml` call `reset_pattern` with `true`, and Rust mirrors
+  this with `PatternState::reset(true)`.
 - `Invalid_for_loop_index`: covered by
   `tests/error_output_parity/compiler/fixtures/invalid_for_loop_index.res`.
 - `Invalid_for_of_pattern`: parser-gated for normal `.res` source by
@@ -96,6 +107,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/not_an_extension_constructor.res`.
 - `Inlined_record_escape`: covered by
   `tests/error_output_parity/compiler/fixtures/inlined_record_escape.res`.
+- `Type_params_not_supported`: covered by
+  `tests/error_output_parity/compiler/fixtures/type_params_not_supported_variant_spread.res`.
 - `Typemod.Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`.
 - `Break_outside_loop`: covered by
