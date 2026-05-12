@@ -3076,6 +3076,13 @@ pub enum TypeModError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// A type parameter variance annotation is not satisfied by the declaration.
+    BadVariance {
+        loc: LocIdx,
+        param_index: usize,
+        actual: (bool, bool, bool),
+        expected: (bool, bool, bool),
+    },
     /// Invalid untagged variant definition.
     InvalidUntaggedVariantDefinition { loc: Location, reason: String },
     /// A variant type spread could not resolve its source type.
@@ -3350,6 +3357,53 @@ fn union_variance_rows(lhs: &[TypesVariance], rhs: &[TypesVariance]) -> Vec<Type
             left.union(&right)
         })
         .collect()
+}
+
+fn parser_variance_requirement(variance: ParserVariance) -> (bool, bool, bool) {
+    let (co, cn, inj) = match variance {
+        ParserVariance::Covariant => (true, false, false),
+        ParserVariance::Contravariant => (false, true, false),
+        ParserVariance::Invariant => (false, false, false),
+    };
+    if co || cn {
+        (co, cn, inj)
+    } else {
+        (true, true, inj)
+    }
+}
+
+fn check_type_decl_variance_requirements(
+    ctx: &crate::types::context::TypeContext,
+    parsed_decl: &crate::parser::ast::TypeDeclaration,
+    typed_decl: &TypedTypeDeclaration,
+    variance_row: &[TypesVariance],
+) -> TypeModResult<()> {
+    for (idx, ((typed_param, _), (_, parser_variance))) in typed_decl
+        .typ_params
+        .iter()
+        .zip(parsed_decl.ptype_params.iter())
+        .enumerate()
+    {
+        if !crate::types::btype::is_tvar(ctx, typed_param.ctyp_type) {
+            continue;
+        }
+        let expected = parser_variance_requirement(*parser_variance);
+        let actual_variance = variance_row
+            .get(idx)
+            .copied()
+            .unwrap_or_else(TypesVariance::null);
+        let (actual_co, actual_cn) = actual_variance.get_upper();
+        let actual = (actual_co, actual_cn, actual_variance.is_injective());
+        if (actual_co && !expected.0) || (actual_cn && !expected.1) || (!actual.2 && expected.2) {
+            return Err(TypeModError::BadVariance {
+                loc: parsed_decl.ptype_loc,
+                param_index: idx + 1,
+                actual,
+                expected,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn has_decl_attr(attrs: &[crate::types::decl::Attribute], name: &str) -> bool {
@@ -15716,6 +15770,14 @@ fn type_structure_item<'a>(
                     let Some(variance_row) = resolved_variances.get(idx) else {
                         continue;
                     };
+                    if let Some(typed_decl) = typed_tree_decls.get(idx) {
+                        check_type_decl_variance_requirements(
+                            ctx,
+                            &decls[idx],
+                            typed_decl,
+                            variance_row,
+                        )?;
+                    }
                     let path = Path::pident(type_id.clone());
                     let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
                         continue;
@@ -17868,6 +17930,9 @@ fn transl_sig_type_declarations_with_ids<'a>(
     let resolved_variances = compute_type_variance_fixpoint(ctx, &variance_env, &declared_type_ids);
     if resolved_variances.len() == declared_type_ids.len() {
         for (idx, variance_row) in resolved_variances.iter().enumerate() {
+            if let Some(typed_decl) = typed_tree_decls.get(idx) {
+                check_type_decl_variance_requirements(ctx, &decls[idx], typed_decl, variance_row)?;
+            }
             if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                 typed_decl.typ_type.type_variance = variance_row.clone();
             }

@@ -3381,6 +3381,24 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::BadVariance {
+            loc,
+            param_index,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_bad_variance_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                *param_index,
+                *actual,
+                *expected,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::InvalidUntaggedVariantDefinition { loc, reason } => UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -4448,6 +4466,55 @@ fn format_inconsistent_constraint_report(
             "The type constraints are not consistent.",
         )
     }
+}
+
+fn variance_suffix(n: usize) -> &'static str {
+    let is_teen = (n % 100) / 10 == 1;
+    match n % 10 {
+        1 if !is_teen => "st",
+        2 if !is_teen => "nd",
+        3 if !is_teen => "rd",
+        _ => "th",
+    }
+}
+
+fn format_variance((co, cn, inj): (bool, bool, bool)) -> String {
+    let mut output = String::new();
+    if inj {
+        output.push_str("injective ");
+    }
+    match (co, cn) {
+        (true, true) => output.push_str("invariant"),
+        (true, false) => output.push_str("covariant"),
+        (false, true) => output.push_str("contravariant"),
+        (false, false) if inj => {}
+        (false, false) => output.push_str("unrestricted"),
+    }
+    output
+}
+
+fn format_bad_variance_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    param_index: usize,
+    actual: (bool, bool, bool),
+    expected: (bool, bool, bool),
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "In this definition, expected parameter variances are not satisfied.\nThe {}{} type parameter was expected to be {},\nbut it is {}.",
+            param_index,
+            variance_suffix(param_index),
+            format_variance(expected),
+            format_variance(actual),
+        ),
+    )
 }
 
 fn format_compiler_error_report_with_bare_reset_lines(

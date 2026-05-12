@@ -326,6 +326,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/rebind_private.res`.
 - `Bad_variance`
+  - Covered for direct annotated parameter variance mismatch by
+    `tests/error_output_parity/compiler/fixtures/bad_variance.res`.
 - `Unavailable_type_constructor`
 - `Bad_fixed_type`
 - `Unbound_type_var_ext`
