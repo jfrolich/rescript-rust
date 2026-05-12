@@ -5401,13 +5401,9 @@ fn force_qualified_value_type_paths<'a>(
         _ => None,
     };
     let ctx = tctx.type_ctx;
-    let selected_module_is_opened_component_path =
-        selected_module_path.as_ref().is_some_and(|path| {
-            selected_module_is_opened_component_path(env, path)
-                && !path_root_ident(path).is_some_and(|root| {
-                    root.is_persistent() && (root.name() == "Stdlib" || root.name() == "Pervasives")
-                })
-        });
+    let selected_module_is_opened_component_path = selected_module_path
+        .as_ref()
+        .is_some_and(|path| selected_module_is_opened_component_path(env, path));
     let selected_module_is_dotted_component_path =
         matches!(selected_module_path.as_ref(), Some(Path::Pdot(..)));
     let should_collect_selected_alias_targets = value_access_root_is_local
