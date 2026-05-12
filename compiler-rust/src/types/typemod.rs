@@ -5752,6 +5752,112 @@ fn report_unused_top_level_value_warnings(
     }
 }
 
+fn module_type_exported_value_names(
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+) -> Option<HashSet<String>> {
+    fn loop_(
+        env: &Env,
+        mty: &crate::types::decl::ModuleType,
+        visiting: &mut HashSet<Path>,
+    ) -> Option<HashSet<String>> {
+        let sig = match mty {
+            crate::types::decl::ModuleType::MtySignature(sig) => sig,
+            crate::types::decl::ModuleType::MtyIdent(path) => {
+                if !visiting.insert(path.clone()) {
+                    return None;
+                }
+                let result = env
+                    .lookup_modtype(path)
+                    .ok()
+                    .and_then(|mtd| mtd.mtd_type.as_ref())
+                    .and_then(|mty| loop_(env, mty, visiting));
+                visiting.remove(path);
+                return result;
+            }
+            crate::types::decl::ModuleType::MtyAlias(_, path) => {
+                if !visiting.insert(path.clone()) {
+                    return None;
+                }
+                let result = env
+                    .lookup_module(path)
+                    .ok()
+                    .and_then(|md| loop_(env, &md.md_type, visiting));
+                visiting.remove(path);
+                return result;
+            }
+            crate::types::decl::ModuleType::MtyFunctor { .. } => return None,
+        };
+
+        let mut names = HashSet::default();
+        for item in sig {
+            if let crate::types::decl::SignatureItem::SigValue(id, _) = item {
+                names.insert(id.name().to_string());
+            }
+        }
+        Some(names)
+    }
+
+    loop_(env, mty, &mut HashSet::default())
+}
+
+fn report_unused_values_hidden_by_module_constraint(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    module_expr: &ModuleExpr,
+    constraint_mty: &crate::types::decl::ModuleType,
+) {
+    // OCaml delays unused-value checks until after module inclusion. A value
+    // that was considered exported by the implementation structure can still be
+    // unused when an explicit module constraint hides it.
+    let Some(exported_value_names) = module_type_exported_value_names(env, constraint_mty) else {
+        return;
+    };
+    let ModuleExprDesc::Tmod_structure(structure) = &module_expr.mod_desc else {
+        return;
+    };
+
+    let mut checks = Vec::new();
+    for (item_index, item) in structure.str_items.iter().enumerate() {
+        collect_top_level_value_use_checks(item, item_index, &mut checks);
+    }
+
+    let mut final_visible = HashMap::new();
+    for (index, check) in checks.iter().enumerate() {
+        final_visible.insert(check.name.clone(), index);
+    }
+
+    for (check_index, check) in checks.iter().enumerate() {
+        if !should_warn_unused_value_name(&check.name)
+            || arena.to_location(check.loc).loc_ghost
+            || final_visible.get(&check.name) != Some(&check_index)
+            || exported_value_names.contains(&check.name)
+        {
+            continue;
+        }
+
+        let start_index = if check.rec_flag == RecFlag::Recursive {
+            check.item_index
+        } else {
+            check.item_index + 1
+        };
+        let used = structure
+            .str_items
+            .iter()
+            .skip(start_index)
+            .any(|item| structure_item_uses_ident(item, &check.id));
+        if !used {
+            tctx.report_warning(
+                check.loc,
+                Warning::UnusedValueDeclaration {
+                    name: check.name.clone(),
+                },
+            );
+        }
+    }
+}
+
 fn push_sig_values_from_env_pattern(
     env: &Env,
     pat: &crate::types::typedtree::Pattern,
@@ -12925,6 +13031,9 @@ fn type_module_expr_with_alias<'a>(
             // `wrap_constraint`; it does not re-run module-type translation.
             let decl_mty = decl_module_type_from_typed(&typed_mty)
                 .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+            report_unused_values_hidden_by_module_constraint(
+                tctx, env, arena, &typed_mod, &decl_mty,
+            );
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
