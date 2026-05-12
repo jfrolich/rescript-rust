@@ -527,6 +527,9 @@ pub enum TypeCoreError {
     /// Invalid type variable name.
     InvalidVariableName { loc: LocIdx, name: String },
 
+    /// Multiple constraints on the same package type.
+    MultipleConstraintsOnType { loc: LocIdx, lid: Longident },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -2497,10 +2500,10 @@ fn transl_type_inner(
 
             for pair in sorted_constraints.windows(2) {
                 if compare_longident(tctx.arena, &pair[0].0, &pair[1].0) == Ordering::Equal {
-                    return Err(TypeCoreError::Other(format!(
-                        "multiple constraints on type {}",
-                        tctx.longident_to_string(&pair[0].0)
-                    )));
+                    return Err(TypeCoreError::MultipleConstraintsOnType {
+                        loc,
+                        lid: pair[0].0.clone(),
+                    });
                 }
             }
 

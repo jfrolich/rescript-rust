@@ -207,6 +207,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/invalid_type_parameter_name.res`
   and
   `tests/error_output_parity/compiler/fixtures/invalid_type_variable_name.res`.
+- `Multiple_constraints_on_type`: covered for package type constraints by
+  `tests/error_output_parity/compiler/fixtures/multiple_constraints_on_package_type.res`.
 
 ## `compiler/ml/typetexp.ml`
 

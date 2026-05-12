@@ -2987,6 +2987,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::MultipleConstraintsOnType { loc, lid }) => {
+            UserDiagnostic::new(
+                format_multiple_constraints_on_type_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3605,6 +3612,25 @@ fn format_invalid_variable_name_report(
         filename,
         loc,
         &format!("The type variable name {name} is not allowed in programs"),
+    )
+}
+
+fn format_multiple_constraints_on_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "Multiple constraints for type {}",
+            format_longident_for_report(arena, lid)
+        ),
     )
 }
 
