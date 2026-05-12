@@ -2973,6 +2973,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::UnboundTypeVariable { loc, name }) => {
+            UserDiagnostic::new(
+                format_unbound_type_variable_report(arena, source, filename, *loc, name),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3558,6 +3565,24 @@ fn format_unbound_type_constructor_report(
             "This type constructor, `{name}`, can't be found.\nIf you wanted to write a recursive type, don't forget the `rec` in `type rec`"
         ),
     )
+}
+
+fn format_unbound_type_variable_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+) -> String {
+    let mut report = format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("Unbound type parameter {name}"),
+    );
+    report.push('\n');
+    report
 }
 
 fn format_type_arity_mismatch_report(

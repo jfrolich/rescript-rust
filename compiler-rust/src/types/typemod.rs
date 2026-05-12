@@ -28,7 +28,8 @@ use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
 use crate::types::type_expr::TypeExprRef;
 use crate::types::typecore::{
-    TypeCheckContext, TypeCoreError, transl_type, type_binding, type_exp, type_expression,
+    TypeCheckContext, TypeCoreError, transl_type, transl_type_fixed, type_binding, type_exp,
+    type_expression,
 };
 use crate::types::typedtree::{
     EnvRef, Expression, IncludeDeclaration, IncludeDescription, ModuleBinding, ModuleCoercion,
@@ -38,6 +39,38 @@ use crate::types::typedtree::{
     TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+
+fn core_type_has_row_var(arena: &ParseArena, core_type: &crate::parser::ast::CoreType) -> bool {
+    match &*core_type.ptyp_desc {
+        crate::parser::ast::CoreTypeDesc::Ptyp_alias(inner) => {
+            let (inner, _) = &**inner;
+            core_type_has_row_var(arena, arena.get_core_type(*inner))
+        }
+        crate::parser::ast::CoreTypeDesc::Ptyp_object(inner) => {
+            let (_, closed) = &**inner;
+            matches!(closed, crate::parser::ast::ClosedFlag::Open)
+        }
+        crate::parser::ast::CoreTypeDesc::Ptyp_variant(inner) => {
+            let (_, closed, labels) = &**inner;
+            matches!(closed, crate::parser::ast::ClosedFlag::Open)
+                || (matches!(closed, crate::parser::ast::ClosedFlag::Closed) && labels.is_some())
+        }
+        _ => false,
+    }
+}
+
+fn type_decl_manifest_uses_fixed_type_variables(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    manifest: &crate::parser::ast::CoreType,
+) -> bool {
+    let is_fixed_type = matches!(
+        &decl.ptype_kind,
+        crate::parser::ast::TypeKind::Ptype_abstract
+    ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
+        && core_type_has_row_var(arena, manifest);
+    !is_fixed_type
+}
 
 // ============================================================================
 // Helper Functions for Path Conversion
@@ -14325,7 +14358,15 @@ fn type_structure_item<'a>(
                         Some(manifest) => {
                             let manifest_ct = arena.get_core_type(*manifest);
                             let (typed_manifest, type_ref) =
-                                transl_type(tctx, &temp_env, manifest_ct)?;
+                                if type_decl_manifest_uses_fixed_type_variables(
+                                    arena,
+                                    decl,
+                                    manifest_ct,
+                                ) {
+                                    transl_type_fixed(tctx, &temp_env, manifest_ct)?
+                                } else {
+                                    transl_type(tctx, &temp_env, manifest_ct)?
+                                };
                             touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                             (Some(typed_manifest), Some(type_ref))
                         }
@@ -16001,8 +16042,13 @@ fn transl_sig_type_declarations_with_ids<'a>(
             // Convert manifest type (type alias)
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
+                    let manifest_ct = arena.get_core_type(*manifest);
                     let (typed_manifest, manifest_ref) =
-                        transl_type(tctx, env, arena.get_core_type(*manifest))?;
+                        if type_decl_manifest_uses_fixed_type_variables(arena, decl, manifest_ct) {
+                            transl_type_fixed(tctx, env, manifest_ct)?
+                        } else {
+                            transl_type(tctx, env, manifest_ct)?
+                        };
                     touch_manifest_cyclic_abbrev_check(ctx, env, manifest_ref);
                     (Some(typed_manifest), Some(manifest_ref))
                 }

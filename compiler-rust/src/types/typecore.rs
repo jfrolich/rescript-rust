@@ -521,6 +521,9 @@ pub enum TypeCoreError {
     /// Unbound type constructor identifier.
     UnboundTypeConstructor { loc: LocIdx, lid: Longident },
 
+    /// Unbound type variable.
+    UnboundTypeVariable { loc: LocIdx, name: String },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -944,6 +947,8 @@ pub struct TypeCheckContext<'a> {
     /// `globalize_used_variables` to link per-type-expression variables
     /// back to declaration-level parameters.
     pub type_variables: HashMap<String, TypeExprRef>,
+    /// Whether the current type translation rejects free type variables.
+    fixed_type_variables: bool,
     /// Persistent environment for loading external modules from .cmi files.
     pub persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     /// Scoped counter for OCaml's persistent-signature forcing side effect while
@@ -1014,6 +1019,7 @@ impl<'a> TypeCheckContext<'a> {
             loop_depth: 0,
             used_variables: HashMap::new(),
             type_variables: HashMap::new(),
+            fixed_type_variables: false,
             recursive_let_depth: 0,
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
@@ -1452,7 +1458,15 @@ pub fn transl_type(
     env: &Env,
     styp: &crate::parser::ast::CoreType,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
-    transl_type_delayed(tctx, env, styp, false)
+    transl_type_with_options(tctx, env, styp, false, false)
+}
+
+pub(crate) fn transl_type_fixed(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    styp: &crate::parser::ast::CoreType,
+) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
+    transl_type_with_options(tctx, env, styp, false, true)
 }
 
 /// Translate a type with delayed globalization (matching OCaml's
@@ -1465,9 +1479,23 @@ pub fn transl_type_delayed(
     styp: &crate::parser::ast::CoreType,
     globalize: bool,
 ) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
+    transl_type_with_options(tctx, env, styp, globalize, false)
+}
+
+fn transl_type_with_options(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    styp: &crate::parser::ast::CoreType,
+    globalize: bool,
+    fixed_type_variables: bool,
+) -> TypeCoreResult<(crate::types::typedtree::TypedCoreType, TypeExprRef)> {
     // Reset used_variables for each top-level type translation (matches OCaml's transl_simple_type)
     tctx.used_variables.clear();
-    let translated = transl_type_inner(tctx, env, styp)?;
+    let old_fixed_type_variables = tctx.fixed_type_variables;
+    tctx.fixed_type_variables = fixed_type_variables;
+    let translated = transl_type_inner(tctx, env, styp);
+    tctx.fixed_type_variables = old_fixed_type_variables;
+    let translated = translated?;
 
     // Match OCaml typetexp `globalize_used_variables`: link variables seen in
     // this type expression back to declaration-level variables and register
@@ -1656,6 +1684,12 @@ fn transl_type_inner(
 
     match &*styp.ptyp_desc {
         CTD::Ptyp_any => {
+            if tctx.fixed_type_variables {
+                return Err(TypeCoreError::UnboundTypeVariable {
+                    loc,
+                    name: "_".to_string(),
+                });
+            }
             // Wildcard type: create a fresh type variable
             let ty = ctx.new_var(None);
             let ctyp = TypedCoreType {
@@ -1675,6 +1709,15 @@ fn transl_type_inner(
             // not Ptyp_var. OCaml's typetexp only looks up type variables
             // (used_variables/TyVarEnv), not the type environment, for Ptyp_var.
             let name_str = name.to_string();
+            if tctx.fixed_type_variables
+                && !tctx.used_variables.contains_key(&name_str)
+                && !tctx.type_variables.contains_key(&name_str)
+            {
+                return Err(TypeCoreError::UnboundTypeVariable {
+                    loc,
+                    name: format!("'{name_str}"),
+                });
+            }
             let ty = if let Some(&existing) = tctx.used_variables.get(&name_str) {
                 crate::types::instance(ctx, existing)
             } else {

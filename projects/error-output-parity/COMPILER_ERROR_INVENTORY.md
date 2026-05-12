@@ -195,6 +195,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
 - `Unbound_type_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`.
+- `Unbound_type_variable`: covered through a type declaration manifest by
+  `tests/error_output_parity/compiler/fixtures/unbound_type_variable.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/unbound_type_variable_wildcard.res`.
 - `Type_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/type_arity_mismatch.res`
   and
