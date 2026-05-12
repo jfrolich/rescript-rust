@@ -4616,8 +4616,8 @@ fn package_longident_same_label(
     ) -> bool {
         left == right
             || match (
-                ctx.resolve_cmi_longident_component(left),
-                ctx.resolve_cmi_longident_component(right),
+                ctx.resolve_any_longident_component(left),
+                ctx.resolve_any_longident_component(right),
             ) {
                 (Some(left), Some(right)) => left == right,
                 _ => false,

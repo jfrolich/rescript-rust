@@ -5891,6 +5891,14 @@ fn rendered_alias_expansion(
     } else {
         top_expected
     };
+    let top_repr = type_ctx.repr(top);
+    let top_desc = type_ctx.get_desc(top_repr);
+    let top_is_package = matches!(&*top_desc, TypeDesc::Tpackage { .. });
+    drop(top_desc);
+    if top_is_package {
+        return None;
+    }
+
     let top_text = format_type_expr(type_ctx, top);
     if let Some(expansion) = trace.iter().skip(1).find_map(|pair| {
         let ty = if actual_side { pair.0 } else { pair.1 };
@@ -6496,7 +6504,9 @@ fn append_extra_type_clash_help(
         message.push_str("The type constructor ");
         message.push_str(&path);
         message.push_str(" would escape its scope");
-        return;
+        if !type_clash_top_actual_is_package(type_ctx, trace) {
+            return;
+        }
     }
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
@@ -6746,26 +6756,106 @@ fn type_clash_escape_constructor_path(
     None
 }
 
+fn type_clash_top_actual_is_package(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.first().is_some_and(|(actual, _)| {
+        let actual = type_ctx.repr(*actual);
+        let desc = type_ctx.get_desc(actual);
+        matches!(&*desc, TypeDesc::Tpackage { .. })
+    })
+}
+
 fn escaped_constructor_path(
     type_ctx: &TypeContext,
     constr_ty: TypeExprRef,
     var_ty: TypeExprRef,
 ) -> Option<String> {
-    let constr_ty = type_ctx.repr(constr_ty);
     let var_ty = type_ctx.repr(var_ty);
     if !matches!(&*type_ctx.get_desc(var_ty), TypeDesc::Tvar(_)) {
         return None;
     }
 
     let var_level = type_ctx.get_level(var_ty);
-    let constr_desc = type_ctx.get_desc(constr_ty);
-    let TypeDesc::Tconstr { path, .. } = &*constr_desc else {
+    escaped_constructor_path_in_type(type_ctx, constr_ty, var_level, &mut AHashSet::new())
+}
+
+fn escaped_constructor_path_in_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    var_level: i32,
+    seen: &mut AHashSet<TypeExprRef>,
+) -> Option<String> {
+    let ty = type_ctx.repr(ty);
+    if !seen.insert(ty) {
         return None;
-    };
-    if var_level < path.binding_time() {
-        return Some(path.name());
     }
-    None
+
+    let desc = type_ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if var_level < path.binding_time() {
+                return Some(path.name());
+            }
+            for arg in args {
+                if let Some(path) =
+                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        TypeDesc::Tpackage { args, .. } | TypeDesc::Ttuple(args) => {
+            for arg in args {
+                if let Some(path) =
+                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => escaped_constructor_path_in_type(
+            type_ctx,
+            arg.typ,
+            var_level,
+            seen,
+        )
+        .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen)),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
+            escaped_constructor_path_in_type(type_ctx, *next, var_level, seen)
+        }
+        TypeDesc::Tobject { fields, .. } | TypeDesc::Tfield { rest: fields, .. } => {
+            escaped_constructor_path_in_type(type_ctx, *fields, var_level, seen)
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
+                        if let Some(path) =
+                            escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                        {
+                            return Some(path);
+                        }
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for arg in types {
+                            if let Some(path) =
+                                escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                            {
+                                return Some(path);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            escaped_constructor_path_in_type(type_ctx, row.row_more, var_level, seen)
+        }
+        _ => None,
+    }
 }
 
 fn append_math_operator_help(
@@ -7303,6 +7393,11 @@ fn runtime_coercion_suggestion(
         return None;
     }
 
+    let target_ty = bottom_type_clash_aliases(trace)
+        .map(|(_, target)| target)
+        .unwrap_or(expected);
+    let target_type_string = format_type_expr(type_ctx, target_ty);
+
     if !runtime_coercion_compatible(type_ctx, actual, expected) {
         return None;
     }
@@ -7312,7 +7407,6 @@ fn runtime_coercion_suggestion(
         return None;
     }
 
-    let target_type_string = format_type_expr(type_ctx, expected);
     Some(format!("({target_expr_text} :> {target_type_string})\n"))
 }
 
@@ -9668,7 +9762,7 @@ impl<'a> TypeExprPrinter<'a> {
             TypeDesc::Tfield { .. } => self.format_object(repr),
             TypeDesc::Tnil => "{}".to_string(),
             TypeDesc::Tvariant(row) => self.format_variant(row),
-            TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
+            TypeDesc::Tpackage { path, lids, args } => self.format_package(path, lids, args),
         };
         self.active.remove(&repr);
 
@@ -9689,6 +9783,53 @@ impl<'a> TypeExprPrinter<'a> {
         self.next_var += 1;
         self.recursive_aliases.insert(ty, alias.clone());
         alias
+    }
+
+    fn format_package(
+        &mut self,
+        path: &crate::types::Path,
+        lids: &[Longident],
+        args: &[TypeExprRef],
+    ) -> String {
+        if lids.is_empty() {
+            return format!("module({})", path.name());
+        }
+
+        let constraints = lids
+            .iter()
+            .zip(args.iter())
+            .map(|(lid, arg)| {
+                format!(
+                    "type {} = {}",
+                    self.format_longident(lid),
+                    self.format(*arg)
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("module({} with {})", path.name(), constraints.join(" and "))
+    }
+
+    fn format_longident(&self, lid: &Longident) -> String {
+        match lid {
+            Longident::Lident(name) => self
+                .type_ctx
+                .resolve_any_longident_component(*name)
+                .unwrap_or_else(|| format!("#{}", name.raw())),
+            Longident::Ldot(prefix, name) => {
+                let name = self
+                    .type_ctx
+                    .resolve_any_longident_component(*name)
+                    .unwrap_or_else(|| format!("#{}", name.raw()));
+                format!("{}.{}", self.format_longident(prefix), name)
+            }
+            Longident::Lapply(func, arg) => {
+                format!(
+                    "{}({})",
+                    self.format_longident(func),
+                    self.format_longident(arg)
+                )
+            }
+        }
     }
 
     fn format_path_name(&self, path: &crate::types::Path) -> String {

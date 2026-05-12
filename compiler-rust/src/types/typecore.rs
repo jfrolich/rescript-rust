@@ -1088,6 +1088,7 @@ pub struct TypeCoreWarning {
 impl<'a> TypeCheckContext<'a> {
     /// Create a new type check context.
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
+        type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             type_ctx,
             arena,
@@ -19074,12 +19075,12 @@ fn apply_letmodule_local_path_cleanup<'a>(
     }
 }
 
-fn letmodule_local_escape_path(
+fn letmodule_local_escape_type(
     ctx: &TypeContext,
     ty: TypeExprRef,
     module_id: &Ident,
     seen: &mut HashSet<TypeExprRef>,
-) -> Option<Path> {
+) -> Option<TypeExprRef> {
     let ty = ctx.repr(ty);
     if !seen.insert(ty) {
         return None;
@@ -19089,16 +19090,26 @@ fn letmodule_local_escape_path(
     if let TypeDesc::Tconstr { path, .. } = &desc
         && letmodule_path_root_is_module(path, module_id)
     {
-        return Some(path.clone());
+        return Some(ty);
     }
 
     let mut found = None;
     crate::types::iter_type_expr(ctx, ty, |child| {
         if found.is_none() {
-            found = letmodule_local_escape_path(ctx, child, module_id, seen);
+            found = letmodule_local_escape_type(ctx, child, module_id, seen);
         }
     });
     found
+}
+
+fn expression_result_loc(expr: &Expression) -> LocIdx {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_let(_, _, body)
+        | ExpressionDesc::Texp_letmodule(_, _, _, body)
+        | ExpressionDesc::Texp_letexception(_, body)
+        | ExpressionDesc::Texp_sequence(_, body) => expression_result_loc(body),
+        _ => expr.exp_loc,
+    }
 }
 
 fn unbound_value_error(
@@ -19546,10 +19557,12 @@ fn type_letmodule(
             rewritten_ty,
             expected_ty,
         );
-        if letmodule_local_escape_path(ctx, rewritten_ty, &mod_id, &mut HashSet::new()).is_some() {
+        if let Some(escaped_ty) =
+            letmodule_local_escape_type(ctx, rewritten_ty, &mod_id, &mut HashSet::new())
+        {
             return Err(TypeCoreError::ExprTypeClash {
-                loc: typed_body.exp_loc,
-                trace: vec![(rewritten_ty, letmodule_ty)],
+                loc: expression_result_loc(&typed_body),
+                trace: vec![(rewritten_ty, letmodule_ty), (escaped_ty, letmodule_ty)],
                 context: None,
             });
         }

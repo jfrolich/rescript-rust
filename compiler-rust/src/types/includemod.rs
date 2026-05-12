@@ -2514,7 +2514,13 @@ pub(crate) fn type_declarations<'a>(
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
     if let Some(sig_manifest) = sig_decl.type_manifest {
         let manifests_match = impl_decl.type_manifest.is_some_and(|impl_manifest| {
-            type_exprs_equal_for_inclusion(type_ctx, &param_map, impl_manifest, sig_manifest)
+            type_exprs_equal_for_inclusion(
+                type_ctx,
+                Some(env),
+                &param_map,
+                impl_manifest,
+                sig_manifest,
+            )
         });
         if !manifests_match {
             return Err(IncludeModError::TypeDeclarationMismatch {
@@ -2610,6 +2616,7 @@ pub(crate) fn type_declarations<'a>(
         ) => {
             if let Some(detail) = compare_record_declarations(
                 type_ctx,
+                env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
                 impl_labels,
@@ -2632,6 +2639,7 @@ pub(crate) fn type_declarations<'a>(
         ) => {
             if let Some(detail) = compare_variant_declarations(
                 type_ctx,
+                env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
                 impl_constructors,
@@ -2663,6 +2671,7 @@ pub(crate) fn type_declarations<'a>(
 
 fn compare_record_declarations(
     type_ctx: &TypeContext,
+    env: &Env,
     impl_params: &[TypeExprRef],
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
@@ -2697,6 +2706,7 @@ fn compare_record_declarations(
         }
         if !type_exprs_equal_for_inclusion(
             type_ctx,
+            Some(env),
             &param_map,
             impl_label.ld_type,
             sig_label.ld_type,
@@ -2727,6 +2737,7 @@ fn compare_record_declarations(
 
 fn compare_variant_declarations(
     type_ctx: &TypeContext,
+    env: &Env,
     impl_params: &[TypeExprRef],
     sig_params: &[TypeExprRef],
     impl_constructors: &[ConstructorDeclaration],
@@ -2755,6 +2766,7 @@ fn compare_variant_declarations(
             ) => {
                 if let Some(detail) = compare_record_declarations(
                     type_ctx,
+                    env,
                     impl_params,
                     sig_params,
                     impl_labels,
@@ -2777,7 +2789,13 @@ fn compare_variant_declarations(
                 ConstructorArguments::CstrTuple(sig_args),
             ) => {
                 for (impl_arg, sig_arg) in impl_args.iter().zip(sig_args.iter()) {
-                    if !type_exprs_equal_for_inclusion(type_ctx, &param_map, *impl_arg, *sig_arg) {
+                    if !type_exprs_equal_for_inclusion(
+                        type_ctx,
+                        Some(env),
+                        &param_map,
+                        *impl_arg,
+                        *sig_arg,
+                    ) {
                         return Some(format!(
                             "The types for field {} are not equal.",
                             impl_constructor.cd_id.name()
@@ -2826,12 +2844,13 @@ fn build_type_param_map(
 
 fn type_exprs_equal_for_inclusion(
     type_ctx: &TypeContext,
+    env: Option<&Env>,
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
 ) -> bool {
     let mut seen = HashSet::new();
-    type_exprs_equal_for_inclusion_inner(type_ctx, param_map, impl_ty, sig_ty, &mut seen)
+    type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, sig_ty, &mut seen)
 }
 
 pub(crate) fn type_exprs_equal_for_type_declaration(
@@ -2842,11 +2861,12 @@ pub(crate) fn type_exprs_equal_for_type_declaration(
     actual_ty: TypeExprRef,
 ) -> bool {
     let param_map = build_type_param_map(type_ctx, expected_params, actual_params);
-    type_exprs_equal_for_inclusion(type_ctx, &param_map, expected_ty, actual_ty)
+    type_exprs_equal_for_inclusion(type_ctx, None, &param_map, expected_ty, actual_ty)
 }
 
 fn type_exprs_equal_for_inclusion_inner(
     type_ctx: &TypeContext,
+    env: Option<&Env>,
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_ty: TypeExprRef,
     sig_ty: TypeExprRef,
@@ -2869,6 +2889,21 @@ fn type_exprs_equal_for_inclusion_inner(
         return false;
     }
 
+    if let Some(env) = env {
+        let impl_expanded = type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, impl_ty));
+        let sig_expanded = type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_ty));
+        if impl_expanded != impl_ty || sig_expanded != sig_ty {
+            return type_exprs_equal_for_inclusion_inner(
+                type_ctx,
+                Some(env),
+                param_map,
+                impl_expanded,
+                sig_expanded,
+                seen,
+            );
+        }
+    }
+
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
         (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
         | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
@@ -2887,13 +2922,14 @@ fn type_exprs_equal_for_inclusion_inner(
             arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
                 && type_exprs_equal_for_inclusion_inner(
                     type_ctx,
+                    env,
                     param_map,
                     impl_arg.typ,
                     sig_arg.typ,
                     seen,
                 )
                 && type_exprs_equal_for_inclusion_inner(
-                    type_ctx, param_map, *impl_ret, *sig_ret, seen,
+                    type_ctx, env, param_map, *impl_ret, *sig_ret, seen,
                 )
         }
         (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(sig_items)) => {
@@ -2903,7 +2939,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(sig_items.iter())
                     .all(|(impl_item, sig_item)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, param_map, *impl_item, *sig_item, seen,
+                            type_ctx, env, param_map, *impl_item, *sig_item, seen,
                         )
                     })
         }
@@ -2926,22 +2962,24 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(sig_args.iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, param_map, *impl_arg, *sig_arg, seen,
+                            type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
                         )
                     })
         }
         (TypeDesc::Tlink(impl_next), _) | (TypeDesc::Tsubst(impl_next), _) => {
-            type_exprs_equal_for_inclusion_inner(type_ctx, param_map, *impl_next, sig_ty, seen)
+            type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, *impl_next, sig_ty, seen)
         }
         (_, TypeDesc::Tlink(sig_next)) | (_, TypeDesc::Tsubst(sig_next)) => {
-            type_exprs_equal_for_inclusion_inner(type_ctx, param_map, impl_ty, *sig_next, seen)
+            type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, *sig_next, seen)
         }
         (
             TypeDesc::Tpoly {
                 body: impl_body, ..
             },
             TypeDesc::Tpoly { body: sig_body, .. },
-        ) => type_exprs_equal_for_inclusion_inner(type_ctx, param_map, *impl_body, *sig_body, seen),
+        ) => type_exprs_equal_for_inclusion_inner(
+            type_ctx, env, param_map, *impl_body, *sig_body, seen,
+        ),
         (
             TypeDesc::Tpackage {
                 path: impl_path,
@@ -2961,7 +2999,7 @@ fn type_exprs_equal_for_inclusion_inner(
                     .zip(sig_args.iter())
                     .all(|(impl_arg, sig_arg)| {
                         type_exprs_equal_for_inclusion_inner(
-                            type_ctx, param_map, *impl_arg, *sig_arg, seen,
+                            type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
                         )
                     })
         }
@@ -3041,7 +3079,7 @@ fn force_package_manifest_inclusion_side_effects<'a>(
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
 fn extension_constructors<'a>(
     type_ctx: &'a TypeContext,
-    _env: &Env,
+    env: &Env,
     id: Ident,
     impl_ext: &ExtensionConstructor,
     sig_ext: &ExtensionConstructor,
@@ -3069,7 +3107,13 @@ fn extension_constructors<'a>(
             .iter()
             .zip(sig_ext.ext_type_params.iter())
             .any(|(impl_param, sig_param)| {
-                !type_exprs_equal_for_inclusion(type_ctx, &param_map, *impl_param, *sig_param)
+                !type_exprs_equal_for_inclusion(
+                    type_ctx,
+                    Some(env),
+                    &param_map,
+                    *impl_param,
+                    *sig_param,
+                )
             })
     {
         return Err(mismatch());
@@ -3077,6 +3121,7 @@ fn extension_constructors<'a>(
 
     if !constructor_arguments_equal_for_inclusion(
         type_ctx,
+        env,
         &param_map,
         &impl_ext.ext_args,
         &sig_ext.ext_args,
@@ -3086,7 +3131,13 @@ fn extension_constructors<'a>(
 
     match (impl_ext.ext_ret_type, sig_ext.ext_ret_type) {
         (Some(impl_ret), Some(sig_ret))
-            if !type_exprs_equal_for_inclusion(type_ctx, &param_map, impl_ret, sig_ret) =>
+            if !type_exprs_equal_for_inclusion(
+                type_ctx,
+                Some(env),
+                &param_map,
+                impl_ret,
+                sig_ret,
+            ) =>
         {
             return Err(mismatch());
         }
@@ -3105,6 +3156,7 @@ fn extension_constructors<'a>(
 
 fn constructor_arguments_equal_for_inclusion(
     type_ctx: &TypeContext,
+    env: &Env,
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_args: &ConstructorArguments,
     sig_args: &ConstructorArguments,
@@ -3119,14 +3171,20 @@ fn constructor_arguments_equal_for_inclusion(
                     .iter()
                     .zip(sig_items.iter())
                     .all(|(impl_item, sig_item)| {
-                        type_exprs_equal_for_inclusion(type_ctx, param_map, *impl_item, *sig_item)
+                        type_exprs_equal_for_inclusion(
+                            type_ctx,
+                            Some(env),
+                            param_map,
+                            *impl_item,
+                            *sig_item,
+                        )
                     })
         }
         (
             ConstructorArguments::CstrRecord(impl_labels),
             ConstructorArguments::CstrRecord(sig_labels),
         ) => {
-            compare_record_declarations(type_ctx, &[], &[], impl_labels, sig_labels).is_none()
+            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_none()
         }
         _ => false,
     }

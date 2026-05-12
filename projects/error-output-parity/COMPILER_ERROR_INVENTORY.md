@@ -81,7 +81,9 @@ with a reason after checking raise sites.
   and the function label mismatch subcase in
   `tests/error_output_parity/compiler/fixtures/function_label_mismatch.res`,
   plus the local module escape note subcase in
-  `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`.
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`
+  and the package local type escape/coercion subcase in
+  `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
@@ -492,7 +494,8 @@ with a reason after checking raise sites.
     `type_package` rebuilds constrained package arguments and checks whether
     they can be exported without local dependencies. Reduced ReScript probes
     with locally abstract types either compile in OCaml or fail earlier for
-    other reasons, so this remains documented as unresolved rather than covered.
+    other reasons. The package local type escape fixture covers the related
+    `Typecore.Expr_type_clash` path, not this `Typemod.Scoping_pack` raise.
 - `Recursive_module_require_explicit_type`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`.
