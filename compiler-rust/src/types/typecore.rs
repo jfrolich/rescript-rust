@@ -17648,22 +17648,12 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
                     flat_heads.push(flat_head);
                 }
             }
-            let double_underscore_flat_name =
-                format!("{}__{}", head.name(), prefix_components.join("__"));
-            let known_double_underscore_head = pers_env
-                .and_then(|pers| {
-                    pers.qualified_alias_path_for_flattened_head(&double_underscore_flat_name)
-                })
-                .or_else(|| ctx.find_flattened_alias_component_path(&double_underscore_flat_name))
-                .is_some();
-            if known_double_underscore_head
-                && !flat_heads
-                    .iter()
-                    .any(|item| item == &double_underscore_flat_name)
-            {
-                flat_heads.push(double_underscore_flat_name);
-            }
-
+            // OCaml compiler/ml/env.ml:1516-1538 discovers alias backing paths by
+            // scraping real module declarations, and env.ml:1567-1578 stores the
+            // selected child component path in the component table. Do not
+            // synthesize flattened names from path spelling here; every source
+            // prefix must come from the persistent alias table or the component
+            // relation registered while building that table.
             for flat_head in flat_heads {
                 let mut source_prefix = Path::pident(Ident::create_persistent(&flat_head));
                 for component in remaining_components {
