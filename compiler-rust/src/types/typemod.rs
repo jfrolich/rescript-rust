@@ -3342,6 +3342,11 @@ pub enum TypeModError {
         /// Aliased module path changed by the destructive substitution.
         path: Path,
     },
+    /// A destructive type substitution would remove constrained type parameters.
+    WithCannotRemoveConstrainedType {
+        /// Whole constrained module type location.
+        loc: LocIdx,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -3388,6 +3393,38 @@ fn unify_type_declaration_constraints(
             },
         })?;
     }
+    Ok(())
+}
+
+fn unify_with_constraint_original_params(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    params: &[TypeExprRef],
+    original_decl: &crate::types::decl::TypeDeclaration,
+) -> TypeModResult<()> {
+    if params.len() != original_decl.type_arity as usize {
+        return Ok(());
+    }
+
+    // OCaml compiler/ml/typedecl.ml:1938-1941 instances the constrained
+    // declaration, then unifies replacement params with the original params.
+    // This makes constraints on the original parameters visible in the
+    // replacement declaration before destructive-substitution checks run.
+    let original_params =
+        crate::types::ctype::instance_list(tctx.type_ctx, &original_decl.type_params);
+    for (&param, original_param) in params.iter().zip(original_params) {
+        crate::types::unify_var(tctx.type_ctx, &mut tctx.unify_state, param, original_param)
+            .map_err(|err| match err {
+                crate::types::TypeError::Unify(trace) => {
+                    TypeModError::InconsistentConstraint { loc, trace }
+                }
+                _ => TypeModError::InconsistentConstraint {
+                    loc,
+                    trace: vec![(param, original_param)],
+                },
+            })?;
+    }
+
     Ok(())
 }
 
@@ -7587,6 +7624,51 @@ fn nested_with_type_constraints(
         .collect()
 }
 
+fn with_type_subst_replacement_is_same_arg_alias(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+) -> bool {
+    use crate::parser::ast::CoreTypeDesc;
+
+    let Some(manifest_idx) = decl.ptype_manifest else {
+        return false;
+    };
+    let manifest = arena.get_core_type(manifest_idx);
+    let CoreTypeDesc::Ptyp_constr(inner) = &*manifest.ptyp_desc else {
+        return false;
+    };
+    let (_, args) = &**inner;
+    if args.len() != decl.ptype_params.len() {
+        return false;
+    }
+
+    args.iter()
+        .zip(decl.ptype_params.iter())
+        .all(|(arg_idx, (param_idx, _))| {
+            let arg = arena.get_core_type(*arg_idx);
+            let param = arena.get_core_type(*param_idx);
+            match (&*arg.ptyp_desc, &*param.ptyp_desc) {
+                (CoreTypeDesc::Ptyp_var(arg), CoreTypeDesc::Ptyp_var(param)) => arg == param,
+                _ => false,
+            }
+        })
+}
+
+fn typed_params_are_constrained(
+    ctx: &crate::types::context::TypeContext,
+    params: &[TypeExprRef],
+) -> bool {
+    params.iter().enumerate().any(|(index, param)| {
+        let param = ctx.repr(*param);
+        match &*ctx.get_desc(param) {
+            TypeDesc::Tvar(_) => params[index + 1..]
+                .iter()
+                .any(|other| ctx.repr(*other) == param),
+            _ => true,
+        }
+    })
+}
+
 fn rewrite_package_freshened_type_path(path: &Path, fresh_type_ids: &HashMap<i32, Ident>) -> Path {
     match path {
         Path::Pident(id) => fresh_type_ids
@@ -8660,7 +8742,9 @@ fn collect_pmty_with_type_constraints<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
+    base_mty: Option<&crate::types::decl::ModuleType>,
     constraints: &[crate::parser::ast::WithConstraint],
+    loc: LocIdx,
 ) -> TypeModResult<Vec<WithTypeConstraint>> {
     use crate::parser::ast::WithConstraint as ParsedWithConstraint;
 
@@ -8680,9 +8764,55 @@ fn collect_pmty_with_type_constraints<'a>(
                 }
             }
             ParsedWithConstraint::Pwith_typesubst(lid, decl) => {
-                if let Some(manifest) = decl.ptype_manifest {
+                let longident = tctx.resolve_lid(lid.txt).clone();
+                if let Some(ResolvedWithConstraintTarget::Type {
+                    id,
+                    decl: original_decl,
+                    ..
+                }) = resolve_with_constraint_target(tctx, env, arena, base_mty, &longident)
+                {
+                    let mut typed_decls = transl_sig_type_declarations_with_ids_and_originals(
+                        tctx,
+                        env,
+                        arena,
+                        RecFlag::Nonrecursive,
+                        std::slice::from_ref(decl),
+                        Some(std::slice::from_ref(&id)),
+                        Some(std::slice::from_ref(&original_decl)),
+                    )?;
+                    if let Some(typed_decl) = typed_decls.pop() {
+                        crate::types::includemod::type_declarations(
+                            tctx.type_ctx,
+                            env,
+                            id,
+                            &typed_decl.typ_type,
+                            &original_decl,
+                        )
+                        .map_err(|error| TypeModError::WithMismatch {
+                            loc,
+                            lid: longident.clone(),
+                            error,
+                        })?;
+                        if !with_type_subst_replacement_is_same_arg_alias(arena, decl)
+                            && typed_params_are_constrained(
+                                tctx.type_ctx,
+                                &typed_decl.typ_type.type_params,
+                            )
+                        {
+                            return Err(TypeModError::WithCannotRemoveConstrainedType { loc });
+                        }
+                        if let Some(manifest_ty) = typed_decl.typ_type.type_manifest {
+                            let path =
+                                flatten_package_constraint_path(&longident, arena, tctx.type_ctx);
+                            out.push(WithTypeConstraint {
+                                path,
+                                manifest: manifest_ty,
+                                kind: WithTypeConstraintKind::Substitute,
+                            });
+                        }
+                    }
+                } else if let Some(manifest) = decl.ptype_manifest {
                     let (_, manifest_ty) = transl_type(tctx, env, arena.get_core_type(manifest))?;
-                    let longident = tctx.resolve_lid(lid.txt).clone();
                     let path = flatten_package_constraint_path(&longident, arena, tctx.type_ctx);
                     out.push(WithTypeConstraint {
                         path,
@@ -8985,13 +9115,14 @@ fn transl_with_constraints<'a>(
                     decl: original_decl,
                 }) = resolve_with_constraint_target(tctx, env, arena, base_mty, &longident)
                 {
-                    let mut typed_decls = transl_sig_type_declarations_with_ids(
+                    let mut typed_decls = transl_sig_type_declarations_with_ids_and_originals(
                         tctx,
                         env,
                         arena,
                         RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
+                        Some(std::slice::from_ref(&original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
                         crate::types::includemod::type_declarations(
@@ -9039,13 +9170,14 @@ fn transl_with_constraints<'a>(
                     decl: original_decl,
                 }) = resolve_with_constraint_target(tctx, env, arena, base_mty, &longident)
                 {
-                    let mut typed_decls = transl_sig_type_declarations_with_ids(
+                    let mut typed_decls = transl_sig_type_declarations_with_ids_and_originals(
                         tctx,
                         env,
                         arena,
                         RecFlag::Nonrecursive,
                         std::slice::from_ref(decl),
                         Some(std::slice::from_ref(&id)),
+                        Some(std::slice::from_ref(&original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
                         crate::types::includemod::type_declarations(
@@ -9060,6 +9192,14 @@ fn transl_with_constraints<'a>(
                             lid: longident.clone(),
                             error,
                         })?;
+                        if !with_type_subst_replacement_is_same_arg_alias(arena, decl)
+                            && typed_params_are_constrained(
+                                tctx.type_ctx,
+                                &typed_decl.typ_type.type_params,
+                            )
+                        {
+                            return Err(TypeModError::WithCannotRemoveConstrainedType { loc });
+                        }
                         typed_constraints.push((
                             path,
                             lid.clone(),
@@ -11250,7 +11390,14 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 mty.pmty_loc,
             )?;
             let type_constraints =
-                collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
+                collect_pmty_with_type_constraints(
+                    tctx,
+                    env,
+                    arena,
+                    Some(&base_mty),
+                    constraints,
+                    mty.pmty_loc,
+                )?;
             check_destructive_substitution_alias_usage(
                 tctx,
                 env,
@@ -18852,6 +18999,26 @@ fn transl_sig_type_declarations_with_ids<'a>(
     decls: &[crate::parser::ast::TypeDeclaration],
     predeclared_type_ids: Option<&[Ident]>,
 ) -> TypeModResult<Vec<TypedTypeDeclaration>> {
+    transl_sig_type_declarations_with_ids_and_originals(
+        tctx,
+        env,
+        arena,
+        rec_flag,
+        decls,
+        predeclared_type_ids,
+        None,
+    )
+}
+
+fn transl_sig_type_declarations_with_ids_and_originals<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    rec_flag: RecFlag,
+    decls: &[crate::parser::ast::TypeDeclaration],
+    predeclared_type_ids: Option<&[Ident]>,
+    with_constraint_original_decls: Option<&[crate::types::decl::TypeDeclaration]>,
+) -> TypeModResult<Vec<TypedTypeDeclaration>> {
     let ctx = tctx.type_ctx;
     let mut typed_tree_decls = Vec::new();
     let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
@@ -18967,6 +19134,17 @@ fn transl_sig_type_declarations_with_ids<'a>(
                     ParserVariance::Invariant => TypesVariance::null(),
                 };
                 typ_params.push((typed_core_type, types_var));
+            }
+
+            if let Some(original_decl) =
+                with_constraint_original_decls.and_then(|decls| decls.get(decl_idx))
+            {
+                unify_with_constraint_original_params(
+                    tctx,
+                    decl.ptype_loc,
+                    &internal_type_params,
+                    original_decl,
+                )?;
             }
 
             // Convert type constraints

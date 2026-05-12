@@ -2871,6 +2871,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::WithCannotRemoveConstrainedType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Destructive substitutions are not supported for constrained \ntypes (other than when replacing a type constructor with \na type constructor with the same arguments).",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
