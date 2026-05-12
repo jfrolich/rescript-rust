@@ -4525,23 +4525,20 @@ fn force_qualified_value_type_paths<'a>(
             let selected_is_inside_candidate_parent =
                 path_descendant_depth(selected_module_path, candidate_parent)
                     .is_some_and(|depth| depth > 0);
-            let candidate_root_is_stdlib = path_root_ident(candidate_parent)
-                .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib");
-            let candidate_and_selected_share_non_stdlib_alias_root = !candidate_root_is_stdlib
-                && path_descendant_depth(selected_module_path, &qualified_root)
+            let candidate_and_selected_share_alias_root =
+                path_descendant_depth(selected_module_path, &qualified_root)
                     .is_some_and(|depth| depth > 0)
-                && path_descendant_depth(candidate_parent, &qualified_root)
-                    .is_some_and(|depth| depth > 0);
-            let raw_candidate_parent_is_alias = candidate_and_selected_share_non_stdlib_alias_root
+                    && path_descendant_depth(candidate_parent, &qualified_root)
+                        .is_some_and(|depth| depth > 0);
+            let raw_candidate_parent_is_alias = candidate_and_selected_share_alias_root
                 && matches!(path, Path::Pdot(raw_parent, _, _) if {
                     let mut persistent_env = pers_env.clone();
                     raw_alias_target_for_module_path(raw_parent, env, &mut persistent_env, ctx)
                         .is_some()
                 });
             if !candidate_parent_is_selected_or_child
-                && !(selected_is_inside_candidate_parent && !candidate_root_is_stdlib)
-                && !(candidate_and_selected_share_non_stdlib_alias_root
-                    && !raw_candidate_parent_is_alias)
+                && !selected_is_inside_candidate_parent
+                && !(candidate_and_selected_share_alias_root && !raw_candidate_parent_is_alias)
             {
                 // OCaml compiler/ml/env.ml:1516-1538 scrapes the selected
                 // module alias, then prefixes only identifiers reached through
