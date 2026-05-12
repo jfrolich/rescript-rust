@@ -65,6 +65,11 @@ pub enum IncludeModError {
         expected: Box<ModuleType>,
         error: Box<IncludeModError>,
     },
+    /// Nested include error reported in a module context.
+    InModule {
+        name: Ident,
+        error: Box<IncludeModError>,
+    },
     /// Functor parameter mismatch.
     FunctorParamMismatch(String),
     /// Functor result mismatch.
@@ -123,6 +128,12 @@ fn format_include_error(
                 output.push_str(&expected);
                 output.push('\n');
             }
+            format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::InModule { name, error } => {
+            output.push_str("  In module ");
+            output.push_str(name.name());
+            output.push_str(":\n");
             format_include_error(type_ctx, filename, error, output);
         }
         IncludeModError::TypeDeclarationMismatch {
@@ -244,7 +255,7 @@ pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> St
             } else {
                 let items = sig
                     .iter()
-                    .map(|item| format!("  {}", format_signature_item(type_ctx, item)))
+                    .map(|item| indent_lines(&format_signature_item(type_ctx, item), "  "))
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!("{{\n{items}\n}}")
@@ -288,6 +299,13 @@ fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String
         SignatureItem::SigClass => "class ...".to_string(),
         SignatureItem::SigClassType => "class type ...".to_string(),
     }
+}
+
+fn indent_lines(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_value_description(
@@ -1425,10 +1443,19 @@ fn check_paired_signature_items<'a>(
                     nested_sig_access_path.as_ref(),
                     false,
                 )
-                .map_err(|error| IncludeModError::ModuleTypesMismatch {
-                    actual: Box::new(impl_mty.clone()),
-                    expected: Box::new(sig_mod_decl.md_type.clone()),
-                    error: Box::new(error),
+                .map_err(|error| {
+                    let name = impl_id.clone();
+                    IncludeModError::InModule {
+                        name: name.clone(),
+                        error: Box::new(IncludeModError::ModuleTypesMismatch {
+                            actual: Box::new(impl_mty.clone()),
+                            expected: Box::new(sig_mod_decl.md_type.clone()),
+                            error: Box::new(IncludeModError::InModule {
+                                name,
+                                error: Box::new(error),
+                            }),
+                        }),
+                    }
                 })?;
                 coercions.push((pair.runtime_pos, coercion));
             }
