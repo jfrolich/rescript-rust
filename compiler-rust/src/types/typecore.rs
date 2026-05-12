@@ -546,6 +546,14 @@ pub enum TypeCoreError {
     /// A polymorphic variant inherits a type that is not a polymorphic variant.
     NotAVariant { loc: LocIdx, ty: TypeExprRef },
 
+    /// An object type contains the same method with incompatible types.
+    MethodMismatch {
+        loc: LocIdx,
+        label: String,
+        actual: TypeExprRef,
+        expected: TypeExprRef,
+    },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -2153,15 +2161,27 @@ fn transl_type_inner(
             let mut field_insertions: Vec<String> = Vec::new();
 
             fn add_object_field(
+                tctx: &mut TypeCheckContext<'_>,
+                loc: LocIdx,
                 field_entries: &mut HashMap<String, TypeExprRef>,
                 field_insertions: &mut Vec<String>,
                 field_name: String,
                 field_type: TypeExprRef,
-            ) {
-                if !field_entries.contains_key(&field_name) {
+            ) -> TypeCoreResult<()> {
+                if let Some(existing_type) = field_entries.get(&field_name) {
+                    let ctx = tctx.type_ctx;
+                    crate::types::unify(ctx, &mut tctx.unify_state, field_type, *existing_type)
+                        .map_err(|_| TypeCoreError::MethodMismatch {
+                            loc,
+                            label: field_name,
+                            actual: field_type,
+                            expected: *existing_type,
+                        })?;
+                } else {
                     field_insertions.push(field_name.clone());
                     field_entries.insert(field_name, field_type);
                 }
+                Ok(())
             }
 
             for field in fields.iter() {
@@ -2194,11 +2214,13 @@ fn transl_type_inner(
 
                         let field_name = tctx.arena.get_string(label.txt).to_string();
                         add_object_field(
+                            tctx,
+                            field_ct.ptyp_loc,
                             &mut field_entries,
                             &mut field_insertions,
                             field_name.clone(),
                             poly_ty,
-                        );
+                        )?;
 
                         typed_fields.push(crate::types::typedtree::ObjectField {
                             of_desc: crate::types::typedtree::ObjectFieldDesc::OTtag(
@@ -2233,11 +2255,13 @@ fn transl_type_inner(
                                         name, typ, rest, ..
                                     } => {
                                         add_object_field(
+                                            tctx,
+                                            inherit_ct.ptyp_loc,
                                             &mut field_entries,
                                             &mut field_insertions,
                                             name.clone(),
                                             *typ,
-                                        );
+                                        )?;
                                         current_field = *rest;
                                     }
                                     TypeDesc::Tnil => break,

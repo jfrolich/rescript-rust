@@ -3024,6 +3024,18 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::MethodMismatch {
+            loc,
+            label,
+            actual,
+            expected,
+        }) => UserDiagnostic::new(
+            format_method_mismatch_report(
+                type_ctx, arena, source, filename, *loc, label, *actual, *expected,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3737,6 +3749,28 @@ fn format_not_a_variant_report(
             "The type {} does not expand to a polymorphic variant type",
             format_type_expr(type_ctx, ty)
         ),
+    )
+}
+
+fn format_method_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> String {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    let actual = printer.format(actual);
+    let expected = printer.format(expected);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("Method '{label}' has type {actual}, which should be {expected}"),
     )
 }
 
