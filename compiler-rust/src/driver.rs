@@ -2723,6 +2723,20 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::WithNoComponent { loc, lid } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The signature constrained by `with' has no component named {}",
+                    format_longident_for_report(arena, lid)
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

@@ -3157,6 +3157,13 @@ pub enum TypeModError {
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// A `with` constraint targets a missing signature component.
+    WithNoComponent {
+        /// Whole constrained module type location.
+        loc: LocIdx,
+        /// Missing constrained component path.
+        lid: Longident,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -7131,6 +7138,45 @@ fn transl_with_constraints<'a>(
     Ok(typed_constraints)
 }
 
+fn check_with_constraint_components<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    base_mty: &crate::types::decl::ModuleType,
+    constraints: &[crate::parser::ast::WithConstraint],
+    loc: LocIdx,
+) -> TypeModResult<()> {
+    if resolve_mod_type_to_sig(base_mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)
+        .is_none()
+    {
+        return Ok(());
+    }
+
+    for constraint in constraints {
+        let (lid, needs_type) = match constraint {
+            crate::parser::ast::WithConstraint::Pwith_type(lid, _)
+            | crate::parser::ast::WithConstraint::Pwith_typesubst(lid, _) => (lid, true),
+            crate::parser::ast::WithConstraint::Pwith_module(lid, _)
+            | crate::parser::ast::WithConstraint::Pwith_modsubst(lid, _) => (lid, false),
+        };
+        let longident = tctx.resolve_lid(lid.txt).clone();
+        let target = resolve_with_constraint_target(tctx, env, arena, Some(base_mty), &longident);
+        let found = matches!(
+            (target, needs_type),
+            (Some(ResolvedWithConstraintTarget::Type { .. }), true)
+                | (Some(ResolvedWithConstraintTarget::Module { .. }), false)
+        );
+        if !found {
+            return Err(TypeModError::WithNoComponent {
+                loc,
+                lid: longident,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn collect_manifest_type_aliases_for_functor_arg(
     arg_mty: &crate::types::decl::ModuleType,
 ) -> HashMap<String, TypeExprRef> {
@@ -9111,6 +9157,14 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 arena,
                 arena.get_mod_type(*body_idx),
                 typed_body_hint,
+            )?;
+            check_with_constraint_components(
+                tctx,
+                env,
+                arena,
+                &base_mty,
+                constraints,
+                mty.pmty_loc,
             )?;
             let type_constraints =
                 collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
@@ -11756,6 +11810,16 @@ fn transl_modtype<'a>(
             let body = arena.get_mod_type(*body_idx);
             let typed_body = transl_modtype(tctx, env, arena, body)?;
             let base_mty = decl_module_type_from_typed(&typed_body);
+            if let Some(base_mty) = base_mty.as_ref() {
+                check_with_constraint_components(
+                    tctx,
+                    env,
+                    arena,
+                    base_mty,
+                    constraints,
+                    smty.pmty_loc,
+                )?;
+            }
             let typed_constraints =
                 transl_with_constraints(tctx, env, arena, base_mty.as_ref(), constraints)?;
             TMtyDesc::Tmty_with(Box::new(typed_body), typed_constraints)
