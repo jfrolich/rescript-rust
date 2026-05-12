@@ -5060,11 +5060,6 @@ fn force_qualified_value_type_paths<'a>(
                     let nested_inside_selected_module = selected_module_path
                         .and_then(|selected| path_descendant_depth(parent, selected))
                         .is_some_and(|depth| depth > 1);
-                    let selected_module_is_implicit_stdlib_path =
-                        selected_module_path.is_some_and(|selected| {
-                            path_root_ident(selected)
-                                .is_some_and(|root| root.is_persistent() && root.name() == "Stdlib")
-                        });
                     let type_parent_is_selected_alias_sibling =
                         selected_alias_targets.iter().any(|target| {
                             let Some(target_parent) = target.parent() else {
@@ -5075,10 +5070,7 @@ fn force_qualified_value_type_paths<'a>(
                             };
                             type_parent_parent.same(&target_parent) && !parent.same(target)
                         });
-                    if !((nested_inside_selected_module
-                        && !selected_module_is_implicit_stdlib_path)
-                        || type_parent_is_selected_alias_sibling)
-                    {
+                    if !(nested_inside_selected_module || type_parent_is_selected_alias_sibling) {
                         // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
                         // reads the selected value description from
                         // compiler/ml/env.ml:1091-1100's component value
