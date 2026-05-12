@@ -577,10 +577,14 @@ pub enum TypeCoreError {
     ContinueOutsideLoop { loc: LocIdx },
 
     /// Literal overflow.
-    LiteralOverflow(String),
+    LiteralOverflow { loc: LocIdx, ty: String },
 
     /// Unknown literal.
-    UnknownLiteral(String, char),
+    UnknownLiteral {
+        loc: LocIdx,
+        literal: String,
+        modifier: char,
+    },
 
     /// Illegal let-rec pattern.
     IllegalLetrecPat { loc: LocIdx },
@@ -1269,7 +1273,10 @@ fn warn_integer_literal_overflow(
 }
 
 /// Convert a parsed constant to a typed constant.
-pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Constant> {
+pub fn convert_constant(
+    cst: &crate::parser::ast::Constant,
+    loc: LocIdx,
+) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
 
     match cst {
@@ -1279,16 +1286,21 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             // and simulate 63-bit wrapping to match OCaml's int_of_string behavior.
             match parse_int_literal(s) {
                 Some(n) => Ok(Constant::Int(wrap_to_ocaml_int(n))),
-                None => Err(TypeCoreError::LiteralOverflow("int".to_string())),
+                None => Err(TypeCoreError::LiteralOverflow {
+                    loc,
+                    ty: "int".to_string(),
+                }),
             }
         }
         ParsedConstant::Integer(s, Some('n')) => {
             let (sign, digits) = parse_bigint_literal(s);
             Ok(Constant::BigInt(sign, digits))
         }
-        ParsedConstant::Integer(i, Some(c)) => {
-            Err(TypeCoreError::UnknownLiteral(i.to_string(), *c))
-        }
+        ParsedConstant::Integer(i, Some(c)) => Err(TypeCoreError::UnknownLiteral {
+            loc,
+            literal: i.to_string(),
+            modifier: *c,
+        }),
         ParsedConstant::Char(c) => Ok(Constant::Char(*c)),
         ParsedConstant::String(s, d) => {
             // Transform "js" delimiter to "*j" to match OCaml's escaped form
@@ -1302,7 +1314,11 @@ pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Co
             Ok(Constant::String(s.to_string(), delim))
         }
         ParsedConstant::Float(f, None) => Ok(Constant::Float(f.to_string())),
-        ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral(f.to_string(), *c)),
+        ParsedConstant::Float(f, Some(c)) => Err(TypeCoreError::UnknownLiteral {
+            loc,
+            literal: f.to_string(),
+            modifier: *c,
+        }),
     }
 }
 
@@ -2882,7 +2898,7 @@ fn type_pattern_inner(
         PD::Ppat_constant(cst) => {
             // Constant pattern
             warn_integer_literal_overflow(tctx, loc, cst);
-            let constant = convert_constant(cst)?;
+            let constant = convert_constant(cst, loc)?;
             let ty = type_constant(ctx, env, &constant);
 
             // Unify with expected type
@@ -4615,8 +4631,8 @@ fn type_pattern_interval(
     // Convert constants
     warn_integer_literal_overflow(tctx, loc, c1);
     warn_integer_literal_overflow(tctx, loc, c2);
-    let constant1 = convert_constant(c1)?;
-    let constant2 = convert_constant(c2)?;
+    let constant1 = convert_constant(c1, loc)?;
+    let constant2 = convert_constant(c2, loc)?;
 
     // Get type of first constant (both should have same type)
     let const_ty = type_constant(ctx, env, &constant1);
@@ -6490,7 +6506,7 @@ fn type_expect_with_recarg<'a>(
         ED::Pexp_constant(cst) => {
             // Constant expression
             warn_integer_literal_overflow(tctx, loc, cst);
-            let constant = convert_constant(cst)?;
+            let constant = convert_constant(cst, loc)?;
             let ty = type_constant(ctx, env, &constant);
 
             // OCaml: rue { ... exp_type = type_constant cst; ... }
@@ -29797,7 +29813,7 @@ mod tests {
     #[test]
     fn test_convert_constant_int() {
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("42"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert_eq!(result, Constant::Int(42));
     }
 
@@ -29805,7 +29821,7 @@ mod tests {
     fn test_convert_constant_large_fits_63bit() {
         // Values that fit in 63-bit should be preserved
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert_eq!(result, Constant::Int(99999999999999999));
     }
 
@@ -29814,15 +29830,18 @@ mod tests {
         // Values that don't fit in i64 should still error
         let cst =
             crate::parser::ast::Constant::Integer(Cow::Borrowed("99999999999999999999999"), None);
-        let result = convert_constant(&cst);
-        assert!(matches!(result, Err(TypeCoreError::LiteralOverflow(_))));
+        let result = convert_constant(&cst, LocIdx(0));
+        assert!(matches!(
+            result,
+            Err(TypeCoreError::LiteralOverflow { .. })
+        ));
     }
 
     #[test]
     fn test_convert_constant_underscores() {
         // 949460645006 fits in 63 bits, should be preserved
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("949_460_645_006"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert_eq!(result, Constant::Int(949_460_645_006));
     }
 
@@ -29830,7 +29849,7 @@ mod tests {
     fn test_convert_constant_hex() {
         // 0xFFFFFFFF = 4294967295, fits in 63 bits
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("0xffff_ffff"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert_eq!(result, Constant::Int(4294967295));
     }
 
@@ -29838,21 +29857,21 @@ mod tests {
     fn test_convert_constant_63bit_wrap() {
         // 4611686018427387904 = 2^62, wraps to -2^62 in 63-bit
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("4611686018427387904"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert_eq!(result, Constant::Int(-4611686018427387904));
     }
 
     #[test]
     fn test_convert_constant_string() {
         let cst = crate::parser::ast::Constant::String(Cow::Borrowed("hello"), None);
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert!(matches!(result, Constant::String(s, None) if s == "hello"));
     }
 
     #[test]
     fn test_convert_constant_bigint() {
         let cst = crate::parser::ast::Constant::Integer(Cow::Borrowed("12345"), Some('n'));
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "12345"));
     }
 
@@ -29860,7 +29879,7 @@ mod tests {
     fn test_convert_constant_bigint_removes_underscores() {
         let cst =
             crate::parser::ast::Constant::Integer(Cow::Owned("01_000_000".to_string()), Some('n'));
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "1000000"));
     }
 
@@ -29870,7 +29889,7 @@ mod tests {
             Cow::Owned("00x1_000_000".to_string()),
             Some('n'),
         );
-        let result = convert_constant(&cst).unwrap();
+        let result = convert_constant(&cst, LocIdx(0)).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
     }
 

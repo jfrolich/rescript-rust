@@ -78,6 +78,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/no_value_clauses.res`.
 - `Exception_pattern_below_toplevel`: covered by
   `tests/error_output_parity/compiler/fixtures/exception_pattern_below_toplevel.res`.
+- `Literal_overflow`: covered by
+  `tests/error_output_parity/compiler/fixtures/literal_overflow.res`.
+- `Unknown_literal`: covered for both integer and float modifier raise sites by
+  `tests/error_output_parity/compiler/fixtures/unknown_integer_literal_modifier.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/unknown_float_literal_modifier.res`.
 
 ## `compiler/ml/typetexp.ml`
 

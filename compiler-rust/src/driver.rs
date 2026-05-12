@@ -2568,6 +2568,38 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "Integer literal exceeds the range of representable integers of type {ty}"
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnknownLiteral {
+            loc,
+            literal,
+            modifier,
+        }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("Unknown modifier '{modifier}' for literal {literal}{modifier}"),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::ExprTypeClash {
             loc,
             trace,
