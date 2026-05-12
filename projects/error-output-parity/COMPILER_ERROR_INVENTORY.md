@@ -226,6 +226,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/polyvariant_constructor_mismatch.res`.
 - `Not_a_variant`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res`.
+- `Variant_tags`: covered by a polymorphic variant hash collision in
+  `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`.
 - `Opened_object`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_opened_object.res`.
 - `Not_an_object`: covered by
@@ -252,6 +254,8 @@ with a reason after checking raise sites.
 - `Constructor_mismatch`
 - `Not_a_variant`
 - `Variant_tags`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`.
 - `Invalid_variable_name`
 - `Cannot_quantify`
 - `Multiple_constraints_on_type`
