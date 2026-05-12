@@ -59,6 +59,13 @@ pub enum IncludeModError {
     },
     /// Module type mismatch.
     ModuleTypeMismatch { name: Ident, reason: String },
+    /// Module type declaration mismatch.
+    ModuleTypeDeclarationMismatch {
+        name: Ident,
+        actual: ModtypeDeclaration,
+        expected: ModtypeDeclaration,
+        error: Box<IncludeModError>,
+    },
     /// Nested module types do not include one another.
     ModuleTypesMismatch {
         actual: Box<ModuleType>,
@@ -67,6 +74,11 @@ pub enum IncludeModError {
     },
     /// Nested include error reported in a module context.
     InModule {
+        name: Ident,
+        error: Box<IncludeModError>,
+    },
+    /// Nested include error reported in a module type position.
+    AtModtype {
         name: Ident,
         error: Box<IncludeModError>,
     },
@@ -134,6 +146,12 @@ fn format_include_error(
             output.push_str("  In module ");
             output.push_str(name.name());
             output.push_str(":\n");
+            format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::AtModtype { name, error } => {
+            output.push_str("  At position module type ");
+            output.push_str(name.name());
+            output.push_str(" = <here>\n");
             format_include_error(type_ctx, filename, error, output);
         }
         IncludeModError::TypeDeclarationMismatch {
@@ -230,6 +248,22 @@ fn format_include_error(
             output.push_str(reason);
             output.push('\n');
         }
+        IncludeModError::ModuleTypeDeclarationMismatch {
+            name,
+            actual,
+            expected,
+            error,
+        } => {
+            output.push_str("  Module type declarations do not match:\n");
+            output.push_str("    ");
+            output.push_str(&format_modtype_declaration(type_ctx, name, actual));
+            output.push('\n');
+            output.push_str("  does not match\n");
+            output.push_str("    ");
+            output.push_str(&format_modtype_declaration(type_ctx, name, expected));
+            output.push('\n');
+            format_include_error(type_ctx, filename, error, output);
+        }
         IncludeModError::FunctorParamMismatch(reason)
         | IncludeModError::FunctorResultMismatch(reason) => {
             output.push_str("  ");
@@ -298,6 +332,21 @@ fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String
         SignatureItem::SigTypext(id, _, _) => format!("type {} += ...", id.name()),
         SignatureItem::SigClass => "class ...".to_string(),
         SignatureItem::SigClassType => "class type ...".to_string(),
+    }
+}
+
+fn format_modtype_declaration(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    decl: &ModtypeDeclaration,
+) -> String {
+    match &decl.mtd_type {
+        Some(mty) => format!(
+            "module type {} = {}",
+            id.name(),
+            format_module_type(type_ctx, mty)
+        ),
+        None => format!("module type {}", id.name()),
     }
 }
 
@@ -2730,10 +2779,45 @@ fn modtype_declarations<'a>(
                 return Ok(());
             }
             // Module types must be equivalent (both directions)
-            modtypes(type_ctx, env, impl_mty, sig_mty)?;
-            modtypes(type_ctx, env, sig_mty, impl_mty)?;
+            modtypes(type_ctx, env, impl_mty, sig_mty).map_err(|error| {
+                IncludeModError::ModuleTypeDeclarationMismatch {
+                    name: id.clone(),
+                    actual: impl_decl.clone(),
+                    expected: sig_decl.clone(),
+                    error: Box::new(with_modtype_context(id.clone(), error)),
+                }
+            })?;
+            modtypes(type_ctx, env, sig_mty, impl_mty).map_err(|error| {
+                IncludeModError::ModuleTypeDeclarationMismatch {
+                    name: id.clone(),
+                    actual: impl_decl.clone(),
+                    expected: sig_decl.clone(),
+                    error: Box::new(with_modtype_context(id.clone(), error)),
+                }
+            })?;
             Ok(())
         }
+    }
+}
+
+fn with_modtype_context(name: Ident, error: IncludeModError) -> IncludeModError {
+    match error {
+        IncludeModError::ModuleTypesMismatch {
+            actual,
+            expected,
+            error,
+        } => IncludeModError::AtModtype {
+            name: name.clone(),
+            error: Box::new(IncludeModError::ModuleTypesMismatch {
+                actual,
+                expected,
+                error: Box::new(with_modtype_context(name, *error)),
+            }),
+        },
+        error => IncludeModError::AtModtype {
+            name,
+            error: Box::new(error),
+        },
     }
 }
 

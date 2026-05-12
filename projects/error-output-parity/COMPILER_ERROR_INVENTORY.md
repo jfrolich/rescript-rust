@@ -387,7 +387,8 @@ only the wrapper variant:
 - extension constructor mismatch
 - module mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
-- module type mismatch
+- module type mismatch (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_modtype_mismatch.res`)
 - invalid module alias
 - unbound module path
 - unbound module type path
