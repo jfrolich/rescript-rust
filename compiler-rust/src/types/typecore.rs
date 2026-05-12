@@ -1149,6 +1149,64 @@ fn wrap_to_ocaml_int(n: i64) -> i64 {
     (wrapped - half as i128) as i64
 }
 
+fn int32_literal_fits_ocaml(s: &str) -> bool {
+    let stripped: String = s.chars().filter(|c| *c != '_').collect();
+    let digits = stripped.as_str();
+    let (negative, digits) = if let Some(rest) = digits.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = digits.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, digits)
+    };
+    let (base, digits) = if let Some(rest) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        (16, rest)
+    } else if let Some(rest) = digits
+        .strip_prefix("0o")
+        .or_else(|| digits.strip_prefix("0O"))
+    {
+        (8, rest)
+    } else if let Some(rest) = digits
+        .strip_prefix("0b")
+        .or_else(|| digits.strip_prefix("0B"))
+    {
+        (2, rest)
+    } else {
+        (10, digits)
+    };
+    if digits.is_empty() {
+        return false;
+    }
+    let Ok(value) = u128::from_str_radix(digits, base) else {
+        return false;
+    };
+    let max = if base == 10 {
+        if negative {
+            2_147_483_648u128
+        } else {
+            2_147_483_647u128
+        }
+    } else {
+        u32::MAX as u128
+    };
+    value <= max
+}
+
+fn warn_integer_literal_overflow(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    cst: &crate::parser::ast::Constant,
+) {
+    if let crate::parser::ast::Constant::Integer(s, None) = cst {
+        if !int32_literal_fits_ocaml(s) {
+            tctx.report_warning(loc, Warning::BsIntegerLiteralOverflow);
+        }
+    }
+}
+
 /// Convert a parsed constant to a typed constant.
 pub fn convert_constant(cst: &crate::parser::ast::Constant) -> TypeCoreResult<Constant> {
     use crate::parser::ast::Constant as ParsedConstant;
@@ -2724,6 +2782,7 @@ fn type_pattern_inner(
 
         PD::Ppat_constant(cst) => {
             // Constant pattern
+            warn_integer_literal_overflow(tctx, loc, cst);
             let constant = convert_constant(cst)?;
             let ty = type_constant(ctx, env, &constant);
 
@@ -4371,6 +4430,8 @@ fn type_pattern_interval(
     let ctx = tctx.type_ctx;
 
     // Convert constants
+    warn_integer_literal_overflow(tctx, loc, c1);
+    warn_integer_literal_overflow(tctx, loc, c2);
     let constant1 = convert_constant(c1)?;
     let constant2 = convert_constant(c2)?;
 
@@ -6264,6 +6325,7 @@ fn type_expect_with_recarg<'a>(
 
         ED::Pexp_constant(cst) => {
             // Constant expression
+            warn_integer_literal_overflow(tctx, loc, cst);
             let constant = convert_constant(cst)?;
             let ty = type_constant(ctx, env, &constant);
 
