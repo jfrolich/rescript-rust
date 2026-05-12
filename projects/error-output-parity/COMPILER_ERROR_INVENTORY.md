@@ -554,6 +554,8 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/fragile_pattern_in_toplevel.res`.
 - `compiler/ml/transl_recmodule.ml`
   - `Circular_dependency`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
   - `Wrong_version_interface`

@@ -68,6 +68,14 @@ enum RawFunctionBindingRef<'a> {
     Module(&'a Ident, &'a ModuleExpr),
 }
 
+#[derive(Clone)]
+struct RecModuleBinding {
+    id: Ident,
+    loc: Location,
+    init: Option<(RawLambda, RawLambda)>,
+    rhs: RawLambda,
+}
+
 fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
@@ -5107,12 +5115,10 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     /// Check if all bindings are either strict (no shape) or all-function blocks.
-    fn is_strict_or_all_functions(
-        bindings: &[(Ident, Option<(RawLambda, RawLambda)>, RawLambda)],
-    ) -> bool {
-        bindings.iter().all(|(_, opt, rhs)| match opt {
+    fn is_strict_or_all_functions(bindings: &[RecModuleBinding]) -> bool {
+        bindings.iter().all(|binding| match &binding.init {
             None => true,
-            Some(_) => Self::is_function_or_const_block(rhs, &HashSet::new()),
+            Some(_) => Self::is_function_or_const_block(&binding.rhs, &HashSet::new()),
         })
     }
 
@@ -5121,20 +5127,19 @@ impl<'a> RawLambdaConverter<'a> {
     /// Bindings with shapes (init_mod) can appear in any order.
     ///
     /// Mirrors OCaml's `Transl_recmodule.reorder_rec_bindings`.
-    fn reorder_rec_bindings(
-        bindings: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>,
-    ) -> Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)> {
+    fn reorder_rec_bindings(&mut self, bindings: Vec<RecModuleBinding>) -> Vec<RecModuleBinding> {
         let n = bindings.len();
-        if n <= 1 {
+        if n == 0 {
             return bindings;
         }
 
         // Compute free variables for each RHS
         let fvs: Vec<HashSet<Ident>> = bindings
             .iter()
-            .map(|(_, _, rhs)| raw_free_variables(rhs))
+            .map(|binding| raw_free_variables(&binding.rhs))
             .collect();
-        let ids: Vec<&Ident> = bindings.iter().map(|(id, _, _)| id).collect();
+        let ids: Vec<&Ident> = bindings.iter().map(|binding| &binding.id).collect();
+        let locs: Vec<Location> = bindings.iter().map(|binding| binding.loc.clone()).collect();
 
         #[derive(Clone, Copy, PartialEq)]
         enum Status {
@@ -5144,20 +5149,30 @@ impl<'a> RawLambdaConverter<'a> {
         }
         let mut status = vec![Status::Undefined; n];
         let mut result_indices: Vec<usize> = Vec::with_capacity(n);
+        let mut diagnostic: Option<(Location, String)> = None;
 
         fn emit_binding(
             i: usize,
             ids: &[&Ident],
+            locs: &[Location],
             fvs: &[HashSet<Ident>],
             inits: &[&Option<(RawLambda, RawLambda)>],
             status: &mut [Status],
             result: &mut Vec<usize>,
+            diagnostic: &mut Option<(Location, String)>,
         ) {
             match status[i] {
                 Status::Defined => return,
                 Status::Inprogress => {
-                    // Circular dependency - OCaml raises an error here.
-                    // We'll just proceed (the runtime will catch it).
+                    if diagnostic.is_none() {
+                        *diagnostic = Some((
+                            locs[i].clone(),
+                            format!(
+                                "Cannot safely evaluate the definition of the recursively-defined module {}",
+                                ids[i].name()
+                            ),
+                        ));
+                    }
                     return;
                 }
                 Status::Undefined => {
@@ -5166,7 +5181,7 @@ impl<'a> RawLambdaConverter<'a> {
                         status[i] = Status::Inprogress;
                         for j in 0..ids.len() {
                             if fvs[i].contains(ids[j]) {
-                                emit_binding(j, ids, fvs, inits, status, result);
+                                emit_binding(j, ids, locs, fvs, inits, status, result, diagnostic);
                             }
                         }
                     }
@@ -5177,20 +5192,31 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         let inits: Vec<&Option<(RawLambda, RawLambda)>> =
-            bindings.iter().map(|(_, init, _)| init).collect();
+            bindings.iter().map(|binding| &binding.init).collect();
 
         for i in 0..n {
             if status[i] == Status::Undefined {
-                emit_binding(i, &ids, &fvs, &inits, &mut status, &mut result_indices);
+                emit_binding(
+                    i,
+                    &ids,
+                    &locs,
+                    &fvs,
+                    &inits,
+                    &mut status,
+                    &mut result_indices,
+                    &mut diagnostic,
+                );
             }
         }
 
+        if let Some((loc, message)) = diagnostic {
+            self.report_diagnostic(loc, message);
+        }
+
         // Reorder bindings according to result_indices
-        let mut bindings = bindings;
         let mut reordered = Vec::with_capacity(n);
         // Use a vec of Options so we can take values out
-        let mut slots: Vec<Option<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>> =
-            bindings.into_iter().map(Some).collect();
+        let mut slots: Vec<Option<RecModuleBinding>> = bindings.into_iter().map(Some).collect();
         for i in result_indices {
             if let Some(binding) = slots[i].take() {
                 reordered.push(binding);
@@ -5206,24 +5232,31 @@ impl<'a> RawLambdaConverter<'a> {
     /// 2. `let M = rhs` for strict modules (no shape)
     /// 3. `seq #update_mod(shape, M, rhs)` to fill in actual values
     fn eval_rec_bindings(
-        bindings: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)>,
+        bindings: Vec<RecModuleBinding>,
         cont: RawLambda,
     ) -> RawLambda {
         if Self::is_strict_or_all_functions(&bindings) {
             // Simple letrec: all modules are just function/const blocks
             let rec_bindings: Vec<(Ident, RawLambda)> =
-                bindings.into_iter().map(|(id, _, rhs)| (id, rhs)).collect();
+                bindings
+                    .into_iter()
+                    .map(|binding| (binding.id, binding.rhs))
+                    .collect();
             return RawLambda::Lletrec(rec_bindings, Box::new(cont));
         }
 
         // Phase 3: patch_forwards - update_mod for each shaped binding
         let mut result = cont;
-        for (id, init, rhs) in bindings.iter().rev() {
-            if let Some((_loc, shape)) = init {
+        for binding in bindings.iter().rev() {
+            if let Some((_loc, shape)) = &binding.init {
                 result = RawLambda::seq(
                     RawLambda::prim(
                         Primitive::PupdateMod,
-                        vec![shape.clone(), RawLambda::Lvar(id.clone()), rhs.clone()],
+                        vec![
+                            shape.clone(),
+                            RawLambda::Lvar(binding.id.clone()),
+                            binding.rhs.clone(),
+                        ],
                         Location::none(),
                     ),
                     result,
@@ -5232,18 +5265,23 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         // Phase 2: bind_strict - let bindings for modules without shapes
-        for (id, init, rhs) in bindings.iter().rev() {
-            if init.is_none() {
-                result = RawLambda::let_(LetKind::Strict, id.clone(), rhs.clone(), result);
+        for binding in bindings.iter().rev() {
+            if binding.init.is_none() {
+                result = RawLambda::let_(
+                    LetKind::Strict,
+                    binding.id.clone(),
+                    binding.rhs.clone(),
+                    result,
+                );
             }
         }
 
         // Phase 1: bind_inits - init_mod for modules with shapes
-        for (id, init, _rhs) in bindings.iter().rev() {
-            if let Some((loc, shape)) = init {
+        for binding in bindings.iter().rev() {
+            if let Some((loc, shape)) = &binding.init {
                 result = RawLambda::let_(
                     LetKind::Strict,
-                    id.clone(),
+                    binding.id.clone(),
                     RawLambda::prim(
                         Primitive::PinitMod,
                         vec![loc.clone(), shape.clone()],
@@ -5265,17 +5303,23 @@ impl<'a> RawLambdaConverter<'a> {
         cont: RawLambda,
     ) -> RawLambda {
         // Collect (id, init_shape, rhs) for each binding
-        let collected: Vec<(Ident, Option<(RawLambda, RawLambda)>, RawLambda)> = bindings
+        let collected: Vec<RecModuleBinding> = bindings
             .iter()
             .map(|mb| {
                 let id = mb.mb_id.clone();
+                let loc = self.loc(mb.mb_expr.mod_loc);
                 let shape = self.init_shape(&mb.mb_expr);
                 let rhs = self.convert_module_expr_raw(&mb.mb_expr, &None);
-                (id, shape, rhs)
+                RecModuleBinding {
+                    id,
+                    loc,
+                    init: shape,
+                    rhs,
+                }
             })
             .collect();
 
-        let reordered = Self::reorder_rec_bindings(collected);
+        let reordered = self.reorder_rec_bindings(collected);
         Self::eval_rec_bindings(reordered, cont)
     }
 
