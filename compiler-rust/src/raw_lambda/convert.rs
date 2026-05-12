@@ -829,6 +829,12 @@ struct ComparisonSpecialization {
     simplify_constant_constructor: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawLambdaDiagnostic {
+    pub loc: Location,
+    pub message: String,
+}
+
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
@@ -842,6 +848,7 @@ pub struct RawLambdaConverter<'a> {
     lowered: LambdaConverter<'a>,
     unit_name: String,
     no_assert_false: bool,
+    diagnostic: Option<RawLambdaDiagnostic>,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -863,6 +870,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
             no_assert_false: false,
+            diagnostic: None,
         }
     }
 
@@ -885,6 +893,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
             no_assert_false: false,
+            diagnostic: None,
         }
     }
 
@@ -908,6 +917,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
             no_assert_false: false,
+            diagnostic: None,
         }
     }
 
@@ -930,6 +940,19 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
         std::mem::take(&mut self.possible_required_modules)
+    }
+
+    pub fn take_diagnostic(&mut self) -> Option<RawLambdaDiagnostic> {
+        self.diagnostic.take()
+    }
+
+    fn report_unknown_builtin_primitive(&mut self, loc: Location, prim_name: &str) {
+        if self.diagnostic.is_none() && prim_name.starts_with('%') {
+            self.diagnostic = Some(RawLambdaDiagnostic {
+                loc,
+                message: format!("Unknown builtin primitive \"{prim_name}\""),
+            });
+        }
     }
 
     fn sync_local_stamp_generators(&mut self) {
@@ -2875,22 +2898,24 @@ impl<'a> RawLambdaConverter<'a> {
         ty: TypeExprRef,
         loc: Location,
     ) -> RawLambda {
-        let resolved =
-            self.specialize_primitive_raw(prim, ty)
-                .unwrap_or_else(|| Primitive::PjsCall {
-                    prim_name: Self::raw_primitive_name(&prim.prim_name).to_string(),
-                    arg_types: decoded_external_arg_types(
-                        &prim.prim_native_name,
-                        prim.prim_arity.max(0) as usize,
-                    ),
-                    ffi: self.ffi_spec_for_primitive(
-                        prim,
-                        self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
-                        self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
-                    ),
-                    dynamic_import: false,
-                    transformed_jsx: false,
-                });
+        let raw_name = Self::raw_primitive_name(&prim.prim_name).to_string();
+        let resolved = self.specialize_primitive_raw(prim, ty).unwrap_or_else(|| {
+            self.report_unknown_builtin_primitive(loc.clone(), &raw_name);
+            Primitive::PjsCall {
+                prim_name: raw_name,
+                arg_types: decoded_external_arg_types(
+                    &prim.prim_native_name,
+                    prim.prim_arity.max(0) as usize,
+                ),
+                ffi: self.ffi_spec_for_primitive(
+                    prim,
+                    self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
+                    self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
+                ),
+                dynamic_import: false,
+                transformed_jsx: false,
+            }
+        });
 
         let prim_arity = prim.prim_arity;
 
@@ -2950,23 +2975,25 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_primitive_application_raw(
-        &self,
+        &mut self,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         args: &[&Expression],
         transformed_jsx: bool,
+        loc: Location,
     ) -> Primitive {
-        let prim_name = Self::raw_primitive_name(&prim.prim_name);
+        let prim_name = Self::raw_primitive_name(&prim.prim_name).to_string();
 
         if let [arg1] | [arg1, _] = args {
-            if let Some(primitive) = self.translate_unified_ops_primitive(prim_name, arg1.exp_type)
+            if let Some(primitive) =
+                self.translate_unified_ops_primitive(&prim_name, arg1.exp_type)
             {
                 return primitive;
             }
         }
 
         if let [arg1, _] = args {
-            if let Some(table) = Self::comparison_specialization(prim_name) {
+            if let Some(table) = Self::comparison_specialization(&prim_name) {
                 if self.is_base_type(arg1.exp_type, "bool") {
                     return table.boolcomp;
                 }
@@ -2988,8 +3015,9 @@ impl<'a> RawLambdaConverter<'a> {
         if let Some(primitive) = self.specialize_primitive_raw(prim, ty) {
             primitive
         } else {
+            self.report_unknown_builtin_primitive(loc, &prim_name);
             Primitive::PjsCall {
-                prim_name: prim_name.to_string(),
+                prim_name,
                 arg_types: decoded_external_arg_types(
                     &prim.prim_native_name,
                     prim.prim_arity.max(0) as usize,
@@ -9991,6 +10019,7 @@ impl<'a> RawLambdaConverter<'a> {
                         funct.exp_type,
                         &applied_exprs,
                         transformed_jsx,
+                        loc.clone(),
                     );
                     let base = RawLambda::prim(
                         primitive.clone(),
@@ -10249,7 +10278,8 @@ impl<'a> RawLambdaConverter<'a> {
                         .iter()
                         .map(|expr| self.convert_expr(expr))
                         .collect::<Vec<_>>();
-                    let prim = self.translate_primitive_application(prim, transformed_jsx);
+                    let prim =
+                        self.translate_primitive_application(prim, loc.clone(), transformed_jsx);
                     let base = Lambda::prim(prim, prim_args, loc.clone());
                     return if rest.is_empty() {
                         base
@@ -10652,6 +10682,7 @@ impl<'a> RawLambdaConverter<'a> {
             if let Some(primitive) = self.specialize_primitive_raw_with_env(prim, ty, env) {
                 primitive
             } else {
+                self.report_unknown_builtin_primitive(loc.clone(), raw_name);
                 Primitive::PjsCall {
                     prim_name: raw_name.to_string(),
                     arg_types: decoded_external_arg_types(
@@ -10707,7 +10738,7 @@ impl<'a> RawLambdaConverter<'a> {
         if raw_name == "%undefined" && prim.prim_arity == 0 {
             return Lambda::const_(Constant::JsUndefined { is_unit: false });
         }
-        let primitive = self.translate_primitive_application(prim, false);
+        let primitive = self.translate_primitive_application(prim, loc.clone(), false);
         if prim.prim_arity == 0 {
             Lambda::prim(primitive, vec![], loc)
         } else {
@@ -10732,14 +10763,16 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_primitive_application(
-        &self,
+        &mut self,
         prim: &crate::types::PrimitiveDescription,
+        loc: Location,
         transformed_jsx: bool,
     ) -> Primitive {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
         if let Some(primitive) = self.lowered.primitive_from_name(raw_name) {
             primitive
         } else {
+            self.report_unknown_builtin_primitive(loc, raw_name);
             Primitive::PjsCall {
                 prim_name: raw_name.to_string(),
                 arg_types: decoded_external_arg_types(

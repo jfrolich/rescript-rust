@@ -546,6 +546,8 @@ with a reason after checking raise sites.
   - `Variable_in_scope`
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/unknown_builtin_primitive.res`.
 - `compiler/ml/translmod.ml`
   - `Fragile_pattern_in_toplevel`
 - `compiler/ml/transl_recmodule.ml`

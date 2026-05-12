@@ -9956,6 +9956,18 @@ pub fn compile_source_to_js_with_options(
     }
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    if let Some(diagnostic) = raw_converter.take_diagnostic() {
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
     if options.dump_lambda {
@@ -12387,7 +12399,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let (raw_lambda, possible_required_modules, raw_lambda_current_stamp) =
+    let (raw_lambda, raw_diagnostic, possible_required_modules, raw_lambda_current_stamp) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.raw_lambda").entered();
             let implementation_coercion = compute_raw_implementation_coercion(
@@ -12412,14 +12424,19 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             }
             let raw_lambda = raw_converter
                 .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+            let raw_diagnostic = raw_converter.take_diagnostic();
             let possible_required_modules = raw_converter.take_possible_required_modules();
             let raw_lambda_current_stamp = raw_converter.current_stamp();
             (
                 raw_lambda,
+                raw_diagnostic,
                 possible_required_modules,
                 raw_lambda_current_stamp,
             )
         });
+    if let Some(diagnostic) = raw_diagnostic {
+        return Err(anyhow!(diagnostic.message));
+    }
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
