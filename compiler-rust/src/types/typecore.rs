@@ -4240,152 +4240,11 @@ fn force_qualified_value_type_paths<'a>(
         return;
     }
 
-    fn visible_local_alias_type_path(
-        ctx: &TypeContext,
-        env: &Env,
-        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
-        path: &Path,
-        value_access_root_is_local: bool,
-        value_access_root: Option<&Ident>,
-        selected_module_path: Option<&Path>,
-        selected_alias_targets: &[Path],
-    ) -> Option<Path> {
-        fn path_root_is_local(path: &Path) -> bool {
-            match path {
-                Path::Pident(id) => !id.is_persistent(),
-                Path::Pdot(parent, _, _) => path_root_is_local(parent),
-                Path::Papply(_, _) => false,
-            }
-        }
-
-        fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
-            if path.same(old_prefix) {
-                return Some(new_prefix.clone());
-            }
-            match path {
-                Path::Pdot(prefix, name, pos) => {
-                    rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
-                        Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
-                    })
-                }
-                _ => None,
-            }
-        }
-
-        if !value_access_root_is_local {
-            return None;
-        }
-        let Path::Pdot(parent, type_name, pos) = path else {
-            return None;
-        };
-        if path_root_is_local(parent) {
-            return None;
-        }
-
-        fn add_alias_targets(
-            ctx: &TypeContext,
-            env: &Env,
-            pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
-            target: &Path,
-            out: &mut Vec<Path>,
-        ) {
-            if !out.iter().any(|candidate| candidate.same(target)) {
-                out.push(target.clone());
-            }
-            let normalized = env.normalize_path(target);
-            if !out.iter().any(|candidate| candidate.same(&normalized)) {
-                out.push(normalized);
-            }
-            if let Path::Pident(flat_id) = target
-                && flat_id.is_persistent()
-                && let Some(qualified_alias_target) = pers_env
-                    .as_ref()
-                    .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_id.name()))
-                    .or_else(|| ctx.find_flattened_alias_component_path(flat_id.name()))
-                && !out
-                    .iter()
-                    .any(|candidate| candidate.same(&qualified_alias_target))
-            {
-                out.push(qualified_alias_target);
-            }
-        }
-
-        let mut alias_rewrites: Vec<(Path, Vec<Path>)> = Vec::new();
-        env.with_current_local_module_aliases(|aliases| {
-            for (alias_id, alias_target) in aliases {
-                if !value_access_root.is_some_and(|root| root.same(alias_id)) {
-                    continue;
-                }
-                let alias_path = Path::pident(alias_id.clone());
-                let mut alias_targets = vec![alias_target.clone()];
-                add_alias_targets(ctx, env, pers_env, alias_target, &mut alias_targets);
-                alias_rewrites.push((alias_path, alias_targets));
-            }
-        });
-        if let (Some(root), Some(selected_module_path)) = (value_access_root, selected_module_path)
-        {
-            if selected_module_path.head().same(root) && !selected_alias_targets.is_empty() {
-                alias_rewrites.push((
-                    selected_module_path.clone(),
-                    selected_alias_targets.to_vec(),
-                ));
-            }
-        }
-        alias_rewrites
-            .into_iter()
-            .find_map(|(alias_path, alias_targets)| {
-                alias_targets.into_iter().find_map(|alias_target| {
-                    if parent.same(&alias_target) {
-                        // OCaml compiler/ml/env.ml:1435-1444 scrapes the
-                        // alias by strengthening the target module type, and
-                        // compiler/ml/mtype.ml:41-49 leaves value
-                        // descriptions unchanged. The env.ml:1529-1538
-                        // component substitution only rewrites bound
-                        // identifiers, so a direct target type like
-                        // `Js.Dict.t` must not become `J.t`.
-                        return None;
-                    }
-                    let candidate_parent = rewrite_path_prefix(parent, &alias_target, &alias_path)?;
-                    if candidate_parent.same(parent) {
-                        return None;
-                    }
-                    let candidate = Path::Pdot(
-                        std::sync::Arc::new(candidate_parent),
-                        type_name.clone(),
-                        *pos,
-                    );
-                    if candidate.same(path) {
-                        return None;
-                    }
-                    // OCaml compiler/ml/env.ml:1091-1100 selects values from
-                    // the component table of the looked-up module path, and
-                    // env.ml:1530-1538 builds those component values with
-                    // `prefix_idents` plus compiler/ml/subst.ml:303-309
-                    // `Subst.value_description`. That substitution rewrites
-                    // the whole selected module prefix, so nested alias-target
-                    // paths like `Js.Json.Kind.json` become `J.Kind.json`, not
-                    // `J.json`. When Rust stores the module alias as a
-                    // flattened persistent unit such as `Js_Json`, use the
-                    // persistent alias table to recover the same qualified
-                    // component prefix OCaml substituted.
-                    Some(candidate)
-                })
-            })
-    }
-
     fn path_root_is_local(path: &Path) -> bool {
         match path {
             Path::Pident(id) => !id.is_persistent(),
             Path::Pdot(parent, _, _) => path_root_is_local(parent),
             Path::Papply(_, _) => false,
-        }
-    }
-
-    fn path_root_ident(path: &Path) -> Option<&Ident> {
-        match path {
-            Path::Pident(id) => Some(id),
-            Path::Pdot(parent, _, _) => path_root_ident(parent),
-            Path::Papply(_, _) => None,
         }
     }
 
@@ -4411,72 +4270,12 @@ fn force_qualified_value_type_paths<'a>(
         path_descendant_depth(module_path, selected_module_path).is_some_and(|depth| depth > 1)
     }
 
-    fn selected_value_module_alias_target<'a>(
-        path: &Path,
-        env: &Env,
-        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-        ctx: &'a TypeContext,
-    ) -> Option<Path> {
-        match path {
-            Path::Pident(_) => alias_target_for_module_path(path, env, pers_env, ctx),
-            Path::Pdot(parent, module_name, _) => {
-                // OCaml compiler/ml/env.ml:781-793 descends through
-                // `comp_components`, env.ml:1091-1099 reads `comp_values`, and
-                // env.ml:1530-1578 builds `comp_components` separately from the
-                // env.ml:1568 `comp_modules` thunk. For alias recovery while
-                // typing a qualified value, inspect the raw module component;
-                // forcing `lookup_qualified_module` would run
-                // compiler/ml/subst.ml:330-364 and freshen child binders
-                // before OCaml's value lookup observes them.
-                with_resolved_module_components_for_path_with_cache_mode(
-                    parent,
-                    env,
-                    pers_env,
-                    ctx,
-                    // OCaml compiler/ml/env.ml:781-793 `find_module_descr`
-                    // is the path used before env.ml:1091-1100 reads a
-                    // qualified value. Stay on that descriptor path while
-                    // recovering the selected component alias; env.ml:865-882
-                    // `find_module` is only for real module lookup/normalizing.
-                    ComponentLookupCacheMode::FindModuleDescr,
-                    |components| {
-                        components
-                            .lookup_module(module_name.as_str())
-                            .and_then(|(_, _, md)| match &md.md_type {
-                                crate::types::decl::ModuleType::MtyAlias(_, target)
-                                | crate::types::decl::ModuleType::MtyIdent(target) => {
-                                    Some(target.clone())
-                                }
-                                _ => None,
-                            })
-                    },
-                )
-                .flatten()
-            }
-            Path::Papply(_, _) => None,
-        }
-    }
-
-    fn selected_module_is_opened_component_path(env: &Env, selected_module_path: &Path) -> bool {
-        env.find_module_with_origin(selected_module_path.last())
-            .ok()
-            .is_some_and(|(_, md, is_local)| {
-                !is_local
-                    && md
-                        .md_path
-                        .as_ref()
-                        .is_some_and(|opened_path| opened_path.same(selected_module_path))
-            })
-    }
-
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
         ty: TypeExprRef,
         value_access_root_is_local: bool,
-        value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
-        selected_alias_targets: &[Path],
         defer_selected_value_final_result: bool,
         seen: &mut TypeExprRefSet,
     ) {
@@ -4509,9 +4308,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     arg_ty,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4533,9 +4330,7 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         ret_ty,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         defer_selected_value_final_result && ret_is_arrow,
                         seen,
                     );
@@ -4550,18 +4345,15 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         item,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         false,
                         seen,
                     );
                 }
             }
-            TypeDesc::Tconstr { path, args, abbrev } => {
+            TypeDesc::Tconstr { path, args, .. } => {
                 let path = path.clone();
                 let args = args.clone();
-                let abbrev = abbrev.clone();
                 drop(desc);
                 if defer_selected_value_final_result {
                     // OCaml compiler/ml/typecore.ml:2421-2457 handles
@@ -4581,33 +4373,10 @@ fn force_qualified_value_type_paths<'a>(
                 // Later expansion/unification paths, such as ctype.ml:666-673
                 // `get_level` and ctype.ml:1367-1372 `expand_head`, perform
                 // the real Env.find_type/Env.normalize_path effects lazily.
-                let rewritten_path = visible_local_alias_type_path(
-                    ctx,
-                    env,
-                    &tctx.persistent_env,
-                    &path,
-                    value_access_root_is_local,
-                    value_access_root,
-                    selected_module_path,
-                    selected_alias_targets,
-                )
-                .or_else(|| {
-                    if value_access_root_is_local {
-                        // OCaml compiler/ml/typecore.ml:2421-2457 only
-                        // instances the value description returned by
-                        // compiler/ml/env.ml:1091-1100. It does not run the
-                        // compiler/ml/ctype.ml:1367-1372 normalize-path
-                        // fallback for nested local-alias children such as
-                        // `Functions.Types.ZoomGenerator` until a later
-                        // expansion/unification actually requests it.
-                        return None;
-                    }
-                    let Path::Pdot(parent, _, _) = &path else {
-                        return None;
-                    };
-                    if !module_path_is_nested_under_selected(parent, selected_module_path) {
-                        return None;
-                    }
+                if !value_access_root_is_local
+                    && let Path::Pdot(parent, _, _) = &path
+                    && module_path_is_nested_under_selected(parent, selected_module_path)
+                {
                     // OCaml compiler/ml/typecore.ml:775-787 `expand_path`
                     // reaches compiler/ml/ctype.ml:1367-1372's
                     // `Env.normalize_path` fallback. env.ml:923-934 first
@@ -4636,17 +4405,6 @@ fn force_qualified_value_type_paths<'a>(
                             ctx,
                         );
                     }
-                    None
-                });
-                if let Some(rewritten_path) = rewritten_path {
-                    ctx.set_desc(
-                        ty,
-                        TypeDesc::Tconstr {
-                            path: rewritten_path,
-                            args: args.clone(),
-                            abbrev,
-                        },
-                    );
                 }
                 for arg in args {
                     visit(
@@ -4654,9 +4412,7 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         arg,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         false,
                         seen,
                     );
@@ -4671,9 +4427,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     fields,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4684,9 +4438,7 @@ fn force_qualified_value_type_paths<'a>(
                             env,
                             arg,
                             value_access_root_is_local,
-                            value_access_root,
                             selected_module_path,
-                            selected_alias_targets,
                             false,
                             seen,
                         );
@@ -4702,9 +4454,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     typ,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4713,9 +4463,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     rest,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4728,9 +4476,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     inner,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4753,9 +4499,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     row_more,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4765,9 +4509,7 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         arg,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         false,
                         seen,
                     );
@@ -4782,9 +4524,7 @@ fn force_qualified_value_type_paths<'a>(
                     env,
                     body,
                     value_access_root_is_local,
-                    value_access_root,
                     selected_module_path,
-                    selected_alias_targets,
                     false,
                     seen,
                 );
@@ -4794,9 +4534,7 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         var,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         false,
                         seen,
                     );
@@ -4811,9 +4549,7 @@ fn force_qualified_value_type_paths<'a>(
                         env,
                         arg,
                         value_access_root_is_local,
-                        value_access_root,
                         selected_module_path,
-                        selected_alias_targets,
                         false,
                         seen,
                     );
@@ -4824,91 +4560,9 @@ fn force_qualified_value_type_paths<'a>(
     }
 
     let value_access_root_is_local = path_root_is_local(value_path);
-    let value_access_root = path_root_ident(value_path);
     let selected_module_path = match value_path {
         Path::Pdot(parent, _, _) => Some(parent.as_ref()),
         _ => None,
-    };
-    let ctx = tctx.type_ctx;
-    let selected_module_is_opened_component_path = selected_module_path
-        .as_ref()
-        .is_some_and(|path| selected_module_is_opened_component_path(env, path));
-    let selected_module_is_dotted_component_path =
-        matches!(selected_module_path.as_ref(), Some(Path::Pdot(..)));
-    let should_collect_selected_alias_targets = value_access_root_is_local
-        || matches!(selected_module_path.as_ref(), Some(Path::Pident(_)))
-        || selected_module_is_opened_component_path
-        || selected_module_is_dotted_component_path;
-    let selected_alias_targets = if should_collect_selected_alias_targets {
-        // OCaml compiler/ml/env.ml:781-813 reaches component tables for
-        // qualified value lookup without forcing env.ml:1568's module
-        // declaration thunk. Alias-target recovery is only needed for local
-        // aliases selected from env.ml:665-676's local module table, for
-        // exact root modules whose declaration is read directly by env.ml:800-813,
-        // or for dotted component paths whose raw
-        // env.ml:1573-1578 child component still points at a scraped alias
-        // target. In the latter case, compiler/ml/env.ml:1530-1538 and
-        // compiler/ml/subst.ml:303-309 expose the selected component prefix in
-        // `Subst.value_description`, e.g. `DB__Story.Key.t` instead of the
-        // included backing module's `DB__Story__Read.Key.t`, while still
-        // avoiding the env.ml:1568 child module-declaration thunk.
-        selected_module_path
-            .and_then(|path| {
-                selected_value_module_alias_target(path, env, &mut tctx.persistent_env, ctx)
-            })
-            .map(|target| {
-                let mut targets = Vec::new();
-                let mut push_target = |candidate: Path| {
-                    if !targets
-                        .iter()
-                        .any(|existing: &Path| existing.same(&candidate))
-                    {
-                        targets.push(candidate);
-                    }
-                };
-                push_target(target.clone());
-                let normalized = env.normalize_path(&target);
-                push_target(normalized);
-                if let Path::Pdot(parent, name, pos) = &target {
-                    if let Some(pers) = tctx.persistent_env.as_ref() {
-                        for flat_head in pers.flattened_alias_heads_for_path(parent) {
-                            // OCaml compiler/ml/env.ml:1530-1538 substitutes the
-                            // selected component path into value descriptions. A
-                            // ReScript namespace alias may still appear in Rust as
-                            // the flattened backing unit (`Webapi__Fetch.Response`);
-                            // map that backing parent to the same selected alias
-                            // target so `Response.t` can be rewritten to the
-                            // opened path.
-                            push_target(Path::Pdot(
-                                std::sync::Arc::new(Path::pident(Ident::create_persistent(
-                                    flat_head,
-                                ))),
-                                name.clone(),
-                                *pos,
-                            ));
-                        }
-                    }
-                }
-                if let Path::Pident(flat_id) = &target
-                    && flat_id.is_persistent()
-                    && let Some(qualified_alias_target) = tctx
-                        .persistent_env
-                        .as_ref()
-                        .and_then(|pers| {
-                            pers.qualified_alias_path_for_flattened_head(flat_id.name())
-                        })
-                        .or_else(|| ctx.find_flattened_alias_component_path(flat_id.name()))
-                    && !targets
-                        .iter()
-                        .any(|candidate| candidate.same(&qualified_alias_target))
-                {
-                    targets.push(qualified_alias_target);
-                }
-                targets
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
     };
     let mut seen = TypeExprRefSet::new();
     visit(
@@ -4916,9 +4570,7 @@ fn force_qualified_value_type_paths<'a>(
         env,
         ty,
         value_access_root_is_local,
-        value_access_root,
         selected_module_path,
-        selected_alias_targets.as_slice(),
         true,
         &mut seen,
     );
