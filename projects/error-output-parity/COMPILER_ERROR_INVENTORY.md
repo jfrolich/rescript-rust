@@ -550,6 +550,8 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/unknown_builtin_primitive.res`.
 - `compiler/ml/translmod.ml`
   - `Fragile_pattern_in_toplevel`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/fragile_pattern_in_toplevel.res`.
 - `compiler/ml/transl_recmodule.ml`
   - `Circular_dependency`
 - `compiler/ml/cmi_format.ml`

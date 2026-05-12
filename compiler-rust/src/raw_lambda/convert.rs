@@ -947,11 +947,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn report_unknown_builtin_primitive(&mut self, loc: Location, prim_name: &str) {
-        if self.diagnostic.is_none() && prim_name.starts_with('%') {
-            self.diagnostic = Some(RawLambdaDiagnostic {
-                loc,
-                message: format!("Unknown builtin primitive \"{prim_name}\""),
-            });
+        if prim_name.starts_with('%') {
+            self.report_diagnostic(loc, format!("Unknown builtin primitive \"{prim_name}\""));
+        }
+    }
+
+    fn report_diagnostic(&mut self, loc: Location, message: String) {
+        if self.diagnostic.is_none() {
+            self.diagnostic = Some(RawLambdaDiagnostic { loc, message });
         }
     }
 
@@ -5302,6 +5305,20 @@ impl<'a> RawLambdaConverter<'a> {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
+                if is_top_level && *rec_flag == crate::parser::ast::RecFlag::Nonrecursive {
+                    for binding in bindings {
+                        match &binding.vb_pat.pat_desc {
+                            PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
+                            _ if !Self::is_irrefutable_pattern(&binding.vb_pat) => {
+                                self.report_diagnostic(
+                                    self.loc(binding.vb_pat.pat_loc),
+                                    "Such fragile pattern not allowed in the toplevel".to_string(),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 self.convert_let_with_body_raw(*rec_flag, bindings, body)
             }
             StructureItemDesc::Tstr_module(binding) => {

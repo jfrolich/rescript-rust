@@ -21314,39 +21314,54 @@ fn report_unused_rec_flag_warning(
     }
 }
 
-fn let_unwrap_partial_match_hint_side_effect<'a>(
+fn report_let_partial_match_warnings<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     bindings: &[ValueBinding],
 ) {
-    if !tctx.experimental_let_unwrap {
-        return;
-    }
-
     let ctx = tctx.type_ctx;
     for binding in bindings {
+        let cases = vec![crate::types::typedtree::Case::simple(
+            binding.vb_pat.clone(),
+            binding.vb_expr.clone(),
+        )];
+        if check_partial_simple(ctx, env, &cases) != crate::types::typedtree::Partial::Partial {
+            continue;
+        }
+
         // OCaml compiler/ml/typecore.ml:4695-4707 computes the LetUnwrap
         // partial-match warning hint with `repr (Ctype.expand_head env
         // pat.pat_type)` before typecore.ml:4715 `end_def ()`. That
         // expansion is observable because persistent type aliases may be
         // forced while identifiers for later bindings have not been allocated.
-        let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
-        let desc = ctx.get_desc(ctx.repr(expanded));
-        if let TypeDesc::Tconstr { path, .. } = &*desc {
-            let kind = if path.same(&crate::types::predef::path_option()) {
-                Some("option")
-            } else if path.same(&crate::types::predef::path_result()) {
-                Some("result")
-            } else {
-                None
+        let let_unwrap_example = if tctx.experimental_let_unwrap {
+            let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
+            let desc = ctx.get_desc(ctx.repr(expanded));
+            let kind = match &*desc {
+                TypeDesc::Tconstr { path, .. }
+                    if path.same(&crate::types::predef::path_option()) =>
+                {
+                    Some("option")
+                }
+                TypeDesc::Tconstr { path, .. }
+                    if path.same(&crate::types::predef::path_result()) =>
+                {
+                    Some("result")
+                }
+                _ => None,
             };
             drop(desc);
-            if let Some(example) = let_unwrap_partial_match_example(&binding.vb_pat, kind) {
-                tctx.report_warning(binding.vb_pat.pat_loc, Warning::PartialMatch { example });
-            }
+            let_unwrap_partial_match_example(&binding.vb_pat, kind)
         } else {
-            drop(desc);
-        }
+            None
+        };
+
+        let example = let_unwrap_example
+            .or_else(|| optional_record_field_missing_example(&cases))
+            .or_else(|| polymorphic_variant_missing_example(ctx, env, &cases))
+            .or_else(|| simple_partial_missing_example(tctx, env, &cases))
+            .unwrap_or_default();
+        tctx.report_warning(binding.vb_pat.pat_loc, Warning::PartialMatch { example });
     }
 }
 
@@ -21543,7 +21558,7 @@ fn type_let_bindings(
             report_unused_rec_flag_warning(tctx, &typed_bindings);
         }
 
-        let_unwrap_partial_match_hint_side_effect(tctx, env, &typed_bindings);
+        report_let_partial_match_warnings(tctx, env, &typed_bindings);
 
         // End definition level
         ctx.end_def();
