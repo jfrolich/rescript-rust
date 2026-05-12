@@ -341,6 +341,12 @@ with a reason after checking raise sites.
   - Covered for direct annotated parameter variance mismatch by
     `tests/error_output_parity/compiler/fixtures/bad_variance.res`.
 - `Unavailable_type_constructor`
+  - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
+    raise sites are second-pass checks over already translated `Tconstr` nodes
+    in `check_constraints_rec` and `check_coherence`; missing source-level type
+    constructors are rejected earlier by type expression translation, while
+    recursive placeholders are all installed in the final declaration env before
+    these checks run.
 - `Bad_fixed_type`
   - Covered for fixed polymorphic variant rows without a row variable by
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res`.
@@ -351,6 +357,12 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.
 - `Val_in_structure`
+  - Not reachable from normal `.res` structure syntax. The ReScript parser only
+    constructs `Pstr_primitive` from `external`; valid externals have
+    non-empty `pval_prim`, and a recovered missing primitive reports the parser
+    diagnostic before this Typedecl error is observable. Signature value
+    descriptions are routed through `Psig_value`, where OCaml permits empty
+    `pval_prim`.
 - `Invalid_attribute`
   - Covered for `@notUndefined` misuse by
     `tests/error_output_parity/compiler/fixtures/invalid_not_undefined_attribute.res`.
