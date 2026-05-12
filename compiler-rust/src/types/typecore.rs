@@ -7292,84 +7292,6 @@ fn path_depth_without_apply(path: &Path) -> usize {
     }
 }
 
-fn signature_has_persistent_alias_child(
-    sig: &[crate::types::decl::SignatureItem],
-    child_name: &str,
-) -> bool {
-    sig.iter().any(|item| match item {
-        crate::types::decl::SignatureItem::SigModule(id, md, _) if id.name() == child_name => {
-            match &md.md_type {
-                crate::types::decl::ModuleType::MtyAlias(_, target)
-                | crate::types::decl::ModuleType::MtyIdent(target) => {
-                    path_non_apply_root_ident(target)
-                        .is_some_and(|target_id| target_id.is_persistent())
-                }
-                _ => false,
-            }
-        }
-        _ => false,
-    })
-}
-
-fn manifest_parent_is_persistent_alias_child(
-    ctx: &TypeContext,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    path: &Path,
-) -> bool {
-    let Path::Pdot(parent, _, _) = path else {
-        return false;
-    };
-    let Path::Pdot(root, child_name, _) = parent.as_ref() else {
-        return false;
-    };
-    let Path::Pident(root_id) = root.as_ref() else {
-        return false;
-    };
-    if !(root_id.is_persistent() || root_id.stamp() == 0) {
-        return false;
-    }
-    // OCaml compiler/ml/env.ml:1440-1446 follows explicit alias components
-    // through `scrape_alias`. If this root is Rust's registered backing path
-    // for such an alias, do not also treat its child as a source-selected alias
-    // child based on the spelling of the persistent unit.
-    if pers_env
-        .as_ref()
-        .and_then(|pers| pers.qualified_alias_path_for_flattened_head(root_id.name()))
-        .or_else(|| ctx.find_flattened_alias_component_path(root_id.name()))
-        .is_some()
-    {
-        return false;
-    }
-
-    if ctx
-        .with_raw_module_sig(root_id.name(), |raw_sig| {
-            signature_has_persistent_alias_child(raw_sig, child_name.as_str())
-        })
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    pers_env
-        .as_mut()
-        .and_then(|pers| pers.read_raw_sig_shared(root_id.name(), ctx))
-        .is_some_and(|raw_sig| signature_has_persistent_alias_child(&raw_sig, child_name.as_str()))
-}
-
-fn lookup_parent_signature_already_forced(ctx: &TypeContext, lookup_path: &Path) -> bool {
-    let Path::Pdot(parent, _, _) = lookup_path else {
-        return false;
-    };
-    let Path::Pident(parent_id) = parent.as_ref() else {
-        return false;
-    };
-    parent_id.is_persistent()
-        && ctx
-            .renamed_module_sigs
-            .borrow()
-            .contains_key(parent_id.name())
-}
-
 fn lower_args_manifest_needs_component_force(
     ctx: &TypeContext,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -7401,8 +7323,6 @@ fn lower_args_manifest_needs_component_force(
                 ctx.find_flattened_alias_component_path(head.name())
                     .is_some()
             });
-            let alias_child_hit = lookup_parent_signature_already_forced(ctx, lookup_path)
-                && manifest_parent_is_persistent_alias_child(ctx, pers_env, &path);
             let parent_depth = path
                 .parent()
                 .map(|parent| path_depth_without_apply(&parent));
@@ -7411,17 +7331,13 @@ fn lower_args_manifest_needs_component_force(
             // ctype.ml:666-673 `get_level` calls env.ml:800-813 `find_type`,
             // whose env.ml:1513-1552 component-table construction applies
             // `Subst.type_declaration` to type manifests regardless of arity.
-            // For nullary manifests such as `Web__File.t = Webapi.File.t`,
-            // env.ml:1516-1518's `scrape_alias` reaches the persistent child
-            // alias `Webapi__File` only after the source alias module's
-            // ps_sig has already been forced. Preserve that force without
-            // turning flattened backing-unit manifests such as
-            // `Webapi__Fetch.signal = Webapi__Fetch.AbortController.signal` into
-            // eager child-module walks; compiler/ml/subst.ml:87-95 only rewrites
-            // paths through the component substitution it was given.
+            // Keep this tied to captured Ctype lookup/expansion paths and
+            // registered alias-component facts. Scanning raw signature contents
+            // here would add a Rust-only force heuristic; OCaml reaches child
+            // module thunks through env.ml:1567-1578 component storage.
             !path.same(lookup_path)
-                && ((has_args && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit))
-                    || alias_child_hit)
+                && has_args
+                && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit)
                 && parent_depth.is_some_and(|depth| depth >= 2)
         }
         _ => false,
