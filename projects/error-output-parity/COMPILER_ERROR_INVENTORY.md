@@ -304,6 +304,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.
 - `Unbound_type_var`
+  - Covered for variant constructor payloads by
+    `tests/error_output_parity/compiler/fixtures/unbound_type_var_decl.res`.
 - `Cannot_extend_private_type`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/cannot_extend_private_type.res`.

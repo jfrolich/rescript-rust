@@ -3187,6 +3187,13 @@ pub enum TypeModError {
         /// Rebound constructor longident.
         lid: Longident,
     },
+    /// A type declaration contains an unbound type variable.
+    UnboundTypeVar {
+        /// Unbound variable location.
+        loc: LocIdx,
+        /// Unbound variable name as printed by OCaml, including the leading quote.
+        name: String,
+    },
     /// An extension constructor contains an unbound type variable.
     UnboundTypeVarExt {
         /// Extension constructor location.
@@ -11846,7 +11853,12 @@ fn find_unbound_type_var_in_typed_core_type(
     match &ctyp.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_var(name) => {
             let ty = ctx.repr(ctyp.ctyp_type);
-            (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
+            match &*ctx.get_desc(ty) {
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                    (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
+                }
+                _ => None,
+            }
         }
         TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
             find_unbound_type_var_in_typed_core_type(ctx, &arg.typ, allowed)
@@ -11857,7 +11869,14 @@ fn find_unbound_type_var_in_typed_core_type(
                 .iter()
                 .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed))
         }
-        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
+        TypedCoreTypeDesc::Ttyp_poly(_, body) => {
+            let mut allowed = allowed.clone();
+            if let TypeDesc::Tpoly { vars, .. } = &*ctx.get_desc(ctx.repr(ctyp.ctyp_type)) {
+                allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
+            }
+            find_unbound_type_var_in_typed_core_type(ctx, body, &allowed)
+        }
+        TypedCoreTypeDesc::Ttyp_alias(body, _) => {
             find_unbound_type_var_in_typed_core_type(ctx, body, allowed)
         }
         _ => None,
@@ -11877,6 +11896,67 @@ fn find_unbound_type_var_in_typed_constructor_args(
             .iter()
             .find_map(|label| find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)),
     }
+}
+
+fn find_unbound_type_var_in_typed_type_constructor_args(
+    ctx: &crate::types::context::TypeContext,
+    args: &TypedConstructorArguments,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match args {
+        TypedConstructorArguments::Cstr_tuple(types) => types
+            .iter()
+            .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
+        TypedConstructorArguments::Cstr_record(labels) => labels
+            .iter()
+            .find_map(|label| find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)),
+    }
+}
+
+fn find_unbound_type_var_in_typed_type_kind(
+    ctx: &crate::types::context::TypeContext,
+    kind: &TypedTypeKind,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match kind {
+        TypedTypeKind::Ttype_variant(constructors) => constructors.iter().find_map(|cstr| {
+            cstr.cd_res
+                .as_ref()
+                .and_then(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed))
+                .or_else(|| {
+                    if cstr.cd_res.is_some() {
+                        None
+                    } else {
+                        find_unbound_type_var_in_typed_type_constructor_args(
+                            ctx,
+                            &cstr.cd_args,
+                            allowed,
+                        )
+                    }
+                })
+        }),
+        TypedTypeKind::Ttype_record(labels) => labels
+            .iter()
+            .find_map(|label| find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)),
+        TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => None,
+    }
+}
+
+fn find_unbound_type_var_in_typed_type_decl(
+    ctx: &crate::types::context::TypeContext,
+    decl: &TypedTypeDeclaration,
+) -> Option<(String, LocIdx)> {
+    let allowed: HashSet<TypeExprRef> = decl
+        .typ_type
+        .type_params
+        .iter()
+        .map(|ty_ref| ctx.repr(*ty_ref))
+        .collect();
+    find_unbound_type_var_in_typed_type_kind(ctx, &decl.typ_kind, &allowed).or_else(|| {
+        decl.typ_manifest
+            .as_ref()
+            .and_then(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, &allowed))
+    })
 }
 
 fn type_expr_has_free_variables(
@@ -15607,6 +15687,14 @@ fn type_structure_item<'a>(
             // pattern type variables via update_level_expand during unification.
             for ty in &env_desc_types_for_generalize {
                 crate::types::ctype::generalize(ctx, *ty);
+            }
+
+            for typed_decl in &typed_tree_decls {
+                if let Some((name, loc)) =
+                    find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)
+                {
+                    return Err(TypeModError::UnboundTypeVar { loc, name });
+                }
             }
 
             for decl in &internal_decls_for_generalize {

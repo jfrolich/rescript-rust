@@ -3682,6 +3682,11 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::UnboundTypeVar { loc, name } => UserDiagnostic::new(
+            format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
         TypeModError::UnboundTypeVarExt { loc, name } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
             2,
