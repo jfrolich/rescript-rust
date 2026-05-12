@@ -17,9 +17,11 @@ the same control flow, location choice, warning/error ordering, and reporting
 logic into Rust instead of adding output-specific special cases.
 
 Any compiler/parser code added for this project should be treated as a direct
-port of the OCaml implementation first. If the Rust code needs to differ for
-local architecture reasons, document the reason in the code or commit message
-and keep the externally visible diagnostic behavior byte-for-byte identical.
+port of the OCaml implementation first. Prefer matching the OCaml data flow and
+error constructors over patching only the final rendered text. If the Rust code
+needs to differ for local architecture reasons, document the reason in the code
+or commit message and keep the externally visible diagnostic behavior
+byte-for-byte identical.
 
 ## Existing Work To Reuse
 
@@ -55,9 +57,12 @@ What it does:
    `tests/syntax_tests/data/parsing/diagnostics_numbers.csv` through
    `res_parser` and `res_parser_rust`.
 2. Runs compiler diagnostics fixtures through OCaml `bsc` and Rust `bsc`.
-3. Compares exit status and combined stdout/stderr byte-for-byte with no output
-   normalization.
-4. Writes outputs and diffs under `.parity-cache/error-output/`.
+3. Compares parser exit status and combined stdout/stderr byte-for-byte with no
+   output normalization.
+4. Compares compiler exit status and stderr byte-for-byte with no output
+   normalization. Compiler stdout is captured separately as `.stdout` only to
+   aid debugging.
+5. Writes outputs and diffs under `.parity-cache/error-output/`.
 
 Useful commands:
 
