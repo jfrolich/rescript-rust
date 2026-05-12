@@ -141,6 +141,23 @@ pub enum EnvError {
 /// Result type for environment operations.
 pub type EnvResult<T> = Result<T, EnvError>;
 
+/// Check that a value identifier is accepted by the environment.
+///
+/// Mirrors OCaml `Env.check_value_name`: most lexical validity is enforced
+/// before this point, but forged AST/CMI values named `->` or multi-`#`
+/// method identifiers must be rejected when values enter the environment.
+pub fn check_value_name(name: &str, loc: Location) -> EnvResult<()> {
+    if name == "->" {
+        return Err(EnvError::IllegalValueName(loc, name.to_string()));
+    }
+    if let Some(rest) = name.strip_prefix('#') {
+        if rest.as_bytes().contains(&b'#') {
+            return Err(EnvError::IllegalValueName(loc, name.to_string()));
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Environment Summary
 // ============================================================================

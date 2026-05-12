@@ -3272,6 +3272,13 @@ pub enum TypeModError {
         /// Normalized dangling path.
         expanded: Path,
     },
+    /// A value identifier rejected by `Env.check_value_name`.
+    IllegalValueName {
+        /// Declaration location to report.
+        loc: Location,
+        /// Invalid value name.
+        name: String,
+    },
     /// A functor result still depends on an anonymous argument module.
     CannotEliminateDependency {
         /// Module application location to report.
@@ -3345,6 +3352,18 @@ impl From<TypeCoreError> for TypeModError {
     fn from(err: TypeCoreError) -> Self {
         TypeModError::CoreError(err)
     }
+}
+
+fn check_value_name_for_env(
+    id: &Ident,
+    desc: &crate::types::decl::ValueDescription,
+) -> TypeModResult<()> {
+    crate::types::env::check_value_name(id.name(), desc.val_loc).map_err(|err| match err {
+        crate::types::env::EnvError::IllegalValueName(loc, name) => {
+            TypeModError::IllegalValueName { loc, name }
+        }
+        other => TypeModError::CoreError(TypeCoreError::Other(format!("{other:?}"))),
+    })
 }
 
 fn unify_type_declaration_constraints(
@@ -6303,12 +6322,18 @@ fn freshened_signature_from_module_type<'a>(
     )
 }
 
-fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], env: &mut Env) {
+fn add_signature_items_to_env(
+    sig_items: &[crate::types::decl::SignatureItem],
+    env: &mut Env,
+) -> TypeModResult<()> {
     use crate::types::decl::SignatureItem;
 
     for item in sig_items {
         match item {
-            SignatureItem::SigValue(id, desc) => env.add_value(id.clone(), desc.clone()),
+            SignatureItem::SigValue(id, desc) => {
+                check_value_name_for_env(id, desc)?;
+                env.add_value(id.clone(), desc.clone());
+            }
             SignatureItem::SigType(id, decl, _) => env.add_type(id.clone(), decl.clone()),
             SignatureItem::SigModule(id, md, _) => env.add_module(id.clone(), md.clone()),
             SignatureItem::SigModtype(id, mtd) => env.add_modtype(id.clone(), mtd.clone()),
@@ -6317,6 +6342,7 @@ fn add_signature_items_to_env(sig_items: &[crate::types::decl::SignatureItem], e
             | SignatureItem::SigClassType => {}
         }
     }
+    Ok(())
 }
 
 /// Mirror the hidden stamp side effect of OCaml's
@@ -10139,7 +10165,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 })?
                             }
                         };
-                        add_signature_items_to_env(&include_sig, &mut sig_env);
+                        add_signature_items_to_env(&include_sig, &mut sig_env)?;
                         items.extend(include_sig);
                     }
                     _ => {}
@@ -13500,7 +13526,7 @@ pub fn transl_signature<'a>(
                         .ok_or_else(|| {
                             TypeModError::ModuleNotFound("included signature".to_string())
                         })?;
-                add_signature_items_to_env(&include_sig, &mut sig_env);
+                add_signature_items_to_env(&include_sig, &mut sig_env)?;
                 TSigDesc::Tsig_include(IncludeDescription {
                     incl_mod: typed_mty,
                     incl_type: include_sig,
@@ -17489,6 +17515,7 @@ fn type_structure_item<'a>(
                 for (sig_index, item) in sig_items.iter().enumerate() {
                     match item {
                         crate::types::decl::SignatureItem::SigValue(id, desc) => {
+                            check_value_name_for_env(id, desc)?;
                             new_env.add_value(id.clone(), desc.clone());
                         }
                         crate::types::decl::SignatureItem::SigType(id, decl, _) => {

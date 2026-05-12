@@ -2769,6 +2769,16 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::IllegalValueName { loc, name } => UserDiagnostic::new(
+            format_compiler_error_report_from_external_location(
+                type_ctx,
+                filename,
+                loc,
+                &format!("'{name}' is not a valid value identifier."),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CannotEliminateDependency { loc, mty } => UserDiagnostic::new(
             format_cannot_eliminate_dependency_report(
                 type_ctx, arena, source, filename, *loc, mty,
@@ -4064,6 +4074,60 @@ fn format_compiler_error_report_from_location(
     let mut output = String::new();
 
     push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn push_compiler_error_report_header_from_external_location(
+    output: &mut String,
+    source: Option<&str>,
+    filename: &str,
+    loc: &Location,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(
+            filename,
+            &loc.loc_start,
+            &loc.loc_end,
+        ));
+        output.push_str("\n\n");
+        if let Some(source) = source {
+            output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+            output.push('\n');
+        }
+    }
+}
+
+fn format_compiler_error_report_from_external_location(
+    type_ctx: &TypeContext,
+    current_filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let loc_filename = type_ctx
+        .resolve_cmi_longident_component(loc.loc_start.file_name)
+        .filter(|name| !name.is_empty() && name != "_none_")
+        .unwrap_or_else(|| current_filename.to_string());
+    let loc_source = std::fs::read_to_string(&loc_filename).ok();
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_external_location(
+        &mut output,
+        loc_source.as_deref(),
+        &loc_filename,
+        loc,
+    );
 
     for line in message.lines() {
         output.push_str("  ");

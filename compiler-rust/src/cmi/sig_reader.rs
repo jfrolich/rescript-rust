@@ -9,7 +9,7 @@
 //! Records are blocks with tag 0. See the tag tables in the module-level comments below.
 
 use crate::ident::Ident;
-use crate::location::Location;
+use crate::location::{Location, Position};
 use crate::types::asttypes::{ArgLabel, Located, MutableFlag, PrivateFlag};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
@@ -135,13 +135,13 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let val_type = self.read_type_expr(&fields[0]);
         let val_kind = self.read_value_kind(&fields[1]);
-        let _val_loc = read_location(&fields[2]);
-        let val_attributes = read_attributes(&fields[3]);
+        let val_loc = read_location(self.ctx, &fields[2]);
+        let val_attributes = read_attributes(self.ctx, &fields[3]);
 
         ValueDescription {
             val_type,
             val_kind,
-            val_loc: Location::none(), // Use none for CMI-loaded items
+            val_loc,
             val_attributes,
             val_path: None,
         }
@@ -197,7 +197,8 @@ impl<'a> SigReadContext<'a> {
             let (_, f) = tup.as_block();
             (f[0].as_int() as i32, f[1].as_int() as i32)
         });
-        let type_attributes = read_attributes(&fields[8]);
+        let type_loc = read_location(self.ctx, &fields[7]);
+        let type_attributes = read_attributes(self.ctx, &fields[8]);
         let type_immediate = fields[9].as_bool();
         let type_unboxed = read_unboxed_status(&fields[10]);
         let type_inlined_types = self.read_type_inlined_types(&fields[11]);
@@ -210,7 +211,7 @@ impl<'a> SigReadContext<'a> {
             type_manifest,
             type_variance,
             type_newtype_level,
-            type_loc: Location::none(),
+            type_loc,
             type_attributes,
             type_immediate,
             type_unboxed,
@@ -274,7 +275,7 @@ impl<'a> SigReadContext<'a> {
                     tag: f[0].as_int() as i32,
                     name: f[1].as_string().to_string(),
                     num_nonconsts: f[2].as_int() as i32,
-                    attrs: read_attributes(&f[3]),
+                    attrs: read_attributes(self.ctx, &f[3]),
                 }
             }
             _ => RecordRepresentation::RecordRegular, // fallback
@@ -296,14 +297,15 @@ impl<'a> SigReadContext<'a> {
         let ld_mutable = read_mutable_flag(&fields[1]);
         let ld_optional = fields[2].as_bool();
         let ld_type = self.read_type_expr(&fields[3]);
-        let ld_attributes = read_attributes(&fields[5]);
+        let ld_loc = read_location(self.ctx, &fields[4]);
+        let ld_attributes = read_attributes(self.ctx, &fields[5]);
 
         LabelDeclaration {
             ld_id,
             ld_mutable,
             ld_optional,
             ld_type,
-            ld_loc: Location::none(),
+            ld_loc,
             ld_attributes,
         }
     }
@@ -321,13 +323,14 @@ impl<'a> SigReadContext<'a> {
         let cd_id = read_ident(&fields[0]);
         let cd_args = self.read_constructor_arguments(&fields[1]);
         let cd_res = fields[2].as_option().map(|te| self.read_type_expr(te));
-        let cd_attributes = read_attributes(&fields[4]);
+        let cd_loc = read_location(self.ctx, &fields[3]);
+        let cd_attributes = read_attributes(self.ctx, &fields[4]);
 
         ConstructorDeclaration {
             cd_id,
             cd_args,
             cd_res,
-            cd_loc: Location::none(),
+            cd_loc,
             cd_attributes,
         }
     }
@@ -381,8 +384,9 @@ impl<'a> SigReadContext<'a> {
         let ext_args = self.read_constructor_arguments(&fields[2]);
         let ext_ret_type = fields[3].as_option().map(|te| self.read_type_expr(te));
         let ext_private = read_private_flag(&fields[4]);
+        let ext_loc = read_location(self.ctx, &fields[5]);
+        let ext_attributes = read_attributes(self.ctx, &fields[6]);
         let ext_is_exception = fields[7].as_bool();
-        let ext_attributes = read_attributes(&fields[6]);
 
         ExtensionConstructor {
             ext_type_path,
@@ -390,7 +394,7 @@ impl<'a> SigReadContext<'a> {
             ext_args,
             ext_ret_type,
             ext_private,
-            ext_loc: Location::none(),
+            ext_loc,
             ext_attributes,
             ext_is_exception,
         }
@@ -405,12 +409,13 @@ impl<'a> SigReadContext<'a> {
     fn read_module_declaration(&mut self, value: &OcamlValue) -> ModuleDeclaration {
         let fields = &value.as_block().1;
         let md_type = self.read_module_type(&fields[0]);
-        let md_attributes = read_attributes(&fields[1]);
+        let md_attributes = read_attributes(self.ctx, &fields[1]);
+        let md_loc = read_location(self.ctx, &fields[2]);
 
         ModuleDeclaration {
             md_type,
             md_attributes,
-            md_loc: Location::none(),
+            md_loc,
             md_path: None,
         }
     }
@@ -424,12 +429,13 @@ impl<'a> SigReadContext<'a> {
     fn read_modtype_declaration(&mut self, value: &OcamlValue) -> ModtypeDeclaration {
         let fields = &value.as_block().1;
         let mtd_type = fields[0].as_option().map(|mt| self.read_module_type(mt));
-        let mtd_attributes = read_attributes(&fields[1]);
+        let mtd_attributes = read_attributes(self.ctx, &fields[1]);
+        let mtd_loc = read_location(self.ctx, &fields[2]);
 
         ModtypeDeclaration {
             mtd_type,
             mtd_attributes,
-            mtd_loc: Location::none(),
+            mtd_loc,
         }
     }
 
@@ -710,7 +716,7 @@ impl<'a> SigReadContext<'a> {
     /// Read an arg record {lbl: arg_label; typ: type_expr}.
     fn read_arg(&mut self, value: &OcamlValue) -> TypeArg {
         let fields = &value.as_block().1;
-        let lbl = read_arg_label(&fields[0]);
+        let lbl = read_arg_label(self.ctx, &fields[0]);
         let typ = self.read_type_expr(&fields[1]);
         TypeArg { lbl, typ }
     }
@@ -1081,9 +1087,26 @@ fn read_path(value: &OcamlValue) -> Path {
     }
 }
 
-/// Read a Location.t (we just skip it for now).
-fn read_location(_value: &OcamlValue) -> Location {
-    Location::none()
+/// Read a Lexing.position.
+fn read_position(ctx: &TypeContext, value: &OcamlValue) -> Position {
+    let fields = &value.as_block().1;
+    let file_name = ctx.intern_cmi_longident_name(fields[0].as_string());
+    Position {
+        file_name,
+        line: fields[1].as_int() as i32,
+        bol: fields[2].as_int() as i32,
+        cnum: fields[3].as_int() as i32,
+    }
+}
+
+/// Read a Location.t.
+fn read_location(ctx: &TypeContext, value: &OcamlValue) -> Location {
+    let fields = &value.as_block().1;
+    Location {
+        loc_start: read_position(ctx, &fields[0]),
+        loc_end: read_position(ctx, &fields[1]),
+        loc_ghost: fields[2].as_bool(),
+    }
 }
 
 fn read_attribute_name(value: &OcamlValue) -> crate::types::asttypes::Located<String> {
@@ -1114,7 +1137,7 @@ fn read_first_string(value: &OcamlValue) -> Option<String> {
 /// The JS backend relies on simple constructor `@as(...)` payloads from loaded
 /// interfaces, so preserve the payload forms the OCaml backend observes for
 /// null/undefined identifiers and simple string literals.
-fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
+fn read_attributes(ctx: &TypeContext, value: &OcamlValue) -> Vec<Attribute> {
     value
         .as_list()
         .iter()
@@ -1135,7 +1158,7 @@ fn read_attributes(value: &OcamlValue) -> Vec<Attribute> {
                     attr_payload: payload,
                     attr_loc: fields
                         .get(2)
-                        .map(read_location)
+                        .map(|loc| read_location(ctx, loc))
                         .unwrap_or_else(Location::none),
                 })
             }
@@ -1328,20 +1351,20 @@ fn read_mutable_flag(value: &OcamlValue) -> MutableFlag {
 ///
 /// Nolabel is constant (Int(0)).
 /// Non-constants: Labelled = Block(0), Optional = Block(1).
-fn read_arg_label(value: &OcamlValue) -> ArgLabel {
+fn read_arg_label(ctx: &TypeContext, value: &OcamlValue) -> ArgLabel {
     match value {
         OcamlValue::Int(0) => ArgLabel::Nolabel,
         OcamlValue::Block(0, fields) => {
             // Labelled(string loc) - string loc is {txt: string; loc: Location.t}
             let loc_fields = &fields[0].as_block().1;
             let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Labelled(Located::new(name, Location::none()))
+            ArgLabel::Labelled(Located::new(name, read_location(ctx, &loc_fields[1])))
         }
         OcamlValue::Block(1, fields) => {
             // Optional(string loc) - string loc is {txt: string; loc: Location.t}
             let loc_fields = &fields[0].as_block().1;
             let name = loc_fields[0].as_string().to_string();
-            ArgLabel::Optional(Located::new(name, Location::none()))
+            ArgLabel::Optional(Located::new(name, read_location(ctx, &loc_fields[1])))
         }
         _ => ArgLabel::Nolabel,
     }

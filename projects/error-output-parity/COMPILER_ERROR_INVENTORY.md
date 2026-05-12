@@ -544,6 +544,8 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/cases/missing_module.res`.
   - `Illegal_value_name`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/illegal_value_name.res`.
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
     - Covered by
