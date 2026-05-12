@@ -2477,6 +2477,58 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         },
+        TypeModError::CoreError(TypeCoreError::InvalidForLoopIndex { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid for-loop index: only variables and _ are allowed.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidForOfPattern { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid for...of binding: only variables and _ are allowed.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalLetrecPat { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Only variables are allowed as left-hand side of `let rec'",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::EmptyRecordLiteral { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Empty record literal {} should be type annotated or used in a record context.",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::ExprTypeClash {
             loc,
             trace,

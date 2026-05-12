@@ -5048,6 +5048,33 @@ fn restore_exp(expr: Expression, opens: &[OpenCtx], arena: &mut ParseArena) -> E
     })
 }
 
+fn rewrite_value_binding_without_flattening(
+    vb: &ValueBinding,
+    arena: &mut ParseArena,
+) -> ValueBinding {
+    let vb_pat = arena.get_pat(vb.pvb_pat).clone();
+    let vb_expr = arena.get_expr(vb.pvb_expr).clone();
+    let pvb_pat = rewrite_pattern(&vb_pat, arena);
+    let pvb_expr = rewrite_expression(&vb_expr, arena);
+    let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
+    ValueBinding {
+        pvb_pat: arena.push_pat(pvb_pat),
+        pvb_expr: arena.push_expr(pvb_expr),
+        pvb_attributes: pvb_attributes.into(),
+        pvb_loc: vb.pvb_loc,
+    }
+}
+
+fn rewrite_value_bindings_without_flattening(
+    bindings: &[ValueBinding],
+    arena: &mut ParseArena,
+) -> Vec<ValueBinding> {
+    bindings
+        .iter()
+        .map(|vb| rewrite_value_binding_without_flattening(vb, arena))
+        .collect()
+}
+
 /// Flatten a single value binding into one or more bindings.
 /// If the binding is a tuple pattern matched against a tuple expression
 /// (possibly wrapped in open expressions), desugar into individual bindings.
@@ -6039,7 +6066,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 }
             }
 
-            let new_bindings = flatten_value_bindings(bindings, arena);
+            let new_bindings = if *rec_flag == RecFlag::Recursive {
+                rewrite_value_bindings_without_flattening(bindings, arena)
+            } else {
+                flatten_value_bindings(bindings, arena)
+            };
             let body_expr = arena.get_expr(*body).clone();
             let rw_body = rewrite_expression(&body_expr, arena);
             ExpressionDesc::Pexp_let(Box::new((
@@ -11546,8 +11577,14 @@ fn rewrite_structure_item_no_spice(
                 }
             }
 
-            // Default case: rewrite all bindings (with tuple flattening)
-            let new_bindings = flatten_value_bindings(bindings, arena);
+            // Default case: rewrite all bindings. Recursive bindings must keep
+            // their original patterns so Typecore can raise Illegal_letrec_pat,
+            // matching OCaml.
+            let new_bindings = if *rec_flag == RecFlag::Recursive {
+                rewrite_value_bindings_without_flattening(bindings, arena)
+            } else {
+                flatten_value_bindings(bindings, arena)
+            };
             vec![StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
                     *rec_flag,

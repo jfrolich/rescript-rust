@@ -547,10 +547,10 @@ pub enum TypeCoreError {
     InvalidInterval,
 
     /// Invalid for loop index.
-    InvalidForLoopIndex,
+    InvalidForLoopIndex { loc: LocIdx },
 
     /// Invalid for...of binding (only `_` or a variable allowed). Upstream #7887.
-    InvalidForOfPattern,
+    InvalidForOfPattern { loc: LocIdx },
 
     /// No value clauses.
     NoValueClauses,
@@ -583,10 +583,10 @@ pub enum TypeCoreError {
     UnknownLiteral(String, char),
 
     /// Illegal let-rec pattern.
-    IllegalLetrecPat,
+    IllegalLetrecPat { loc: LocIdx },
 
     /// Empty record literal.
-    EmptyRecordLiteral,
+    EmptyRecordLiteral { loc: LocIdx },
 
     /// Uncurried arity mismatch.
     UncurriedArityMismatch {
@@ -14351,7 +14351,7 @@ fn type_for(
         &*pat.ppat_desc,
         crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
     ) {
-        return Err(TypeCoreError::InvalidForLoopIndex);
+        return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc });
     }
 
     // Type check pattern with a fresh int type (separate from loop bounds),
@@ -14371,7 +14371,7 @@ fn type_for(
     let loop_var_id = match &*pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any => {
             if !state.pattern_variables.is_empty() {
-                return Err(TypeCoreError::InvalidForLoopIndex);
+                return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc });
             }
             ctx.create_ident("_for")
         }
@@ -14379,10 +14379,10 @@ fn type_for(
             if state.pattern_variables.len() == 1 {
                 state.pattern_variables[0].id.clone()
             } else {
-                return Err(TypeCoreError::InvalidForLoopIndex);
+                return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc });
             }
         }
-        _ => return Err(TypeCoreError::InvalidForLoopIndex),
+        _ => return Err(TypeCoreError::InvalidForLoopIndex { loc: pat.ppat_loc }),
     };
 
     // Extend environment with loop variable
@@ -14456,7 +14456,7 @@ fn type_for_of(
         &*pat.ppat_desc,
         crate::parser::ast::PatternDesc::Ppat_any | crate::parser::ast::PatternDesc::Ppat_var(_)
     ) {
-        return Err(TypeCoreError::InvalidForOfPattern);
+        return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc });
     }
 
     let ty_elem = ctx.new_var(None);
@@ -14520,7 +14520,7 @@ fn type_for_of(
     let loop_var_id = match &*pat.ppat_desc {
         crate::parser::ast::PatternDesc::Ppat_any => {
             if !state.pattern_variables.is_empty() {
-                return Err(TypeCoreError::InvalidForOfPattern);
+                return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc });
             }
             if await_kw {
                 ctx.create_ident("_for_await_of")
@@ -14532,10 +14532,10 @@ fn type_for_of(
             if state.pattern_variables.len() == 1 {
                 state.pattern_variables[0].id.clone()
             } else {
-                return Err(TypeCoreError::InvalidForOfPattern);
+                return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc });
             }
         }
-        _ => return Err(TypeCoreError::InvalidForOfPattern),
+        _ => return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc }),
     };
 
     let mut body_env = if state.pattern_variables.is_empty() {
@@ -15952,8 +15952,7 @@ fn type_record(
                     all_labels = Some(Vec::new());
                 }
                 None => {
-                    // Keep the existing fallback for record shapes where Rust cannot
-                    // reconstruct `lbl_all` yet (notably some inline-record paths).
+                    return Err(TypeCoreError::EmptyRecordLiteral { loc });
                 }
             }
         }
@@ -19889,6 +19888,32 @@ fn report_unused_local_let_warnings(
     }
 }
 
+fn report_unused_rec_flag_warning(
+    tctx: &mut TypeCheckContext<'_>,
+    typed_bindings: &[ValueBinding],
+) {
+    let Some(first_binding) = typed_bindings.first() else {
+        return;
+    };
+
+    let mut bound = Vec::new();
+    for binding in typed_bindings {
+        collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
+    }
+    if bound.is_empty() {
+        return;
+    }
+
+    let rec_needed = bound.iter().any(|(id, _, _)| {
+        typed_bindings
+            .iter()
+            .any(|binding| typed_expression_uses_ident(&binding.vb_expr, id))
+    });
+    if !rec_needed {
+        tctx.report_warning(first_binding.vb_pat.pat_loc, Warning::UnusedRecFlag);
+    }
+}
+
 fn let_unwrap_partial_match_hint_side_effect<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -20105,6 +20130,10 @@ fn type_let_bindings(
             ));
         }
 
+        if rec_flag == RecFlag::Recursive {
+            report_unused_rec_flag_warning(tctx, &typed_bindings);
+        }
+
         let_unwrap_partial_match_hint_side_effect(tctx, env, &typed_bindings);
 
         // End definition level
@@ -20124,6 +20153,21 @@ fn type_let_bindings(
             iter_typed_pattern(&binding.vb_pat, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type);
             });
+        }
+
+        if rec_flag == RecFlag::Recursive {
+            for binding in &typed_bindings {
+                match &binding.vb_pat.pat_desc {
+                    PatternDesc::Tpat_var(_, _) => {}
+                    PatternDesc::Tpat_alias(inner, _, _)
+                        if matches!(&inner.pat_desc, PatternDesc::Tpat_any) => {}
+                    _ => {
+                        return Err(TypeCoreError::IllegalLetrecPat {
+                            loc: binding.vb_pat.pat_loc,
+                        });
+                    }
+                }
+            }
         }
 
         // Build final environment from all collected pattern variables.

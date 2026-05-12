@@ -60,6 +60,19 @@ with a reason after checking raise sites.
 - `Field_access_on_dict_type`
 - `Jsx_not_enabled`
 
+### Typecore Coverage Notes
+
+- `Empty_record_literal`: covered by
+  `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
+- `Illegal_letrec_pat`: covered by
+  `tests/error_output_parity/compiler/fixtures/illegal_letrec_pattern.res`.
+- `Invalid_for_loop_index`: covered by
+  `tests/error_output_parity/compiler/fixtures/invalid_for_loop_index.res`.
+- `Invalid_for_of_pattern`: parser-gated for normal `.res` source by
+  `normalize_for_of_pattern` in `compiler/syntax/src/res_core.ml`; destructuring
+  patterns in `for...of` report a syntax error before Typecore. Keep this marked
+  as unreachable from normal source unless a PPX/binary AST fixture is added.
+
 ## `compiler/ml/typetexp.ml`
 
 - `Unbound_type_variable`
