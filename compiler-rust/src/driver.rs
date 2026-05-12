@@ -2136,8 +2136,6 @@ pub fn load_pervasives<'a>(
     nopervasives: bool,
     compiling_module: Option<&str>,
 ) {
-    use crate::ident::Ident;
-
     if !nopervasives {
         // Try to load and open Pervasives
         if pers_env.open_module("Pervasives", env, ctx) {
@@ -2181,13 +2179,17 @@ pub fn load_pervasives<'a>(
             }
         }
         if pers_env.open_module(module_name, env, ctx) {
-            // Keep bsc's standalone path unchanged, but in-process builds can
-            // resolve explicit `Module.X` lookups through the persistent
-            // registry. Creating this binding would clone the full raw
-            // signature after `open_module` already added the opened contents.
+            // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
+            // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
+            // which calls Env.open_signature (env.ml:1874-1877). That exposes
+            // opened components but does not install a root module binding, so
+            // later Env.normalize_path can still reach the persistent-root
+            // force path through env.ml:903-914.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                    env.add_module(Ident::create_persistent(module_name), md);
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig(module_name, std::sync::Arc::new(sig.clone()));
+                    }
                 }
             }
         }

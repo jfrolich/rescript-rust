@@ -3086,6 +3086,17 @@ fn touch_manifest_cyclic_abbrev_check(
         }
         seen.push(current_repr);
         let Some(expanded) = crate::types::ctype::expand_head_once(ctx, env, current_repr) else {
+            if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } =
+                &*ctx.get_desc(current_repr)
+            {
+                // OCaml compiler/ml/ctype.ml:1367-1372 still calls
+                // Env.normalize_path when Env.find_type_expansion cannot
+                // expand the abbreviation. In the cyclic-abbrev path from
+                // compiler/ml/ctype.ml:4155-4170 this can force persistent
+                // module signature lazies through env.ml:903-914 even though
+                // the type path normalizes to itself.
+                crate::types::ctype::force_normalize_path_full_side_effects(ctx, env, path);
+            }
             break;
         };
         current = expanded;
