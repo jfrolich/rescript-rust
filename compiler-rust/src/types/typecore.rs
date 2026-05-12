@@ -7184,7 +7184,7 @@ fn type_expect_with_recarg<'a>(
             // OCaml does NOT reset typetexp.type_variables for local Pexp_let.
             // reset_type_variables happens at top-level expression/binding entry.
             let (typed_bindings, new_env, unpacks) =
-                type_let_bindings(tctx, env, *rec_flag, bindings)?;
+                type_let_bindings(tctx, env, *rec_flag, bindings, true)?;
 
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
@@ -21572,6 +21572,7 @@ fn type_let_bindings(
     env: &Env,
     rec_flag: RecFlag,
     bindings: &[crate::parser::ast::ValueBinding],
+    allow_modules: bool,
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
     let previous_recursive_let_depth = tctx.recursive_let_depth;
     let previous_recursive_value_count = tctx.active_recursive_value_ids.len();
@@ -21600,7 +21601,7 @@ fn type_let_bindings(
         let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            state.reset(true);
+            state.reset(allow_modules);
 
             // Type check pattern
             let typed_pat = type_pattern_without_existentials(
@@ -21942,7 +21943,8 @@ pub fn type_binding<'a>(
 ) -> TypeCoreResult<(Vec<ValueBinding>, Env)> {
     // Match OCaml Typecore.type_binding -> Typetexp.reset_type_variables.
     tctx.reset_type_variables();
-    let (typed_bindings, new_env, _unpacks) = type_let_bindings(tctx, env, rec_flag, bindings)?;
+    let (typed_bindings, new_env, _unpacks) =
+        type_let_bindings(tctx, env, rec_flag, bindings, false)?;
     Ok((typed_bindings, new_env))
 }
 
