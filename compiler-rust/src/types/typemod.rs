@@ -7010,6 +7010,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     let mut constructors = Vec::with_capacity(cstrs.len());
                                     for cstr in cstrs {
                                         let cstr_name = arena.get_string(cstr.pcd_name.txt);
+                                        // OCaml compiler/ml/typedecl.ml:481-484
+                                        // creates the constructor id before
+                                        // make_constructor translates inline
+                                        // record labels.
+                                        let cstr_id = tctx.type_ctx.create_ident(cstr_name);
                                         let cstr_args = match &cstr.pcd_args {
                                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(
                                                 args,
@@ -7066,7 +7071,6 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                                 )
                                             }
                                         };
-                                        let cstr_id = tctx.type_ctx.create_ident(cstr_name);
                                         constructors.push(crate::types::ConstructorDeclaration {
                                             cd_id: cstr_id,
                                             cd_args: cstr_args,
@@ -14453,6 +14457,10 @@ fn transl_sig_type_declarations_with_ids<'a>(
 
                     for cstr in cstrs {
                         let cstr_name = arena.get_string(cstr.pcd_name.txt);
+                        // OCaml compiler/ml/typedecl.ml:481-484 creates
+                        // the constructor id before make_constructor
+                        // translates inline record labels.
+                        let cstr_id = ctx.create_ident(cstr_name);
                         let (internal_args, typed_args) = match &cstr.pcd_args {
                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
                                 let mut internal_tuple_args = Vec::with_capacity(args.len());
@@ -14567,7 +14575,6 @@ fn transl_sig_type_declarations_with_ids<'a>(
                             None => (None, None),
                         };
 
-                        let cstr_id = ctx.create_ident(cstr_name);
                         internal_cstrs.push(crate::types::ConstructorDeclaration {
                             cd_id: cstr_id.clone(),
                             cd_args: internal_args,
