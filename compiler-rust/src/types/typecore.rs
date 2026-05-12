@@ -19607,14 +19607,6 @@ fn is_local_module_access_path(path: &Path) -> bool {
     matches!(path_root_module(path), Path::Pident(id) if !id.is_persistent())
 }
 
-fn is_implicit_stdlib_component_path(path: &Path) -> bool {
-    matches!(path, Path::Pdot(_, _, _))
-        && matches!(
-            path_root_module(path),
-            Path::Pident(id) if id.name() == "Stdlib" || id.name() == "Pervasives"
-        )
-}
-
 fn type_contains_unresolved_local_path<'a>(
     ctx: &'a crate::types::context::TypeContext,
     env: &Env,
@@ -21313,9 +21305,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
             }
             let mut rewritten_path: Option<Path> = None;
 
-            let alias_target = if is_implicit_stdlib_component_path(module_access_path)
-                || path_non_apply_root_is_persistent_or_global(module_access_path)
-            {
+            let alias_target = if path_non_apply_root_is_persistent_or_global(module_access_path) {
                 // OCaml compiler/ml/env.ml:781-793 and env.ml:1000-1007
                 // navigate persistent component paths through
                 // `find_module_descr`, reading `ps_comps` or child
