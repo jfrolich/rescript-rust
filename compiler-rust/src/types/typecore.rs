@@ -534,7 +534,7 @@ pub enum TypeCoreError {
     ExceptionPatternBelowToplevel,
 
     /// Inlined record escape.
-    InlinedRecordEscape,
+    InlinedRecordEscape { loc: LocIdx },
 
     /// Inlined record expected.
     InlinedRecordExpected,
@@ -6179,6 +6179,17 @@ pub fn type_expect<'a>(
     expected_ty: TypeExprRef,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    type_expect_with_recarg(tctx, env, expr, expected_ty, context, RecArg::Rejected)
+}
+
+fn type_expect_with_recarg<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    recarg: RecArg,
+) -> TypeCoreResult<Expression> {
     use crate::parser::ast::ExpressionDesc as ED;
 
     let loc = expr.pexp_loc.clone();
@@ -6234,6 +6245,7 @@ pub fn type_expect<'a>(
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
+            check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
             let ty = crate::types::instance(ctx, desc.val_type);
             force_qualified_value_type_paths(tctx, env, &path, ty);
@@ -6959,6 +6971,7 @@ pub fn type_expect<'a>(
                 (*base).map(|idx| tctx.arena.get_expr(idx)),
                 expected_ty,
                 attrs,
+                recarg,
             )
         }
 
@@ -13377,6 +13390,30 @@ fn type_construct(
         unify_expression_types(tctx, loc, result_ty, expected_inst, None)?;
     }
 
+    let recarg = if cstr_desc.cstr_inlined.is_none() {
+        RecArg::Rejected
+    } else {
+        let inline_record_arg_shape = arg.is_some_and(|arg_expr| match &*arg_expr.pexp_desc {
+            crate::parser::ast::ExpressionDesc::Pexp_ident(_) => true,
+            crate::parser::ast::ExpressionDesc::Pexp_record(inner) => {
+                let (_, base) = &**inner;
+                match base {
+                    None => true,
+                    Some(base_idx) => matches!(
+                        &*tctx.arena.get_expr(*base_idx).pexp_desc,
+                        crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+                    ),
+                }
+            }
+            _ => false,
+        });
+        if inline_record_arg_shape {
+            RecArg::Required
+        } else {
+            return Err(TypeCoreError::InlinedRecordExpected);
+        }
+    };
+
     // Type check arguments
     let typed_args = match (
         arg_types_for_expect.as_slice(),
@@ -13387,7 +13424,7 @@ fn type_construct(
             if arg_types.len() == 1 && unify_types.len() == 1 =>
         {
             // Single argument
-            let typed_arg = type_expect(tctx, env, arg_expr, arg_types[0], None)?;
+            let typed_arg = type_expect_with_recarg(tctx, env, arg_expr, arg_types[0], None, recarg)?;
             unify_expression_types(tctx, loc, typed_arg.exp_type, unify_types[0], None)?;
             vec![typed_arg]
         }
@@ -13422,7 +13459,8 @@ fn type_construct(
         }
         (_arg_types, _unify_types, Some(arg_expr)) => {
             // Inlined record - type check the expression
-            let typed_arg = type_expect(tctx, env, arg_expr, ctx.new_var(None), None)?;
+            let typed_arg =
+                type_expect_with_recarg(tctx, env, arg_expr, ctx.new_var(None), None, recarg)?;
             vec![typed_arg]
         }
     };
@@ -13888,6 +13926,7 @@ fn type_record(
     base: Option<&ParsedExpression>,
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
+    recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::RecordLabelDefinition;
 
@@ -13912,7 +13951,7 @@ fn type_record(
     // type chain and the expected type chain, matching OCaml's cycle structure.
     let mut typed_base = if let Some(base_expr) = base {
         let base_ty = ctx.new_var(None);
-        let typed = type_expect(tctx, env, base_expr, base_ty, None)?;
+        let typed = type_expect_with_recarg(tctx, env, base_expr, base_ty, None, recarg)?;
         Some(typed)
     } else {
         None
@@ -15378,7 +15417,14 @@ fn type_field(
     let field_name = tctx.longident_last_name(&resolved_lid);
 
     // Match OCaml type_label_access: type record first, then disambiguate.
-    let typed_record = type_expect(tctx, env, record_expr, tctx.type_ctx.new_var(None), None)?;
+    let typed_record = type_expect_with_recarg(
+        tctx,
+        env,
+        record_expr,
+        tctx.type_ctx.new_var(None),
+        None,
+        RecArg::Allowed,
+    )?;
     let ty_exp = typed_record.exp_type;
     if extract_type_path_from_expected_with_persistent_env(
         ty_exp,
@@ -16823,6 +16869,35 @@ fn unbound_value_alternatives(
             })
             .unwrap_or_default(),
         Longident::Lapply(_, _) => Vec::new(),
+    }
+}
+
+fn check_inlined_record_escape(
+    ctx: &TypeContext,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    recarg: RecArg,
+) -> TypeCoreResult<()> {
+    let repr = ctx.repr(ty);
+    let desc = ctx.get_desc(repr);
+    let is_recarg = match &*desc {
+        TypeDesc::Tconstr { path, .. } => path.is_constructor_typath(),
+        _ => false,
+    };
+    let escapes = match (is_recarg, recarg, &*desc) {
+        (_, RecArg::Allowed, _) | (true, RecArg::Required, _) | (false, RecArg::Rejected, _) => {
+            false
+        }
+        (true, RecArg::Rejected, _)
+        | (false, RecArg::Required, TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }) => true,
+        (false, RecArg::Required, _) => false,
+    };
+    drop(desc);
+
+    if escapes {
+        Err(TypeCoreError::InlinedRecordEscape { loc })
+    } else {
+        Ok(())
     }
 }
 

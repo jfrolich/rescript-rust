@@ -1926,6 +1926,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::InlinedRecordEscape { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This use of an inlined record is not allowed: its anonymous type would escape its constructor scope.\nPossible solutions: \n- Destructure the fields you're interested in from the inline record\n- Change the underlying type to use a defined record as payload instead of an inline record. That will let you use the payload without destructuring it first",
+                ),
+                2,
+            )
+            .into()
+        }
         _ => anyhow!("Type checking failed: {err:?}"),
     }
 }
