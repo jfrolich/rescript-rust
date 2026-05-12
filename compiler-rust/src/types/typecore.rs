@@ -4616,66 +4616,6 @@ fn force_qualified_value_type_paths<'a>(
             })
     }
 
-    fn selected_opened_alias_type_path(
-        path: &Path,
-        value_access_root_is_local: bool,
-        value_access_root: Option<&Ident>,
-        selected_module_path: Option<&Path>,
-        selected_alias_targets: &[Path],
-    ) -> Option<Path> {
-        if value_access_root_is_local || selected_alias_targets.is_empty() {
-            return None;
-        }
-        let selected_module_path = selected_module_path?;
-        let Path::Pdot(parent, type_name, pos) = path else {
-            return None;
-        };
-        if value_access_root
-            .is_some_and(|root| path_root_ident(path).is_some_and(|path_root| path_root.same(root)))
-        {
-            // OCaml compiler/ml/env.ml:1091-1100 keeps explicit flattened
-            // persistent access paths selected from an open, such as
-            // `Webapi__Dom.Event`, on that path. The env.ml:1530-1538
-            // substitution only rewrites identifiers bound by the opened
-            // component table; it does not replace the source-level root with
-            // a registered alias path.
-            return None;
-        }
-
-        fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
-            if path.same(old_prefix) {
-                return Some(new_prefix.clone());
-            }
-            match path {
-                Path::Pdot(prefix, name, pos) => {
-                    rewrite_path_prefix(prefix, old_prefix, new_prefix).map(|rewritten_prefix| {
-                        Path::Pdot(std::sync::Arc::new(rewritten_prefix), name.clone(), *pos)
-                    })
-                }
-                _ => None,
-            }
-        }
-
-        selected_alias_targets.iter().find_map(|target| {
-            let candidate_parent = rewrite_path_prefix(parent, target, selected_module_path)?;
-            if candidate_parent.same(parent) {
-                return None;
-            }
-            // OCaml compiler/ml/env.ml:1841-1860 opens component tables under
-            // the opened root, env.ml:1091-1100 selects values from that table,
-            // and env.ml:1530-1538 applies compiler/ml/subst.ml:303-309
-            // `Subst.value_description`. For an opened alias such as
-            // `TellaStd.Response = Webapi.Fetch.Response`, the selected value
-            // scheme therefore exposes `TellaStd.Response.t`, not the alias
-            // target's `Webapi__Fetch.Response.t`.
-            Some(Path::Pdot(
-                std::sync::Arc::new(candidate_parent),
-                type_name.clone(),
-                *pos,
-            ))
-        })
-    }
-
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
@@ -4788,25 +4728,16 @@ fn force_qualified_value_type_paths<'a>(
                 // Later expansion/unification paths, such as ctype.ml:666-673
                 // `get_level` and ctype.ml:1367-1372 `expand_head`, perform
                 // the real Env.find_type/Env.normalize_path effects lazily.
-                let rewritten_path = selected_opened_alias_type_path(
+                let rewritten_path = visible_local_alias_type_path(
+                    ctx,
+                    env,
+                    &tctx.persistent_env,
                     &path,
                     value_access_root_is_local,
                     value_access_root,
                     selected_module_path,
                     selected_alias_targets,
                 )
-                .or_else(|| {
-                    visible_local_alias_type_path(
-                        ctx,
-                        env,
-                        &tctx.persistent_env,
-                        &path,
-                        value_access_root_is_local,
-                        value_access_root,
-                        selected_module_path,
-                        selected_alias_targets,
-                    )
-                })
                 .or_else(|| {
                     flattened_persistent_alias_type_path(
                         ctx,
