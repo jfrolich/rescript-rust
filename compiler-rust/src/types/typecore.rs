@@ -16196,31 +16196,11 @@ fn type_record(
                         poly_vars,
                     )
                 } else {
-                    let inner_ty = ctx.new_var(None);
-                    let lbl_arg = if field.opt {
-                        env.type_option(ctx, inner_ty)
-                    } else {
-                        inner_ty
-                    };
-
-                    (
-                        crate::types::LabelDescription {
-                            lbl_name: field_name.to_string(),
-                            lbl_res: record_ty,
-                            lbl_arg,
-                            lbl_mut: crate::types::MutableFlag::Immutable,
-                            lbl_optional: field.opt,
-                            lbl_pos: idx as i32,
-                            lbl_all: crate::types::LabelArrayRef(0),
-                            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                            lbl_private: crate::types::PrivateFlag::Public,
-                            lbl_loc: tctx.arena.to_location(field.lid.loc),
-                            lbl_attributes: vec![],
-                        },
-                        lbl_arg,
-                        lbl_arg,
-                        vec![],
-                    )
+                    return Err(TypeCoreError::UnboundRecordField {
+                        loc: field.lid.loc,
+                        field_name: field_name.to_string(),
+                        from_type: None,
+                    });
                 };
 
             let field_context = Some(TypeClashContext::RecordField {
