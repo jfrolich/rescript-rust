@@ -99,6 +99,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/cannot_infer_pack_signature.res`.
 - `Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
+- `Not_a_variant_type`: covered by
+  `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
+- `Not_subtype`: covered by
+  `tests/error_output_parity/compiler/fixtures/not_subtype_variant_spread.res`.
 - `Inlined_record_expected`: covered by
   `tests/error_output_parity/compiler/fixtures/inlined_record_expected.res`.
 - `Invalid_extension_constructor_payload`: covered by
