@@ -416,7 +416,11 @@ pub enum TypeCoreError {
     MultiplyBoundVariable { loc: LocIdx, name: String },
 
     /// Variables don't match in or-pattern.
-    OrpatVars(Ident, Vec<Ident>),
+    OrpatVars {
+        loc: LocIdx,
+        id: Ident,
+        valid_idents: Vec<Ident>,
+    },
 
     /// Expression type clash.
     ExprTypeClash {
@@ -3706,20 +3710,36 @@ fn merge_or_pattern_variables(
             }
             std::cmp::Ordering::Less => {
                 // v1 has no match in p2
-                return Err(TypeCoreError::OrpatVars(v1.id.clone(), vec![]));
+                return Err(TypeCoreError::OrpatVars {
+                    loc,
+                    id: v1.id.clone(),
+                    valid_idents: vec![],
+                });
             }
             std::cmp::Ordering::Greater => {
                 // v2 has no match in p1
-                return Err(TypeCoreError::OrpatVars(v2.id.clone(), vec![]));
+                return Err(TypeCoreError::OrpatVars {
+                    loc,
+                    id: v2.id.clone(),
+                    valid_idents: vec![],
+                });
             }
         }
     }
 
     if i < p1_sorted.len() {
-        return Err(TypeCoreError::OrpatVars(p1_sorted[i].id.clone(), vec![]));
+        return Err(TypeCoreError::OrpatVars {
+            loc,
+            id: p1_sorted[i].id.clone(),
+            valid_idents: vec![],
+        });
     }
     if j < p2_sorted.len() {
-        return Err(TypeCoreError::OrpatVars(p2_sorted[j].id.clone(), vec![]));
+        return Err(TypeCoreError::OrpatVars {
+            loc,
+            id: p2_sorted[j].id.clone(),
+            valid_idents: vec![],
+        });
     }
 
     Ok(result)

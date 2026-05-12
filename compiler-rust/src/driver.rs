@@ -2457,6 +2457,20 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::OrpatVars { loc, id, .. }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "Variable {} must occur on both sides of this | pattern",
+                    id.name()
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::BreakOutsideLoop { loc }) => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
