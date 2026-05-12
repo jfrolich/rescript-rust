@@ -190,7 +190,11 @@ with a reason after checking raise sites.
   and for direct module access by
   `tests/error_output_parity/compiler/fixtures/unbound_module.res`, plus the
   module-type alias lookup path in
-  `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`.
+  `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`
+  and the `with module` right-hand side lookup paths in
+  `tests/error_output_parity/compiler/fixtures/with_module_equation_unbound_module.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/with_module_unbound_module.res`.
 - `Unbound_value`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_value.res`.
 - `Unbound_constructor`: covered by

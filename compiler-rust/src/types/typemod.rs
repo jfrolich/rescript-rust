@@ -8100,9 +8100,12 @@ fn transl_with_constraints<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or_else(|| {
-                    path_from_longident(&rhs_longident, |idx| arena.get_string(idx))
-                });
+                .ok_or_else(|| {
+                    TypeModError::CoreError(TypeCoreError::UnboundModule {
+                        loc,
+                        name: tctx.longident_to_string(&rhs_longident),
+                    })
+                })?;
                 typed_constraints.push((
                     lhs_path,
                     lid.clone(),
@@ -8129,9 +8132,12 @@ fn transl_with_constraints<'a>(
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
                 )
-                .unwrap_or_else(|| {
-                    path_from_longident(&rhs_longident, |idx| arena.get_string(idx))
-                });
+                .ok_or_else(|| {
+                    TypeModError::CoreError(TypeCoreError::UnboundModule {
+                        loc,
+                        name: tctx.longident_to_string(&rhs_longident),
+                    })
+                })?;
                 typed_constraints.push((
                     lhs_path,
                     lid.clone(),
