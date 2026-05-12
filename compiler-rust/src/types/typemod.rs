@@ -3150,6 +3150,13 @@ pub enum TypeModError {
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// A functor result still depends on an anonymous argument module.
+    CannotEliminateDependency {
+        /// Module application location to report.
+        loc: LocIdx,
+        /// Functor module type.
+        mty: crate::types::decl::ModuleType,
+    },
     /// Recursive modules require an explicit module type constraint.
     RecursiveModuleRequiresExplicitType {
         /// Module expression location to report.
@@ -11612,7 +11619,10 @@ fn type_module_expr_with_alias<'a>(
                                     },
                                 );
                                 nondep_supertype(tctx.type_ctx, &nondep_env, param, result)
-                                    .unwrap_or_else(|| (**result).clone())
+                                    .ok_or_else(|| TypeModError::CannotEliminateDependency {
+                                        loc,
+                                        mty: functor_mty.clone(),
+                                    })?
                             }
                         }
                     }

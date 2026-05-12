@@ -311,6 +311,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`.
 - `Cannot_eliminate_dependency`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/cannot_eliminate_dependency.res`.
 - `Signature_expected`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`.

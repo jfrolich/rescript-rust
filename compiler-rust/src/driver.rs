@@ -2731,6 +2731,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CannotEliminateDependency { loc, mty } => UserDiagnostic::new(
+            format_cannot_eliminate_dependency_report(
+                type_ctx, arena, source, filename, *loc, mty,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::RecursiveModuleRequiresExplicitType { loc } => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -3798,6 +3805,27 @@ fn format_cannot_apply_module_report(
     output.push_str("  This module is not a functor; it has type ");
     output.push_str(&rendered_module_type);
     output.push_str("\n\n");
+    output
+}
+
+fn format_cannot_eliminate_dependency_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type =
+        crate::types::includemod::format_module_type_full_paths(type_ctx, mty);
+    output.push_str("  This functor has type ");
+    output.push_str(&rendered_module_type);
+    output.push('\n');
+    output.push_str("  The parameter cannot be eliminated in the result type.\n");
+    output.push_str("   Bind the argument to a module identifier.\n\n");
     output
 }
 
