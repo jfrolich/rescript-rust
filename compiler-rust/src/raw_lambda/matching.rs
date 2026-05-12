@@ -8780,7 +8780,16 @@ fn record_labels_cover_pattern_fields(
 ) -> bool {
     fields.iter().all(|(_, field_label, _, _)| {
         all_labels.iter().any(|label| {
-            label.lbl_pos == field_label.lbl_pos && label.lbl_name == field_label.lbl_name
+            // OCaml carries the physical `lbl_all` array from typecore into
+            // matching.ml:1417-1476, so source names and `@as` runtime names
+            // are two views of the same label. Rust reconstructs that array
+            // from caches that may store Lambda.find_name-style runtime names
+            // (compiler/ml/lambda.ml:147-154); accept either spelling while
+            // still requiring the declaration position to match.
+            label.lbl_pos == field_label.lbl_pos
+                && (label.lbl_name == field_label.lbl_name
+                    || label_runtime_name_matching(label)
+                        == label_runtime_name_matching(field_label))
         })
     })
 }
