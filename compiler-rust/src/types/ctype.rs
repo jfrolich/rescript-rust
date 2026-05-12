@@ -6343,18 +6343,6 @@ fn compute_variance_rec(
                 // same lazy persistent signature components that later stamps
                 // depend on. Use Rust's path-aware helper instead of the
                 // name fallback-only env lookup.
-                if matches!(
-                    &path,
-                    Path::Pdot(parent, _, _)
-                        if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives")
-                ) {
-                    // OCaml compiler/ml/env.ml:783-788 resolves the persistent
-                    // parent of `Pervasives.ref` while serving the
-                    // compiler/ml/typedecl.ml:1064-1066 variance lookup. Rust's
-                    // initial environment stores that root module eagerly, so
-                    // explicitly consume the corresponding lazy rename here.
-                    ctx.trigger_module_sig_rename("Pervasives");
-                }
                 let variances = lookup_type_decl_for_path(ctx, env, &path)
                     .map(|d| d.type_variance.clone())
                     .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
