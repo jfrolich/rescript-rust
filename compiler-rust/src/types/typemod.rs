@@ -3351,6 +3351,17 @@ pub enum TypeModError {
         /// Aliased module path changed by the destructive substitution.
         path: Path,
     },
+    /// A destructive `with` constraint makes an applicative functor path ill typed.
+    WithMakesApplicativeFunctorIllTyped {
+        /// Whole constrained module type location.
+        loc: LocIdx,
+        /// Constrained component path.
+        lid: Longident,
+        /// Applicative functor path in the constrained signature.
+        path: Path,
+        /// Inclusion error from retyping the functor application argument.
+        error: crate::types::includemod::IncludeModError,
+    },
     /// A destructive type substitution would remove constrained type parameters.
     WithCannotRemoveConstrainedType {
         /// Whole constrained module type location.
@@ -9061,14 +9072,287 @@ fn path_is_strict_prefix(path: &Path, prefix: &Path) -> bool {
 }
 
 fn check_usage_of_path_of_substituted_item(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
     paths: &[Path],
     signature: &[crate::types::decl::SignatureItem],
     loc: LocIdx,
     lid: &Longident,
 ) -> TypeModResult<()> {
-    use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+    use crate::types::decl::{
+        ConstructorArguments, ModuleType as DeclMty, SignatureItem, TypeDeclaration, TypeKind,
+    };
+    use crate::types::type_expr::TypeDesc;
+
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    fn iter_path_apply(path: &Path, mut f: impl FnMut(&Path, &Path)) {
+        fn loop_(path: &Path, f: &mut impl FnMut(&Path, &Path)) {
+            match path {
+                Path::Papply(funct, arg) => {
+                    f(funct, arg);
+                    loop_(funct, f);
+                    loop_(arg, f);
+                }
+                Path::Pdot(prefix, _, _) => loop_(prefix, f),
+                Path::Pident(_) => {}
+            }
+        }
+
+        loop_(path, &mut f);
+    }
+
+    fn retype_applicative_functor_type(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        funct: &Path,
+        arg: &Path,
+    ) -> Result<(), crate::types::includemod::IncludeModError> {
+        let Ok(functor_md) = env.lookup_module(funct) else {
+            return Ok(());
+        };
+        let Ok(arg_md) = env.lookup_module(arg) else {
+            return Ok(());
+        };
+        let Some(DeclMty::MtyFunctor {
+            param_type: Some(mty_param),
+            ..
+        }) = scrape_alias_module_type(
+            &functor_md.md_type,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        ) else {
+            return Ok(());
+        };
+        let aliasable = !env.is_functor_arg_path(arg);
+        let mty_arg = if aliasable {
+            crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                tctx.type_ctx,
+                env,
+                arg,
+                &arg_md.md_type,
+            )
+        } else {
+            crate::types::ctype::strengthen_module_type_for_non_aliasable_path(
+                tctx.type_ctx,
+                env,
+                arg,
+                &arg_md.md_type,
+            )
+        };
+
+        crate::types::includemod::modtypes(tctx.type_ctx, env, &mty_arg, &mty_param).map(|_| ())
+    }
+
+    fn check_path(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        paths: &[Path],
+        referenced_path: &Path,
+        loc: LocIdx,
+        lid: &Longident,
+    ) -> TypeModResult<()> {
+        let mut result = Ok(());
+        iter_path_apply(referenced_path, |funct, arg| {
+            if result.is_err() {
+                return;
+            }
+            if paths
+                .iter()
+                .any(|path| path_is_strict_prefix(path, arg))
+            {
+                if let Err(error) = retype_applicative_functor_type(tctx, env, funct, arg) {
+                    result = Err(TypeModError::WithMakesApplicativeFunctorIllTyped {
+                        loc,
+                        lid: lid.clone(),
+                        path: referenced_path.clone(),
+                        error,
+                    });
+                }
+            }
+        });
+        result
+    }
+
+    fn check_type_expr(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        paths: &[Path],
+        ty: TypeExprRef,
+        loc: LocIdx,
+        lid: &Longident,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> TypeModResult<()> {
+        let ty = tctx.type_ctx.repr(ty);
+        if !visited.insert(ty) {
+            return Ok(());
+        }
+
+        enum TypeAction {
+            Path(Path, Vec<TypeExprRef>),
+            Object(TypeExprRef, Option<(Path, Vec<TypeExprRef>)>),
+            Variant(crate::types::type_expr::RowDesc),
+            Children(Vec<TypeExprRef>),
+        }
+
+        let action = {
+            let desc = tctx.type_ctx.borrow_desc(ty);
+            match &*desc {
+                TypeDesc::Tconstr { path, args, .. } => {
+                    TypeAction::Path(path.clone(), args.clone())
+                }
+                TypeDesc::Tpackage { path, args, .. } => {
+                    TypeAction::Path(path.clone(), args.clone())
+                }
+                TypeDesc::Tobject { fields, name } => {
+                    TypeAction::Object(*fields, name.clone())
+                }
+                TypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),
+                _ => {
+                    let mut children = Vec::new();
+                    crate::types::btype::iter_type_expr(tctx.type_ctx, ty, |child| {
+                        children.push(child);
+                    });
+                    TypeAction::Children(children)
+                }
+            }
+        };
+
+        match action {
+            TypeAction::Path(path, args) => {
+                check_path(tctx, env, paths, &path, loc, lid)?;
+                for arg in args {
+                    check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
+                }
+            }
+            TypeAction::Object(fields, name) => {
+                check_type_expr(tctx, env, paths, fields, loc, lid, visited)?;
+                if let Some((path, args)) = name {
+                    check_path(tctx, env, paths, &path, loc, lid)?;
+                    for arg in args {
+                        check_type_expr(tctx, env, paths, arg, loc, lid, visited)?;
+                    }
+                }
+            }
+            TypeAction::Variant(row) => {
+                if let Some((path, args)) = &row.row_name {
+                    check_path(tctx, env, paths, path, loc, lid)?;
+                    for arg in args {
+                        check_type_expr(tctx, env, paths, *arg, loc, lid, visited)?;
+                    }
+                }
+                let mut children = Vec::new();
+                crate::types::btype::iter_row(tctx.type_ctx, &row, |child| {
+                    children.push(child);
+                });
+                children.push(crate::types::btype::row_more(tctx.type_ctx, &row));
+                for child in children {
+                    check_type_expr(tctx, env, paths, child, loc, lid, visited)?;
+                }
+            }
+            TypeAction::Children(children) => {
+                for child in children {
+                    check_type_expr(tctx, env, paths, child, loc, lid, visited)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn check_constructor_arguments(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        paths: &[Path],
+        args: &ConstructorArguments,
+        loc: LocIdx,
+        lid: &Longident,
+    ) -> TypeModResult<()> {
+        let mut visited = HashSet::new();
+        match args {
+            ConstructorArguments::CstrTuple(args) => {
+                for ty in args {
+                    check_type_expr(tctx, env, paths, *ty, loc, lid, &mut visited)?;
+                }
+            }
+            ConstructorArguments::CstrRecord(labels) => {
+                for label in labels {
+                    check_type_expr(tctx, env, paths, label.ld_type, loc, lid, &mut visited)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_type_declaration(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        paths: &[Path],
+        decl: &TypeDeclaration,
+        loc: LocIdx,
+        lid: &Longident,
+    ) -> TypeModResult<()> {
+        let mut visited = HashSet::new();
+        for param in &decl.type_params {
+            check_type_expr(tctx, env, paths, *param, loc, lid, &mut visited)?;
+        }
+        if let Some(manifest) = decl.type_manifest {
+            check_type_expr(tctx, env, paths, manifest, loc, lid, &mut visited)?;
+        }
+        match &decl.type_kind {
+            TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+            TypeKind::TypeRecord(labels, _) => {
+                for label in labels {
+                    check_type_expr(tctx, env, paths, label.ld_type, loc, lid, &mut visited)?;
+                }
+            }
+            TypeKind::TypeVariant(constructors) => {
+                for cstr in constructors {
+                    check_constructor_arguments(tctx, env, paths, &cstr.cd_args, loc, lid)?;
+                    if let Some(res) = cstr.cd_res {
+                        check_type_expr(tctx, env, paths, res, loc, lid, &mut visited)?;
+                    }
+                }
+            }
+        }
+        for inlined in &decl.type_inlined_types {
+            match inlined {
+                crate::types::decl::TypeInlinedType::Record { labels, .. } => {
+                    for label in labels {
+                        check_type_expr(tctx, env, paths, label.ld_type, loc, lid, &mut visited)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_extension_constructor(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        paths: &[Path],
+        ext: &crate::types::decl::ExtensionConstructor,
+        loc: LocIdx,
+        lid: &Longident,
+    ) -> TypeModResult<()> {
+        check_path(tctx, env, paths, &ext.ext_type_path, loc, lid)?;
+        let mut visited = HashSet::new();
+        for param in &ext.ext_type_params {
+            check_type_expr(tctx, env, paths, *param, loc, lid, &mut visited)?;
+        }
+        check_constructor_arguments(tctx, env, paths, &ext.ext_args, loc, lid)?;
+        if let Some(ret) = ext.ext_ret_type {
+            check_type_expr(tctx, env, paths, ret, loc, lid, &mut visited)?;
+        }
+        Ok(())
+    }
 
     fn check_module_type(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
         paths: &[Path],
         mty: &DeclMty,
         loc: LocIdx,
@@ -9076,18 +9360,32 @@ fn check_usage_of_path_of_substituted_item(
     ) -> TypeModResult<()> {
         match mty {
             DeclMty::MtySignature(signature) => {
-                check_usage_of_path_of_substituted_item(paths, signature, loc, lid)
+                check_usage_of_path_of_substituted_item(tctx, env, paths, signature, loc, lid)
             }
             DeclMty::MtyFunctor {
-                param_type, result, ..
+                param,
+                param_type,
+                result,
             } => {
                 if let Some(param_type) = param_type {
-                    check_module_type(paths, param_type, loc, lid)?;
+                    check_module_type(tctx, env, paths, param_type, loc, lid)?;
                 }
-                check_module_type(paths, result, loc, lid)
+                let mut result_env = env.clone_preserve_id();
+                result_env.add_module_arg(
+                    param.clone(),
+                    empty_module_decl(default_module_type(param_type.as_deref().cloned())),
+                );
+                check_module_type(tctx, &result_env, paths, result, loc, lid)
             }
-            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => Ok(()),
+            DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
+                check_path(tctx, env, paths, path, loc, lid)
+            }
         }
+    }
+
+    let mut iter_env = env.clone_preserve_id();
+    for item in signature {
+        add_decl_signature_item_to_env(item, &mut iter_env);
     }
 
     for item in signature {
@@ -9106,18 +9404,24 @@ fn check_usage_of_path_of_substituted_item(
                         });
                     }
                 }
-                check_module_type(paths, &md.md_type, loc, lid)?;
+                check_module_type(tctx, &iter_env, paths, &md.md_type, loc, lid)?;
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(mty) = &mtd.mtd_type {
-                    check_module_type(paths, mty, loc, lid)?;
+                    check_module_type(tctx, &iter_env, paths, mty, loc, lid)?;
                 }
             }
-            SignatureItem::SigValue(_, _)
-            | SignatureItem::SigType(_, _, _)
-            | SignatureItem::SigTypext(_, _, _)
-            | SignatureItem::SigClass
-            | SignatureItem::SigClassType => {}
+            SignatureItem::SigValue(_, desc) => {
+                let mut visited = HashSet::new();
+                check_type_expr(tctx, &iter_env, paths, desc.val_type, loc, lid, &mut visited)?;
+            }
+            SignatureItem::SigType(_, decl, _) => {
+                check_type_declaration(tctx, &iter_env, paths, decl, loc, lid)?;
+            }
+            SignatureItem::SigTypext(_, ext, _) => {
+                check_extension_constructor(tctx, &iter_env, paths, ext, loc, lid)?;
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
     }
 
@@ -9144,43 +9448,116 @@ fn check_destructive_substitution_alias_usage<'a>(
         })
     }
 
-    fn collect_substituted_item_usage_paths<'a>(
+    fn path_concat(head: &Ident, path: &Path) -> Path {
+        match path {
+            Path::Pident(id) => Path::pdot(Path::pident(head.clone()), id.name()),
+            Path::Pdot(prefix, name, pos) => Path::Pdot(
+                std::sync::Arc::new(path_concat(head, prefix)),
+                name.clone(),
+                *pos,
+            ),
+            Path::Papply(_, _) => Path::pdot(Path::pident(head.clone()), path.name()),
+        }
+    }
+
+    fn destructive_substitution_signature_and_paths<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
         signature: &[crate::types::decl::SignatureItem],
         components: &[String],
-    ) -> Vec<Path> {
-        use crate::types::decl::SignatureItem;
+        needs_type: bool,
+    ) -> Option<(crate::types::decl::Signature, Vec<Path>)> {
+        use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
 
+        fn loop_<'a>(
+            tctx: &mut TypeCheckContext<'a>,
+            env: &Env,
+            signature: &[crate::types::decl::SignatureItem],
+            components: &[String],
+            needs_type: bool,
+        ) -> Option<(crate::types::decl::Signature, Vec<Path>, Path)> {
+            let (head, tail) = components.split_first()?;
+            let mut rewritten = Vec::with_capacity(signature.len());
+            let mut found = None;
+
+            for item in signature {
+                if found.is_none() {
+                    match item {
+                        SignatureItem::SigType(id, _, _)
+                            if needs_type && id.name() == head.as_str() && tail.is_empty() =>
+                        {
+                            let path = Path::pident(id.clone());
+                            found = Some((path.clone(), vec![path]));
+                            continue;
+                        }
+                        SignatureItem::SigModule(id, _, _)
+                            if !needs_type && id.name() == head.as_str() && tail.is_empty() =>
+                        {
+                            let path = Path::pident(id.clone());
+                            found = Some((path.clone(), vec![path]));
+                            continue;
+                        }
+                        SignatureItem::SigModule(id, md, rec_status)
+                            if id.name() == head.as_str() && !tail.is_empty() =>
+                        {
+                            if let Some(child_signature) = resolve_mod_type_to_sig(
+                                &md.md_type,
+                                Some(env),
+                                &mut tctx.persistent_env,
+                                tctx.type_ctx,
+                            ) {
+                                if let Some((new_child_signature, mut paths, child_path)) =
+                                    loop_(tctx, env, &child_signature, tail, needs_type)
+                                {
+                                    let parent_path = path_concat(id, &child_path);
+                                    paths.push(parent_path.clone());
+                                    let mut new_md = md.clone();
+                                    new_md.md_type = DeclMty::MtySignature(new_child_signature);
+                                    rewritten.push(SignatureItem::SigModule(
+                                        id.clone(),
+                                        new_md,
+                                        *rec_status,
+                                    ));
+                                    found = Some((parent_path, paths));
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                rewritten.push(item.clone());
+            }
+
+            let (path, paths) = found?;
+            Some((rewritten, paths, path))
+        }
+
+        let (signature, paths, _) = loop_(tctx, env, signature, components, needs_type)?;
+        Some((signature, paths))
+    }
+
+    fn collect_substituted_item_usage_paths(id: &Ident, tail: &[String]) -> Vec<Path> {
+        if tail.is_empty() {
+            Vec::new()
+        } else {
+            vec![path_from_ident_and_tail(id, tail)]
+        }
+    }
+
+    fn fallback_substituted_item_usage_paths(
+        signature: &[crate::types::decl::SignatureItem],
+        components: &[String],
+    ) -> Vec<Path> {
         let Some((head, tail)) = components.split_first() else {
             return Vec::new();
         };
-        if tail.is_empty() {
-            return Vec::new();
-        }
-
         for item in signature {
-            if let SignatureItem::SigModule(id, md, _) = item {
-                if id.name() != head {
-                    continue;
+            if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
+                if id.name() == head {
+                    return collect_substituted_item_usage_paths(id, tail);
                 }
-                let mut paths = vec![path_from_ident_and_tail(id, tail)];
-                if tail.len() > 1 {
-                    if let Some(child_signature) = resolve_mod_type_to_sig(
-                        &md.md_type,
-                        Some(env),
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    ) {
-                        paths.extend(collect_substituted_item_usage_paths(
-                            tctx,
-                            env,
-                            &child_signature,
-                            tail,
-                        ));
-                    }
-                }
-                return paths;
             }
         }
 
@@ -9207,8 +9584,24 @@ fn check_destructive_substitution_alias_usage<'a>(
             _ => continue,
         };
         if matches!(path, Path::Pdot(..)) {
-            let paths = collect_substituted_item_usage_paths(tctx, env, &signature, &components);
-            check_usage_of_path_of_substituted_item(&paths, &signature, loc, &longident)?;
+            let (signature_to_check, paths) =
+                destructive_substitution_signature_and_paths(
+                    tctx, env, &signature, &components, needs_type,
+                )
+                .unwrap_or_else(|| {
+                    (
+                        signature.clone(),
+                        fallback_substituted_item_usage_paths(&signature, &components),
+                    )
+                });
+            check_usage_of_path_of_substituted_item(
+                tctx,
+                env,
+                &paths,
+                &signature_to_check,
+                loc,
+                &longident,
+            )?;
         }
     }
 

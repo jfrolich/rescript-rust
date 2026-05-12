@@ -2889,6 +2889,18 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::WithMakesApplicativeFunctorIllTyped {
+            loc,
+            lid,
+            path,
+            error,
+        } => UserDiagnostic::new(
+            format_with_makes_applicative_functor_ill_typed_report(
+                type_ctx, arena, source, filename, *loc, lid, path, error,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::WithCannotRemoveConstrainedType { loc } => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -4328,6 +4340,43 @@ fn format_with_mismatch_report(
     message.push_str(&crate::types::includemod::format_error_without_signature_header(
         type_ctx, filename, error,
     ));
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+}
+
+fn format_with_makes_applicative_functor_ill_typed_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    path: &crate::types::Path,
+    error: &crate::types::includemod::IncludeModError,
+) -> String {
+    let mut message = String::new();
+    let lid_text = format_longident_for_report(arena, lid);
+    message.push_str("  This `with' constraint on ");
+    message.push_str(&lid_text);
+    message.push_str(" makes the applicative functor \n");
+    message.push_str("  type ");
+    message.push_str(&path.name());
+    message.push_str(" ill-typed in the constrained signature:\n");
+    let mut include_error = crate::types::includemod::format_error_without_signature_header(
+        type_ctx, filename, error,
+    );
+    include_error = include_error.replacen(
+        "  Modules do not match:\n    \n  is not included in\n    ",
+        "  Modules do not match:  is not included in ",
+        1,
+    );
+    if let Some(last_component) = lid_text.rsplit('.').next() {
+        include_error = include_error.replacen(
+            &format!("type {last_component} = {last_component}\n"),
+            &format!("type {last_component} = {lid_text}\n"),
+            1,
+        );
+    }
+    message.push_str(&include_error);
     format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
 
