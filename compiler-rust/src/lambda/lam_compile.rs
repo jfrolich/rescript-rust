@@ -290,6 +290,11 @@ pub struct LambdaCompiler {
     /// compiler/core/js_cmj_format.ml:120-128.
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     pub(crate) cmj_arity_cache: HashMap<String, Option<HashMap<String, CmjExportArity>>>,
+    /// Same intentional cache family as above, but for exported lambda bodies.
+    /// Keep this paired with the constant/arity caches so repeated cross-module
+    /// inline probes do not re-read the same `.cmj` metadata
+    /// (`query_external_id_info` in compiler/core/lam_compile.ml:234-244,
+    /// 274-279).
     pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,

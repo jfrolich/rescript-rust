@@ -272,11 +272,13 @@ impl TypeExprRef {
     }
 }
 
-/// Scratch map keyed by dense `TypeExprRef` arena indices.
+/// Intentional Rust performance representation for short-lived type-node maps.
 ///
 /// This preserves physical-identity semantics: the key is still the exact
 /// `TypeExprRef`, matching the OCaml compiler's type-node identity model. The
-/// storage avoids hashing for short-lived copy/substitution caches.
+/// reference node shape is compiler/ml/types.ml:22 and allocation path is
+/// compiler/ml/btype.ml:46-48. The storage avoids hashing for short-lived
+/// copy/substitution caches.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefMap<T> {
     offset: u32,
@@ -328,11 +330,12 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-/// Scratch set keyed by dense `TypeExprRef` arena indices.
+/// Intentional Rust performance representation for short-lived type-node sets.
 ///
 /// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
 /// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
-/// type traversals without changing OCaml physical-sharing semantics.
+/// type traversals without changing OCaml physical-sharing semantics from
+/// compiler/ml/types.ml:22.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefSet {
     offset: u32,
