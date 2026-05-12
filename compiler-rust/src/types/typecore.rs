@@ -560,6 +560,12 @@ pub enum TypeCoreError {
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
 
+    /// Type alias reuse is incompatible with its earlier binding.
+    AliasTypeMismatch {
+        loc: LocIdx,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -1485,6 +1491,20 @@ fn collect_named_type_vars_from_core_type(
     }
 }
 
+fn alias_type_mismatch_trace(
+    err: TypeError,
+    inner_ty: TypeExprRef,
+    alias_ty: TypeExprRef,
+) -> Vec<(TypeExprRef, TypeExprRef)> {
+    match err {
+        TypeError::Unify(trace) => trace
+            .into_iter()
+            .map(|(left, right)| (right, left))
+            .collect(),
+        _ => vec![(inner_ty, alias_ty)],
+    }
+}
+
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -1971,12 +1991,11 @@ fn transl_type_inner(
             let (inner_ctyp, alias_ty) = if let Some(existing_alias) = existing_alias {
                 let alias_ty = crate::types::instance(ctx, existing_alias);
                 let (inner_ctyp, inner_ty) = transl_type_inner(tctx, env, inner)?;
-                crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty).map_err(
-                    |_| TypeCoreError::PatternTypeClash {
-                        loc: Some(loc),
-                        trace: vec![(alias_ty, inner_ty)],
-                    },
-                )?;
+                crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
+                    .map_err(|err| TypeCoreError::AliasTypeMismatch {
+                        loc,
+                        trace: alias_type_mismatch_trace(err, inner_ty, alias_ty),
+                    })?;
                 (inner_ctyp, inner_ty)
             } else {
                 let alias_ty = ctx.new_var(None);
@@ -1997,12 +2016,11 @@ fn transl_type_inner(
                         })?;
                     (inner_ctyp, inner_ty)
                 } else {
-                    crate::types::unify(ctx, &mut tctx.unify_state, alias_ty, inner_ty).map_err(
-                        |_| TypeCoreError::PatternTypeClash {
-                            loc: Some(loc),
-                            trace: vec![(alias_ty, inner_ty)],
-                        },
-                    )?;
+                    crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, alias_ty, inner_ty)
+                        .map_err(|err| TypeCoreError::AliasTypeMismatch {
+                            loc,
+                            trace: alias_type_mismatch_trace(err, inner_ty, alias_ty),
+                        })?;
 
                     let instantiated = crate::types::instance(ctx, alias_ty);
                     let proxy = crate::types::btype::proxy(ctx, instantiated);

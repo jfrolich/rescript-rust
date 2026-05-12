@@ -3043,6 +3043,15 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::AliasTypeMismatch { loc, trace }) => {
+            UserDiagnostic::new(
+                format_alias_type_mismatch_report(
+                    type_ctx, arena, source, filename, *loc, trace,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3804,6 +3813,30 @@ fn format_type_mismatch_report(
         loc,
         &format!(
             "This type {} should be an instance of type {}",
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        ),
+    )
+}
+
+fn format_alias_type_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This alias is bound to type {} but is used as an instance of type {}",
             format_type_expr(type_ctx, actual),
             format_type_expr(type_ctx, expected)
         ),
