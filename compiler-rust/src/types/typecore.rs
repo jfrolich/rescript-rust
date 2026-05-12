@@ -17964,52 +17964,16 @@ impl Env {
                     });
                 }
 
-                // Fallback: try looking up as a flattened value in the local env.
-                match self.find_value_with_id(value_name) {
-                    Ok((id, desc)) => {
-                        let path = if let Longident::Lident(mod_idx) = &**prefix {
-                            let mod_name = arena.get_string(*mod_idx);
-                            let module_access_path = self
-                                .find_module_with_origin(mod_name)
-                                .ok()
-                                .and_then(|(_, md, _)| md.md_path.clone());
-                            if let (Some(mod_path), Some(existing_path)) =
-                                (module_access_path, desc.val_path.clone())
-                            {
-                                let can_requalify = match &existing_path {
-                                    Path::Pdot(parent, leaf, _)
-                                        if leaf == value_name
-                                            && (parent.last() == mod_name
-                                                || parent.last().trim_end_matches('!')
-                                                    == mod_name) =>
-                                    {
-                                        true
-                                    }
-                                    _ => false,
-                                };
-                                if can_requalify {
-                                    Path::pdot(mod_path, value_name.to_string())
-                                } else {
-                                    existing_path
-                                }
-                            } else {
-                                desc.val_path
-                                    .clone()
-                                    .unwrap_or_else(|| Path::pident(id.clone()))
-                            }
-                        } else {
-                            desc.val_path
-                                .clone()
-                                .unwrap_or_else(|| Path::pident(id.clone()))
-                        };
-                        Ok((path, desc.clone()))
-                    }
-                    Err(_) => Err(TypeCoreError::UndefinedMethod {
-                        ty: TypeExprRef(0),
-                        method: lid_str,
-                        alternatives: None,
-                    }),
-                }
+                // OCaml compiler/ml/env.ml:1091-1100 only resolves qualified
+                // values by first resolving the module prefix through
+                // `lookup_module_descr`, then reading the selected component
+                // table. It does not fall back to an unqualified value with the
+                // same leaf name when the prefix is unavailable.
+                Err(TypeCoreError::UndefinedMethod {
+                    ty: TypeExprRef(0),
+                    method: lid_str,
+                    alternatives: None,
+                })
             }
             Longident::Lapply(_, _) => Err(TypeCoreError::UndefinedMethod {
                 ty: TypeExprRef(0),
