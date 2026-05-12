@@ -2973,6 +2973,16 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructorIncomplete {
+            loc,
+            path,
+        }) => UserDiagnostic::new(
+            format_unbound_type_constructor_incomplete_report(
+                arena, source, filename, *loc, path,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UnboundTypeVariable { loc, name }) => {
             UserDiagnostic::new(
                 format_unbound_type_variable_report(arena, source, filename, *loc, name),
@@ -3646,6 +3656,24 @@ fn format_unbound_type_constructor_report(
         &format!(
             "This type constructor, `{name}`, can't be found.\nIf you wanted to write a recursive type, don't forget the `rec` in `type rec`"
         ),
+    )
+}
+
+fn format_unbound_type_constructor_incomplete_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    path: &crate::types::Path,
+) -> String {
+    let name = format_type_path_for_report(path);
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type constructor {name}"),
+        "is not yet completely defined",
     )
 }
 

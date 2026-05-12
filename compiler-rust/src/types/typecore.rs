@@ -521,6 +521,9 @@ pub enum TypeCoreError {
     /// Unbound type constructor identifier.
     UnboundTypeConstructor { loc: LocIdx, lid: Longident },
 
+    /// Type constructor exists but is not completely defined yet.
+    UnboundTypeConstructorIncomplete { loc: LocIdx, path: Path },
+
     /// Unbound type variable.
     UnboundTypeVariable { loc: LocIdx, name: String },
 
@@ -1505,6 +1508,36 @@ fn alias_type_mismatch_trace(
     }
 }
 
+fn incomplete_type_constructor_path(
+    ctx: &TypeContext,
+    env: &Env,
+    original_ty: TypeExprRef,
+) -> Option<Path> {
+    let original = ctx.repr(original_ty);
+    let original_desc = ctx.get_desc(original);
+    let path = match &*original_desc {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    drop(original_desc);
+
+    let path = path?;
+    let Path::Pident(id) = &path else {
+        return None;
+    };
+    if id.stamp() == 0 || id.is_persistent() || ctx.find_type_decl_by_stamp(id.stamp()).is_some() {
+        return None;
+    }
+    let env_decl = env.find_type_by_ident(id).ok()?;
+    let is_incomplete_placeholder = matches!(env_decl.type_kind, crate::types::TypeKind::TypeAbstract)
+        && env_decl.type_manifest.is_none()
+        && env_decl
+            .type_path
+            .as_ref()
+            .is_some_and(|decl_path| decl_path.same(&path));
+    is_incomplete_placeholder.then_some(path)
+}
+
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -2270,6 +2303,14 @@ fn transl_type_inner(
                                 }
                             }
                         } else {
+                            if let Some(path) =
+                                incomplete_type_constructor_path(ctx, env, inherit_ty)
+                            {
+                                return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
+                                    loc: inherit_ct.ptyp_loc,
+                                    path,
+                                });
+                            }
                             return Err(TypeCoreError::NotAnObjectType {
                                 loc: inherit_ct.ptyp_loc,
                                 ty: expanded,
@@ -2475,6 +2516,14 @@ fn transl_type_inner(
                             }
                         };
                         let Some(fields) = inherited_fields else {
+                            if let Some(path) =
+                                incomplete_type_constructor_path(ctx, env, inherit_ty)
+                            {
+                                return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
+                                    loc: inherit_ct.ptyp_loc,
+                                    path,
+                                });
+                            }
                             return Err(TypeCoreError::NotAVariant {
                                 loc: inherit_ct.ptyp_loc,
                                 ty: inherit_ty,
