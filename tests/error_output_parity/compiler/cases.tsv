@@ -5,3 +5,6 @@
 # Add explicit cases here when a fixture needs different flags.
 tests/error_output_parity/compiler/cases/jsx_not_enabled.res	-w +A -color never
 tests/error_output_parity/compiler/cases/interface_not_compiled.res	-w +A -bs-jsx 4 -color never -bs-read-cmi
+tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi	-color never
+tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi	-color never
+tests/error_output_parity/compiler/cases/cmi_corrupted.cmi	-color never

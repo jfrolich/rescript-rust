@@ -65,7 +65,7 @@ pub struct UserDiagnostic {
 }
 
 impl UserDiagnostic {
-    fn new(output: String, exit_code: i32) -> Self {
+    pub fn new(output: String, exit_code: i32) -> Self {
         Self { output, exit_code }
     }
 

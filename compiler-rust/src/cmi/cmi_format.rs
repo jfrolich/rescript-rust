@@ -67,11 +67,14 @@ impl From<io::Error> for CmiError {
 impl std::fmt::Display for CmiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CmiError::NotAnInterface(path) => write!(f, "not an interface file: {}", path),
-            CmiError::WrongVersion(path, ver) => {
-                write!(f, "wrong version interface: {} (version {})", path, ver)
+            CmiError::NotAnInterface(path) => {
+                write!(f, "{path}\nis not a compiled interface")
             }
-            CmiError::Corrupted(path) => write!(f, "corrupted interface: {}", path),
+            CmiError::WrongVersion(path, older_newer) => write!(
+                f,
+                "{path}\nis not a compiled interface for this version of OCaml.\nIt seems to be for {older_newer} version of OCaml."
+            ),
+            CmiError::Corrupted(path) => write!(f, "Corrupted compiled interface\n{path}"),
             CmiError::Marshal(e) => write!(f, "marshal error: {}", e),
             CmiError::Io(e) => write!(f, "IO error: {}", e),
         }
@@ -89,7 +92,7 @@ pub fn read_cmi(filename: &str) -> Result<CmiInfos, CmiError> {
 /// Read a CMI file from bytes.
 pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiError> {
     if data.len() < 12 {
-        return Err(CmiError::NotAnInterface(filename.to_string()));
+        return Err(CmiError::Corrupted(filename.to_string()));
     }
 
     // Check magic number
@@ -97,8 +100,15 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
     if magic != CMI_MAGIC {
         // Check if it's a different version
         if magic.starts_with(b"Caml1999I") {
-            let version = String::from_utf8_lossy(magic).to_string();
-            return Err(CmiError::WrongVersion(filename.to_string(), version));
+            let older_newer = if magic < CMI_MAGIC {
+                "an older"
+            } else {
+                "a newer"
+            };
+            return Err(CmiError::WrongVersion(
+                filename.to_string(),
+                older_newer.to_string(),
+            ));
         }
         return Err(CmiError::NotAnInterface(filename.to_string()));
     }
@@ -107,7 +117,9 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
 
     // Read first marshal'd value: (cmi_name, cmi_sign)
     let mut reader = MarshalReader::new();
-    let name_and_sign = reader.read_with_header(&mut cursor)?;
+    let name_and_sign = reader
+        .read_with_header(&mut cursor)
+        .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
 
     // The first value is a tuple: (string, signature_item list)
     let (tag, fields) = name_and_sign.as_block();
@@ -120,12 +132,16 @@ pub fn read_cmi_from_bytes(data: &[u8], filename: &str) -> Result<CmiInfos, CmiE
 
     // Read second marshal'd value: crcs
     let mut reader2 = MarshalReader::new();
-    let crcs_value = reader2.read_with_header(&mut cursor)?;
+    let crcs_value = reader2
+        .read_with_header(&mut cursor)
+        .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
     let cmi_crcs = read_crcs(&crcs_value);
 
     // Read third marshal'd value: flags
     let mut reader3 = MarshalReader::new();
-    let flags_value = reader3.read_with_header(&mut cursor)?;
+    let flags_value = reader3
+        .read_with_header(&mut cursor)
+        .map_err(|_| CmiError::Corrupted(filename.to_string()))?;
     let cmi_flags = read_flags(&flags_value);
 
     Ok(CmiInfos {

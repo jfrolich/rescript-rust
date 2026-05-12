@@ -8,16 +8,17 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current, write_structure_ast_current,
 };
+use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
-    typecheck_interface_file,
+    compile_file_to_js_with_options, enable_cli_cleanup_skip, typecheck_interface_file,
+    CompilerOptions, UserDiagnostic,
 };
 use rescript_compiler::js_ir::ModuleFormat;
-use rescript_compiler::parser::{Parser, module, sexp_locs};
+use rescript_compiler::parser::{module, sexp_locs, Parser};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
@@ -270,6 +271,10 @@ fn run() -> Result<()> {
     }
 
     let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext == "cmi" {
+        return read_cmi_input(&input);
+    }
+
     let source_path = if ext == "ast" || ext == "iast" {
         read_ast_source_path(&input)?
     } else {
@@ -330,6 +335,19 @@ fn run() -> Result<()> {
     } else {
         write_outputs(&source_path, &compiler_opts, &opts)
     }
+}
+
+fn read_cmi_input(input: &Path) -> Result<()> {
+    let filename = input.to_string_lossy();
+    match cmi_format::read_cmi(&filename) {
+        Ok(_cmi) => Ok(()),
+        Err(cmi_format::CmiError::Io(err)) => Err(err).with_context(|| filename.to_string()),
+        Err(err) => Err(UserDiagnostic::new(format_cmi_error_report(&err), 2).into()),
+    }
+}
+
+fn format_cmi_error_report(err: &cmi_format::CmiError) -> String {
+    format!("\n  We've found a bug for you!\n  _none_\n\n  {err}\n\n")
 }
 
 fn generate_ast(

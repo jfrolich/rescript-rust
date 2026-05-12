@@ -558,8 +558,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi`.
   - `Wrong_version_interface`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi`.
   - `Corrupted_interface`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/cmi_corrupted.cmi`.
 
 ## Include Mismatch Surfaces
 
