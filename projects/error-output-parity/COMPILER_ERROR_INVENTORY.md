@@ -421,10 +421,23 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_mismatch_type.res`.
 - `With_makes_applicative_functor_ill_typed`
+  - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
+    raise site only fires for deep destructive substitutions when an
+    applicative functor path such as `F(M).t` remains in the constrained
+    signature and becomes ill typed after substituting a nested module path.
+    The ReScript parser does not expose source syntax for applicative functor
+    type paths in signatures; a direct `F(M).u` type path is rejected by the
+    parser before Typemod.
 - `With_changes_module_alias`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_changes_module_alias.res`.
 - `With_cannot_remove_constrained_type`
+  - Not reachable from normal `.res`/`.resi` source found so far. OCaml raises
+    this only for non-alias destructive `with type ... := ...` substitutions
+    whose translated parameters are constrained. In ReScript source, explicit
+    `constraint` clauses are accepted on ordinary type declarations but not
+    inside module-type `with type` constraints; duplicate parameters are
+    rejected earlier by `Typedecl.Repeated_parameter`.
 - `Repeated_name`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/repeated_module_name.res`.
@@ -441,10 +454,18 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/not_allowed_in_functor_body.res`.
 - `Not_a_packed_module`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`.
 - `Incomplete_packed_module`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/incomplete_packed_module.res`.
 - `Scoping_pack`
+  - No reachable `.res`/`.resi` fixture found yet. The OCaml raise site is
+    limited to first-class module packing with package constraints after
+    `type_package` rebuilds constrained package arguments and checks whether
+    they can be exported without local dependencies. Reduced ReScript probes
+    with locally abstract types either compile in OCaml or fail earlier for
+    other reasons, so this remains documented as unresolved rather than covered.
 - `Recursive_module_require_explicit_type`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`.
@@ -452,6 +473,12 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/apply_generative_functor.res`.
 - `Cannot_scrape_alias`
+  - No reachable `.res`/`.resi` fixture found yet. The Typemod raise sites
+    require `Env.scrape_alias` to return a module alias whose target is missing
+    while the alias itself was already accepted into the environment. Normal
+    ReScript source paths tried so far either resolve the alias target earlier
+    or report the missing module through Typetexp before Typemod observes an
+    `Mty_alias`.
 
 ## Ast_untagged_variants Coverage Notes
 
