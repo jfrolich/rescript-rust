@@ -598,6 +598,22 @@ pub struct PersistentEnv {
     /// env still has to rebuild its local flattened-alias table when it first
     /// observes a cached signature.
     prepared_cached_alias_rewrites: HashSet<String>,
+    /// First persistent-loader error observed through any clone of this env.
+    last_error: Arc<Mutex<Option<PersistentEnvError>>>,
+}
+
+/// Errors reported by OCaml's `Env` persistent interface loader.
+#[derive(Debug, Clone)]
+pub enum PersistentEnvError {
+    /// The file found for one module contains a different compiled unit.
+    IllegalRenaming {
+        /// Module name requested by the lookup.
+        expected: String,
+        /// Unit name stored inside the loaded `.cmi`.
+        actual: String,
+        /// Path to the mismatched `.cmi`.
+        filename: String,
+    },
 }
 
 fn should_register_lazy_raw_sig(name: &str) -> bool {
@@ -626,6 +642,7 @@ impl PersistentEnv {
             portable_cache_overrides: HashMap::new(),
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -654,6 +671,31 @@ impl PersistentEnv {
             portable_cache_overrides: registry.local_cached_modules.clone(),
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn record_error(&self, error: PersistentEnvError) {
+        let mut last_error = self.last_error.lock().unwrap();
+        if last_error.is_none() {
+            *last_error = Some(error);
+        }
+    }
+
+    pub fn last_error(&self) -> Option<PersistentEnvError> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    fn validate_cmi_name(&self, expected: &str, actual: &str, filename: &str) -> bool {
+        if actual == expected {
+            true
+        } else {
+            self.record_error(PersistentEnvError::IllegalRenaming {
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+                filename: filename.to_string(),
+            });
+            false
         }
     }
 
@@ -1318,6 +1360,7 @@ impl PersistentEnv {
             portable_cache_overrides: self.portable_cache_overrides.clone(),
             hidden_modules: self.hidden_modules.clone(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: self.last_error.clone(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
@@ -1496,11 +1539,15 @@ impl PersistentEnv {
                 }
             };
 
+            if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
+                return None;
+            }
+
             let mut sig_ctx = SigReadContext::new(ctx);
             let signature = sig_ctx.read_signature(&cmi.cmi_sign);
             return Some(self.finalize_loaded_signature(
                 name,
-                cmi.cmi_name,
+                name.to_string(),
                 signature,
                 full_path,
                 ctx,
@@ -1574,6 +1621,9 @@ impl PersistentEnv {
         let cmi_filename = format!("{}.cmi", name);
         let full_path = self.find_in_path_uncap(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
+        if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
+            return None;
+        }
         let mut sig_ctx = SigReadContext::new(ctx);
         Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
     }

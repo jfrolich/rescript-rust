@@ -15,7 +15,7 @@ use tracing::info_span;
 
 use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{
-    CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv,
+    CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
@@ -3801,6 +3801,32 @@ fn type_mod_error_to_anyhow(
         }
         _ => anyhow!("Type checking failed: {err:?}"),
     }
+}
+
+fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
+    let message = match error {
+        PersistentEnvError::IllegalRenaming {
+            expected, actual, ..
+        } => format!(
+            "You referred to the module {expected}, but we've found one called {actual} instead.\nIs the name's casing right?"
+        ),
+    };
+    UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
+}
+
+fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {
+    let mut output = String::new();
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(filename);
+    output.push_str("\n\n");
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
 }
 
 fn format_duplicate_type_label_report(
@@ -9836,6 +9862,13 @@ pub fn compile_source_to_js_with_options(
             Err(e) => {
                 let suppress_info_style = !tctx.warnings.is_empty();
                 emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                if let Some(error) = tctx
+                    .persistent_env
+                    .as_ref()
+                    .and_then(|persistent_env| persistent_env.last_error())
+                {
+                    return Err(persistent_env_error_to_anyhow(error, filename));
+                }
                 return Err(type_mod_error_to_anyhow(
                     e,
                     &type_ctx,
@@ -9846,6 +9879,13 @@ pub fn compile_source_to_js_with_options(
                 ));
             }
         };
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
     if type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
@@ -10472,8 +10512,26 @@ pub fn typecheck_interface_source(
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
+        Ok(typed_signature) => typed_signature,
+        Err(e) => {
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(persistent_env_error_to_anyhow(error, filename));
+            }
+            return Err(anyhow!("Type checking failed: {e:?}"));
+        }
+    };
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
 
     // Print typed tree if requested
     if options.dump_typed_sexp {

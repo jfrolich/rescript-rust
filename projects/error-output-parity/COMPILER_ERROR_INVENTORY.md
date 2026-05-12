@@ -535,6 +535,8 @@ with a reason after checking raise sites.
 
 - `compiler/ml/env.ml`
   - `Illegal_renaming`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/illegal_renaming.res`.
   - `Inconsistent_import`
   - `Missing_module`
   - `Illegal_value_name`
