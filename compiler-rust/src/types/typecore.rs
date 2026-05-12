@@ -4772,146 +4772,6 @@ fn force_qualified_value_type_paths<'a>(
         })
     }
 
-    fn path_is_promise_constructor(path: &Path) -> bool {
-        path.same(&crate::types::predef::path_promise())
-    }
-
-    #[derive(Clone, Copy, Default)]
-    struct FinalResultPathFlags {
-        has_qualified_component_path: bool,
-        has_promise_constructor_path: bool,
-    }
-
-    impl FinalResultPathFlags {
-        fn for_path(path: &Path) -> Self {
-            Self {
-                has_qualified_component_path: matches!(path, Path::Pdot(..)),
-                has_promise_constructor_path: path_is_promise_constructor(path),
-            }
-        }
-
-        fn merge(&mut self, other: Self) {
-            self.has_qualified_component_path |= other.has_qualified_component_path;
-            self.has_promise_constructor_path |= other.has_promise_constructor_path;
-        }
-    }
-
-    fn final_result_path_flags(
-        ctx: &crate::types::context::TypeContext,
-        ty: TypeExprRef,
-        seen: &mut TypeExprRefSet,
-    ) -> FinalResultPathFlags {
-        let ty = ctx.repr(ty);
-        if !seen.insert(ty) {
-            return FinalResultPathFlags::default();
-        }
-
-        let desc = ctx.borrow_desc(ty);
-        match &*desc {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
-                FinalResultPathFlags::default()
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                let arg_ty = arg.typ;
-                let ret_ty = *ret;
-                drop(desc);
-                let mut flags = final_result_path_flags(ctx, arg_ty, seen);
-                flags.merge(final_result_path_flags(ctx, ret_ty, seen));
-                flags
-            }
-            TypeDesc::Ttuple(items) => {
-                let items = items.clone();
-                drop(desc);
-                let mut flags = FinalResultPathFlags::default();
-                for item in items {
-                    flags.merge(final_result_path_flags(ctx, item, seen));
-                }
-                flags
-            }
-            TypeDesc::Tconstr { path, args, .. } => {
-                let mut flags = FinalResultPathFlags::for_path(path);
-                let args = args.clone();
-                drop(desc);
-                for arg in args {
-                    flags.merge(final_result_path_flags(ctx, arg, seen));
-                }
-                flags
-            }
-            TypeDesc::Tobject { fields, name } => {
-                let fields = *fields;
-                let name = name.clone();
-                drop(desc);
-                let mut flags = FinalResultPathFlags::default();
-                if let Some((path, args)) = name.as_ref() {
-                    flags.merge(FinalResultPathFlags::for_path(path));
-                    for arg in args.iter().copied() {
-                        flags.merge(final_result_path_flags(ctx, arg, seen));
-                    }
-                }
-                flags.merge(final_result_path_flags(ctx, fields, seen));
-                flags
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                let typ = *typ;
-                let rest = *rest;
-                drop(desc);
-                let mut flags = final_result_path_flags(ctx, typ, seen);
-                flags.merge(final_result_path_flags(ctx, rest, seen));
-                flags
-            }
-            TypeDesc::Tlink(link) | TypeDesc::Tsubst(link) => {
-                let link = *link;
-                drop(desc);
-                final_result_path_flags(ctx, link, seen)
-            }
-            TypeDesc::Tvariant(row) => {
-                let row = row.clone();
-                drop(desc);
-                let mut flags = FinalResultPathFlags::default();
-                if let Some((path, args)) = row.row_name.as_ref() {
-                    flags.merge(FinalResultPathFlags::for_path(path));
-                    for arg in args.iter().copied() {
-                        flags.merge(final_result_path_flags(ctx, arg, seen));
-                    }
-                }
-                flags.merge(final_result_path_flags(ctx, row.row_more, seen));
-                for (_, field) in row.row_fields.iter() {
-                    match field {
-                        RowField::Rpresent(Some(ty)) => {
-                            flags.merge(final_result_path_flags(ctx, *ty, seen))
-                        }
-                        RowField::Reither { types, .. } => {
-                            for ty in types.iter().copied() {
-                                flags.merge(final_result_path_flags(ctx, ty, seen));
-                            }
-                        }
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
-                    }
-                }
-                flags
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                let body = *body;
-                let vars = vars.clone();
-                drop(desc);
-                let mut flags = final_result_path_flags(ctx, body, seen);
-                for var in vars {
-                    flags.merge(final_result_path_flags(ctx, var, seen));
-                }
-                flags
-            }
-            TypeDesc::Tpackage { path, args, .. } => {
-                let mut flags = FinalResultPathFlags::for_path(path);
-                let args = args.clone();
-                drop(desc);
-                for arg in args {
-                    flags.merge(final_result_path_flags(ctx, arg, seen));
-                }
-                flags
-            }
-        }
-    }
-
     fn visit<'a>(
         tctx: &mut TypeCheckContext<'a>,
         env: &Env,
@@ -4959,40 +4819,12 @@ fn force_qualified_value_type_paths<'a>(
                     seen,
                 );
                 if defer_selected_value_final_result && !ret_is_arrow {
-                    let final_result_flags =
-                        final_result_path_flags(ctx, ret_ty, &mut TypeExprRefSet::new());
-                    if final_result_flags.has_qualified_component_path
-                        && final_result_flags.has_promise_constructor_path
-                    {
-                        // OCaml compiler/ml/typecore.ml:2335-2343 `lower_args`
-                        // walks arrow argument types and stops when the return
-                        // is no longer an arrow. typecore.ml:4219-4224 then
-                        // leaves that final application result for the caller's
-                        // unification/expansion. Async lowering threads
-                        // promise result types through typecore.ml:2568-2588
-                        // before argument typing, so Rust must not eagerly
-                        // force qualified component aliases that appear only
-                        // under that final promise result.
-                    } else {
-                        // OCaml compiler/ml/typecore.ml:4219-4224 leaves the
-                        // final application result to the caller, but
-                        // env.ml:1530-1538 and compiler/ml/subst.ml:303-309
-                        // have already substituted the selected component path
-                        // into the value description. Keep those component-table
-                        // side effects visible while still leaving the final
-                        // result to the caller.
-                        visit(
-                            tctx,
-                            env,
-                            ret_ty,
-                            value_access_root_is_local,
-                            value_access_root,
-                            selected_module_path,
-                            selected_alias_targets,
-                            false,
-                            seen,
-                        );
-                    }
+                    // OCaml compiler/ml/typecore.ml:2335-2343 `lower_args`
+                    // walks arrow argument types and stops when the return is
+                    // no longer an arrow. typecore.ml:4219-4224 leaves that
+                    // final application result for the caller's later
+                    // unification/expansion, so do not add a result-shape
+                    // predicate here.
                 } else {
                     // OCaml compiler/ml/typecore.ml:4171-4192 advances through
                     // curried source arguments, but typecore.ml:4219-4224 leaves
