@@ -3378,6 +3378,7 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
+    pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
     pub debug: bool,
     pub jsx_preserve: bool,
@@ -3889,6 +3890,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
         )
     });
+    // OCaml has one mutable `Ident.currentstamp` through typechecking,
+    // `Translmod.transl_implementation`, and `Lam_compile_main.compile`
+    // (compiler/ext/ident.ml:26-58; compiler/core/js_implementation.ml:161-167).
+    // Rewatch can split Rust in-process compilation before JS and resume it on a
+    // different worker thread, so carry the module-local legacy stamp explicitly
+    // instead of reading that worker's unrelated thread-local counter.
+    let ident_stamp_at_js_boundary = crate::ident::Ident::current_local_stamp();
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -3902,6 +3910,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
+        ident_stamp_at_js_boundary,
         file_directives,
         debug,
         jsx_preserve,
@@ -3937,6 +3946,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         persistent_env_for_js.unregister_in_memory_signature(module_name);
     }
     let persistent_env_for_js = Some(persistent_env_for_js);
+    crate::ident::Ident::set_current_time(pre_js.ident_stamp_at_js_boundary);
     let js_targets = effective_js_output_targets(options);
     let primary_target = js_targets.first();
     let primary_output_path = primary_target
