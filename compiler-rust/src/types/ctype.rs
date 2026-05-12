@@ -2105,7 +2105,7 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -2123,11 +2123,11 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     // normalized-path cache for this side-effect-only call, because an earlier
     // component-table probe may have cached the same structural answer before
     // the OCaml-equivalent module thunk was forced.
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true)
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, None)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
 }
 
 fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
@@ -2176,7 +2176,6 @@ fn normalize_path_full_inner<'a>(
     depth: usize,
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
-    root_child: Option<&str>,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -2206,7 +2205,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
         }
     }
@@ -2230,7 +2228,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                Some(s.as_str()),
             );
             if p_norm == **p {
                 path.clone()
@@ -2246,7 +2243,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
             let p2_norm = normalize_path_full_inner(
                 ctx,
@@ -2255,7 +2251,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
             if p1_norm == **p1 && p2_norm == **p2 {
                 path.clone()
@@ -2291,21 +2286,9 @@ fn normalize_path_full_inner<'a>(
         // already cached that component view, do not turn recursive
         // normalize-path prefix handling for Belt collection aliases into an
         // earlier full-signature force than OCaml observes.
-        let stdlib_array_buffer_component_lookup =
-            id.name() == "Stdlib" && matches!(root_child, Some("ArrayBuffer"));
-        // OCaml compiler/ml/env.ml:1000-1007 can reach the implicit
-        // `Stdlib.ArrayBuffer` component through `ps_comps` while typing
-        // `Stdlib_TypedArray` signatures; compiler/ml/env.ml:865-875 is not
-        // entered for the root `Stdlib` until a later normalize-path call.
-        // Rust recursively normalizes the synthetic `Stdlib.ArrayBuffer.t`
-        // path, so skip only that root force to preserve OCaml's lazy
-        // `Subst.signature` stamp order without weakening `Stdlib.Iterator.*`
-        // normalize-path forcing.
         let should_force_persistent_sig = id.is_persistent()
             && !(id.name() == "Belt" && has_component_cache)
-            && (!has_local_module
-                || id.name() == "Pervasives"
-                || (id.name() == "Stdlib" && !stdlib_array_buffer_component_lookup));
+            && (!has_local_module || id.name() == "Pervasives" || id.name() == "Stdlib");
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
@@ -2354,7 +2337,6 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
-            None,
         );
     }
 
@@ -2380,7 +2362,6 @@ fn normalize_path_full_inner<'a>(
                     depth + 1,
                     visiting,
                     allow_reverse_local_aliases,
-                    None,
                 );
             }
         }
@@ -2404,7 +2385,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
         }
     }
@@ -2419,7 +2399,6 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
-            None,
         );
     }
 
