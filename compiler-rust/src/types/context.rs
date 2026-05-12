@@ -248,6 +248,9 @@ pub struct TypeContext {
     /// persistent signatures. Keyed by the original source node identity for
     /// the lifetime of this typing context.
     generic_dotted_constr_copies: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
+    /// GADT constraint variables.
+    reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -489,6 +492,7 @@ impl TypeContext {
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             generic_dotted_constr_copies: RefCell::new(ahash::AHashMap::new()),
+            reified_var_counters: RefCell::new(ahash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
@@ -648,6 +652,18 @@ impl TypeContext {
     /// Register a type declaration by ident stamp for alias expansion.
     pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
         self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+    }
+
+    /// Match OCaml `Ctype.get_new_abstract_name`.
+    pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
+        let mut counters = self.reified_var_counters.borrow_mut();
+        let index = counters.get(prefix).map_or(0, |previous| previous + 1);
+        counters.insert(prefix.to_string(), index);
+        if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
+            prefix.to_string()
+        } else {
+            format!("{prefix}{index}")
+        }
     }
 
     /// Look up a type declaration by name from the global store.

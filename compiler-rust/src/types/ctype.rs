@@ -275,6 +275,9 @@ pub struct UnifyState {
 
     /// Current recursive call depth in `unify`.
     recursion_depth: usize,
+
+    /// Current newtype level for GADT equation reification.
+    pub newtype_level: Option<i32>,
 }
 
 impl UnifyState {
@@ -290,6 +293,7 @@ impl UnifyState {
             pending_type_expansion_paths: Vec::new(),
             capture_type_lookup_paths: false,
             recursion_depth: 0,
+            newtype_level: None,
         }
     }
 
@@ -305,6 +309,7 @@ impl UnifyState {
             pending_type_expansion_paths: Vec::new(),
             capture_type_lookup_paths: false,
             recursion_depth: 0,
+            newtype_level: None,
         }
     }
 
@@ -729,9 +734,10 @@ pub(crate) fn nullary_constr_paths_equivalent(
 fn add_gadt_equation(
     ctx: &TypeContext,
     env: &mut Env,
+    newtype_level: Option<i32>,
     source_path: &Path,
     destination: TypeExprRef,
-) {
+) -> TypeResult<()> {
     // local_non_recursive_abbrev check: destination must not reference source
     let dest_repr = ctx.repr(destination);
     let is_recursive = matches!(
@@ -739,7 +745,11 @@ fn add_gadt_equation(
         TypeDesc::Tconstr { path, .. } if path.same(source_path)
     );
     if is_recursive {
-        return;
+        return Ok(());
+    }
+
+    if let Some(newtype_level) = newtype_level {
+        reify(ctx, env, newtype_level, destination)?;
     }
 
     // duplicate_type: structural copy of destination
@@ -769,10 +779,107 @@ fn add_gadt_equation(
     };
 
     // Add as a local constraint
+    if let Path::Pident(id) = source_path {
+        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+    }
     env.add_local_constraint(source_path.clone(), decl);
     // OCaml add_gadt_equation calls cleanup_abbrev after installing the new
     // local constraint so future expansions observe the updated equation.
     ctx.clear_abbrev_memos();
+    Ok(())
+}
+
+fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
+    super::TypeDeclaration {
+        type_params: vec![],
+        type_arity: 0,
+        type_kind: super::TypeKind::TypeAbstract,
+        type_private: super::PrivateFlag::Public,
+        type_manifest: None,
+        type_variance: vec![],
+        type_newtype_level: Some((newtype_level, newtype_level)),
+        type_loc: crate::location::Location::none(),
+        type_attributes: vec![],
+        type_immediate: false,
+        type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_inlined_types: vec![],
+        type_path: None,
+    }
+}
+
+fn create_reified_constr(
+    ctx: &TypeContext,
+    env: &mut Env,
+    newtype_level: i32,
+    level: i32,
+    name: Option<String>,
+) -> TypeExprRef {
+    let prefix = name.map_or_else(|| "$".to_string(), |name| format!("$'{name}"));
+    let name = ctx.next_reified_abstract_name(&prefix);
+    let ident = ctx.create_ident(&name);
+    let decl = reified_type_decl(newtype_level);
+    env.add_type(ident.clone(), decl.clone());
+    ctx.register_type_decl_by_stamp(ident.stamp(), decl);
+    let path = Path::Pident(ident);
+    let abbrev = ctx.alloc_abbrev(AbbrevMemo::Mnil);
+    ctx.alloc_type_at_level(
+        TypeDesc::Tconstr {
+            path,
+            args: vec![],
+            abbrev,
+        },
+        level,
+    )
+}
+
+/// Match OCaml `Ctype.reify`: replace free RHS variables in a local GADT
+/// equation with fresh local abstract types before installing the constraint.
+fn reify(
+    ctx: &TypeContext,
+    env: &mut Env,
+    newtype_level: i32,
+    ty: TypeExprRef,
+) -> TypeResult<()> {
+    fn iterator(
+        ctx: &TypeContext,
+        env: &mut Env,
+        newtype_level: i32,
+        visited: &mut TypeExprRefSet,
+        ty: TypeExprRef,
+    ) -> TypeResult<()> {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return Ok(());
+        }
+
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(name) => {
+                let name = name.clone();
+                let level = ctx.get_level(ty);
+                drop(desc);
+                let reified = create_reified_constr(ctx, env, newtype_level, level, name);
+                link_type(ctx, ty, reified);
+                if level < newtype_level {
+                    let rhs = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
+                    return Err(TypeError::Unify(vec![(reified, rhs)]));
+                }
+                Ok(())
+            }
+            _ => {
+                drop(desc);
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                for child in children {
+                    iterator(ctx, env, newtype_level, visited, child)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    let mut visited = TypeExprRefSet::new();
+    iterator(ctx, env, newtype_level, &mut visited, ty)
 }
 
 // ============================================================================
@@ -820,6 +927,15 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     let needle = ctx.repr(needle);
     let mut visited = TypeExprRefSet::new();
     occurs_rec(ctx, needle, haystack, &mut visited)
+}
+
+fn occurs_with_expanded_head(
+    ctx: &TypeContext,
+    env: &Env,
+    needle: TypeExprRef,
+    haystack: TypeExprRef,
+) -> bool {
+    occurs(ctx, needle, haystack) || occurs(ctx, needle, expand_head_unif(ctx, env, haystack))
 }
 
 /// Match OCaml's `occur_univar` pass before linking a type variable.
@@ -4557,7 +4673,12 @@ pub fn unify_var<'a>(
         (TypeDesc::Tvar(_), _) => {
             drop(desc1);
             drop(desc2);
-            if occurs(ctx, t1, t2) {
+            let occurs = if let Some(env) = state.env() {
+                occurs_with_expanded_head(ctx, env, t1, t2)
+            } else {
+                occurs(ctx, t1, t2)
+            };
+            if occurs {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -4627,6 +4748,14 @@ fn unify_after_expansion<'a>(
     let lhs = if swap { t2_expanded } else { t1_expanded };
     let rhs = if swap { t1_expanded } else { t2_expanded };
     let relink_target = if swap { t1 } else { t2 };
+    let swap_trace = |result: TypeResult<()>| -> TypeResult<()> {
+        match result {
+            Err(TypeError::Unify(trace)) if swap => Err(TypeError::Unify(
+                trace.into_iter().map(|(left, right)| (right, left)).collect(),
+            )),
+            other => other,
+        }
+    };
 
     let lhs = ctx.repr(lhs);
     let rhs = ctx.repr(rhs);
@@ -4707,14 +4836,16 @@ fn unify_after_expansion<'a>(
             }
 
             for (a, b) in pairs {
-                unify(ctx, state, a, b)?;
+                if let Err(err) = unify(ctx, state, a, b) {
+                    return swap_trace(Err(err));
+                }
             }
 
             return Ok(());
         }
     }
 
-    let unify_result = unify(ctx, state, lhs, rhs);
+    let unify_result = swap_trace(unify(ctx, state, lhs, rhs));
     unify_result?;
 
     if state.mode != crate::types::UnifyMode::Pattern {
@@ -4879,8 +5010,13 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            if occurs(ctx, t1, t2) {
-                return Err(TypeError::RecursiveType(t1));
+            let occurs = if let Some(env) = state.env() {
+                occurs_with_expanded_head(ctx, env, t1, t2)
+            } else {
+                occurs(ctx, t1, t2)
+            };
+            if occurs {
+                return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t2)?;
@@ -4897,8 +5033,13 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            if occurs(ctx, t2, t1) {
-                return Err(TypeError::RecursiveType(t2));
+            let occurs = if let Some(env) = state.env() {
+                occurs_with_expanded_head(ctx, env, t2, t1)
+            } else {
+                occurs(ctx, t2, t1)
+            };
+            if occurs {
+                return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
                 occur_univar(ctx, env, t1)?;
@@ -5433,6 +5574,7 @@ fn unify_types<'a>(
 
                 // GADT equation handling for Tconstr with different paths
                 if state.generate_equations {
+                    let newtype_level = state.newtype_level;
                     if let Some(ref p1) = gadt_path1 {
                         if let Some(ref p2) = gadt_path2 {
                             if let Some(env) = state.env_mut() {
@@ -5452,26 +5594,26 @@ fn unify_types<'a>(
                                     } else {
                                         (p2.clone(), t1)
                                     };
-                                    add_gadt_equation(ctx, env, &source, dest);
+                                    add_gadt_equation(ctx, env, newtype_level, &source, dest)?;
                                     return Ok(());
                                 } else if inst1 {
-                                    add_gadt_equation(ctx, env, p1, t2);
+                                    add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
                                     return Ok(());
                                 } else if inst2 {
-                                    add_gadt_equation(ctx, env, p2, t1);
+                                    add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
                                     return Ok(());
                                 }
                             }
                         } else if let Some(env) = state.env_mut() {
                             if is_instantiable(env, p1) {
-                                add_gadt_equation(ctx, env, p1, t2);
+                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
                                 return Ok(());
                             }
                         }
                     } else if let Some(ref p2) = gadt_path2 {
                         if let Some(env) = state.env_mut() {
                             if is_instantiable(env, p2) {
-                                add_gadt_equation(ctx, env, p2, t1);
+                                add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
                                 return Ok(());
                             }
                         }
@@ -5833,6 +5975,7 @@ fn unify_types<'a>(
             // When generate_equations is true and one/both sides are instantiable
             // newtypes, add a type equation instead of failing.
             if state.generate_equations {
+                let newtype_level = state.newtype_level;
                 if let Some(ref p1) = path1_for_gadt {
                     if let Some(ref p2) = path2_for_gadt {
                         // Both are nullary Tconstr
@@ -5854,13 +5997,13 @@ fn unify_types<'a>(
                                 } else {
                                     (p2.clone(), t1)
                                 };
-                                add_gadt_equation(ctx, env, &source, dest);
+                                add_gadt_equation(ctx, env, newtype_level, &source, dest)?;
                                 return Ok(());
                             } else if inst1 {
-                                add_gadt_equation(ctx, env, p1, t2);
+                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
                                 return Ok(());
                             } else if inst2 {
-                                add_gadt_equation(ctx, env, p2, t1);
+                                add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
                                 return Ok(());
                             }
                         }
@@ -5868,7 +6011,7 @@ fn unify_types<'a>(
                         // Only left is nullary Tconstr
                         if let Some(env) = state.env_mut() {
                             if is_instantiable(env, p1) {
-                                add_gadt_equation(ctx, env, p1, t2);
+                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
                                 return Ok(());
                             }
                         }
@@ -5877,7 +6020,7 @@ fn unify_types<'a>(
                     // Only right is nullary Tconstr
                     if let Some(env) = state.env_mut() {
                         if is_instantiable(env, p2) {
-                            add_gadt_equation(ctx, env, p2, t1);
+                            add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
                             return Ok(());
                         }
                     }
@@ -8714,7 +8857,7 @@ pub fn instance_constructor_in_pattern(
         // OCaml compiler/ml/ctype.ml:1111-1123 creates existential abstract
         // type names with `Ident.create`, so they consume the same stamp
         // stream as typedtree binders.
-        let path = super::path::Path::pident(ctx.create_ident(&name));
+        let path = super::path::Path::pident(ctx.create_ident(&ctx.next_reified_abstract_name(&name)));
         env.add_local_constraint(path.clone(), decl);
 
         // Create Tconstr pointing to the abstract type

@@ -3464,11 +3464,13 @@ fn unify_pattern_types_gadt(
     let old_generate = tctx.unify_state.generate_equations;
     let old_injective = tctx.unify_state.assume_injective;
     let old_mode = tctx.unify_state.mode;
+    let old_newtype_level = tctx.unify_state.newtype_level;
 
     // Set GADT mode
     tctx.unify_state.generate_equations = true;
     tctx.unify_state.assume_injective = true;
     tctx.unify_state.mode = crate::types::UnifyMode::Pattern;
+    tctx.unify_state.newtype_level = tctx.newtype_level;
 
     let result = unify(tctx.type_ctx, &mut tctx.unify_state, ty1, ty2);
 
@@ -3476,6 +3478,7 @@ fn unify_pattern_types_gadt(
     tctx.unify_state.generate_equations = old_generate;
     tctx.unify_state.assume_injective = old_injective;
     tctx.unify_state.mode = old_mode;
+    tctx.unify_state.newtype_level = old_newtype_level;
 
     match result {
         Ok(()) => Ok(()),
@@ -14081,6 +14084,8 @@ fn type_case_pattern<'a>(
     generic_scrutinee_ty: TypeExprRef,
     erase_either: bool,
 ) -> TypeCoreResult<PendingSequentialMatchCase<'a>> {
+    let case_has_gadt =
+        pattern_contains_generalized_constructor(tctx, env, tctx.arena.get_pat(case.pc_lhs));
     match type_case_pattern_impl(
         tctx,
         env,
@@ -14091,7 +14096,7 @@ fn type_case_pattern<'a>(
         false,
     ) {
         Ok(case) => Ok(case),
-        Err(TypeCoreError::PatternTypeClash { .. }) => type_case_pattern_impl(
+        Err(TypeCoreError::PatternTypeClash { .. }) if !case_has_gadt => type_case_pattern_impl(
             tctx,
             env,
             case,

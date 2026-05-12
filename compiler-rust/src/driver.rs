@@ -4506,7 +4506,11 @@ fn format_pattern_type_clash_report(
     ));
     message.push_str(RESET);
     append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
-    append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
+    let is_polyvariant_explanation =
+        append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
+    if !is_polyvariant_explanation {
+        append_incompatible_type_parts(type_ctx, trace, &mut message);
+    }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
@@ -5934,12 +5938,41 @@ fn type_is_predef_path(
     }
 }
 
+fn type_expands_to_predef_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expected_path: &crate::types::path::Path,
+) -> bool {
+    let mut current = type_ctx.repr(ty);
+    let mut seen = AHashSet::new();
+    loop {
+        if !seen.insert(current) {
+            return false;
+        }
+        if type_is_predef_path(type_ctx, current, expected_path) {
+            return true;
+        }
+        let Some(expansion) = type_alias_expansion(type_ctx, current) else {
+            return false;
+        };
+        let expansion = type_ctx.repr(expansion);
+        if type_expansion_same(type_ctx, current, expansion) {
+            return false;
+        }
+        current = expansion;
+    }
+}
+
 fn type_clash_actual_promise(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
-    bottom_type_clash_aliases(trace)
-        .or_else(|| trace.first().copied())
-        .is_some_and(|(actual, _)| {
-            type_is_predef_path(type_ctx, actual, &crate::types::predef::path_promise())
-        })
+    let is_promise_like = |ty| {
+        type_expands_to_predef_path(type_ctx, ty, &crate::types::predef::path_promise())
+    };
+    trace
+        .first()
+        .copied()
+        .into_iter()
+        .chain(bottom_type_clash_aliases(trace))
+        .any(|(actual, expected)| is_promise_like(actual) && !is_promise_like(expected))
 }
 
 fn append_optional_record_field_help(
@@ -6964,7 +6997,7 @@ fn super_trace_reports(
         })
         .collect::<Vec<_>>();
 
-    let mut reports = Vec::new();
+    let mut reports: Vec<TypeExpansionReport> = Vec::new();
     for (idx, group) in groups.iter().copied().enumerate() {
         let actual_text = format_type_expr(type_ctx, group.actual);
         let expected_text = format_type_expr(type_ctx, group.expected);
@@ -6981,6 +7014,23 @@ fn super_trace_reports(
 
         let is_same_expansion = type_expansion_same(type_ctx, group.actual, group.actual_expansion)
             && type_expansion_same(type_ctx, group.expected, group.expected_expansion);
+        let duplicates_previous_expansion = reports.iter().any(|previous| {
+            let previous_actual_expansion = format_type_expr(type_ctx, previous.actual_expansion);
+            let previous_expected = format_type_expr(type_ctx, previous.expected);
+            let previous_actual = format_type_expr(type_ctx, previous.actual);
+            let previous_expected_expansion =
+                format_type_expr(type_ctx, previous.expected_expansion);
+            (actual_text == previous_actual_expansion && expected_text == previous_expected)
+                || (actual_text == previous_expected
+                    && expected_text == previous_actual_expansion)
+                || (actual_text == previous_actual
+                    && expected_text == previous_expected_expansion)
+                || (actual_text == previous_expected_expansion
+                    && expected_text == previous_actual)
+        });
+        if is_same_expansion && duplicates_previous_expansion {
+            continue;
+        }
         if is_same_expansion && idx + 1 != groups.len() {
             continue;
         }
@@ -8443,10 +8493,16 @@ impl<'a> TypeExprPrinter<'a> {
 
     fn format_path_name(&self, path: &crate::types::Path) -> String {
         let name = path.name();
-        name.strip_prefix("Stdlib.")
+        let name = name
+            .strip_prefix("Stdlib.")
             .or_else(|| name.strip_prefix("Stdlib_"))
             .unwrap_or(&name)
-            .to_string()
+            .to_string();
+        if name.starts_with('$') {
+            format!("\\\"{name}\"")
+        } else {
+            name
+        }
     }
 
     fn format_object(&mut self, fields: TypeExprRef) -> String {
