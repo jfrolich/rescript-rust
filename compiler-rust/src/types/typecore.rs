@@ -14072,66 +14072,125 @@ fn type_setfield(
     if let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, ctx);
     }
-    let (label_desc, field_ty) = if let Some(env_label) = env_label {
-        let (_poly_vars, ty_arg, ty_res) =
-            crate::types::ctype::instance_label(ctx, false, &env_label);
-        let module_access_path = {
-            let ty_res_repr = ctx.repr(ty_res);
-            let ty_res_desc = ctx.get_desc(ty_res_repr);
-            let path = if let TypeDesc::Tconstr { path, .. } = &*ty_res_desc {
-                path.parent()
-            } else {
-                None
-            };
-            drop(ty_res_desc);
-            path
-        };
-        if let Some(module_path) = module_access_path {
-            if is_local_module_access_path(&module_path) {
-                let mut visited_arg = HashSet::new();
-                qualify_module_local_type_paths_from_module_descr_in_place(
-                    ctx,
-                    env,
-                    &mut tctx.persistent_env,
-                    ty_arg,
-                    &module_path,
-                    &mut visited_arg,
-                );
-                let mut visited_res = HashSet::new();
-                qualify_module_local_type_paths_from_module_descr_in_place(
-                    ctx,
-                    env,
-                    &mut tctx.persistent_env,
-                    ty_res,
-                    &module_path,
-                    &mut visited_res,
-                );
+    // OCaml compiler/ml/typecore.ml:3703-3743 (`type_label_exp`) opens a
+    // definition scope before `instance_label` and keeps it open through
+    // `type_argument`; setfield values must see the same raised level as record
+    // literal fields.
+    ctx.begin_def();
+    let field_result = (|| -> TypeCoreResult<(
+        crate::types::LabelDescription,
+        Vec<TypeExprRef>,
+        Expression,
+    )> {
+        let (label_desc, field_ty, poly_vars) = if let Some(env_label) = env_label {
+            let separate = env.has_local_constraints();
+            if separate {
+                // OCaml compiler/ml/typecore.ml:3706-3716 opens two extra scopes
+                // for local constraints around `instance_label`.
+                ctx.begin_def();
+                ctx.begin_def();
             }
-        }
-        unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
-        (env_label, ty_arg)
-    } else {
-        let field_ty = ctx.new_var(None);
-        (
-            crate::types::LabelDescription {
-                lbl_name: field_name,
-                lbl_res: record_ty,
-                lbl_arg: field_ty,
-                lbl_mut: crate::types::MutableFlag::Mutable,
-                lbl_optional: false,
-                lbl_pos: 0,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                lbl_private: crate::types::PrivateFlag::Public,
-                lbl_loc: tctx.arena.to_location(field_lid.loc),
-                lbl_attributes: vec![],
-            },
-            field_ty,
-        )
-    };
 
-    // Type check the new value with the proper field type
-    let typed_value = type_expect(tctx, env, new_value, field_ty, None)?;
+            // OCaml compiler/ml/typecore.ml:3711 uses `instance_label true` for
+            // both record creation and setfield.
+            let (poly_vars, ty_arg0, ty_res0) =
+                crate::types::ctype::instance_label(ctx, true, &env_label);
+            if separate {
+                ctx.end_def();
+                crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
+                crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
+            }
+
+            let module_access_path = {
+                let ty_res_repr = ctx.repr(ty_res0);
+                let ty_res_desc = ctx.get_desc(ty_res_repr);
+                let path = if let TypeDesc::Tconstr { path, .. } = &*ty_res_desc {
+                    path.parent()
+                } else {
+                    None
+                };
+                drop(ty_res_desc);
+                path
+            };
+            if let Some(module_path) = module_access_path {
+                if is_local_module_access_path(&module_path) {
+                    let mut visited_arg = HashSet::new();
+                    qualify_module_local_type_paths_from_module_descr_in_place(
+                        ctx,
+                        env,
+                        &mut tctx.persistent_env,
+                        ty_arg0,
+                        &module_path,
+                        &mut visited_arg,
+                    );
+                    let mut visited_res = HashSet::new();
+                    qualify_module_local_type_paths_from_module_descr_in_place(
+                        ctx,
+                        env,
+                        &mut tctx.persistent_env,
+                        ty_res0,
+                        &module_path,
+                        &mut visited_res,
+                    );
+                }
+            }
+
+            // OCaml compiler/ml/typecore.ml:3717-3721 unifies an instance of the
+            // label result with the expected record type, then instances the field
+            // argument before typing the assigned value.
+            let ty_res = crate::types::ctype::instance(ctx, ty_res0);
+            let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
+            let label_result_unify =
+                unify_expression_types(tctx, loc, ty_res, expected_record_ty, None);
+            let field_ty = crate::types::ctype::instance(ctx, ty_arg0);
+
+            if separate {
+                // OCaml compiler/ml/typecore.ml:3722-3725 closes the second local
+                // constraint scope after instantiating the field argument.
+                ctx.end_def();
+                crate::types::generalize_structure(ctx, ctx.current_level(), field_ty);
+            }
+            label_result_unify?;
+
+            (env_label, field_ty, poly_vars)
+        } else {
+            let field_ty = ctx.new_var(None);
+            (
+                crate::types::LabelDescription {
+                    lbl_name: field_name,
+                    lbl_res: record_ty,
+                    lbl_arg: field_ty,
+                    lbl_mut: crate::types::MutableFlag::Mutable,
+                    lbl_optional: false,
+                    lbl_pos: 0,
+                    lbl_all: crate::types::LabelArrayRef(0),
+                    lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                    lbl_private: crate::types::PrivateFlag::Public,
+                    lbl_loc: tctx.arena.to_location(field_lid.loc),
+                    lbl_attributes: vec![],
+                },
+                field_ty,
+                vec![],
+            )
+        };
+
+        let typed_value = type_expect(tctx, env, new_value, field_ty, None)?;
+        // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
+        // types against `ty_arg` and then unifies with `instance env ty_arg`.
+        let field_ty_inst = crate::types::ctype::instance(ctx, field_ty);
+        unify_expression_types(tctx, loc, typed_value.exp_type, field_ty_inst, None)?;
+
+        Ok((label_desc, poly_vars, typed_value))
+    })();
+    ctx.end_def();
+    let (label_desc, poly_vars, mut typed_value) = field_result?;
+
+    if !poly_vars.is_empty() {
+        crate::types::ctype::check_univars(ctx, &poly_vars);
+    }
+    // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
+    // instance env arg.exp_type}` from `type_label_exp`.
+    typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.
