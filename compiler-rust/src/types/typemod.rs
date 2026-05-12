@@ -4830,9 +4830,9 @@ fn type_abbrev_path_to_check(path: &Path, ids: &[Ident]) -> bool {
 
 fn check_type_abbrev_cycle_rec(
     ctx: &crate::types::context::TypeContext,
-    env: &Env,
     target_path: &Path,
-    ids: &[Ident],
+    should_check_path: &dyn Fn(&Path) -> bool,
+    find_decl: &dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
     initial_ty: TypeExprRef,
     ty: TypeExprRef,
     parents: &HashSet<TypeExprRef>,
@@ -4875,9 +4875,9 @@ fn check_type_abbrev_cycle_rec(
             for arg in &args {
                 if let Some(cycle) = check_type_abbrev_cycle_rec(
                     ctx,
-                    env,
                     target_path,
-                    ids,
+                    should_check_path,
+                    find_decl,
                     initial_ty,
                     *arg,
                     &next_parents,
@@ -4888,13 +4888,13 @@ fn check_type_abbrev_cycle_rec(
                 }
             }
 
-            let should_expand = type_abbrev_path_to_check(&path, ids) || arg_cycle.is_some();
+            let should_expand = should_check_path(&path) || arg_cycle.is_some();
             if !should_expand {
                 return None;
             }
 
             if let Some(cycle) = arg_cycle {
-                if type_abbrev_path_to_check(&path, ids) {
+                if should_check_path(&path) {
                     return Some(cycle);
                 }
 
@@ -4902,9 +4902,9 @@ fn check_type_abbrev_cycle_rec(
                 for arg in &args {
                     if let Some(empty_cycle) = check_type_abbrev_cycle_rec(
                         ctx,
-                        env,
                         target_path,
-                        ids,
+                        should_check_path,
+                        find_decl,
                         initial_ty,
                         *arg,
                         &empty_parents,
@@ -4913,7 +4913,7 @@ fn check_type_abbrev_cycle_rec(
                         return Some(empty_cycle);
                     }
                 }
-                let Some(decl) = find_type_decl_for_abbrev_cycle(ctx, env, &path) else {
+                let Some(decl) = find_decl(&path) else {
                     return Some(cycle);
                 };
                 let Some(manifest) = decl.type_manifest else {
@@ -4921,9 +4921,9 @@ fn check_type_abbrev_cycle_rec(
                 };
                 return check_type_abbrev_cycle_rec(
                     ctx,
-                    env,
                     target_path,
-                    ids,
+                    should_check_path,
+                    find_decl,
                     if parents.is_empty() { ty } else { initial_ty },
                     manifest,
                     &next_parents,
@@ -4931,13 +4931,13 @@ fn check_type_abbrev_cycle_rec(
                 );
             }
 
-            let decl = find_type_decl_for_abbrev_cycle(ctx, env, &path)?;
+            let decl = find_decl(&path)?;
             let manifest = decl.type_manifest?;
             check_type_abbrev_cycle_rec(
                 ctx,
-                env,
                 target_path,
-                ids,
+                should_check_path,
+                find_decl,
                 if parents.is_empty() { ty } else { initial_ty },
                 manifest,
                 &next_parents,
@@ -4950,9 +4950,9 @@ fn check_type_abbrev_cycle_rec(
             for child in children {
                 if let Some(cycle) = check_type_abbrev_cycle_rec(
                     ctx,
-                    env,
                     target_path,
-                    ids,
+                    should_check_path,
+                    find_decl,
                     initial_ty,
                     child,
                     &next_parents,
@@ -4966,6 +4966,65 @@ fn check_type_abbrev_cycle_rec(
     }
 }
 
+fn check_type_declaration_abbrev_cycle(
+    ctx: &crate::types::context::TypeContext,
+    loc: LocIdx,
+    name: String,
+    target_path: &Path,
+    internal_decl: &crate::types::TypeDeclaration,
+    should_check_path: &dyn Fn(&Path) -> bool,
+    find_decl: &dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
+) -> TypeModResult<()> {
+    let Some(manifest) = internal_decl.type_manifest else {
+        return Ok(());
+    };
+    let parents = HashSet::new();
+    let mut visited = HashMap::new();
+    match check_type_abbrev_cycle_rec(
+        ctx,
+        target_path,
+        should_check_path,
+        find_decl,
+        manifest,
+        manifest,
+        &parents,
+        &mut visited,
+    ) {
+        Some(TypeAbbrevCycle::Recursive) => Err(TypeModError::RecursiveAbbrev { loc, name }),
+        Some(TypeAbbrevCycle::Cycle(ty))
+            if type_expr_mentions_path(ctx, ty, target_path, &mut HashSet::new()) =>
+        {
+            Err(TypeModError::RecursiveAbbrev { loc, name })
+        }
+        Some(TypeAbbrevCycle::Cycle(ty)) => Err(TypeModError::CycleInDef { loc, name, ty }),
+        None => Ok(()),
+    }
+}
+
+fn type_expr_mentions_path(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+    target_path: &Path,
+    visited: &mut HashSet<TypeExprRef>,
+) -> bool {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return false;
+    }
+
+    if let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty)
+        && path.same(target_path)
+    {
+        return true;
+    }
+
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    children
+        .into_iter()
+        .any(|child| type_expr_mentions_path(ctx, child, target_path, visited))
+}
+
 fn check_type_declaration_abbrev_cycles(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -4973,38 +5032,98 @@ fn check_type_declaration_abbrev_cycles(
     parser_decls: &[crate::parser::ast::TypeDeclaration],
     internal_decls: &[crate::types::TypeDeclaration],
 ) -> TypeModResult<()> {
+    let should_check_path = |path: &Path| type_abbrev_path_to_check(path, ids);
+    let find_decl = |path: &Path| find_type_decl_for_abbrev_cycle(ctx, env, path);
     for ((id, parser_decl), internal_decl) in ids.iter().zip(parser_decls).zip(internal_decls) {
-        let Some(manifest) = internal_decl.type_manifest else {
-            continue;
-        };
         let type_path = Path::pident(id.clone());
-        let parents = HashSet::new();
-        let mut visited = HashMap::new();
-        match check_type_abbrev_cycle_rec(
+        check_type_declaration_abbrev_cycle(
             ctx,
-            env,
+            parser_decl.ptype_loc,
+            id.name().to_string(),
             &type_path,
-            ids,
-            manifest,
-            manifest,
-            &parents,
-            &mut visited,
-        ) {
-            Some(TypeAbbrevCycle::Recursive) => {
-                return Err(TypeModError::RecursiveAbbrev {
-                    loc: parser_decl.ptype_loc,
-                    name: id.name().to_string(),
-                });
+            internal_decl,
+            &should_check_path,
+            &find_decl,
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_type_paths_from_module_type<'a>(
+    mty: &'a crate::types::decl::ModuleType,
+    prefix: &Path,
+    paths: &mut Vec<(Path, &'a crate::types::TypeDeclaration)>,
+) {
+    match mty {
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            for item in sig {
+                match item {
+                    crate::types::decl::SignatureItem::SigType(id, decl, _) => {
+                        paths.push((Path::pdot(prefix.clone(), id.name()), decl));
+                    }
+                    crate::types::decl::SignatureItem::SigModule(id, md, _) => {
+                        let module_path = Path::pdot(prefix.clone(), id.name());
+                        collect_type_paths_from_module_type(&md.md_type, &module_path, paths);
+                    }
+                    _ => {}
+                }
             }
-            Some(TypeAbbrevCycle::Cycle(ty)) => {
-                return Err(TypeModError::CycleInDef {
-                    loc: parser_decl.ptype_loc,
-                    name: id.name().to_string(),
-                    ty,
-                });
-            }
-            None => {}
         }
+        crate::types::decl::ModuleType::MtyFunctor { result, .. } => {
+            collect_type_paths_from_module_type(result, prefix, paths);
+        }
+        crate::types::decl::ModuleType::MtyIdent(_)
+        | crate::types::decl::ModuleType::MtyAlias(_, _) => {}
+    }
+}
+
+fn check_recmod_type_declarations(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    recmod_ids: &[Ident],
+    module_id: &Ident,
+    mty: &crate::types::decl::ModuleType,
+) -> TypeModResult<()> {
+    // OCaml typemod.ml `check_recmod_typedecls` checks every type path
+    // exported by the recursive module type with typedecl.ml
+    // `check_recmod_typedecl`. Keep a local path table here so expansion uses
+    // the just-translated recursive module signature before falling back to the
+    // environment, matching `Mtype.type_paths` followed by `Env.find_type`.
+    let mut paths = Vec::new();
+    collect_type_paths_from_module_type(mty, &Path::pident(module_id.clone()), &mut paths);
+    let local_type_path_matches = |path: &Path| {
+        paths.iter().any(|(_, decl)| {
+            decl.type_path
+                .as_ref()
+                .is_some_and(|local_path| local_path.same(path))
+        })
+    };
+    let should_check_path =
+        |path: &Path| recmod_ids.iter().any(|id| path.is_free(id)) || local_type_path_matches(path);
+    let find_decl = |path: &Path| {
+        paths
+            .iter()
+            .find(|(candidate, decl)| {
+                candidate.same(path)
+                    || decl
+                        .type_path
+                        .as_ref()
+                        .is_some_and(|local_path| local_path.same(path))
+            })
+            .map(|(_, decl)| (*decl).clone())
+            .or_else(|| find_type_decl_for_abbrev_cycle(ctx, env, path))
+    };
+    for (path, decl) in &paths {
+        check_type_declaration_abbrev_cycle(
+            ctx,
+            loc,
+            path.name(),
+            path,
+            decl,
+            &should_check_path,
+            &find_decl,
+        )?;
     }
     Ok(())
 }
@@ -18373,6 +18492,18 @@ fn type_structure_item<'a>(
                     empty_module_decl(decl.md_type.mty_type.clone()),
                 );
             }
+            // OCaml transl_recmodule_modtypes checks recursive-module type
+            // declarations after the first transition environment is built.
+            for ((_, _, _, mty_idx, _, _), decl) in rec_bindings.iter().zip(dcl1.iter()) {
+                check_recmod_type_declarations(
+                    ctx,
+                    &env1,
+                    arena.get_mod_type(*mty_idx).pmty_loc,
+                    &mod_ids,
+                    &decl.md_id,
+                    &decl.md_type.mty_type,
+                )?;
+            }
 
             let mut dcl2 = Vec::with_capacity(rec_bindings.len());
             for ((name, name_loc, _, mty_idx, attrs, mb_loc), id) in
@@ -18397,6 +18528,18 @@ fn type_structure_item<'a>(
                     decl.md_id.clone(),
                     empty_module_decl(decl.md_type.mty_type.clone()),
                 );
+            }
+            // And again after the second transition environment, before body
+            // typing and recursive module inclusion.
+            for ((_, _, _, mty_idx, _, _), decl) in rec_bindings.iter().zip(dcl2.iter()) {
+                check_recmod_type_declarations(
+                    ctx,
+                    &rec_env,
+                    arena.get_mod_type(*mty_idx).pmty_loc,
+                    &mod_ids,
+                    &decl.md_id,
+                    &decl.md_type.mty_type,
+                )?;
             }
 
             // Type-check each module body with the environment produced by the
