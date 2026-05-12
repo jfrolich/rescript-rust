@@ -2787,6 +2787,23 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::UnqualifiedGadtPattern { loc, tpath, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "The GADT constructor {} of type {} must be qualified in this pattern.",
+                        name,
+                        format_type_path_for_report(tpath)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::NotAVariantType { loc, lid }) => {
             UserDiagnostic::new(
                 format_not_a_variant_type_report(arena, source, filename, *loc, lid),

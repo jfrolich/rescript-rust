@@ -577,7 +577,11 @@ pub enum TypeCoreError {
     UnexpectedExistential,
 
     /// Unqualified GADT pattern.
-    UnqualifiedGadtPattern(Path, String),
+    UnqualifiedGadtPattern {
+        loc: LocIdx,
+        tpath: Path,
+        name: String,
+    },
 
     /// Invalid interval pattern.
     InvalidInterval { loc: LocIdx },
@@ -3981,7 +3985,18 @@ fn type_pattern_construct(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         ) {
-            Some((path, desc)) => (desc, path),
+            Some(resolution) => {
+                if let ConstructorDisambiguationSource::ExpectedType { tpath } = &resolution.source
+                    && resolution.desc.cstr_generalized
+                {
+                    return Err(TypeCoreError::UnqualifiedGadtPattern {
+                        loc,
+                        tpath: tpath.clone(),
+                        name: resolution.desc.cstr_name.clone(),
+                    });
+                }
+                (resolution.desc, resolution.path)
+            }
             None => {
                 match lookup_constructor_in_module(
                     lid_txt,
@@ -14820,7 +14835,7 @@ fn type_construct(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         ) {
-            Some((path, desc)) => (path, desc),
+            Some(resolution) => (resolution.path, resolution.desc),
             None => {
                 match lookup_constructor_in_module(
                     &longident,
@@ -24189,6 +24204,17 @@ fn qualify_label_description_paths<'a>(
     }
 }
 
+struct DisambiguatedConstructor {
+    path: Path,
+    desc: crate::types::decl::ConstructorDescription,
+    source: ConstructorDisambiguationSource,
+}
+
+enum ConstructorDisambiguationSource {
+    InScope,
+    ExpectedType { tpath: Path },
+}
+
 /// Disambiguate a constructor by name, considering both the environment and
 /// the expected type. Follows OCaml's disambiguate pattern:
 /// 1. Try to extract the concrete variant type from expected_ty
@@ -24201,7 +24227,7 @@ fn disambiguate_constructor<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
+) -> Option<DisambiguatedConstructor> {
     // Step 1: Try to extract the variant type path from the expected type
     let opath = extract_variant_type_path_from_expected_with_persistent_env(
         expected_ty,
@@ -24215,7 +24241,13 @@ fn disambiguate_constructor<'a>(
 
     if all_constrs.is_empty() {
         // No constructors found in env - try type-directed lookup
-        return lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx);
+        let (path, desc) =
+            lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx)?;
+        return Some(DisambiguatedConstructor {
+            path,
+            desc,
+            source: ConstructorDisambiguationSource::ExpectedType { tpath: opath? },
+        });
     }
 
     // Step 3: If we have a target type path, try to disambiguate
@@ -24243,7 +24275,11 @@ fn disambiguate_constructor<'a>(
                     ctx,
                 ) {
                     let path = Path::pident(Ident::create_persistent(cstr_name));
-                    return Some((path, (*cstr).clone()));
+                    return Some(DisambiguatedConstructor {
+                        path,
+                        desc: (*cstr).clone(),
+                        source: ConstructorDisambiguationSource::InScope,
+                    });
                 }
             }
         }
@@ -24252,7 +24288,14 @@ fn disambiguate_constructor<'a>(
         if let Some(result) =
             lookup_constructor_by_expected_type(cstr_name, expected_ty, env, pers_env, ctx)
         {
-            return Some(result);
+            let (path, desc) = result;
+            return Some(DisambiguatedConstructor {
+                path,
+                desc,
+                source: ConstructorDisambiguationSource::ExpectedType {
+                    tpath: target_path.clone(),
+                },
+            });
         }
     }
 
@@ -24269,7 +24312,11 @@ fn disambiguate_constructor<'a>(
         ctx,
     );
     let path = Path::pident(Ident::create_persistent(cstr_name));
-    Some((path, (*cstr).clone()))
+    Some(DisambiguatedConstructor {
+        path,
+        desc: (*cstr).clone(),
+        source: ConstructorDisambiguationSource::InScope,
+    })
 }
 
 fn force_constructor_disambiguate_by_type_compare<'a>(

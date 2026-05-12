@@ -111,6 +111,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/less_general_field_value.res`
   and
   `tests/error_output_parity/compiler/fixtures/less_general_definition.res`.
+- `Unqualified_gadt_pattern`: covered by
+  `tests/error_output_parity/compiler/fixtures/unqualified_gadt_pattern.res`.
 - `Too_many_arguments`: covered by
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
 - `Abstract_wrong_label`: covered by
