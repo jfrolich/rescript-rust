@@ -3349,6 +3349,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::OpenedObject { loc, path }) => {
+            let message = match path {
+                Some(path) => format!("Illegal open object type {}", path.name()),
+                None => "Illegal open object type".to_string(),
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,

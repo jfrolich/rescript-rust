@@ -740,6 +740,9 @@ pub enum TypeCoreError {
     /// Object type spread/inheritance used with a non-object type.
     NotAnObjectType { loc: LocIdx, ty: TypeExprRef },
 
+    /// Object type spread/inheritance used with an open object type.
+    OpenedObject { loc: LocIdx, path: Option<Path> },
+
     /// JSX not enabled.
     JsxNotEnabled { loc: LocIdx },
 
@@ -1569,6 +1572,31 @@ fn incomplete_type_constructor_path(
     is_incomplete_placeholder.then_some(path)
 }
 
+fn object_row(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let mut current = ty;
+    let mut seen = HashSet::new();
+    loop {
+        let repr = ctx.repr(current);
+        if !seen.insert(repr) {
+            return repr;
+        }
+        let desc = ctx.get_desc(repr);
+        match &*desc {
+            TypeDesc::Tobject { fields, .. } => current = *fields,
+            TypeDesc::Tfield { rest, .. } => current = *rest,
+            _ => return repr,
+        }
+    }
+}
+
+fn opened_object(ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let row = object_row(ctx, ty);
+    matches!(
+        &*ctx.get_desc(row),
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. }
+    )
+}
+
 /// Translate a parsed CoreType to a TypedCoreType and its corresponding TypeExprRef.
 ///
 /// This function converts the surface syntax type annotations into the internal
@@ -2318,17 +2346,38 @@ fn transl_type_inner(
                     crate::parser::ast::ObjectField::Oinherit(inherit_type) => {
                         let inherit_ct = tctx.arena.get_core_type(*inherit_type);
                         let (inherit_ctyp, inherit_ty) = transl_type_inner(tctx, env, inherit_ct)?;
+                        let inherit_name = {
+                            let inherit_desc = ctx.get_desc(ctx.repr(inherit_ty));
+                            match &*inherit_desc {
+                                TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+                                _ => None,
+                            }
+                        };
 
                         // Extract fields from the inherited type (OCaml's typetexp.ml lines 597-617).
                         // expand_head resolves type aliases/constructors to get the underlying object type.
                         let expanded = crate::types::ctype::expand_head(ctx, env, inherit_ty);
-                        let expanded_desc = ctx.get_desc(expanded);
-                        if let TypeDesc::Tobject {
-                            fields: obj_fields, ..
-                        } = &*expanded_desc
-                        {
+                        let inherited_object_fields = {
+                            let expanded_desc = ctx.get_desc(expanded);
+                            if let TypeDesc::Tobject { fields, .. } = &*expanded_desc {
+                                let fields_desc = ctx.get_desc(ctx.repr(*fields));
+                                match &*fields_desc {
+                                    TypeDesc::Tfield { .. } | TypeDesc::Tnil => Some(*fields),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(obj_fields) = inherited_object_fields {
+                            if opened_object(ctx, expanded) {
+                                return Err(TypeCoreError::OpenedObject {
+                                    loc: inherit_ct.ptyp_loc,
+                                    path: inherit_name,
+                                });
+                            }
                             // Walk the Tfield chain and add each field to field_entries
-                            let mut current_field = *obj_fields;
+                            let mut current_field = obj_fields;
                             loop {
                                 let fd = ctx.get_desc(ctx.repr(current_field));
                                 match &*fd {
