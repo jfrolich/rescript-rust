@@ -3019,6 +3019,11 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::NotAVariant { loc, ty }) => UserDiagnostic::new(
+            format_not_a_variant_report(type_ctx, arena, source, filename, *loc, *ty),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3711,6 +3716,26 @@ fn format_constructor_mismatch_report(
         &format!(
             "This variant type contains a constructor {} which should be\n{}",
             actual, expected
+        ),
+    )
+}
+
+fn format_not_a_variant_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "The type {} does not expand to a polymorphic variant type",
+            format_type_expr(type_ctx, ty)
         ),
     )
 }

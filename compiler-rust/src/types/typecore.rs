@@ -543,6 +543,9 @@ pub enum TypeCoreError {
         expected: TypeExprRef,
     },
 
+    /// A polymorphic variant inherits a type that is not a polymorphic variant.
+    NotAVariant { loc: LocIdx, ty: TypeExprRef },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -2446,43 +2449,47 @@ fn transl_type_inner(
                                 _ => None,
                             }
                         };
-                        if let Some(fields) = inherited_fields {
-                            for (label_name, inherited_field) in fields {
-                                let is_reither = labels.as_ref().is_some_and(|present| {
-                                    !present.iter().any(|lbl| lbl == label_name.as_str())
-                                });
-                                let resolved_field = if is_reither {
-                                    match inherited_field {
-                                        crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
-                                            crate::types::type_expr::RowField::Reither {
-                                                constant: false,
-                                                types: vec![ty],
-                                                matched: false,
-                                                link: ctx.alloc_row_field(None),
-                                            }
+                        let Some(fields) = inherited_fields else {
+                            return Err(TypeCoreError::NotAVariant {
+                                loc: inherit_ct.ptyp_loc,
+                                ty: inherit_ty,
+                            });
+                        };
+                        for (label_name, inherited_field) in fields {
+                            let is_reither = labels.as_ref().is_some_and(|present| {
+                                !present.iter().any(|lbl| lbl == label_name.as_str())
+                            });
+                            let resolved_field = if is_reither {
+                                match inherited_field {
+                                    crate::types::type_expr::RowField::Rpresent(Some(ty)) => {
+                                        crate::types::type_expr::RowField::Reither {
+                                            constant: false,
+                                            types: vec![ty],
+                                            matched: false,
+                                            link: ctx.alloc_row_field(None),
                                         }
-                                        crate::types::type_expr::RowField::Rpresent(None) => {
-                                            crate::types::type_expr::RowField::Reither {
-                                                constant: true,
-                                                types: vec![],
-                                                matched: false,
-                                                link: ctx.alloc_row_field(None),
-                                            }
-                                        }
-                                        _ => inherited_field,
                                     }
-                                } else {
-                                    inherited_field
-                                };
-                                add_row_field(
-                                    tctx,
-                                    inherit_ct.ptyp_loc,
-                                    &mut row_field_map,
-                                    &mut row_field_insertions,
-                                    label_name,
-                                    resolved_field,
-                                )?;
-                            }
+                                    crate::types::type_expr::RowField::Rpresent(None) => {
+                                        crate::types::type_expr::RowField::Reither {
+                                            constant: true,
+                                            types: vec![],
+                                            matched: false,
+                                            link: ctx.alloc_row_field(None),
+                                        }
+                                    }
+                                    _ => inherited_field,
+                                }
+                            } else {
+                                inherited_field
+                            };
+                            add_row_field(
+                                tctx,
+                                inherit_ct.ptyp_loc,
+                                &mut row_field_map,
+                                &mut row_field_insertions,
+                                label_name,
+                                resolved_field,
+                            )?;
                         }
                         typed_rows.push(crate::types::typedtree::RowFieldType {
                             rf_desc: crate::types::typedtree::RowFieldDesc::Rinherit(inherit_ctyp),
