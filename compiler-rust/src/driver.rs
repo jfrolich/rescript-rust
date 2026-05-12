@@ -2574,6 +2574,19 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::IllegalLetrecExpr { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This kind of expression is not allowed as right-hand side of `let rec'",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::EmptyRecordLiteral { loc }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

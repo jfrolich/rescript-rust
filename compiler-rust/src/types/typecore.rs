@@ -699,6 +699,9 @@ pub enum TypeCoreError {
     /// Illegal let-rec pattern.
     IllegalLetrecPat { loc: LocIdx },
 
+    /// Illegal let-rec right-hand side expression.
+    IllegalLetrecExpr { loc: LocIdx },
+
     /// Empty record literal.
     EmptyRecordLiteral { loc: LocIdx },
 
@@ -20659,6 +20662,563 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecAccess {
+    Guarded,
+    Unguarded,
+    Dereferenced,
+}
+
+type RecUse = HashMap<Ident, RecAccess>;
+type RecEnv = HashMap<Ident, RecUse>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecExpressionClass {
+    Static,
+    Dynamic,
+}
+
+fn rec_access_join(left: RecAccess, right: RecAccess) -> RecAccess {
+    match (left, right) {
+        (RecAccess::Dereferenced, _) | (_, RecAccess::Dereferenced) => RecAccess::Dereferenced,
+        (RecAccess::Unguarded, _) | (_, RecAccess::Unguarded) => RecAccess::Unguarded,
+        (RecAccess::Guarded, RecAccess::Guarded) => RecAccess::Guarded,
+    }
+}
+
+fn rec_use_join(mut left: RecUse, right: RecUse) -> RecUse {
+    for (id, access) in right {
+        left.entry(id)
+            .and_modify(|existing| *existing = rec_access_join(*existing, access))
+            .or_insert(access);
+    }
+    left
+}
+
+fn rec_use_single(id: Ident, access: RecAccess) -> RecUse {
+    let mut use_ = RecUse::default();
+    use_.insert(id, access);
+    use_
+}
+
+fn rec_use_map(use_: RecUse, f: impl Fn(RecAccess) -> RecAccess) -> RecUse {
+    use_.into_iter()
+        .map(|(id, access)| (id, f(access)))
+        .collect()
+}
+
+fn rec_use_guard(use_: RecUse) -> RecUse {
+    rec_use_map(use_, |access| match access {
+        RecAccess::Dereferenced => RecAccess::Dereferenced,
+        RecAccess::Guarded | RecAccess::Unguarded => RecAccess::Guarded,
+    })
+}
+
+fn rec_use_inspect(use_: RecUse) -> RecUse {
+    rec_use_map(use_, |_| RecAccess::Dereferenced)
+}
+
+fn rec_use_delay(use_: RecUse) -> RecUse {
+    rec_use_map(use_, |_| RecAccess::Guarded)
+}
+
+fn rec_use_discard(use_: RecUse) -> RecUse {
+    rec_use_guard(use_)
+}
+
+fn rec_env_join(mut left: RecEnv, right: RecEnv) -> RecEnv {
+    for (id, use_) in right {
+        left.entry(id)
+            .and_modify(|existing| {
+                *existing = rec_use_join(std::mem::take(existing), use_.clone());
+            })
+            .or_insert(use_);
+    }
+    left
+}
+
+fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
+    let mut vars = Vec::new();
+    let mut push_var = |id: &Ident, _name: &str, _loc: LocIdx| {
+        vars.push(id.clone());
+    };
+    fn collect<F: FnMut(&Ident, &str, LocIdx)>(pat: &Pattern, f: &mut F) {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(id, name) => f(id, id.name(), name.loc),
+            PatternDesc::Tpat_alias(inner, id, name) => {
+                collect(inner, f);
+                f(id, id.name(), name.loc);
+            }
+            PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+                for item in items {
+                    collect(item, f);
+                }
+            }
+            PatternDesc::Tpat_construct(_, _, args) => {
+                for arg in args {
+                    collect(arg, f);
+                }
+            }
+            PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, f),
+            PatternDesc::Tpat_record(fields, _) => {
+                for (_, _, field_pat, _) in fields {
+                    collect(field_pat, f);
+                }
+            }
+            PatternDesc::Tpat_or(left, right, _) => {
+                collect(left, f);
+                collect(right, f);
+            }
+            PatternDesc::Tpat_any
+            | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_variant(_, None, _) => {}
+        }
+    }
+    collect(pat, &mut push_var);
+    vars
+}
+
+fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => false,
+        PatternDesc::Tpat_alias(inner, _, _) => rec_pattern_is_destructuring(inner),
+        PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_tuple(_)
+        | PatternDesc::Tpat_construct(_, _, _)
+        | PatternDesc::Tpat_variant(_, _, _)
+        | PatternDesc::Tpat_record(_, _)
+        | PatternDesc::Tpat_array(_) => true,
+        PatternDesc::Tpat_or(left, right, _) => {
+            rec_pattern_is_destructuring(left) || rec_pattern_is_destructuring(right)
+        }
+    }
+}
+
+fn rec_path(env: &RecEnv, path: &Path) -> RecUse {
+    match path {
+        Path::Pident(id) => env.get(id).cloned().unwrap_or_default(),
+        Path::Pdot(prefix, _, _) => rec_use_inspect(rec_path(env, prefix)),
+        Path::Papply(functor, arg) => {
+            rec_use_inspect(rec_use_join(rec_path(env, functor), rec_path(env, arg)))
+        }
+    }
+}
+
+fn rec_is_ref_value(desc: &ValueDescription) -> bool {
+    matches!(
+        &desc.val_kind,
+        crate::types::ValueKind::ValPrim(prim)
+            if prim.prim_name == "%makeref" && prim.prim_arity == 1
+    )
+}
+
+fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_let(_, _, body)
+        | ExpressionDesc::Texp_letmodule(_, _, _, body)
+        | ExpressionDesc::Texp_sequence(_, body)
+        | ExpressionDesc::Texp_letexception(_, body) => rec_expression_class(body),
+        ExpressionDesc::Texp_ident(_, _, _)
+        | ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_tuple(_)
+        | ExpressionDesc::Texp_array(_)
+        | ExpressionDesc::Texp_construct(_, _, _)
+        | ExpressionDesc::Texp_variant(_, _)
+        | ExpressionDesc::Texp_record { .. }
+        | ExpressionDesc::Texp_record_sparse { .. }
+        | ExpressionDesc::Texp_setfield(_, _, _, _)
+        | ExpressionDesc::Texp_while(_, _)
+        | ExpressionDesc::Texp_for(_, _, _, _, _, _)
+        | ExpressionDesc::Texp_for_of(_, _, _, _)
+        | ExpressionDesc::Texp_for_await_of(_, _, _, _)
+        | ExpressionDesc::Texp_pack(_)
+        | ExpressionDesc::Texp_function { .. }
+        | ExpressionDesc::Texp_extension_constructor(_, _)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue => RecExpressionClass::Static,
+        ExpressionDesc::Texp_apply { funct, .. } => {
+            if matches!(&funct.exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc)) {
+                RecExpressionClass::Static
+            } else {
+                RecExpressionClass::Dynamic
+            }
+        }
+        ExpressionDesc::Texp_match(_, _, _, _)
+        | ExpressionDesc::Texp_ifthenelse(_, _, _)
+        | ExpressionDesc::Texp_send(_, _, _)
+        | ExpressionDesc::Texp_field(_, _, _)
+        | ExpressionDesc::Texp_assert(_)
+        | ExpressionDesc::Texp_try(_, _) => RecExpressionClass::Dynamic,
+    }
+}
+
+fn rec_option_expression(env: &RecEnv, expr: Option<&Expression>) -> RecUse {
+    expr.map_or_else(RecUse::default, |expr| rec_expression(env, expr))
+}
+
+fn rec_case(env: &RecEnv, case: &crate::types::typedtree::Case, scrutinee: RecUse) -> RecUse {
+    let scrutinee = if rec_pattern_is_destructuring(&case.c_lhs) {
+        rec_use_inspect(scrutinee)
+    } else {
+        rec_use_discard(scrutinee)
+    };
+    let mut case_env = env.clone();
+    for id in rec_pattern_variables(&case.c_lhs) {
+        case_env.insert(id, scrutinee.clone());
+    }
+    rec_use_join(
+        scrutinee,
+        rec_use_join(
+            rec_expression(&case_env, &case.c_rhs),
+            rec_use_inspect(rec_option_expression(&case_env, case.c_guard.as_ref())),
+        ),
+    )
+}
+
+fn rec_value_binding(env: &RecEnv, binding: &ValueBinding) -> (RecEnv, RecUse) {
+    let vars = rec_pattern_variables(&binding.vb_pat);
+    let mut use_ = rec_expression(env, &binding.vb_expr);
+    if rec_pattern_is_destructuring(&binding.vb_pat) {
+        use_ = rec_use_inspect(use_);
+    }
+    let mut binding_env = RecEnv::default();
+    for id in vars {
+        binding_env.insert(id, use_.clone());
+    }
+    (binding_env, use_)
+}
+
+fn rec_value_bindings(
+    rec_flag: RecFlag,
+    env: &RecEnv,
+    bindings: &[ValueBinding],
+) -> (RecEnv, RecUse) {
+    match rec_flag {
+        RecFlag::Recursive => {
+            let mut ids = Vec::new();
+            let mut use_ = RecUse::default();
+            for binding in bindings {
+                ids.extend(rec_pattern_variables(&binding.vb_pat));
+                use_ = rec_use_join(use_, rec_expression(env, &binding.vb_expr));
+            }
+            let mut binding_env = RecEnv::default();
+            for id in ids {
+                binding_env.insert(id, use_.clone());
+            }
+            (binding_env, use_)
+        }
+        RecFlag::Nonrecursive => {
+            let mut out_env = RecEnv::default();
+            let mut use_ = RecUse::default();
+            let mut current_env = env.clone();
+            for binding in bindings {
+                let (binding_env, binding_use) = rec_value_binding(&current_env, binding);
+                current_env = rec_env_join(current_env, binding_env.clone());
+                out_env = rec_env_join(out_env, binding_env);
+                use_ = rec_use_join(use_, binding_use);
+            }
+            (out_env, use_)
+        }
+    }
+}
+
+fn rec_module_expr(env: &RecEnv, module_expr: &crate::types::typedtree::ModuleExpr) -> RecUse {
+    match &module_expr.mod_desc {
+        crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => rec_path(env, path),
+        crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
+            rec_use_guard(rec_structure(env, structure))
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, body) => {
+            rec_use_delay(rec_module_expr(env, body))
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_apply(functor, arg, _) => {
+            rec_use_join(
+                rec_use_inspect(rec_module_expr(env, functor)),
+                rec_use_inspect(rec_module_expr(env, arg)),
+            )
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, coercion) => {
+            let use_ = rec_module_expr(env, inner);
+            if matches!(
+                coercion,
+                crate::types::typedtree::ModuleCoercion::Tcoerce_none
+            ) {
+                use_
+            } else {
+                rec_use_inspect(use_)
+            }
+        }
+        crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => rec_expression(env, expr),
+    }
+}
+
+fn rec_structure(env: &RecEnv, structure: &crate::types::typedtree::Structure) -> RecUse {
+    let mut current_env = env.clone();
+    let mut use_ = RecUse::default();
+    for item in &structure.str_items {
+        let (item_env, item_use) = rec_structure_item(&current_env, item);
+        current_env = rec_env_join(current_env, item_env);
+        use_ = rec_use_join(use_, item_use);
+    }
+    use_
+}
+
+fn rec_structure_item(
+    env: &RecEnv,
+    item: &crate::types::typedtree::StructureItem,
+) -> (RecEnv, RecUse) {
+    match &item.str_desc {
+        crate::types::typedtree::StructureItemDesc::Tstr_eval(expr, _) => {
+            (RecEnv::default(), rec_expression(env, expr))
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_value(rec_flag, bindings) => {
+            rec_value_bindings(*rec_flag, env, bindings)
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
+            let use_ = rec_module_expr(env, &binding.mb_expr);
+            let mut item_env = RecEnv::default();
+            item_env.insert(binding.mb_id.clone(), use_.clone());
+            (item_env, use_)
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => {
+            let use_ = bindings.iter().fold(RecUse::default(), |use_, binding| {
+                rec_use_join(use_, rec_module_expr(env, &binding.mb_expr))
+            });
+            (RecEnv::default(), rec_use_inspect(use_))
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => (
+            RecEnv::default(),
+            rec_use_inspect(rec_module_expr(env, &include_decl.incl_mod)),
+        ),
+        crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
+        | crate::types::typedtree::StructureItemDesc::Tstr_type(_, _)
+        | crate::types::typedtree::StructureItemDesc::Tstr_typext(_)
+        | crate::types::typedtree::StructureItemDesc::Tstr_exception(_)
+        | crate::types::typedtree::StructureItemDesc::Tstr_modtype(_)
+        | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
+        | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
+            (RecEnv::default(), RecUse::default())
+        }
+    }
+}
+
+fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => rec_path(env, path),
+        ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
+            let (binding_env, binding_use) = rec_value_bindings(*rec_flag, env, bindings);
+            rec_use_join(
+                rec_use_discard(binding_use),
+                rec_expression(&rec_env_join(env.clone(), binding_env), body),
+            )
+        }
+        ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
+            let module_use = rec_module_expr(env, module_expr);
+            let mut body_env = env.clone();
+            body_env.insert(id.clone(), module_use.clone());
+            rec_use_join(rec_use_discard(module_use), rec_expression(&body_env, body))
+        }
+        ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
+            let scrutinee_use = rec_expression(env, scrutinee);
+            let value_use = value_cases.iter().fold(RecUse::default(), |use_, case| {
+                rec_use_join(use_, rec_case(env, case, scrutinee_use.clone()))
+            });
+            let exn_use = exn_cases.iter().fold(RecUse::default(), |use_, case| {
+                rec_use_join(use_, rec_expression(env, &case.c_rhs))
+            });
+            rec_use_join(value_use, exn_use)
+        }
+        ExpressionDesc::Texp_for(_, _, start, stop, _, body) => rec_use_join(
+            rec_use_join(
+                rec_use_inspect(rec_expression(env, start)),
+                rec_use_inspect(rec_expression(env, stop)),
+            ),
+            rec_use_discard(rec_expression(env, body)),
+        ),
+        ExpressionDesc::Texp_for_of(_, _, iterable, body)
+        | ExpressionDesc::Texp_for_await_of(_, _, iterable, body) => rec_use_join(
+            rec_use_inspect(rec_expression(env, iterable)),
+            rec_use_discard(rec_expression(env, body)),
+        ),
+        ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue
+        | ExpressionDesc::Texp_extension_constructor(_, _) => RecUse::default(),
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            if matches!(&funct.exp_desc, ExpressionDesc::Texp_ident(_, _, desc) if rec_is_ref_value(desc))
+                && args.len() == 1
+                && args[0].expression.is_some()
+            {
+                return rec_use_guard(rec_expression(
+                    env,
+                    args[0].expression.as_ref().expect("checked is_some"),
+                ));
+            }
+            let args_use = args.iter().fold(RecUse::default(), |use_, arg| {
+                rec_use_join(use_, rec_option_expression(env, arg.expression.as_ref()))
+            });
+            rec_use_join(
+                rec_use_inspect(rec_expression(env, funct)),
+                rec_use_inspect(args_use),
+            )
+        }
+        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
+            rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
+                rec_use_join(use_, rec_expression(env, item))
+            }))
+        }
+        ExpressionDesc::Texp_construct(_, desc, items) => {
+            let args_use = items.iter().fold(RecUse::default(), |use_, item| {
+                rec_use_join(use_, rec_expression(env, item))
+            });
+            let args_use = if matches!(
+                desc.cstr_tag,
+                crate::types::decl::ConstructorTag::CstrUnboxed
+            ) {
+                args_use
+            } else {
+                rec_use_guard(args_use)
+            };
+            let constructor_use = match &desc.cstr_tag {
+                crate::types::decl::ConstructorTag::CstrExtension(path) => {
+                    rec_use_inspect(rec_path(env, path))
+                }
+                _ => RecUse::default(),
+            };
+            rec_use_join(constructor_use, args_use)
+        }
+        ExpressionDesc::Texp_variant(_, payload) => {
+            rec_use_guard(rec_option_expression(env, payload.as_deref()))
+        }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            let fields_use = fields.iter().fold(RecUse::default(), |use_, (_, _, def, _)| {
+                let field_use = match def {
+                    crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
+                        rec_expression(env, expr)
+                    }
+                    crate::types::typedtree::RecordLabelDefinition::Kept(_)
+                    | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(_, _) => {
+                        RecUse::default()
+                    }
+                };
+                rec_use_join(use_, field_use)
+            });
+            let record_use = rec_use_join(
+                fields_use,
+                rec_option_expression(env, extended_expression.as_deref()),
+            );
+            let unboxed = fields.first().is_some_and(|(_, label, _, _)| {
+                matches!(
+                    label.lbl_repres,
+                    crate::types::decl::RecordRepresentation::RecordUnboxed(_)
+                )
+            });
+            if unboxed {
+                record_use
+            } else {
+                rec_use_guard(record_use)
+            }
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, ifso, ifnot) => rec_use_join(
+            rec_use_inspect(rec_expression(env, cond)),
+            rec_use_join(
+                rec_expression(env, ifso),
+                rec_option_expression(env, ifnot.as_deref()),
+            ),
+        ),
+        ExpressionDesc::Texp_setfield(base, _, _, value) => rec_use_join(
+            rec_use_inspect(rec_expression(env, base)),
+            rec_use_inspect(rec_expression(env, value)),
+        ),
+        ExpressionDesc::Texp_sequence(first, second) => rec_use_join(
+            rec_use_discard(rec_expression(env, first)),
+            rec_expression(env, second),
+        ),
+        ExpressionDesc::Texp_while(cond, body) => rec_use_join(
+            rec_use_inspect(rec_expression(env, cond)),
+            rec_use_discard(rec_expression(env, body)),
+        ),
+        ExpressionDesc::Texp_send(receiver, _, arg) => rec_use_join(
+            rec_use_inspect(rec_expression(env, receiver)),
+            rec_use_inspect(rec_option_expression(env, arg.as_deref())),
+        ),
+        ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
+            rec_use_inspect(rec_expression(env, base))
+        }
+        ExpressionDesc::Texp_letexception(_, body) => rec_expression(env, body),
+        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(env, module_expr),
+        ExpressionDesc::Texp_try(body, cases) => {
+            let cases_use = cases.iter().fold(RecUse::default(), |use_, case| {
+                rec_use_join(use_, rec_expression(env, &case.c_rhs))
+            });
+            rec_use_join(rec_expression(env, body), cases_use)
+        }
+        ExpressionDesc::Texp_function { body, .. } => rec_use_delay(
+            body.iter().fold(RecUse::default(), |use_, case| {
+                rec_use_join(use_, rec_case(env, case, RecUse::default()))
+            }),
+        ),
+    }
+}
+
+fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_function { .. } => true,
+        ExpressionDesc::Texp_record { fields, .. }
+        | ExpressionDesc::Texp_record_sparse { fields, .. } => {
+            matches!(
+                fields.as_slice(),
+                [(_, _, crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr), _)]
+                    if matches!(expr.exp_desc, ExpressionDesc::Texp_function { .. })
+            )
+        }
+        _ => false,
+    }
+}
+
+fn check_recursive_expression(idlist: &[Ident], expr: &Expression) -> TypeCoreResult<()> {
+    let env = idlist.iter().cloned().fold(RecEnv::default(), |mut env, id| {
+        env.insert(id.clone(), rec_use_single(id, RecAccess::Unguarded));
+        env
+    });
+    let use_ = rec_expression(&env, expr);
+    let has_unguarded = use_.values().any(|access| {
+        matches!(
+            access,
+            RecAccess::Unguarded | RecAccess::Dereferenced
+        )
+    });
+    let has_dependency = !use_.is_empty();
+    if has_unguarded
+        || (has_dependency && rec_expression_class(expr) == RecExpressionClass::Dynamic)
+    {
+        Err(TypeCoreError::IllegalLetrecExpr { loc: expr.exp_loc })
+    } else {
+        Ok(())
+    }
+}
+
+fn check_recursive_bindings(bindings: &[ValueBinding]) -> TypeCoreResult<()> {
+    let ids = bindings
+        .iter()
+        .flat_map(|binding| rec_pattern_variables(&binding.vb_pat))
+        .collect::<Vec<_>>();
+    for binding in bindings {
+        if !rec_binding_rhs_is_exempt(&binding.vb_expr) {
+            check_recursive_expression(&ids, &binding.vb_expr)?;
+        }
+    }
+    Ok(())
+}
+
 fn should_warn_unused_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('_') && !name.starts_with('#')
 }
@@ -20979,6 +21539,7 @@ fn type_let_bindings(
         }
 
         if rec_flag == RecFlag::Recursive {
+            check_recursive_bindings(&typed_bindings)?;
             report_unused_rec_flag_warning(tctx, &typed_bindings);
         }
 

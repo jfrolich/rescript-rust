@@ -532,6 +532,8 @@ with a reason after checking raise sites.
   - `Illegal_value_name`
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`.
 - `compiler/ml/syntaxerr.ml`
   - `Variable_in_scope`
 - `compiler/ml/translcore.ml`
