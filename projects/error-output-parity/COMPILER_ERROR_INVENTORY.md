@@ -240,6 +240,25 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/unbound_modtype.res`.
 - `Access_functor_as_structure`: covered by
   `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`.
+- `Ill_typed_functor_application`: not reachable from normal `.res`/`.resi`
+  source found so far. OCaml raises this while narrowing an unresolved
+  `Longident.Lapply` component path, but the ReScript parser does not expose
+  applicative functor applications as source-level longidents in type/value
+  paths.
+- `Apply_structure_as_functor`: not reachable from normal `.res`/`.resi`
+  source found so far for the same reason as
+  `Ill_typed_functor_application`: the OCaml raise site requires an
+  `Lapply` longident, and normal ReScript functor application syntax is parsed
+  as a module expression instead.
+- `Illegal_reference_to_recursive_module`: no reachable `.res`/`.resi`
+  fixture found yet. The OCaml raise site requires `Env.lookup_module` to see
+  the internal `#recmod#` placeholder; recursive-module signatures in ReScript
+  are checked through approximated declarations, while reduced body probes
+  either compile or fail later as module inclusion mismatches.
+- `Cannot_scrape_alias`: no reachable `.res`/`.resi` fixture found yet. The
+  Typetexp raise sites require a module alias whose target is missing after the
+  alias itself has already resolved; normal source attempts report the missing
+  module earlier during lookup.
 
 ## `compiler/ml/typetexp.ml`
 
