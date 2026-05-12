@@ -504,6 +504,17 @@ pub enum TypeCoreError {
     /// Unbound constructor identifier.
     UnboundConstructor { loc: LocIdx, lid: Longident },
 
+    /// Unbound type constructor identifier.
+    UnboundTypeConstructor { loc: LocIdx, lid: Longident },
+
+    /// Type constructor arity mismatch.
+    TypeArityMismatch {
+        loc: LocIdx,
+        lid: Longident,
+        expected: usize,
+        provided: usize,
+    },
+
     /// Private type.
     PrivateType(TypeExprRef),
 
@@ -1743,24 +1754,34 @@ fn transl_type_inner(
             }
 
             let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
-            if let Some(decl) = &type_decl {
-                if let Some(warning) = deprecated_warning_for_type(&path, decl) {
-                    tctx.report_warning(lid.loc, warning);
-                }
+            let Some(decl) = type_decl else {
+                return Err(TypeCoreError::UnboundTypeConstructor {
+                    loc: lid.loc,
+                    lid: longident.clone(),
+                });
+            };
+            if let Some(warning) = deprecated_warning_for_type(&path, &decl) {
+                tctx.report_warning(lid.loc, warning);
             }
 
             let mut parsed_args: Vec<_> = args
                 .iter()
                 .map(|arg| tctx.arena.get_core_type(*arg).clone())
                 .collect();
-            if let Some(decl) = &type_decl {
-                // Match OCaml Typetexp: `t<_>` for arity>1 expands `_` to all params.
-                if parsed_args.len() == 1
-                    && matches!(&*parsed_args[0].ptyp_desc, CTD::Ptyp_any)
-                    && decl.type_arity > 1
-                {
-                    parsed_args = vec![parsed_args[0].clone(); decl.type_arity as usize];
-                }
+            // Match OCaml Typetexp: `t<_>` for arity>1 expands `_` to all params.
+            if parsed_args.len() == 1
+                && matches!(&*parsed_args[0].ptyp_desc, CTD::Ptyp_any)
+                && decl.type_arity > 1
+            {
+                parsed_args = vec![parsed_args[0].clone(); decl.type_arity as usize];
+            }
+            if parsed_args.len() != decl.type_arity as usize {
+                return Err(TypeCoreError::TypeArityMismatch {
+                    loc,
+                    lid: longident.clone(),
+                    expected: decl.type_arity as usize,
+                    provided: parsed_args.len(),
+                });
             }
 
             let mut typed_args = Vec::new();
@@ -1777,63 +1798,57 @@ fn transl_type_inner(
             // translated argument types before building the constructor type.
             // OCaml uses `unify_var` when there is no manifest (or a generic
             // manifest) and `unify` otherwise; preserve that distinction.
-            if let Some(decl) = &type_decl {
-                let use_unify_var = match decl.type_manifest {
-                    None => true,
-                    Some(manifest) => {
-                        let manifest = ctx.repr(manifest);
-                        ctx.get_level(manifest) == crate::types::type_expr::GENERIC_LEVEL
-                    }
-                };
-                let params = crate::types::ctype::instance_list(ctx, &decl.type_params);
-                for (param_ty, arg_ty) in params.iter().zip(arg_refs.iter()) {
-                    let param_ty = ctx.repr(*param_ty);
-                    let arg_ty = ctx.repr(*arg_ty);
+            let use_unify_var = match decl.type_manifest {
+                None => true,
+                Some(manifest) => {
+                    let manifest = ctx.repr(manifest);
+                    ctx.get_level(manifest) == crate::types::type_expr::GENERIC_LEVEL
+                }
+            };
+            let params = crate::types::ctype::instance_list(ctx, &decl.type_params);
+            for (param_ty, arg_ty) in params.iter().zip(arg_refs.iter()) {
+                let param_ty = ctx.repr(*param_ty);
+                let arg_ty = ctx.repr(*arg_ty);
 
-                    if use_unify_var {
-                        if param_ty == arg_ty {
-                            continue;
-                        }
-                        match (&*ctx.get_desc(param_ty), &*ctx.get_desc(arg_ty)) {
-                            (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
-                                if crate::types::ctype::deep_occur(ctx, param_ty, arg_ty) =>
-                            {
-                                crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
-                                    .map_err(|_| TypeCoreError::PatternTypeClash {
-                                    loc: Some(loc),
-                                    trace: vec![(param_ty, arg_ty)],
-                                })?;
-                            }
-                            (TypeDesc::Tvar(_), _) => {
-                                if crate::types::occurs(ctx, param_ty, arg_ty) {
-                                    return Err(TypeCoreError::PatternTypeClash {
-                                        loc: Some(loc),
-                                        trace: vec![(param_ty, arg_ty)],
-                                    });
-                                }
-                                crate::types::ctype::update_level(
-                                    ctx,
-                                    ctx.get_level(param_ty),
-                                    arg_ty,
-                                );
-                                crate::types::ctype::link_type(ctx, param_ty, arg_ty);
-                            }
-                            _ => {
-                                crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
-                                    .map_err(|_| TypeCoreError::PatternTypeClash {
-                                    loc: Some(loc),
-                                    trace: vec![(param_ty, arg_ty)],
-                                })?;
-                            }
-                        }
-                    } else {
-                        crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty).map_err(
-                            |_| TypeCoreError::PatternTypeClash {
+                if use_unify_var {
+                    if param_ty == arg_ty {
+                        continue;
+                    }
+                    match (&*ctx.get_desc(param_ty), &*ctx.get_desc(arg_ty)) {
+                        (TypeDesc::Tvar(_), TypeDesc::Tconstr { .. })
+                            if crate::types::ctype::deep_occur(ctx, param_ty, arg_ty) =>
+                        {
+                            crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
+                                .map_err(|_| TypeCoreError::PatternTypeClash {
                                 loc: Some(loc),
                                 trace: vec![(param_ty, arg_ty)],
-                            },
-                        )?;
+                            })?;
+                        }
+                        (TypeDesc::Tvar(_), _) => {
+                            if crate::types::occurs(ctx, param_ty, arg_ty) {
+                                return Err(TypeCoreError::PatternTypeClash {
+                                    loc: Some(loc),
+                                    trace: vec![(param_ty, arg_ty)],
+                                });
+                            }
+                            crate::types::ctype::update_level(ctx, ctx.get_level(param_ty), arg_ty);
+                            crate::types::ctype::link_type(ctx, param_ty, arg_ty);
+                        }
+                        _ => {
+                            crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty)
+                                .map_err(|_| TypeCoreError::PatternTypeClash {
+                                loc: Some(loc),
+                                trace: vec![(param_ty, arg_ty)],
+                            })?;
+                        }
                     }
+                } else {
+                    crate::types::unify(ctx, &mut tctx.unify_state, param_ty, arg_ty).map_err(
+                        |_| TypeCoreError::PatternTypeClash {
+                            loc: Some(loc),
+                            trace: vec![(param_ty, arg_ty)],
+                        },
+                    )?;
                 }
             }
 
@@ -2643,46 +2658,26 @@ fn extract_type_from_pat_variant_spread(
 ) -> TypeCoreResult<(Path, Vec<crate::types::ConstructorDeclaration>, TypeExprRef)> {
     let ctx = tctx.type_ctx;
     let lid_txt = tctx.resolve_lid(lid.txt).clone();
-    let spread_ct = crate::parser::ast::CoreType {
-        ptyp_desc: Box::new(crate::parser::ast::CoreTypeDesc::Ptyp_constr(Box::new((
-            *lid,
-            vec![],
-        )))),
-        ptyp_loc: lid.loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    let (_, spread_ty_ref) = transl_type(tctx, env, &spread_ct)?;
-    let spread_ty = ctx.repr(spread_ty_ref);
-    let spread_ty_desc = ctx.get_desc(spread_ty);
-    let (spread_path, spread_args) = match &*spread_ty_desc {
-        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
-        _ => {
-            return Err(TypeCoreError::NotAVariantType {
+    let (spread_path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
+        (path, Some(type_decl)) => (path, type_decl),
+        (_, None) => {
+            return Err(TypeCoreError::UnboundTypeConstructor {
                 loc: lid.loc,
                 lid: lid_txt,
             });
         }
     };
-    drop(spread_ty_desc);
-
-    let Some(type_decl) =
-        lookup_type_decl_for_path(&spread_path, env, &mut tctx.persistent_env, ctx)
-    else {
-        return Err(TypeCoreError::NotAVariantType {
-            loc: lid.loc,
-            lid: lid_txt,
-        });
-    };
-    if !spread_args.is_empty() || !type_decl.type_params.is_empty() {
-        return Err(TypeCoreError::TypeParamsNotSupported {
-            loc: lid.loc,
-            lid: lid_txt,
-        });
-    }
 
     let constructors = match &type_decl.type_kind {
-        crate::types::TypeKind::TypeVariant(cstrs) => cstrs.clone(),
+        crate::types::TypeKind::TypeVariant(cstrs) => {
+            if !type_decl.type_params.is_empty() {
+                return Err(TypeCoreError::TypeParamsNotSupported {
+                    loc: lid.loc,
+                    lid: lid_txt,
+                });
+            }
+            cstrs.clone()
+        }
         _ => {
             return Err(TypeCoreError::NotAVariantType {
                 loc: lid.loc,

@@ -2808,6 +2808,25 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructor { loc, lid }) => {
+            UserDiagnostic::new(
+                format_unbound_type_constructor_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
+            loc,
+            lid,
+            expected,
+            provided,
+        }) => UserDiagnostic::new(
+            format_type_arity_mismatch_report(
+                arena, source, filename, *loc, lid, *expected, *provided,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LabelMultiplyDefined {
             loc,
             label,
@@ -3313,6 +3332,47 @@ fn format_type_params_not_supported_report(
         &format!("The type {}", format_longident_for_report(arena, lid)),
         "has type parameters, but type parameters is not supported here.",
     )
+}
+
+fn format_unbound_type_constructor_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This type constructor, `{name}`, can't be found.\nIf you wanted to write a recursive type, don't forget the `rec` in `type rec`"
+        ),
+    )
+}
+
+fn format_type_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    expected: usize,
+    provided: usize,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    let message = if expected == 0 {
+        format!(
+            "The type {name} is not generic so expects no arguments,\nbut is here applied to {provided} argument(s).\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? "
+        )
+    } else {
+        format!(
+            "The type constructor {name} expects {expected} argument(s),\nbut is here applied to {provided} argument(s)"
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_compiler_error_report_with_bare_reset_lines(

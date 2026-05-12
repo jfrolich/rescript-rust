@@ -130,6 +130,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/unbound_value.res`.
 - `Unbound_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
+- `Unbound_type_constructor`: covered by
+  `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`.
+- `Type_arity_mismatch`: covered by
+  `tests/error_output_parity/compiler/fixtures/type_arity_mismatch.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/type_arity_mismatch_nongeneric.res`.
 
 ## `compiler/ml/typetexp.ml`
 
