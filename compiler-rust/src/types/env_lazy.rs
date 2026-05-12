@@ -1338,13 +1338,13 @@ fn alias_target_matches_raw_parent_child(
         })
 }
 
-fn access_path_is_direct_implicit_open_child(access_path: &Path) -> bool {
-    matches!(
-        access_path.parent(),
-        Some(Path::Pident(parent))
-            if (parent.is_persistent() || parent.stamp() == 0)
-                && matches!(parent.name(), "Stdlib" | "Pervasives")
-    )
+fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &Path) -> bool {
+    // OCaml compiler/core/res_compmisc.ml:56-62 opens implicit modules via
+    // compiler/ml/env.ml:1874-1877, which adds opened component bindings
+    // without a root module binding. Test that origin in Env rather than
+    // matching root names.
+    matches!(access_path.parent(), Some(Path::Pident(_)))
+        && env.path_starts_with_opened_component(access_path)
 }
 
 fn build_local_module_components<'a>(
@@ -1432,7 +1432,7 @@ fn build_local_module_components<'a>(
                     && let Some(pers) = pers_env.as_mut()
                 {
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
-                } else if access_path_is_direct_implicit_open_child(access_path)
+                } else if access_path_is_direct_opened_component(env, access_path)
                     && cache_mode.forces_alias_sig()
                     && env.find_module_with_origin(id.name()).is_err()
                 {
@@ -1443,10 +1443,10 @@ fn build_local_module_components<'a>(
                     // only env.ml:872-875's `Not_found` branch forces
                     // `ps_sig = Subst.signature identity sign` from
                     // env.ml:719-721. ctype expression expansion can reach
-                    // direct children of the implicit Stdlib/Pervasives roots
-                    // from compiler/core/res_compmisc.ml:61-62 without carrying
-                    // PersistentEnv. The TypeContext guard is set while
-                    // compiler/ml/typemod.ml:1710-1719's package
+                    // direct opened components without carrying PersistentEnv;
+                    // detect that through the opened Env binding from
+                    // compiler/ml/env.ml:1874-1877. The TypeContext guard is
+                    // set while compiler/ml/typemod.ml:1710-1719's package
                     // `wrap_constraint` equivalent walks inclusion types in
                     // probe mode, where OCaml keeps env.ml:800-813/1573-1578
                     // component-table laziness instead of forcing this alias
