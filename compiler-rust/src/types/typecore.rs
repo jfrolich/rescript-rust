@@ -530,10 +530,14 @@ pub enum TypeCoreError {
     },
 
     /// Private type.
-    PrivateType(TypeExprRef),
+    PrivateType { loc: LocIdx, ty: TypeExprRef },
 
     /// Private label.
-    PrivateLabel(Longident, TypeExprRef),
+    PrivateLabel {
+        loc: LocIdx,
+        lid: Longident,
+        ty: TypeExprRef,
+    },
 
     /// Too many arguments.
     TooManyArguments(bool, TypeExprRef),
@@ -15821,6 +15825,13 @@ fn type_record(
                         ty_arg
                     };
 
+                    if env_label.lbl_private == crate::types::PrivateFlag::Private {
+                        return Err(TypeCoreError::PrivateType {
+                            loc,
+                            ty: expected_ty,
+                        });
+                    }
+
                     (
                         crate::types::LabelDescription {
                             lbl_name: env_label.lbl_name.clone(),
@@ -17203,6 +17214,13 @@ fn type_setfield(
             }
         }
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
+        if env_label.lbl_private == crate::types::PrivateFlag::Private {
+            return Err(TypeCoreError::PrivateLabel {
+                loc: field_lid.loc,
+                lid: resolved_lid.clone(),
+                ty: ty_exp,
+            });
+        }
         (env_label, ty_arg)
     } else {
         if let Some(err) = wrong_record_field_name_error(

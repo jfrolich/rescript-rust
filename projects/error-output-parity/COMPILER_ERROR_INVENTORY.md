@@ -94,6 +94,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res`.
 - `Undefined_method`: covered by
   `tests/error_output_parity/compiler/fixtures/undefined_method.res`.
+- `Private_type`: covered by
+  `tests/error_output_parity/compiler/fixtures/private_type.res`.
+- `Private_label`: covered by
+  `tests/error_output_parity/compiler/fixtures/private_label.res`.
 - `Apply_non_function`: covered by
   `tests/error_output_parity/compiler/fixtures/apply_non_function.res`.
 - `Apply_wrong_label`: covered by

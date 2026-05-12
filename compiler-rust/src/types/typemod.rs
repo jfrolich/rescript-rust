@@ -14348,12 +14348,17 @@ fn type_structure_item<'a>(
                     &type_unboxed,
                 );
 
+                let type_private = match decl.ptype_private {
+                    crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
+                    crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
+                };
+
                 // Create internal type declaration for the environment
                 let mut internal_decl = crate::types::TypeDeclaration {
                     type_params: internal_type_params,
                     type_arity,
                     type_kind: internal_type_kind,
-                    type_private: crate::types::PrivateFlag::Public,
+                    type_private,
                     type_manifest: manifest_type_ref,
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
@@ -14409,7 +14414,7 @@ fn type_structure_item<'a>(
                             lbl_pos: pos as i32,
                             lbl_all: crate::types::LabelArrayRef(0),
                             lbl_repres: repres.clone(),
-                            lbl_private: crate::types::PrivateFlag::Public,
+                            lbl_private: internal_decl.type_private,
                             lbl_loc: ld.ld_loc.clone(),
                             lbl_attributes: ld.ld_attributes.clone(),
                         };
@@ -14418,15 +14423,6 @@ fn type_structure_item<'a>(
                 }
 
                 // Convert private flag
-                let typ_private = match decl.ptype_private {
-                    crate::parser::ast::PrivateFlag::Public => {
-                        crate::parser::ast::PrivateFlag::Public
-                    }
-                    crate::parser::ast::PrivateFlag::Private => {
-                        crate::parser::ast::PrivateFlag::Private
-                    }
-                };
-
                 // Create typed tree type declaration
                 let typed_tree_decl = TypedTypeDeclaration {
                     typ_id: type_id,
@@ -14438,7 +14434,7 @@ fn type_structure_item<'a>(
                     typ_type: internal_decl,
                     typ_cstrs,
                     typ_kind: typed_tree_kind,
-                    typ_private,
+                    typ_private: decl.ptype_private,
                     typ_manifest,
                     typ_loc: decl.ptype_loc,
                     typ_attributes: decl.ptype_attributes.clone(),
