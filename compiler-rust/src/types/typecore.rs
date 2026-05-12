@@ -544,7 +544,7 @@ pub enum TypeCoreError {
     UnqualifiedGadtPattern(Path, String),
 
     /// Invalid interval pattern.
-    InvalidInterval,
+    InvalidInterval { loc: LocIdx },
 
     /// Invalid for loop index.
     InvalidForLoopIndex { loc: LocIdx },
@@ -553,10 +553,10 @@ pub enum TypeCoreError {
     InvalidForOfPattern { loc: LocIdx },
 
     /// No value clauses.
-    NoValueClauses,
+    NoValueClauses { loc: LocIdx },
 
     /// Exception pattern below toplevel.
-    ExceptionPatternBelowToplevel,
+    ExceptionPatternBelowToplevel { loc: LocIdx },
 
     /// Inlined record escape.
     InlinedRecordEscape { loc: LocIdx },
@@ -4622,27 +4622,15 @@ fn type_pattern_interval(
     let const_ty = type_constant(ctx, env, &constant1);
     unify_pattern_types(tctx, loc, const_ty, expected_ty)?;
 
-    // Validate that both constants are of the same type (char or int)
-    match (&constant1, &constant2) {
-        (Constant::Char(_), Constant::Char(_)) => {}
-        (Constant::Int(_), Constant::Int(_)) => {}
-        _ => return Err(TypeCoreError::InvalidInterval),
-    }
-
-    // Interval patterns are desugared to or-patterns in the typed tree.
-    // OCaml expands the full range into a nested Tpat_or tree of individual constants.
+    // OCaml only supports character intervals in patterns.
     let (start_val, end_val) = match (&constant1, &constant2) {
-        (Constant::Char(c1), Constant::Char(c2)) => (*c1, *c2),
-        (Constant::Int(i1), Constant::Int(i2)) => (*i1 as i32, *i2 as i32),
-        _ => return Err(TypeCoreError::InvalidInterval),
+        (Constant::Char(c1), Constant::Char(c2)) if c1 <= c2 => (*c1, *c2),
+        (Constant::Char(c1), Constant::Char(c2)) => (*c2, *c1),
+        _ => return Err(TypeCoreError::InvalidInterval { loc }),
     };
 
     let make_const = |val: i32| -> Constant {
-        if matches!(constant1, Constant::Char(_)) {
-            Constant::Char(val)
-        } else {
-            Constant::Int(val as i64)
-        }
+        Constant::Char(val)
     };
 
     // Build all constant patterns for the range
@@ -4678,32 +4666,16 @@ fn type_pattern_interval(
 /// Type check exception pattern.
 #[allow(clippy::too_many_arguments)]
 fn type_pattern_exception(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
+    _tctx: &mut TypeCheckContext<'_>,
+    _env: &Env,
     loc: LocIdx,
-    inner_pat: &ParsedPattern,
+    _inner_pat: &ParsedPattern,
     _expected_ty: TypeExprRef,
-    mode: PatternMode,
-    state: &mut PatternState,
-    pat: &ParsedPattern,
+    _mode: PatternMode,
+    _state: &mut PatternState,
+    _pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
-    let ctx = tctx.type_ctx;
-
-    // Exception patterns match the exn type
-    let exn_ty = crate::types::ctype::instance(ctx, ctx.predef_exn());
-
-    // Type check the inner pattern against exn
-    let typed_inner = type_pattern_inner(tctx, env, inner_pat, exn_ty, mode, state, 0)?;
-
-    // Exception patterns have a special representation
-    // For now, just return the inner pattern (simplified)
-    Ok(Pattern::new(
-        typed_inner.pat_desc,
-        loc.clone(),
-        exn_ty,
-        EnvRef(0),
-        pat.ppat_attributes.clone(),
-    ))
+    Err(TypeCoreError::ExceptionPatternBelowToplevel { loc })
 }
 
 /// Type check local open pattern.
@@ -12789,6 +12761,9 @@ fn type_match(
         } else {
             val_caselist.push(case);
         }
+    }
+    if val_caselist.is_empty() && !exn_caselist.is_empty() {
+        return Err(TypeCoreError::NoValueClauses { loc });
     }
 
     let has_generalized_value_patterns = val_caselist.iter().any(|case| {

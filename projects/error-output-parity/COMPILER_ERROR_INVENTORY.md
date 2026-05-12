@@ -72,6 +72,12 @@ with a reason after checking raise sites.
   `normalize_for_of_pattern` in `compiler/syntax/src/res_core.ml`; destructuring
   patterns in `for...of` report a syntax error before Typecore. Keep this marked
   as unreachable from normal source unless a PPX/binary AST fixture is added.
+- `Invalid_interval`: covered by
+  `tests/error_output_parity/compiler/fixtures/invalid_interval_pattern.res`.
+- `No_value_clauses`: covered by
+  `tests/error_output_parity/compiler/fixtures/no_value_clauses.res`.
+- `Exception_pattern_below_toplevel`: covered by
+  `tests/error_output_parity/compiler/fixtures/exception_pattern_below_toplevel.res`.
 
 ## `compiler/ml/typetexp.ml`
 
