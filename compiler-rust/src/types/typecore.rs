@@ -15301,7 +15301,7 @@ fn type_construct(
                     ),
                     Err(_) => {
                         return Err(TypeCoreError::UnboundConstructor {
-                            loc,
+                            loc: lid.loc,
                             lid: longident,
                         });
                     }
@@ -15330,7 +15330,7 @@ fn type_construct(
                     Some((path, desc)) => (path, desc),
                     None => {
                         return Err(TypeCoreError::UnboundConstructor {
-                            loc,
+                            loc: lid.loc,
                             lid: longident,
                         });
                     }
