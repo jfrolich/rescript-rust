@@ -2460,7 +2460,14 @@ fn try_expand_head_with_mode<'a>(
                 if !(cached_repr == ty || stale_same_path) {
                     let level = ctx.get_level(ty);
                     if level != GENERIC_LEVEL {
-                        update_level(ctx, level, cached);
+                        // OCaml compiler/ml/ctype.ml:1353-1359 lowers a
+                        // memoized abbreviation expansion with
+                        // `update_level env level ty'`. That is observable:
+                        // ctype.ml:666-673 `get_level` calls
+                        // Env.find_type, which can force component signatures
+                        // while expanding the head. Keep the env-aware path
+                        // here rather than the cheaper structural lowering.
+                        update_level_expand(ctx, env, level, cached);
                     }
                     return Some(cached_repr);
                 }
