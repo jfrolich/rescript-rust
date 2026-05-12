@@ -15152,7 +15152,7 @@ pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
                 &md.md_type,
                 pers_env,
                 ctx,
-                ComponentLookupCacheMode::Publish,
+                ComponentLookupCacheMode::FindModule,
             )
             .map(|(sig, _)| copy_lookup_signature_for_subst(&sig, ctx))?,
         DeclMty::MtyFunctor { .. } => return None,
@@ -15872,7 +15872,7 @@ fn type_pack(
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
     // typedtree parity depends on doing that work at the same program points.
-    // Component-table probes now carry `ComponentLookupCacheMode::Probe`
+    // Component-table probes now carry `ComponentLookupCacheMode::ProbeModuleDescr`
     // explicitly, so package wrapping can call inclusion directly without
     // changing global lazy-forcing state.
     let coercion =
@@ -17973,7 +17973,7 @@ impl Env {
                         &md.md_type,
                         pers_env,
                         ctx,
-                        ComponentLookupCacheMode::Publish,
+                        ComponentLookupCacheMode::FindModule,
                     );
                     // Some opened submodules carry alias module types with hidden
                     // local idents (e.g. ArrayExt!) that are not directly
@@ -18213,7 +18213,7 @@ impl Env {
                             &sub_md.md_type,
                             pers_env,
                             ctx,
-                            ComponentLookupCacheMode::Publish,
+                            ComponentLookupCacheMode::FindModule,
                         );
                         if let Some((sig, resolved_name)) = result {
                             let (alias_target_pdot, alias_target_pident) = if apply_subst {
@@ -22519,12 +22519,27 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
             let mod_name = arena.get_string(*mod_idx);
             let module_path =
                 if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
+                    let pident_path = Path::pident(mod_id.clone());
+                    if let Some(result) = env
+                        .with_local_module_components(&pident_path, |stored| {
+                            stored.with_components(
+                                pers_env,
+                                ctx,
+                                ComponentLookupCacheMode::FindModule,
+                                |components| f(components),
+                            )
+                        })
+                        .flatten()
+                        .flatten()
+                    {
+                        return Some(result);
+                    }
                     if is_local {
-                        Path::pident(mod_id.clone())
+                        pident_path
                     } else {
                         md.md_path
                             .clone()
-                            .unwrap_or_else(|| Path::pident(mod_id.clone()))
+                            .unwrap_or(pident_path)
                     }
                 } else {
                     Path::pident(Ident::create_persistent(mod_name))
@@ -22549,7 +22564,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 env,
                 pers_env,
                 ctx,
-                ComponentLookupCacheMode::Publish,
+                ComponentLookupCacheMode::FindModule,
                 |components| f(components),
             )
             .flatten()
@@ -22835,21 +22850,30 @@ fn build_shared_persistent_root_components<'a>(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ComponentLookupCacheMode {
-    Publish,
-    Probe,
+    FindModule,
+    FindModuleDescr,
+    ProbeModuleDescr,
 }
 
 impl ComponentLookupCacheMode {
     pub(crate) fn publishes(self) -> bool {
-        matches!(self, ComponentLookupCacheMode::Publish)
+        matches!(
+            self,
+            ComponentLookupCacheMode::FindModule | ComponentLookupCacheMode::FindModuleDescr
+        )
     }
 
     pub(crate) fn forces_alias_sig(self) -> bool {
-        self.publishes()
+        // OCaml compiler/ml/env.ml:865-882 `find_module` forces the selected
+        // module-declaration thunk, and env.ml:1435-1449 `scrape_alias` may
+        // force a persistent alias target's `ps_sig`. Descriptor lookup through
+        // env.ml:781-813 (`find_module_descr`/`find_type`) publishes component
+        // tables but does not force that alias target signature.
+        matches!(self, ComponentLookupCacheMode::FindModule)
     }
 }
 
-fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
+pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
     module_path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -22937,7 +22961,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Publish,
+        ComponentLookupCacheMode::FindModule,
         f,
     )
 }
@@ -23046,7 +23070,7 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Publish,
+        ComponentLookupCacheMode::FindModule,
     )
 }
 
@@ -23063,7 +23087,7 @@ pub(crate) fn lookup_type_in_resolved_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Probe,
+        ComponentLookupCacheMode::ProbeModuleDescr,
     )
 }
 
@@ -23220,7 +23244,7 @@ fn lookup_type_decl_in_resolved_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Publish,
+        ComponentLookupCacheMode::FindModule,
     )
 }
 
@@ -23237,7 +23261,7 @@ fn lookup_type_decl_in_resolved_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Probe,
+        ComponentLookupCacheMode::ProbeModuleDescr,
     )
 }
 
@@ -24131,7 +24155,7 @@ fn lookup_type_decl_for_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Publish,
+        ComponentLookupCacheMode::FindModule,
     )
 }
 
@@ -24146,7 +24170,7 @@ fn lookup_type_decl_for_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::Probe,
+        ComponentLookupCacheMode::ProbeModuleDescr,
     )
 }
 

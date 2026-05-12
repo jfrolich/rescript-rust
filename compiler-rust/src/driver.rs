@@ -2141,6 +2141,7 @@ pub fn load_pervasives<'a>(
     if !nopervasives {
         // Try to load and open Pervasives
         if pers_env.open_module("Pervasives", env, ctx) {
+            env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
             // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
             // and standalone builds alike, that reaches Env.open_signature at
@@ -2159,6 +2160,7 @@ pub fn load_pervasives<'a>(
 
         // Try to load and open Stdlib
         if pers_env.open_module("Stdlib", env, ctx) {
+            env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
             // but let explicit module lookup use the persistent registry.
             if !pers_env.is_in_process_mode() {

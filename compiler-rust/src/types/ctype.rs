@@ -1875,11 +1875,12 @@ fn lookup_component_module_sig_type<'a>(
         // thunk. Use the in-process persistent env so dotted persistent paths
         // such as `Layout__Types.Name.t` can be found through component tables
         // instead of falling back to module-declaration lookup.
-        return crate::types::typecore::with_resolved_module_components_for_path(
+        return crate::types::typecore::with_resolved_module_components_for_path_with_cache_mode(
             module_path,
             env,
             &mut persistent_env,
             ctx,
+            crate::types::typecore::ComponentLookupCacheMode::FindModule,
             |components| {
                 components
                     .lookup_type(type_name)
@@ -2176,19 +2177,21 @@ fn normalize_path_full_inner<'a>(
     }
 
     if let Path::Pdot(parent, module_name, _) = path {
-        let path_starts_with_opened_component = env.path_starts_with_opened_component(path);
-        if !path_starts_with_opened_component
+        let path_starts_with_implicit_opened_component =
+            env.path_starts_with_implicit_opened_component(path);
+        if !path_starts_with_implicit_opened_component
             && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
             && !alias_path.same(path)
         {
             // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr`
             // navigate persistent components through `ps_comps`, and
             // env.ml:876-880 reads a dotted module from those components before
-            // alias normalization continues. Preserve that component-level
-            // alias for ordinary roots, while leaving opened-component paths
-            // to the recursive path below because OCaml opens installed by
-            // compiler/core/res_compmisc.ml:56-62 and compiler/ml/env.ml:1874-1877
-            // add components without adding the opened root as a module binding.
+            // alias normalization continues. `open_signature` at
+            // env.ml:1841-1877 installs opened child component tables too.
+            // Initial-env opens from compiler/core/res_compmisc.ml:48-63 keep
+            // their root force behavior; source-level opens follow the opened
+            // component descriptor path instead of forcing the opened root
+            // through env.ml:865-875.
             return normalize_path_full_inner(
                 ctx,
                 env,
@@ -2208,10 +2211,8 @@ fn normalize_path_full_inner<'a>(
         Path::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
             // prefix before `find_module ~alias:true` inspects the path at
-            // env.ml:865-882. For opened-component paths, keep component-alias
-            // shortcuts below this point so persistent roots still force
-            // `ps_sig` at env.ml:872-874 when `expand_abbrev_gen` reaches
-            // `Env.normalize_path`.
+            // env.ml:865-882. Component aliases already handled above model the
+            // descriptor-table path from env.ml:781-793.
             let p_norm = normalize_path_full_inner(
                 ctx,
                 env,

@@ -5770,7 +5770,18 @@ fn add_signature_to_env_with_options(
                     other => other,
                 };
                 if as_opened {
-                    env.add_opened_module(id.clone(), md.clone());
+                    if let Some((_, stored)) = precomputed_components
+                        .and_then(|components| components.lookup_child_components(id.name()))
+                    {
+                        // OCaml compiler/ml/env.ml:1841-1877 opens the
+                        // already-built `comp_components` table alongside
+                        // `comp_modules`. Reuse that child component thunk so
+                        // opened-module source lookup follows env.ml:1000-1013
+                        // without forcing the parent module declaration.
+                        env.add_opened_module_with_components(id.clone(), md.clone(), stored);
+                    } else {
+                        env.add_opened_module(id.clone(), md.clone());
+                    }
                 } else {
                     env.add_module(id.clone(), md.clone());
                 }

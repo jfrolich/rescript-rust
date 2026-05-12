@@ -393,6 +393,15 @@ pub struct Env {
     /// Memoized env-scope decisions for qualified module-component cache keys.
     module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
 
+    /// Persistent roots opened by the initial environment.
+    ///
+    /// OCaml compiler/core/res_compmisc.ml:48-63 installs implicit opens before
+    /// typechecking source items. `Env.normalize_path` can still force those
+    /// roots through compiler/ml/env.ml:865-875 because no source open selected
+    /// them. Source-level opens use the same component tables but should not be
+    /// classified as initial-env roots.
+    implicit_open_roots: im_rc::HashSet<String>,
+
     /// Summary of bindings.
     ///
     /// OCaml keeps `Env.summary` for paths that reconstruct environment
@@ -432,6 +441,7 @@ impl Clone for Env {
             // memoized lookup results.
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -463,6 +473,7 @@ impl Env {
             modtypes: BindingTable::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: im_rc::HashSet::new(),
             summary: EnvSummary::Empty,
             local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
@@ -494,6 +505,7 @@ impl Env {
             // memoized lookup results.
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -952,6 +964,23 @@ impl Env {
         self.modules.add_opened(id, decl);
     }
 
+    pub(crate) fn add_opened_module_with_components(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        components: Arc<super::env_lazy::StoredModuleComponents>,
+    ) {
+        // OCaml compiler/ml/env.ml:1841-1877 `open_signature` adds both
+        // `comp_modules` and `comp_components` to the opened environment. Keep
+        // the opened component thunk with the opened module declaration so a
+        // source `Lident` lookup can reuse env.ml:1874-1877's component table
+        // instead of rebuilding through the parent module path.
+        self.bump_id();
+        self.invalidate_module_alias_caches();
+        self.modules.add_opened(id.clone(), Arc::new(decl));
+        self.module_components.add_opened(id, components);
+    }
+
     /// Find a module by name.
     pub fn find_module(&self, name: &str) -> EnvResult<&ModuleDeclaration> {
         self.modules
@@ -1010,6 +1039,19 @@ impl Env {
                         .as_ref()
                         .is_some_and(|opened_path| opened_path.same(&component_path))
             })
+    }
+
+    pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
+        self.implicit_open_roots.insert(name.to_string());
+    }
+
+    pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
+        let Some(component_path) = Self::first_dotted_component_path(path) else {
+            return false;
+        };
+        self.implicit_open_roots
+            .contains(component_path.head().name())
+            && self.path_starts_with_opened_component(path)
     }
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
