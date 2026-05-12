@@ -72,6 +72,8 @@ pub enum IncludeModError {
         expected: ModtypeDeclaration,
         error: Box<IncludeModError>,
     },
+    /// Equivalent module type declarations require a structure-field permutation.
+    ModtypePermutation,
     /// Nested module types do not include one another.
     ModuleTypesMismatch {
         actual: Box<ModuleType>,
@@ -329,6 +331,9 @@ fn format_include_error(
             output.push_str(&format_modtype_declaration(type_ctx, name, expected));
             output.push('\n');
             format_include_error(type_ctx, filename, error, output);
+        }
+        IncludeModError::ModtypePermutation => {
+            output.push_str("  Illegal permutation of structure fields\n");
         }
         IncludeModError::FunctorParamMismatch(reason)
         | IncludeModError::FunctorResultMismatch(reason) => {
@@ -3219,23 +3224,24 @@ fn modtype_declarations<'a>(
             if impl_mty == sig_mty {
                 return Ok(());
             }
-            // Module types must be equivalent (both directions)
-            modtypes(type_ctx, env, impl_mty, sig_mty).map_err(|error| {
-                IncludeModError::ModuleTypeDeclarationMismatch {
-                    name: id.clone(),
-                    actual: impl_decl.clone(),
-                    expected: sig_decl.clone(),
-                    error: Box::new(with_modtype_context(id.clone(), error)),
-                }
-            })?;
-            modtypes(type_ctx, env, sig_mty, impl_mty).map_err(|error| {
-                IncludeModError::ModuleTypeDeclarationMismatch {
-                    name: id.clone(),
-                    actual: impl_decl.clone(),
-                    expected: sig_decl.clone(),
-                    error: Box::new(with_modtype_context(id.clone(), error)),
-                }
-            })?;
+
+            let mismatch = |error| IncludeModError::ModuleTypeDeclarationMismatch {
+                name: id.clone(),
+                actual: impl_decl.clone(),
+                expected: sig_decl.clone(),
+                error: Box::new(with_modtype_context(id.clone(), error)),
+            };
+
+            // Module types must be equivalent (both directions), and OCaml
+            // rejects equivalent declarations when either direction needs a
+            // structure-field permutation.
+            let impl_to_sig = modtypes(type_ctx, env, impl_mty, sig_mty).map_err(&mismatch)?;
+            let sig_to_impl = modtypes(type_ctx, env, sig_mty, impl_mty).map_err(&mismatch)?;
+            if !matches!(impl_to_sig, ModuleCoercion::Tcoerce_none)
+                || !matches!(sig_to_impl, ModuleCoercion::Tcoerce_none)
+            {
+                return Err(mismatch(IncludeModError::ModtypePermutation));
+            }
             Ok(())
         }
     }
