@@ -315,12 +315,18 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/extension_mismatch_arity.res`,
     `tests/error_output_parity/compiler/fixtures/extension_mismatch_variance.res`.
 - `Rebind_wrong_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/rebind_wrong_type.res`.
 - `Rebind_mismatch`
 - `Rebind_private`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/rebind_private.res`.
 - `Bad_variance`
 - `Unavailable_type_constructor`
 - `Bad_fixed_type`
 - `Unbound_type_var_ext`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.
 - `Varying_anonymous`
 - `Val_in_structure`
 - `Invalid_attribute`

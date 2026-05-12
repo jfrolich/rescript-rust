@@ -3647,6 +3647,46 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::RebindWrongType {
+            loc,
+            lid,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The constructor {} has type {} but was expected to be of type {}",
+                    format_longident_for_report(arena, lid),
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::RebindPrivate { loc, lid } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The constructor {} is private",
+                    format_longident_for_report(arena, lid)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::UnboundTypeVarExt { loc, name } => UserDiagnostic::new(
+            format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
         TypeModError::AstUntaggedVariantError { loc, error } => {
             let message = error.message_text();
             UserDiagnostic::new(

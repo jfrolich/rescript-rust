@@ -223,6 +223,15 @@ fn rebind_constructor_arguments(
     crate::types::ConstructorArguments::CstrTuple(desc.cstr_args.clone())
 }
 
+fn parser_private_to_type_private(
+    private: crate::parser::ast::PrivateFlag,
+) -> crate::types::PrivateFlag {
+    match private {
+        crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
+        crate::parser::ast::PrivateFlag::Public => crate::types::PrivateFlag::Public,
+    }
+}
+
 fn parser_attr_to_decl_attr(
     arena: &ParseArena,
     attr: &ParsedAttribute,
@@ -3159,6 +3168,31 @@ pub enum TypeModError {
         path: Path,
         /// Specific mismatch reported by `Includecore`.
         mismatch: TypeExtensionMismatch,
+    },
+    /// A rebound constructor has a result type incompatible with the extension.
+    RebindWrongType {
+        /// Rebound constructor path location.
+        loc: LocIdx,
+        /// Rebound constructor longident.
+        lid: Longident,
+        /// Actual constructor result type.
+        actual: TypeExprRef,
+        /// Expected extension result type.
+        expected: TypeExprRef,
+    },
+    /// A private constructor was rebound as public.
+    RebindPrivate {
+        /// Rebound constructor path location.
+        loc: LocIdx,
+        /// Rebound constructor longident.
+        lid: Longident,
+    },
+    /// An extension constructor contains an unbound type variable.
+    UnboundTypeVarExt {
+        /// Extension constructor location.
+        loc: LocIdx,
+        /// Unbound variable name as printed by OCaml, including the leading quote.
+        name: String,
     },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
@@ -11724,6 +11758,127 @@ fn signature_item_contains_type(
     }
 }
 
+fn type_var_report_name(name: &Option<String>) -> String {
+    name.as_ref()
+        .map(|name| format!("'{name}"))
+        .unwrap_or_else(|| "_".to_string())
+}
+
+fn find_unbound_type_var_name(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+    allowed: &HashSet<TypeExprRef>,
+    visited: &mut HashSet<TypeExprRef>,
+) -> Option<String> {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return None;
+    }
+
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
+            (!allowed.contains(&ty)).then(|| type_var_report_name(name))
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            find_unbound_type_var_name(ctx, arg.typ, allowed, visited)
+                .or_else(|| find_unbound_type_var_name(ctx, *ret, allowed, visited))
+        }
+        TypeDesc::Ttuple(types) => types
+            .iter()
+            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
+        TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => args
+            .iter()
+            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            find_unbound_type_var_name(ctx, *next, allowed, visited)
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let mut allowed = allowed.clone();
+            allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
+            find_unbound_type_var_name(ctx, *body, &allowed, visited)
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            find_unbound_type_var_name(ctx, *fields, allowed, visited)
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            find_unbound_type_var_name(ctx, *typ, allowed, visited)
+                .or_else(|| find_unbound_type_var_name(ctx, *rest, allowed, visited))
+        }
+        TypeDesc::Tvariant(row) => {
+            if let Some(name) = find_unbound_type_var_name(ctx, row.row_more, allowed, visited) {
+                return Some(name);
+            }
+            row.row_fields.iter().find_map(|(_, field)| match field {
+                crate::types::RowField::Rpresent(Some(ty)) => {
+                    find_unbound_type_var_name(ctx, *ty, allowed, visited)
+                }
+                crate::types::RowField::Reither { types, .. } => types
+                    .iter()
+                    .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
+                _ => None,
+            })
+        }
+        TypeDesc::Tnil => None,
+    }
+}
+
+fn find_unbound_type_var_name_in_constructor_args(
+    ctx: &crate::types::context::TypeContext,
+    args: &crate::types::ConstructorArguments,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<String> {
+    let mut visited = HashSet::new();
+    match args {
+        crate::types::ConstructorArguments::CstrTuple(types) => types
+            .iter()
+            .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, &mut visited)),
+        crate::types::ConstructorArguments::CstrRecord(labels) => labels
+            .iter()
+            .find_map(|label| find_unbound_type_var_name(ctx, label.ld_type, allowed, &mut visited)),
+    }
+}
+
+fn find_unbound_type_var_in_typed_core_type(
+    ctx: &crate::types::context::TypeContext,
+    ctyp: &TypedCoreType,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match &ctyp.ctyp_desc {
+        TypedCoreTypeDesc::Ttyp_var(name) => {
+            let ty = ctx.repr(ctyp.ctyp_type);
+            (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
+        }
+        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
+            find_unbound_type_var_in_typed_core_type(ctx, &arg.typ, allowed)
+                .or_else(|| find_unbound_type_var_in_typed_core_type(ctx, ret, allowed))
+        }
+        TypedCoreTypeDesc::Ttyp_tuple(types) | TypedCoreTypeDesc::Ttyp_constr(_, _, types) => {
+            types
+                .iter()
+                .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed))
+        }
+        TypedCoreTypeDesc::Ttyp_poly(_, body) | TypedCoreTypeDesc::Ttyp_alias(body, _) => {
+            find_unbound_type_var_in_typed_core_type(ctx, body, allowed)
+        }
+        _ => None,
+    }
+}
+
+fn find_unbound_type_var_in_typed_constructor_args(
+    ctx: &crate::types::context::TypeContext,
+    args: &crate::types::typedtree::ConstructorArgument,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match args {
+        crate::types::typedtree::ConstructorArgument::Cstr_tuple(types) => types
+            .iter()
+            .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
+        crate::types::typedtree::ConstructorArgument::Cstr_record(labels) => labels
+            .iter()
+            .find_map(|label| find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)),
+    }
+}
+
 fn type_expr_has_free_variables(
     ctx: &crate::types::context::TypeContext,
     ty: TypeExprRef,
@@ -15650,11 +15805,12 @@ fn type_structure_item<'a>(
             let mut typed_constructors = Vec::new();
             let mut ext_types_to_generalize: Vec<TypeExprRef> = Vec::new();
             let mut new_env = env.clone();
+            let ext_private = parser_private_to_type_private(ext.ptyext_private);
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
                 let id = ctx.create_ident(&name_str);
 
-                let (typed_args, typed_ret, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
+                let (ext_kind, ext_args, cstr_args, cstr_inlined, ext_ret_ty) =
                     match &ec.pext_kind {
                         crate::parser::ast::ExtensionConstructorKind::Pext_decl(args, ret) => {
                             let mut arg_ty_refs = Vec::new();
@@ -15793,22 +15949,64 @@ fn type_structure_item<'a>(
                                 None => (None, None),
                             };
                             (
-                                typed_args,
-                                typed_ret,
+                                crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                                    typed_args, typed_ret,
+                                ),
                                 ext_args,
                                 cstr_args,
                                 cstr_inlined,
                                 ext_ret_ty,
                             )
                         }
-                        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(_lid) => (
-                            crate::types::typedtree::ConstructorArgument::Cstr_tuple(vec![]),
-                            None,
-                            crate::types::ConstructorArguments::CstrTuple(vec![]),
-                            vec![],
-                            None,
-                            None,
-                        ),
+                        crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
+                            let (rebind_path, rebind_desc) =
+                                lookup_rebind_constructor(tctx, env, lid).ok_or_else(|| {
+                                    TypeModError::ModuleNotFound(format!(
+                                        "constructor {}",
+                                        arena.get_string(ec.pext_name.txt)
+                                    ))
+                                })?;
+                            let (inst_args, cstr_res) =
+                                crate::types::instance_constructor(ctx, &rebind_desc);
+                            if crate::types::ctype::unify(
+                                ctx,
+                                &mut tctx.unify_state,
+                                cstr_res,
+                                ext_res_ty,
+                            )
+                            .is_err()
+                            {
+                                return Err(TypeModError::RebindWrongType {
+                                    loc: lid.loc,
+                                    lid: tctx.resolve_lid(lid.txt).clone(),
+                                    actual: cstr_res,
+                                    expected: ext_res_ty,
+                                });
+                            }
+                            if matches!(rebind_desc.cstr_private, crate::types::PrivateFlag::Private)
+                                && matches!(ext_private, crate::types::PrivateFlag::Public)
+                            {
+                                return Err(TypeModError::RebindPrivate {
+                                    loc: lid.loc,
+                                    lid: tctx.resolve_lid(lid.txt).clone(),
+                                });
+                            }
+                            let ext_args = if rebind_desc.cstr_inlined.is_some() {
+                                rebind_constructor_arguments(&rebind_desc)
+                            } else {
+                                crate::types::ConstructorArguments::CstrTuple(inst_args.clone())
+                            };
+                            (
+                                crate::types::typedtree::ExtensionConstructorKind::Text_rebind(
+                                    rebind_path,
+                                    lid.clone(),
+                                ),
+                                ext_args,
+                                inst_args,
+                                rebind_desc.cstr_inlined.clone(),
+                                None,
+                            )
+                        }
                     };
 
                 crate::types::btype::iter_type_expr_cstr_args(&ext_args, |ty| {
@@ -15830,7 +16028,7 @@ fn type_structure_item<'a>(
                     cstr_consts: -1,
                     cstr_nonconsts: -1,
                     cstr_generalized: false,
-                    cstr_private: crate::types::PrivateFlag::Public,
+                    cstr_private: ext_private,
                     cstr_loc: crate::location::Location::none(),
                     cstr_attributes: vec![],
                     cstr_inlined: cstr_inlined.clone(),
@@ -15852,14 +16050,12 @@ fn type_structure_item<'a>(
                         ext_type_params: vec![],
                         ext_args,
                         ext_ret_type: None,
-                        ext_private: crate::types::PrivateFlag::Public,
+                        ext_private,
                         ext_loc: arena.to_location(ec.pext_loc),
                         ext_attributes: vec![],
                         ext_is_exception: false,
                     },
-                    ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-                        typed_args, typed_ret,
-                    ),
+                    ext_kind,
                     ext_loc: ec.pext_loc,
                     ext_attributes: ec.pext_attributes.clone(),
                 });
@@ -15873,14 +16069,72 @@ fn type_structure_item<'a>(
 
             // Translate params
             let mut typed_params = Vec::new();
+            let mut typed_param_type_refs = Vec::new();
             for (ct, v) in &ext.ptyext_params {
-                let (typed_ct, _) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                typed_param_type_refs.push(ty_ref);
                 let variance = match v {
                     ParserVariance::Covariant => TypesVariance::covariant(),
                     ParserVariance::Contravariant => TypesVariance::contravariant(),
                     ParserVariance::Invariant => TypesVariance::null(),
                 };
                 typed_params.push((typed_ct, variance));
+            }
+            for ty_ref in &typed_param_type_refs {
+                crate::types::generalize(ctx, *ty_ref);
+            }
+            let allowed_type_params: HashSet<TypeExprRef> = typed_param_type_refs
+                .iter()
+                .map(|ty_ref| ctx.repr(*ty_ref))
+                .collect();
+            for ext_cstr in &mut typed_constructors {
+                ext_cstr.ext_type.ext_type_params = typed_param_type_refs.clone();
+                if let crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                    typed_args,
+                    typed_ret,
+                ) = &ext_cstr.ext_kind
+                {
+                    if let Some((name, loc)) = find_unbound_type_var_in_typed_constructor_args(
+                        ctx,
+                        typed_args,
+                        &allowed_type_params,
+                    ) {
+                        return Err(TypeModError::UnboundTypeVarExt { loc, name });
+                    }
+                    if let Some(typed_ret) = typed_ret
+                        && let Some((name, loc)) = find_unbound_type_var_in_typed_core_type(
+                            ctx,
+                            typed_ret,
+                            &allowed_type_params,
+                        )
+                    {
+                        return Err(TypeModError::UnboundTypeVarExt { loc, name });
+                    }
+                }
+                if let Some(name) = find_unbound_type_var_name_in_constructor_args(
+                    ctx,
+                    &ext_cstr.ext_type.ext_args,
+                    &allowed_type_params,
+                ) {
+                    return Err(TypeModError::UnboundTypeVarExt {
+                        loc: ext_cstr.ext_loc,
+                        name,
+                    });
+                }
+                if let Some(ret_ty) = ext_cstr.ext_type.ext_ret_type {
+                    let mut visited = HashSet::new();
+                    if let Some(name) = find_unbound_type_var_name(
+                        ctx,
+                        ret_ty,
+                        &allowed_type_params,
+                        &mut visited,
+                    ) {
+                        return Err(TypeModError::UnboundTypeVarExt {
+                            loc: ext_cstr.ext_loc,
+                            name,
+                        });
+                    }
+                }
             }
 
             let item_sig = typed_constructors
