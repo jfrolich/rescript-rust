@@ -4600,7 +4600,6 @@ fn force_qualified_value_type_paths<'a>(
         env: &Env,
         pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
         path: &Path,
-        arity: usize,
         value_access_root: Option<&Ident>,
         selected_module_path: Option<&Path>,
         infer_stdlib_root_from_flat_parent: bool,
@@ -4699,13 +4698,11 @@ fn force_qualified_value_type_paths<'a>(
             if candidate.same(path) {
                 continue;
             }
-            let flattened_alias_equivalent = infer_stdlib_root_from_flat_parent
-                && crate::types::ctype::flattened_alias_paths_equivalent(
-                    ctx, env, &candidate, path, arity,
-                );
-            if !flattened_alias_equivalent
-                && !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name)
-            {
+            // OCaml compiler/ml/env.ml:800-813 resolves type components
+            // through the parent `comp_components` table. Do not accept a
+            // flattened alias rewrite unless that component table exposes the
+            // type at the selected parent.
+            if !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name) {
                 continue;
             }
 
@@ -5304,7 +5301,6 @@ fn force_qualified_value_type_paths<'a>(
                                 env,
                                 &tctx.persistent_env,
                                 &path,
-                                args.len(),
                                 value_access_root,
                                 selected_module_path,
                                 false,
@@ -5320,7 +5316,6 @@ fn force_qualified_value_type_paths<'a>(
                                 env,
                                 &tctx.persistent_env,
                                 &path,
-                                args.len(),
                                 value_access_root,
                                 selected_module_path,
                                 true,
