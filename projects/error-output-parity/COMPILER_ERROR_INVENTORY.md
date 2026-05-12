@@ -106,6 +106,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/incoherent_label_order.res`.
 - `Too_many_arguments`: covered by
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
+- `Abstract_wrong_label`: covered by
+  `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res`.
 - `Uncurried_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
