@@ -7313,12 +7313,6 @@ fn lower_args_manifest_needs_component_force(
                     .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
                     .is_some()
             });
-            let pers_namespace_hit = root.is_some_and(|head| {
-                pers_env.as_ref().is_some_and(|pers| {
-                    pers.path_head_is_namespace_alias(&path)
-                        || pers.module_is_namespace_backing_head(head.name())
-                })
-            });
             let ctx_flat_hit = root.is_some_and(|head| {
                 ctx.find_flattened_alias_component_path(head.name())
                     .is_some()
@@ -7337,7 +7331,7 @@ fn lower_args_manifest_needs_component_force(
             // module thunks through env.ml:1567-1578 component storage.
             !path.same(lookup_path)
                 && has_args
-                && (pers_flat_hit || pers_namespace_hit || ctx_flat_hit)
+                && (pers_flat_hit || ctx_flat_hit)
                 && parent_depth.is_some_and(|depth| depth >= 2)
         }
         _ => false,
