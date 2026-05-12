@@ -301,6 +301,8 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/definition_mismatch.res` and
     `tests/error_output_parity/compiler/fixtures/definition_mismatch_payload.res`.
 - `Constraint_failed`
+  - Covered for GADT constructor return-type validation by
+    `tests/error_output_parity/compiler/fixtures/constraint_failed_constructor_return.res`.
 - `Inconsistent_constraint`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/inconsistent_type_constraint.res`.
