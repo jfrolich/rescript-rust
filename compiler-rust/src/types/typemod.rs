@@ -13112,6 +13112,86 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     })
 }
 
+fn recmodule_substitute_module_path(path: &Path, subst: &[(Ident, Path)]) -> Path {
+    match path {
+        Path::Pident(id) => subst
+            .iter()
+            .find_map(|(old_id, new_path)| old_id.same(id).then(|| new_path.clone()))
+            .unwrap_or_else(|| path.clone()),
+        Path::Pdot(prefix, name, pos) => Path::Pdot(
+            std::sync::Arc::new(recmodule_substitute_module_path(prefix, subst)),
+            name.clone(),
+            *pos,
+        ),
+        Path::Papply(functor, arg) => Path::Papply(
+            std::sync::Arc::new(recmodule_substitute_module_path(functor, subst)),
+            std::sync::Arc::new(recmodule_substitute_module_path(arg, subst)),
+        ),
+    }
+}
+
+fn recmodule_subst_modtype(
+    ctx: &crate::types::context::TypeContext,
+    subst: &[(Ident, Path)],
+    mty: &crate::types::decl::ModuleType,
+) -> crate::types::decl::ModuleType {
+    crate::cmi::persistent_env::substitute_module_type_with_module_path_subst(mty, subst, ctx)
+}
+
+fn recmodule_subst_and_strengthen(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    subst: &[(Ident, Path)],
+    id: &Ident,
+    mty: &crate::types::decl::ModuleType,
+) -> crate::types::decl::ModuleType {
+    // OCaml compiler/ml/typemod.ml:1069-1072:
+    //   Mtype.strengthen ~aliasable:false env (Subst.modtype s mty)
+    //     (Subst.module_path s (Pident id))
+    let substituted = recmodule_subst_modtype(ctx, subst, mty);
+    let module_path = recmodule_substitute_module_path(&Path::pident(id.clone()), subst);
+    crate::types::ctype::strengthen_module_type_for_non_aliasable_path(
+        ctx,
+        env,
+        &module_path,
+        &substituted,
+    )
+}
+
+fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arg: ModuleExpr,
+    output_decl_mty: crate::types::decl::ModuleType,
+    include_arg_mty: crate::types::decl::ModuleType,
+    include_decl_mty: crate::types::decl::ModuleType,
+    explicit: crate::types::typedtree::ModuleTypeConstraint,
+    mod_loc: LocIdx,
+    mod_attributes: Attributes,
+) -> TypeModResult<ModuleExpr> {
+    let error_loc = arg.mod_loc;
+    let coercion =
+        crate::types::includemod::modtypes(tctx.type_ctx, env, &include_arg_mty, &include_decl_mty)
+            .map_err(|err| TypeModError::SignatureMismatch {
+                loc: error_loc,
+                error: err,
+            })?;
+    let env_ref = tctx.type_ctx.store_typed_env(env);
+
+    Ok(ModuleExpr {
+        mod_desc: ModuleExprDesc::Tmod_constraint(
+            Box::new(arg),
+            output_decl_mty.clone(),
+            explicit,
+            coercion,
+        ),
+        mod_loc,
+        mod_type: output_decl_mty,
+        mod_env: env_ref,
+        mod_attributes,
+    })
+}
+
 /// Type check a module expression.
 pub fn type_module_expr<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -17242,53 +17322,64 @@ fn type_structure_item<'a>(
                 ));
             }
 
-            // OCaml compiler/ml/typemod.ml:1521-1548 types all recursive
-            // bodies before `check_recmodule_inclusion`. typemod.ml:1081-1100
-            // then renames every recursive module id once per recursive binding
-            // level and, after the first level, substitutes the actual module
-            // types while building the intermediate environment.
-            for depth in 0..body_bindings.len() {
-                for (_, _, _, decl, _, _) in &body_bindings {
-                    drop(tctx.type_ctx.rename_ident(&decl.md_id));
-                }
-                if depth > 0 {
-                    for (_, _, typed_inner, _, _, _) in &body_bindings {
-                        let mut actual_mty = typed_inner.mod_type.clone();
-                        crate::cmi::persistent_env::freshen_module_type_bound_idents(
-                            &mut actual_mty,
+            // Match OCaml compiler/ml/typemod.ml:1056-1120
+            // `check_recmodule_inclusion`: unroll recursive module actual types
+            // a finite number of times, using the number of recursive bindings
+            // as the depth. Inclusion is then checked under that unrolled
+            // environment while the emitted constraint keeps the declared
+            // module type.
+            let mut inclusion_env = new_env.clone();
+            let mut inclusion_subst: Vec<(Ident, Path)> = Vec::new();
+            let mut first_time = true;
+            for _ in 0..body_bindings.len() {
+                let renamed_ids = body_bindings
+                    .iter()
+                    .map(|(_, _, _, decl, _, _)| tctx.type_ctx.rename_ident(&decl.md_id))
+                    .collect::<Vec<_>>();
+                let mut next_subst = Vec::with_capacity(body_bindings.len());
+                for ((_, _, typed_inner, decl, _, _), renamed_id) in
+                    body_bindings.iter().zip(renamed_ids.iter())
+                {
+                    let actual_mty = if first_time {
+                        typed_inner.mod_type.clone()
+                    } else {
+                        recmodule_subst_and_strengthen(
                             tctx.type_ctx,
-                        );
-                    }
+                            &inclusion_env,
+                            &inclusion_subst,
+                            &decl.md_id,
+                            &typed_inner.mod_type,
+                        )
+                    };
+                    inclusion_env.add_module(renamed_id.clone(), empty_module_decl(actual_mty));
+                    next_subst.push((decl.md_id.clone(), Path::pident(renamed_id.clone())));
                 }
-            }
-            for (_, _, typed_inner, decl, _, _) in &body_bindings {
-                // OCaml compiler/ml/typemod.ml:1113-1115 computes both
-                // `Subst.modtype s mty_decl.mty_type` and
-                // `subst_and_strengthen env s id mty_actual` before calling
-                // Includemod. compiler/ml/subst.ml:365-400 freshens the hidden
-                // module-type binders even though those clones are not emitted
-                // in the final typedtree.
-                let mut decl_mty = decl.md_type.mty_type.clone();
-                crate::cmi::persistent_env::freshen_module_type_bound_idents(
-                    &mut decl_mty,
-                    tctx.type_ctx,
-                );
-                let mut actual_mty = typed_inner.mod_type.clone();
-                crate::cmi::persistent_env::freshen_module_type_bound_idents(
-                    &mut actual_mty,
-                    tctx.type_ctx,
-                );
+                inclusion_subst = next_subst;
+                first_time = false;
             }
 
             let mut typed_bindings = Vec::with_capacity(body_bindings.len());
             for (name, name_loc, typed_inner, decl, attrs, mb_loc) in body_bindings {
                 let inner_loc = typed_inner.mod_loc;
-                let typed_mod = wrap_constraint_with_decl_mty(
+                let include_decl_mty = recmodule_subst_modtype(
+                    tctx.type_ctx,
+                    &inclusion_subst,
+                    &decl.md_type.mty_type,
+                );
+                let include_actual_mty = recmodule_subst_and_strengthen(
+                    tctx.type_ctx,
+                    &inclusion_env,
+                    &inclusion_subst,
+                    &decl.md_id,
+                    &typed_inner.mod_type,
+                );
+                let typed_mod = wrap_recmodule_constraint_with_inclusion_mtys(
                     tctx,
-                    &new_env,
+                    &inclusion_env,
                     typed_inner,
-                    decl.md_type.clone(),
                     decl.md_type.mty_type.clone(),
+                    include_actual_mty,
+                    include_decl_mty,
                     crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
                         decl.md_type.clone(),
                     )),

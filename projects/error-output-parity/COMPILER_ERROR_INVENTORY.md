@@ -260,11 +260,12 @@ with a reason after checking raise sites.
   `Ill_typed_functor_application`: the OCaml raise site requires an
   `Lapply` longident, and normal ReScript functor application syntax is parsed
   as a module expression instead.
-- `Illegal_reference_to_recursive_module`: no reachable `.res`/`.resi`
-  fixture found yet. The OCaml raise site requires `Env.lookup_module` to see
-  the internal `#recmod#` placeholder; recursive-module signatures in ReScript
-  are checked through approximated declarations, while reduced body probes
-  either compile or fail later as module inclusion mismatches.
+- `Illegal_reference_to_recursive_module`: no reachable error fixture found
+  yet. The OCaml raise site requires `Env.lookup_module` to see the internal
+  `#recmod#` placeholder; recursive-module signatures in ReScript are checked
+  through approximated declarations. A non-error parity guard for OCaml's
+  recursive-module inclusion unrolling is covered by
+  `tests/error_output_parity/compiler/fixtures/recursive_module_sibling_type_alias.res`.
 - `Cannot_scrape_alias`: no reachable `.res`/`.resi` fixture found yet. The
   Typetexp raise sites require a module alias whose target is missing after the
   alias itself has already resolved; normal source attempts report the missing

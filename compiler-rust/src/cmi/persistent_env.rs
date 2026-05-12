@@ -3051,6 +3051,29 @@ pub(crate) fn substitute_functor_result_module_path(
     copied
 }
 
+pub(crate) fn substitute_module_type_with_module_path_subst(
+    module_type: &ModuleType,
+    module_paths: &[(Ident, Path)],
+    ctx: &TypeContext,
+) -> ModuleType {
+    // Mirrors the `Subst.modtype (Subst.add_module ...)` shape used by
+    // compiler/ml/typemod.ml:1056-1120 for recursive-module inclusion. The
+    // module type is copied first, then bound signature/functor ids are
+    // freshened while module paths are rewritten through the same substitution.
+    let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    let mut maps = SubstMaps::default();
+    for (id, path) in module_paths {
+        if id.stamp() != 0 {
+            insert_module_stamp_subst(&mut maps.module_stamp_map, id, path.clone());
+        } else {
+            maps.module_name_map
+                .insert(id.name().to_string(), path.clone());
+        }
+    }
+    freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
+    copied
+}
+
 pub(crate) fn freshen_functor_component_module_type(
     module_type: &ModuleType,
     parent_context: Option<(&Path, &[SignatureItem])>,

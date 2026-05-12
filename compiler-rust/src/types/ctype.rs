@@ -2179,6 +2179,15 @@ pub fn strengthen_module_type_for_inclusion_path<'a>(
     strengthen_module_type_for_module_access_path(ctx, env, true, module_access_path, mty)
 }
 
+pub fn strengthen_module_type_for_non_aliasable_path<'a>(
+    ctx: &'a TypeContext,
+    env: &super::env::Env,
+    module_access_path: &Path,
+    mty: &super::decl::ModuleType,
+) -> super::decl::ModuleType {
+    strengthen_module_type_for_module_access_path(ctx, env, false, module_access_path, mty)
+}
+
 fn strengthen_module_decl_for_module_access_path<'a>(
     ctx: &'a TypeContext,
     env: &super::env::Env,
