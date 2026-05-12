@@ -359,6 +359,7 @@ pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
     values: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    component_values: Arc<RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>>,
     values_indexed: Arc<Cell<bool>>,
     constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
     labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
@@ -544,6 +545,7 @@ impl QualifiedModuleComponents {
             access_path: Arc::new(access_path),
             signature,
             values: Arc::new(RefCell::new(HashMap::new())),
+            component_values: Arc::new(RefCell::new(HashMap::new())),
             values_indexed: Arc::new(Cell::new(false)),
             constructors: Arc::new(RefCell::new(HashMap::new())),
             labels: Arc::new(RefCell::new(HashMap::new())),
@@ -907,6 +909,13 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, ValueDescription)> {
+        if let Some(cached) = self.component_values.borrow().get(name).cloned() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            }
+            return cached;
+        }
+
         let (runtime_pos, id, desc) = self.lookup_value(name)?;
         let needs_component_subst = self.value_mentions_local_component_type(desc, ctx);
         let desc = if needs_component_subst {
@@ -930,7 +939,17 @@ impl QualifiedModuleComponents {
         } else {
             desc.clone()
         };
-        Some((runtime_pos, id.clone(), desc))
+        // OCaml compiler/ml/env.ml:1513-1516 memoizes the whole
+        // `components_of_module_maker` result, and env.ml:1537 stores the
+        // `Subst.value_description` output in `comp_values`. Cache the
+        // per-name Rust value view so repeated qualified value lookups reuse
+        // the same substituted type nodes instead of rerunning the Rust-side
+        // scan/copy/substitution path.
+        let result = Some((runtime_pos, id.clone(), desc));
+        self.component_values
+            .borrow_mut()
+            .insert(name.to_string(), result.clone());
+        result
     }
 
     pub(crate) fn lookup_constructors(
