@@ -133,6 +133,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/inlined_record_escape.res`.
 - `Type_params_not_supported`: covered by
   `tests/error_output_parity/compiler/fixtures/type_params_not_supported_variant_spread.res`.
+- `Field_access_on_dict_type`: covered by
+  `tests/error_output_parity/compiler/fixtures/field_access_on_dict_type.res`.
 - `Typemod.Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`.
 - `Break_outside_loop`: covered by
