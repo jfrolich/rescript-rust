@@ -19,6 +19,7 @@ use crate::cmi::persistent_env::{
 };
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
+use crate::ident::Ident;
 use crate::js_ir::{
     DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolver,
     print_deps_program_with_directives_and_options,
@@ -2471,6 +2472,21 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::OrPatternTypeClash { loc, id, trace }) => {
+            UserDiagnostic::new(
+                format_or_pattern_type_clash_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    id,
+                    trace,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::BreakOutsideLoop { loc }) => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -4347,6 +4363,45 @@ fn format_pattern_type_clash_report(
     message.push_str(RESET);
     append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
     append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_or_pattern_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    id: &Ident,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((left, right)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("The variable ");
+    message.push_str(id.name());
+    message.push_str(" on the left-hand side of this or-pattern has type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, left),
+    ));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("but on the right-hand side it has type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, right),
+    ));
+    message.push_str(RESET);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

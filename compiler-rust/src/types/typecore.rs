@@ -410,7 +410,11 @@ pub enum TypeCoreError {
     },
 
     /// Or-pattern type clash.
-    OrPatternTypeClash(Ident, Vec<(TypeExprRef, TypeExprRef)>),
+    OrPatternTypeClash {
+        loc: LocIdx,
+        id: Ident,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
 
     /// Variable bound multiple times.
     MultiplyBoundVariable { loc: LocIdx, name: String },
@@ -3702,7 +3706,32 @@ fn merge_or_pattern_variables(
                     // OCaml compiler/ml/typecore.ml:551-566
                     // `enter_orpat_variables` only calls `unify env t1 t2` in
                     // branch order before alpha-renaming branch 2.
-                    unify_pattern_types(tctx, loc, v1.ty, v2.ty)?;
+                    match crate::types::unify(
+                        tctx.type_ctx,
+                        &mut tctx.unify_state,
+                        v1.ty,
+                        v2.ty,
+                    ) {
+                        Ok(()) => {}
+                        Err(TypeError::Unify(trace)) => {
+                            return Err(TypeCoreError::OrPatternTypeClash {
+                                loc,
+                                id: v1.id.clone(),
+                                trace: if trace.is_empty() {
+                                    vec![(v1.ty, v2.ty)]
+                                } else {
+                                    trace
+                                },
+                            });
+                        }
+                        Err(_) => {
+                            return Err(TypeCoreError::OrPatternTypeClash {
+                                loc,
+                                id: v1.id.clone(),
+                                trace: vec![(v1.ty, v2.ty)],
+                            });
+                        }
+                    }
                     // Match OCaml alpha_pat: rename branch-2 ids onto branch-1 ids.
                     result.push((v2.id.clone(), v1.id.clone()));
                 }
@@ -4089,6 +4118,32 @@ fn type_pattern_construct(
     ))
 }
 
+fn variant_payload_type_from_expected(
+    ctx: &TypeContext,
+    env: &Env,
+    label: &str,
+    expected_ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
+    let expected_desc = ctx.get_desc(ctx.repr(expanded_expected));
+    match &*expected_desc {
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            row.row_fields
+                .iter()
+                .find(|(field_label, _)| field_label == label)
+                .and_then(|(_, field)| match crate::types::btype::row_field_repr(ctx, field) {
+                    crate::types::type_expr::RowField::Rpresent(Some(ty)) => Some(ty),
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        types.first().copied().filter(|_| types.len() == 1)
+                    }
+                    _ => None,
+                })
+        }
+        _ => None,
+    }
+}
+
 /// Type check polymorphic variant pattern.
 #[allow(clippy::too_many_arguments)]
 fn type_pattern_variant(
@@ -4109,7 +4164,9 @@ fn type_pattern_variant(
     // - always build a single-tag row with Reither
     // - use `constant = (arg is None)`
     // - thread payload type into the row when present
-    let arg_ty = arg.map(|_| ctx.new_var(None));
+    let expected_payload_ty =
+        arg.and_then(|_| variant_payload_type_from_expected(ctx, env, label, expected_ty));
+    let arg_ty = arg.map(|_| expected_payload_ty.unwrap_or_else(|| ctx.new_var(None)));
     let mut row_arg_types = Vec::new();
     if let Some(ty) = arg_ty {
         row_arg_types.push(ty);
