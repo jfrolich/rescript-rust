@@ -91,6 +91,20 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+/// Snapshot of mutable type-checker state for OCaml-style failed-unify
+/// backtracking.
+pub(crate) struct TypeMutationSnapshot {
+    type_states: Vec<(TypeDesc, i32)>,
+    row_field_states: Vec<Option<RowField>>,
+    abbrev_states: Vec<AbbrevMemo>,
+    memoized_abbrev_refs: Vec<AbbrevMemoRef>,
+    current_abbreviations: AbbrevMemoRef,
+    current_level: i32,
+    nongen_level: i32,
+    global_level: i32,
+    saved_levels: Vec<(i32, i32)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct QualifiedModuleComponentsCacheKey {
     path: Path,
@@ -1234,6 +1248,83 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         self.types.get(r).set_desc(desc);
+    }
+
+    /// Save mutable type state before a speculative unification.
+    ///
+    /// OCaml compiler/ml/typecore.ml:3187-3211 and 3321-3329 use
+    /// `Btype.snapshot`/`Btype.backtrack` (with saved Ctype levels) around
+    /// unifications that may fail. Rust keeps type nodes in append-only
+    /// arenas, so this snapshots mutable contents of pre-existing nodes and
+    /// cells, while intentionally leaving newly allocated nodes and lazy
+    /// environment caches alive after restore.
+    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot {
+        let type_len = self.types.len();
+        let mut type_states = Vec::with_capacity(type_len);
+        for idx in 0..type_len {
+            let ty = TypeExprRef::from_usize(idx);
+            type_states.push((self.get_desc(ty).0, self.get_level(ty)));
+        }
+
+        let row_field_states = self
+            .row_fields
+            .borrow()
+            .iter()
+            .map(|cell| cell.borrow().clone())
+            .collect();
+        let abbrev_states = self
+            .abbrevs
+            .borrow()
+            .iter()
+            .map(|cell| cell.borrow().clone())
+            .collect();
+
+        TypeMutationSnapshot {
+            type_states,
+            row_field_states,
+            abbrev_states,
+            memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
+            current_abbreviations: self.current_abbreviations.get(),
+            current_level: self.current_level.get(),
+            nongen_level: self.nongen_level.get(),
+            global_level: self.global_level.get(),
+            saved_levels: self.saved_levels.borrow().clone(),
+        }
+    }
+
+    /// Restore a snapshot created by `snapshot_type_state`.
+    pub(crate) fn restore_type_state(&self, snapshot: TypeMutationSnapshot) {
+        for (idx, (desc, level)) in snapshot.type_states.into_iter().enumerate() {
+            let ty = TypeExprRef::from_usize(idx);
+            self.set_desc(ty, desc);
+            self.set_level(ty, level);
+        }
+
+        {
+            let row_fields = self.row_fields.borrow();
+            for (idx, field) in snapshot.row_field_states.into_iter().enumerate() {
+                if let Some(cell) = row_fields.get(idx) {
+                    *cell.borrow_mut() = field;
+                }
+            }
+        }
+
+        {
+            let abbrevs = self.abbrevs.borrow();
+            for (idx, memo) in snapshot.abbrev_states.into_iter().enumerate() {
+                if let Some(cell) = abbrevs.get(idx) {
+                    *cell.borrow_mut() = memo;
+                }
+            }
+        }
+
+        *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
+        self.current_abbreviations
+            .set(snapshot.current_abbreviations);
+        self.current_level.set(snapshot.current_level);
+        self.nongen_level.set(snapshot.nongen_level);
+        self.global_level.set(snapshot.global_level);
+        *self.saved_levels.borrow_mut() = snapshot.saved_levels;
     }
 
     // ========================================================================

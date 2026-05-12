@@ -10457,41 +10457,47 @@ fn type_for_of(
         type_expect(tctx, env, iterable_expr, async_iter_ty, None)?
     } else {
         let typed = type_exp(tctx, env, iterable_expr, None)?;
+        // OCaml compiler/ml/typecore.ml:3187-3211 snapshots type mutation
+        // state before trying `iterable<'a>`, backtracks on an Expr_type_clash,
+        // then tries the raw-array convenience fallback under a second
+        // snapshot. Keep the same order instead of peeking at constructor
+        // heads after a failed unify.
+        let iterable_snapshot = ctx.snapshot_type_state();
         let iterable_ty = env.type_iterable(ctx, ty_elem);
-        // Try iterable first.
-        match crate::types::ctype::unify(ctx, &mut tctx.unify_state, typed.exp_type, iterable_ty) {
+        let mut iterable_unify_state = UnifyState::new();
+        iterable_unify_state.set_env(env);
+        match crate::types::ctype::unify(
+            ctx,
+            &mut iterable_unify_state,
+            typed.exp_type,
+            iterable_ty,
+        ) {
             Ok(()) => typed,
-            Err(_) => {
-                // Fall back to array<'a> (matches OCaml's convenience path).
-                // We can't backtrack the failed unify perfectly, so peek at
-                // the head and decide based on its constructor — if it's
-                // `array`, use array; otherwise re-raise the iterable error.
+            Err(iterable_error) => {
+                ctx.restore_type_state(iterable_snapshot);
+
+                let array_snapshot = ctx.snapshot_type_state();
                 let array_ty = env.type_array(ctx, ty_elem);
-                let head = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
-                let is_array = match &*ctx.get_desc(head) {
-                    crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-                        path.same(&crate::types::predef::path_array())
+                let mut array_unify_state = UnifyState::new();
+                array_unify_state.set_env(env);
+                match crate::types::ctype::unify(
+                    ctx,
+                    &mut array_unify_state,
+                    typed.exp_type,
+                    array_ty,
+                ) {
+                    Ok(()) => typed,
+                    Err(_) => {
+                        ctx.restore_type_state(array_snapshot);
+                        let trace = match iterable_error {
+                            TypeError::Unify(trace) => trace,
+                            _ => vec![(typed.exp_type, iterable_ty)],
+                        };
+                        return Err(TypeCoreError::ExprTypeClash {
+                            trace,
+                            context: None,
+                        });
                     }
-                    _ => false,
-                };
-                if is_array {
-                    crate::types::ctype::unify(
-                        ctx,
-                        &mut tctx.unify_state,
-                        typed.exp_type,
-                        array_ty,
-                    )
-                    .map_err(|e| {
-                        TypeCoreError::Other(format!(
-                            "for-of array fallback unification failed: {:?}",
-                            e
-                        ))
-                    })?;
-                    typed
-                } else {
-                    return Err(TypeCoreError::Other(format!(
-                        "for...of expects an iterable<'a>, got a non-iterable type"
-                    )));
                 }
             }
         }
@@ -13033,39 +13039,17 @@ fn type_coerce(
 
         if !is_generalizable {
             // OCaml compiler/ml/typecore.ml:3317-3330 first tries ordinary
-            // unification for non-generalizable coercions, inside the
-            // snapshot/backtrack at typecore.ml:3321-3329. Besides validating
-            // private abbreviations, this reaches ctype.ml:2338-2344
-            // expand_head_unif and env.ml:865-875 find_module at the lazy
-            // point where OCaml forces persistent signatures such as SectionID.
-            let source_is_var = {
-                let source_desc = ctx.get_desc(ctx.repr(typed_inner.exp_type));
-                matches!(&*source_desc, TypeDesc::Tvar(_))
-            };
-            if source_is_var {
-                // A plain Tvar source follows OCaml's successful fast path:
-                // Ctype.unify mutates the original argument type.
-                let _ =
-                    crate::types::unify(ctx, &mut tctx.unify_state, typed_inner.exp_type, to_ty);
-            } else {
-                // Rust does not yet have OCaml's Btype trail for backtracking
-                // failed Ctype.unify mutations. Run the force-producing attempt
-                // on copied nodes so the lazy env forcing happens at the same
-                // reference point without retaining mutations OCaml would undo.
-                let mut coerce_unify_cache = HashMap::default();
-                let source_for_unify = crate::types::ctype::copy_type_deep(
-                    ctx,
-                    typed_inner.exp_type,
-                    &mut coerce_unify_cache,
-                );
-                let target_for_unify =
-                    crate::types::ctype::copy_type_deep(ctx, to_ty, &mut coerce_unify_cache);
-                let _ = crate::types::unify(
-                    ctx,
-                    &mut tctx.unify_state,
-                    source_for_unify,
-                    target_for_unify,
-                );
+            // unification for non-generalizable coercions, with
+            // `snapshot ()`/`backtrack` around the failed path at lines
+            // 3321-3329. Keep the mutation on success; restore the original
+            // type graph on failure.
+            let coerce_snapshot = ctx.snapshot_type_state();
+            let mut coerce_unify_state = UnifyState::new();
+            coerce_unify_state.set_env(env);
+            let coerce_result =
+                crate::types::unify(ctx, &mut coerce_unify_state, typed_inner.exp_type, to_ty);
+            if coerce_result.is_err() {
+                ctx.restore_type_state(coerce_snapshot);
             }
             typed_inner.exp_type = to_ty;
         }

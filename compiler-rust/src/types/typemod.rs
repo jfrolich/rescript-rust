@@ -12639,13 +12639,26 @@ fn type_structure_item<'a>(
                     &type_attributes,
                     &type_unboxed,
                 );
+                // OCaml compiler/ml/typedecl.ml:700-706 stores the source
+                // declaration's private flag in the environment declaration.
+                // Keeping private aliases private here prevents ordinary
+                // unification from expanding them as public aliases; coercion
+                // handles the manifest through the subtype path.
+                let type_private = match decl.ptype_private {
+                    crate::parser::ast::PrivateFlag::Public => {
+                        crate::types::PrivateFlag::Public
+                    }
+                    crate::parser::ast::PrivateFlag::Private => {
+                        crate::types::PrivateFlag::Private
+                    }
+                };
 
                 // Create internal type declaration for the environment
                 let mut internal_decl = crate::types::TypeDeclaration {
                     type_params: internal_type_params,
                     type_arity,
                     type_kind: internal_type_kind,
-                    type_private: crate::types::PrivateFlag::Public,
+                    type_private,
                     type_manifest: manifest_type_ref,
                     type_variance: typ_params.iter().map(|(_, v)| *v).collect(),
                     type_newtype_level: None,
