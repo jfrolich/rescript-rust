@@ -290,7 +290,11 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.
 - `Recursive_abbrev`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/recursive_abbrev.res`.
 - `Cycle_in_def`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/cycle_in_def.res`.
 - `Definition_mismatch`
 - `Constraint_failed`
 - `Inconsistent_constraint`

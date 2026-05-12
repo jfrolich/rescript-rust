@@ -23,7 +23,7 @@ use crate::parser::ast::{
     StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
 };
 use crate::parser::longident::Longident;
-use crate::types::Path;
+use crate::types::{Path, TypeDesc};
 use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
 use crate::types::type_expr::{LOWEST_LEVEL, TypeExprRef};
@@ -3112,6 +3112,14 @@ pub enum TypeModError {
         /// First record field mixed with the object type spread.
         field_name: String,
     },
+    /// A type abbreviation expands to itself.
+    RecursiveAbbrev { loc: LocIdx, name: String },
+    /// A type definition contains an abbreviation cycle.
+    CycleInDef {
+        loc: LocIdx,
+        name: String,
+        ty: TypeExprRef,
+    },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
         /// Source location to report.
@@ -4192,6 +4200,214 @@ fn touch_manifest_cyclic_abbrev_check(
         };
         current = expanded;
     }
+}
+
+enum TypeAbbrevCycle {
+    Recursive,
+    Cycle(TypeExprRef),
+}
+
+fn find_type_decl_for_abbrev_cycle(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    path: &Path,
+) -> Option<crate::types::TypeDeclaration> {
+    crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+}
+
+fn type_expr_head_path(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> Option<Path> {
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn type_abbrev_path_to_check(path: &Path, ids: &[Ident]) -> bool {
+    match path {
+        Path::Pident(id) => ids.iter().any(|candidate| candidate.same(id)),
+        _ => false,
+    }
+}
+
+fn check_type_abbrev_cycle_rec(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    target_path: &Path,
+    ids: &[Ident],
+    initial_ty: TypeExprRef,
+    ty: TypeExprRef,
+    parents: &HashSet<TypeExprRef>,
+    visited: &mut HashMap<TypeExprRef, HashSet<TypeExprRef>>,
+) -> Option<TypeAbbrevCycle> {
+    let ty = ctx.repr(ty);
+    if parents.contains(&ty) {
+        let initial_is_target = type_expr_head_path(ctx, initial_ty)
+            .is_some_and(|initial_path| initial_path.same(target_path));
+        return Some(if initial_is_target {
+            TypeAbbrevCycle::Recursive
+        } else {
+            TypeAbbrevCycle::Cycle(ctx.repr(initial_ty))
+        });
+    }
+
+    let mut current_parents = parents.clone();
+    if let Some(prev_parents) = visited.get(&ty) {
+        if current_parents.is_subset(prev_parents) {
+            return None;
+        }
+        current_parents.extend(prev_parents.iter().copied());
+    }
+
+    let desc = ctx.get_desc(ty).clone();
+    let rec_ok = matches!(desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_));
+    visited.insert(ty, current_parents.clone());
+    let mut next_parents = if rec_ok {
+        HashSet::new()
+    } else {
+        current_parents
+    };
+    if !rec_ok {
+        next_parents.insert(ty);
+    }
+
+    match desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            let mut arg_cycle = None;
+            for arg in &args {
+                if let Some(cycle) = check_type_abbrev_cycle_rec(
+                    ctx,
+                    env,
+                    target_path,
+                    ids,
+                    initial_ty,
+                    *arg,
+                    &next_parents,
+                    visited,
+                ) {
+                    arg_cycle = Some(cycle);
+                    break;
+                }
+            }
+
+            let should_expand = type_abbrev_path_to_check(&path, ids) || arg_cycle.is_some();
+            if !should_expand {
+                return None;
+            }
+
+            if let Some(cycle) = arg_cycle {
+                if type_abbrev_path_to_check(&path, ids) {
+                    return Some(cycle);
+                }
+
+                let empty_parents = HashSet::new();
+                for arg in &args {
+                    if let Some(empty_cycle) = check_type_abbrev_cycle_rec(
+                        ctx,
+                        env,
+                        target_path,
+                        ids,
+                        initial_ty,
+                        *arg,
+                        &empty_parents,
+                        visited,
+                    ) {
+                        return Some(empty_cycle);
+                    }
+                }
+                let Some(decl) = find_type_decl_for_abbrev_cycle(ctx, env, &path) else {
+                    return Some(cycle);
+                };
+                let Some(manifest) = decl.type_manifest else {
+                    return Some(cycle);
+                };
+                return check_type_abbrev_cycle_rec(
+                    ctx,
+                    env,
+                    target_path,
+                    ids,
+                    if parents.is_empty() { ty } else { initial_ty },
+                    manifest,
+                    &next_parents,
+                    visited,
+                );
+            }
+
+            let decl = find_type_decl_for_abbrev_cycle(ctx, env, &path)?;
+            let manifest = decl.type_manifest?;
+            check_type_abbrev_cycle_rec(
+                ctx,
+                env,
+                target_path,
+                ids,
+                if parents.is_empty() { ty } else { initial_ty },
+                manifest,
+                &next_parents,
+                visited,
+            )
+        }
+        _ => {
+            let mut children = Vec::new();
+            crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+            for child in children {
+                if let Some(cycle) = check_type_abbrev_cycle_rec(
+                    ctx,
+                    env,
+                    target_path,
+                    ids,
+                    initial_ty,
+                    child,
+                    &next_parents,
+                    visited,
+                ) {
+                    return Some(cycle);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn check_type_declaration_abbrev_cycles(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    ids: &[Ident],
+    parser_decls: &[crate::parser::ast::TypeDeclaration],
+    internal_decls: &[crate::types::TypeDeclaration],
+) -> TypeModResult<()> {
+    for ((id, parser_decl), internal_decl) in ids.iter().zip(parser_decls).zip(internal_decls) {
+        let Some(manifest) = internal_decl.type_manifest else {
+            continue;
+        };
+        let type_path = Path::pident(id.clone());
+        let parents = HashSet::new();
+        let mut visited = HashMap::new();
+        match check_type_abbrev_cycle_rec(
+            ctx,
+            env,
+            &type_path,
+            ids,
+            manifest,
+            manifest,
+            &parents,
+            &mut visited,
+        ) {
+            Some(TypeAbbrevCycle::Recursive) => {
+                return Err(TypeModError::RecursiveAbbrev {
+                    loc: parser_decl.ptype_loc,
+                    name: id.name().to_string(),
+                });
+            }
+            Some(TypeAbbrevCycle::Cycle(ty)) => {
+                return Err(TypeModError::CycleInDef {
+                    loc: parser_decl.ptype_loc,
+                    name: id.name().to_string(),
+                    ty,
+                });
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 fn touch_type_constraint_path(
@@ -15121,6 +15337,14 @@ fn type_structure_item<'a>(
                 tctx.type_variables = saved_type_variables;
             }
 
+            check_type_declaration_abbrev_cycles(
+                ctx,
+                &new_env,
+                &declared_type_ids,
+                decls,
+                &internal_decls_for_generalize,
+            )?;
+
             // OCaml: Ctype.end_def() + generalize_decl for each declaration
             ctx.end_def();
             for decl in &internal_decls_for_generalize {
@@ -17137,6 +17361,14 @@ fn transl_sig_type_declarations_with_ids<'a>(
     {
         variance_env.add_type(type_id.clone(), decl.clone());
     }
+
+    check_type_declaration_abbrev_cycles(
+        ctx,
+        &variance_env,
+        &declared_type_ids,
+        decls,
+        &internal_decls_for_generalize,
+    )?;
 
     // OCaml transl_signature routes Psig_type through
     // Typedecl.transl_type_decl, whose typedecl.ml:1588-1592 runs
