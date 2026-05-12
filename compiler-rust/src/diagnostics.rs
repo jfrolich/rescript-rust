@@ -272,7 +272,7 @@ impl Warning {
             }
             Warning::PartialMatch { example } => {
                 format!(
-                    "You forgot to handle a possible case here, for example: \n  {}",
+                    "You forgot to handle a possible case here, for example: \n{}",
                     example
                 )
             }
@@ -300,7 +300,8 @@ impl Warning {
                 "this argument will not be used by the function.".to_string()
             }
             Warning::NonreturningStatement => {
-                "this statement never returns (or has an unsound type.)".to_string()
+                "This statement does not continue execution; following code is unreachable."
+                    .to_string()
             }
             Warning::Preprocessor { message } => message.clone(),
             Warning::UselessRecordWith => {

@@ -3000,10 +3000,7 @@ pub enum TypeModError {
         error: crate::types::includemod::IncludeModError,
     },
     /// Invalid untagged variant definition.
-    InvalidUntaggedVariantDefinition {
-        loc: Location,
-        reason: String,
-    },
+    InvalidUntaggedVariantDefinition { loc: Location, reason: String },
     /// Duplicate constructor in a variant type declaration.
     DuplicateConstructor {
         /// Source location to report.
@@ -3019,6 +3016,13 @@ pub enum TypeModError {
         label: String,
         /// Enclosing record name, when the label belongs to a named record type.
         record_name: Option<String>,
+    },
+    /// A record declaration mixes object-type spread syntax with record fields.
+    ObjectSpreadWithRecordField {
+        /// Source location to report.
+        loc: LocIdx,
+        /// First record field mixed with the object type spread.
+        field_name: String,
     },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
@@ -3079,15 +3083,12 @@ fn check_untagged_variant_constructor_arities(
     };
 
     for constructor in constructors {
-        if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) = &constructor.pcd_args
-        {
+        if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) = &constructor.pcd_args {
             if args.len() > 1 {
                 let constructor_name = arena.get_string(constructor.pcd_name.txt);
                 return Err(TypeModError::InvalidUntaggedVariantDefinition {
                     loc: arena.to_location(decl.ptype_loc),
-                    reason: format!(
-                        "Constructor {constructor_name} has more than one argument."
-                    ),
+                    reason: format!("Constructor {constructor_name} has more than one argument."),
                 });
             }
         }
@@ -3131,6 +3132,30 @@ fn check_duplicate_label_declarations(
         }
     }
     Ok(())
+}
+
+fn first_non_spread_label<'a>(
+    arena: &ParseArena,
+    labels: &'a [crate::parser::ast::LabelDeclaration],
+) -> Option<&'a crate::parser::ast::LabelDeclaration> {
+    labels
+        .iter()
+        .find(|label| arena.get_string(label.pld_name.txt) != "...")
+}
+
+fn reject_object_spread_with_record_field(
+    arena: &ParseArena,
+    labels: &[crate::parser::ast::LabelDeclaration],
+) -> TypeModResult<()> {
+    if let Some(label) = first_non_spread_label(arena, labels) {
+        let field_name = arena.get_string(label.pld_name.txt).to_string();
+        Err(TypeModError::ObjectSpreadWithRecordField {
+            loc: label.pld_loc,
+            field_name,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Error raised by the ReScript variant runtime-representation checks.
@@ -3310,10 +3335,7 @@ enum UntaggedVariantBlockType {
     Unknown,
 }
 
-fn invalid_untagged_variant_definition(
-    loc: Location,
-    reason: impl Into<String>,
-) -> TypeModError {
+fn invalid_untagged_variant_definition(loc: Location, reason: impl Into<String>) -> TypeModError {
     TypeModError::InvalidUntaggedVariantDefinition {
         loc,
         reason: reason.into(),
@@ -3327,8 +3349,7 @@ fn extract_concrete_untagged_type_decl(
 ) -> Option<crate::types::decl::TypeDeclaration> {
     let mut current = ctx.repr(ty);
     for _ in 0..20 {
-        let crate::types::type_expr::TypeDesc::Tconstr { path, .. } =
-            &*ctx.get_desc(current)
+        let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(current)
         else {
             return None;
         };
@@ -3375,9 +3396,9 @@ fn get_untagged_block_type_from_type(
         crate::types::type_expr::TypeDesc::Tarrow { .. } => {
             Some(UntaggedVariantBlockType::Function)
         }
-        crate::types::type_expr::TypeDesc::Ttuple(_) => Some(UntaggedVariantBlockType::Instance(
-            "Array".to_string(),
-        )),
+        crate::types::type_expr::TypeDesc::Ttuple(_) => {
+            Some(UntaggedVariantBlockType::Instance("Array".to_string()))
+        }
         _ => None,
     }
 }
@@ -3677,12 +3698,10 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
         Some("Uint8Array")
     } else if path_is_t_of_stdlib_child(path, "Uint8ClampedArray") {
         Some("Uint8ClampedArray")
-    } else if path_is_t_of_persistent_module(path, "Js_file")
-        || path_is_t_of_js_child(path, "File")
+    } else if path_is_t_of_persistent_module(path, "Js_file") || path_is_t_of_js_child(path, "File")
     {
         Some("File")
-    } else if path_is_t_of_persistent_module(path, "Js_blob")
-        || path_is_t_of_js_child(path, "Blob")
+    } else if path_is_t_of_persistent_module(path, "Js_blob") || path_is_t_of_js_child(path, "Blob")
     {
         Some("Blob")
     } else if path_is_t_of_stdlib_child(path, "Set") {
@@ -13255,6 +13274,7 @@ fn type_structure_item<'a>(
                                                 ]),
                                             )
                                         } else {
+                                            reject_object_spread_with_record_field(arena, labels)?;
                                             (
                                                 vec![],
                                                 crate::types::ConstructorArguments::CstrRecord(
@@ -13612,6 +13632,7 @@ fn type_structure_item<'a>(
                                         };
                                         (expanded_internal, expanded_typed, Some(object_manifest))
                                     } else {
+                                        reject_object_spread_with_record_field(arena, labels)?;
                                         (expanded_internal, expanded_typed, None)
                                     }
                                 }
@@ -15489,6 +15510,8 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         if all_spreads_resolved {
                             internal_labels = expanded_internal_labels;
                             typed_tree_labels = expanded_typed_labels;
+                        } else {
+                            reject_object_spread_with_record_field(arena, labels)?;
                         }
                     }
 

@@ -3321,9 +3321,9 @@ fn subtype_rec(
                 args: args2,
                 ..
             },
-        ) if path1.same(path2) => subtype_same_constr_args(
-            ctx, env, visited, trace, path1, args1, args2,
-        ),
+        ) if path1.same(path2) => {
+            subtype_same_constr_args(ctx, env, visited, trace, path1, args1, args2)
+        }
         (
             TypeDesc::Tconstr {
                 path: path1,
@@ -3405,7 +3405,11 @@ fn subtype_same_constr_args(
         return Err(subtype_error(trace));
     };
 
-    for (variance, (arg1, arg2)) in decl.type_variance.iter().zip(args1.iter().zip(args2.iter())) {
+    for (variance, (arg1, arg2)) in decl
+        .type_variance
+        .iter()
+        .zip(args1.iter().zip(args2.iter()))
+    {
         let (covariant, contravariant) = variance.get_upper();
         if covariant {
             let mut arg_trace = trace.to_vec();
@@ -4463,6 +4467,7 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
+            let original_desc1 = (*desc1).clone();
             let arg1_typ = arg1.typ;
             let ret1 = *ret1;
             let arg2_typ = arg2.typ;
@@ -4478,35 +4483,43 @@ fn unify_types<'a>(
             // This affects cycle detection: child unifications see t1 already resolved to t2.
             link_type(ctx, t1, t2);
 
-            // Unify argument types
-            unify(ctx, state, arg1_typ, arg2_typ)?;
-            // Unify return types
-            unify(ctx, state, ret1, ret2)?;
+            let result = (|| {
+                // Unify argument types
+                unify(ctx, state, arg1_typ, arg2_typ)?;
+                // Unify return types
+                unify(ctx, state, ret1, ret2)?;
 
-            // Propagate arity from t1 to t2 if t2 lacks it
-            if need_arity_update {
-                let desc = ctx.get_desc(t2);
-                if let TypeDesc::Tarrow {
-                    arg,
-                    ret,
-                    commutable,
-                    ..
-                } = &*desc
-                {
-                    let new_desc = TypeDesc::Tarrow {
-                        arg: arg.clone(),
-                        ret: *ret,
-                        commutable: commutable.clone(),
-                        arity: arity_to_set,
-                    };
-                    drop(desc);
-                    ctx.set_desc(t2, new_desc);
-                } else {
-                    drop(desc);
+                // Propagate arity from t1 to t2 if t2 lacks it
+                if need_arity_update {
+                    let desc = ctx.get_desc(t2);
+                    if let TypeDesc::Tarrow {
+                        arg,
+                        ret,
+                        commutable,
+                        ..
+                    } = &*desc
+                    {
+                        let new_desc = TypeDesc::Tarrow {
+                            arg: arg.clone(),
+                            ret: *ret,
+                            commutable: commutable.clone(),
+                            arity: arity_to_set,
+                        };
+                        drop(desc);
+                        ctx.set_desc(t2, new_desc);
+                    } else {
+                        drop(desc);
+                    }
                 }
+
+                Ok(())
+            })();
+
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
             }
 
-            Ok(())
+            result
         }
 
         // Tuple types
@@ -4517,6 +4530,7 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
+            let original_desc1 = (*desc1).clone();
             let pairs: Vec<_> = tl1.iter().zip(tl2.iter()).map(|(&a, &b)| (a, b)).collect();
             drop(desc1);
             drop(desc2);
@@ -4524,11 +4538,19 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            for (a, b) in pairs {
-                unify(ctx, state, a, b)?;
+            let result = (|| {
+                for (a, b) in pairs {
+                    unify(ctx, state, a, b)?;
+                }
+
+                Ok(())
+            })();
+
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
             }
 
-            Ok(())
+            result
         }
 
         // Type constructors
@@ -5058,6 +5080,7 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
+            let original_desc1 = (*desc1).clone();
             let body1 = *body1;
             let body2 = *body2;
             let var_pairs: Vec<_> = vars1
@@ -5071,15 +5094,23 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            // First unify the bound variables
-            for (v1, v2) in var_pairs {
-                unify(ctx, state, v1, v2)?;
+            let result = (|| {
+                // First unify the bound variables
+                for (v1, v2) in var_pairs {
+                    unify(ctx, state, v1, v2)?;
+                }
+
+                // Then unify the bodies
+                unify(ctx, state, body1, body2)?;
+
+                Ok(())
+            })();
+
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
             }
 
-            // Then unify the bodies
-            unify(ctx, state, body1, body2)?;
-
-            Ok(())
+            result
         }
 
         // Nil types (for objects)
@@ -5113,6 +5144,7 @@ fn unify_types<'a>(
                 fields: fields2, ..
             },
         ) => {
+            let original_desc1 = (*desc1).clone();
             let fields1 = *fields1;
             let fields2 = *fields2;
             drop(desc1);
@@ -5121,8 +5153,11 @@ fn unify_types<'a>(
             // OCaml links t1'→t2 BEFORE recursing into children
             link_type(ctx, t1, t2);
 
-            unify_object_fields(ctx, state, fields1, fields2)?;
-            Ok(())
+            let result = unify_object_fields(ctx, state, fields1, fields2);
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
+            }
+            result
         }
 
         // Field types (for objects)
@@ -6054,9 +6089,30 @@ fn unify_object_fields<'a>(
     unify(ctx, state, rest1, extended2)?;
 
     // Unify paired fields (matching names from both sides)
-    for (_name, _k1, t1, _k2, t2) in &pairs {
+    for (name, k1, t1, k2, t2) in &pairs {
         // OCaml also calls unify_kind here, but Rust FieldKind handling is simpler
-        unify(ctx, state, *t1, *t2)?;
+        if let Err(err) = unify(ctx, state, *t1, *t2) {
+            return Err(match err {
+                TypeError::Unify(trace) => {
+                    let field1 = ctx.new_type(TypeDesc::Tfield {
+                        name: name.clone(),
+                        kind: k1.clone(),
+                        typ: *t1,
+                        rest: ctx.new_type(TypeDesc::Tnil),
+                    });
+                    let field2 = ctx.new_type(TypeDesc::Tfield {
+                        name: name.clone(),
+                        kind: k2.clone(),
+                        typ: *t2,
+                        rest: ctx.new_type(TypeDesc::Tnil),
+                    });
+                    let mut wrapped_trace = vec![(field1, field2)];
+                    wrapped_trace.extend(trace);
+                    TypeError::Unify(wrapped_trace)
+                }
+                err => err,
+            });
+        }
     }
 
     Ok(())

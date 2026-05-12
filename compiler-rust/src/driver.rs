@@ -3,6 +3,7 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
@@ -27,9 +28,10 @@ use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena};
 use crate::parser::ast::{
     ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
-    ModuleExprDesc, Payload, Signature, SignatureItemDesc, Structure, StructureItemDesc,
+    ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
+    StructureItemDesc,
 };
-use crate::parser::{Parser, code_frame, jsx_ppx, module};
+use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
@@ -46,6 +48,9 @@ use crate::types::{
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabled: LetUnwrap. Enable it by setting \"LetUnwrap\" to true under \"experimental-features\" in rescript.json.";
+const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
+const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
+    "`let?` is only supported in let bindings targeting the `result` or `option` type.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -1455,6 +1460,20 @@ fn let_unwrap_feature_error_to_anyhow(
     .into()
 }
 
+fn let_unwrap_position_error_to_anyhow(
+    loc: LocIdx,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    message: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, loc, message),
+        2,
+    )
+    .into()
+}
+
 fn attr_is_let_unwrap(attr: &Attribute, arena: &ParseArena) -> bool {
     arena.get_string(attr.0.txt) == "let.unwrap"
 }
@@ -1478,6 +1497,265 @@ fn reject_disabled_let_unwrap_in_structure(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LetUnwrapPositionError {
+    Toplevel(LocIdx),
+    UnsupportedType(LocIdx),
+}
+
+fn reject_enabled_invalid_let_unwrap_in_structure(
+    enabled: bool,
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    if let Some(error) = invalid_enabled_let_unwrap_in_structure(structure, arena) {
+        let (loc, message) = match error {
+            LetUnwrapPositionError::Toplevel(loc) => (loc, LET_UNWRAP_TOPLEVEL_MSG),
+            LetUnwrapPositionError::UnsupportedType(loc) => (loc, LET_UNWRAP_UNSUPPORTED_TYPE_MSG),
+        };
+        return Err(let_unwrap_position_error_to_anyhow(
+            loc, arena, source, filename, message,
+        ));
+    }
+    Ok(())
+}
+
+fn let_unwrap_binding_loc(
+    bindings: &[crate::parser::ast::ValueBinding],
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    bindings
+        .iter()
+        .find(|binding| attrs_have_let_unwrap(&binding.pvb_attributes, arena))
+        .map(|binding| arena.get_pat(binding.pvb_pat).ppat_loc)
+}
+
+fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
+    let PatternDesc::Ppat_construct(ctor_lid, payload) = &*pat.ppat_desc else {
+        return false;
+    };
+    let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
+        return false;
+    };
+    match (arena.get_string(*ctor_name_idx), payload.is_some()) {
+        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
+        _ => false,
+    }
+}
+
+fn invalid_enabled_let_unwrap_in_bindings(
+    bindings: &[crate::parser::ast::ValueBinding],
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    for binding in bindings {
+        if let Some(error) = invalid_enabled_let_unwrap_in_expr(binding.pvb_expr, arena) {
+            return Some(error);
+        }
+    }
+    None
+}
+
+fn invalid_enabled_let_unwrap_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(eval) => {
+                if let Some(error) = invalid_enabled_let_unwrap_in_expr(eval.0, arena) {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                if let Some(loc) = let_unwrap_binding_loc(&value.1, arena) {
+                    return Some(LetUnwrapPositionError::Toplevel(loc));
+                }
+                if let Some(error) = invalid_enabled_let_unwrap_in_bindings(&value.1, arena) {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
+                {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(error) =
+                        invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
+                    {
+                        return Some(error);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_mod_expr(include_decl.pincl_mod, arena)
+                {
+                    return Some(error);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn invalid_enabled_let_unwrap_in_mod_expr(
+    mod_expr: ModExprIdx,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    let mod_expr = arena.get_mod_expr(mod_expr);
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            invalid_enabled_let_unwrap_in_structure(items, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            invalid_enabled_let_unwrap_in_mod_expr(functor.2, arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => invalid_enabled_let_unwrap_in_mod_expr(*lhs, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_mod_expr(*rhs, arena)),
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            invalid_enabled_let_unwrap_in_mod_expr(*inner, arena)
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => invalid_enabled_let_unwrap_in_expr(*expr, arena),
+        _ => None,
+    }
+}
+
+fn invalid_enabled_let_unwrap_in_expr(
+    expr: ExprIdx,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    let expr = arena.get_expr(expr);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            if let [binding] = bindings.as_slice()
+                && attrs_have_let_unwrap(&binding.pvb_attributes, arena)
+                && !is_supported_let_unwrap_pattern(arena.get_pat(binding.pvb_pat), arena)
+            {
+                return Some(LetUnwrapPositionError::UnsupportedType(
+                    arena.get_pat(binding.pvb_pat).ppat_loc,
+                ));
+            }
+            invalid_enabled_let_unwrap_in_bindings(bindings, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena))
+        }
+        ExpressionDesc::Pexp_fun(fun) => fun
+            .default
+            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(fun.rhs, arena)),
+        ExpressionDesc::Pexp_apply(apply) => invalid_enabled_let_unwrap_in_expr(apply.funct, arena)
+            .or_else(|| {
+                apply
+                    .args
+                    .iter()
+                    .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
+            }),
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena).or_else(|| {
+                inner.1.iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
+                        .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
+                })
+            })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+            .iter()
+            .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_construct(_, payload) => {
+            payload.and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
+        }
+        ExpressionDesc::Pexp_variant(inner) => inner
+            .1
+            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena)),
+        ExpressionDesc::Pexp_record(record) => record
+            .0
+            .iter()
+            .find_map(|field| invalid_enabled_let_unwrap_in_expr(field.expr, arena))
+            .or_else(|| {
+                record
+                    .1
+                    .and_then(|base| invalid_enabled_let_unwrap_in_expr(base, arena))
+            }),
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            invalid_enabled_let_unwrap_in_expr(*owner, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_setfield(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+                .or_else(|| {
+                    inner
+                        .2
+                        .and_then(|else_expr| invalid_enabled_let_unwrap_in_expr(else_expr, arena))
+                })
+        }
+        ExpressionDesc::Pexp_sequence(lhs, rhs) => invalid_enabled_let_unwrap_in_expr(*lhs, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(*rhs, arena)),
+        ExpressionDesc::Pexp_while(cond, body) => invalid_enabled_let_unwrap_in_expr(*cond, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena)),
+        ExpressionDesc::Pexp_for(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.4, arena)),
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            invalid_enabled_let_unwrap_in_mod_expr(inner.1, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena),
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            invalid_enabled_let_unwrap_in_mod_expr(*mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => invalid_enabled_let_unwrap_in_expr(inner.2, arena),
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena).or_else(|| {
+                inner
+                    .2
+                    .and_then(|payload| invalid_enabled_let_unwrap_in_expr(payload, arena))
+            })
+        }
+        _ => None,
+    }
 }
 
 fn disabled_let_unwrap_loc_in_bindings(
@@ -1743,6 +2021,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::ApplyNonFunction { loc, typ }) => {
+            UserDiagnostic::new(
+                format_apply_non_function_report(type_ctx, arena, source, filename, *loc, *typ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::ApplyWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
                 format_apply_wrong_label_report(type_ctx, arena, source, filename, *loc, label, *ty),
@@ -1792,6 +2077,11 @@ fn type_mod_error_to_anyhow(
                 qualifier.as_deref(),
                 alternatives,
             ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundModule { loc, name }) => UserDiagnostic::new(
+            format_unbound_module_report(arena, source, filename, *loc, name),
             2,
         )
         .into(),
@@ -1866,6 +2156,17 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::NotAnObjectType { loc, ty }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("The type {} is not an object type", format_type_expr(type_ctx, *ty)),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
@@ -1904,6 +2205,19 @@ fn type_mod_error_to_anyhow(
             record_name,
         } => UserDiagnostic::new(
             format_duplicate_type_label_report(arena, source, filename, *loc, label, record_name),
+            2,
+        )
+        .into(),
+        TypeModError::ObjectSpreadWithRecordField { loc, field_name } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "You cannot mix a record field with an object type spread.\nRemove the record field or change it to an object field (e.g. \"{field_name}\": ...)."
+                ),
+            ),
             2,
         )
         .into(),
@@ -2229,6 +2543,22 @@ fn format_unbound_value_report(
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
+fn format_unbound_module_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let message = format!(
+        "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?\n\n"
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
 fn format_message_with_compiler_indentation(message: &str) -> String {
     let mut output = String::new();
     for line in message.lines() {
@@ -2442,63 +2772,81 @@ fn format_expr_type_clash_report(
         return format_compiler_error_report_raw_message(arena, source, filename, loc, &message);
     }
 
-    let (error_text, expected_text) = match context {
+    let (error_text, expected_text): (Cow<'static, str>, Cow<'static, str>) = match context {
         Some(TypeClashContext::ArrayLiteral) => (
-            "This array item has type: ",
-            "But this array is expected to have items of type: ",
+            Cow::Borrowed("This array item has type: "),
+            Cow::Borrowed("But this array is expected to have items of type: "),
         ),
         Some(TypeClashContext::FunctionCall) => (
-            "This has type: ",
-            "But this function argument is expecting: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this function argument is expecting: "),
+        ),
+        Some(TypeClashContext::FunctionArgument { .. }) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this function argument is expecting: "),
         ),
         Some(TypeClashContext::StatementFunctionCall) => (
-            "This function call returns: ",
-            "But it's expected to return: ",
+            Cow::Borrowed("This function call returns: "),
+            Cow::Borrowed("But it's expected to return: "),
         ),
         Some(TypeClashContext::ComparisonOperator) => (
-            "This has type: ",
-            "But it's being compared to something of type: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But it's being compared to something of type: "),
+        ),
+        Some(TypeClashContext::MathOperator {
+            operator,
+            is_constant,
+            ..
+        }) => (
+            Cow::Borrowed(if is_constant.is_some() {
+                "This value has type: "
+            } else {
+                "This has type: "
+            }),
+            Cow::Owned(format!(
+                "But it's being used with the {INFO}{operator}{RESET} operator, which works on: "
+            )),
         ),
         Some(TypeClashContext::RecordField { .. }) => (
-            "This has type: ",
-            "But the record field ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But the record field "),
         ),
         Some(TypeClashContext::IfCondition) => (
-            "This has type: ",
-            "But \x1b[1;33mif\x1b[0m conditions must always be of type: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But \x1b[1;33mif\x1b[0m conditions must always be of type: "),
         ),
         Some(TypeClashContext::IfReturn) => (
-            "This has type: ",
-            "But this \x1b[1;33mif\x1b[0m statement is expected to return: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this \x1b[1;33mif\x1b[0m statement is expected to return: "),
         ),
         Some(TypeClashContext::TernaryReturn) => (
-            "This has type: ",
-            "But this ternary is expected to return: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this ternary is expected to return: "),
         ),
         Some(TypeClashContext::WhileCondition) => (
-            "This has type: ",
-            "But a \x1b[1;33mwhile\x1b[0m loop condition must always be of type: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But a \x1b[1;33mwhile\x1b[0m loop condition must always be of type: "),
         ),
         Some(TypeClashContext::ForLoopCondition) => (
-            "This has type: ",
-            "But a \x1b[1;33mfor\x1b[0m loop bounds must always be of type: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But a \x1b[1;33mfor\x1b[0m loop bounds must always be of type: "),
         ),
         Some(TypeClashContext::AssertCondition) => (
-            "This has type: ",
-            "But assertions must always be of type: ",
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But assertions must always be of type: "),
         ),
-        _ => ("This has type: ", "But it's expected to have type: "),
+        Some(TypeClashContext::LetUnwrapReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this \x1b[1;33mlet?\x1b[0m is used where this type is expected: "),
+        ),
+        _ => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But it's expected to have type: "),
+        ),
     };
 
-    message.push_str(error_text);
-    append_type_clash_type(
-        type_ctx,
-        trace,
-        true,
-        ERROR,
-        actual,
-        &mut message,
-    );
+    message.push_str(&error_text);
+    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
     message.push('\n');
     if let Some(TypeClashContext::RecordField {
         field_name, jsx, ..
@@ -2519,35 +2867,77 @@ fn format_expr_type_clash_report(
                 message.push_str(" is expected to have type: ");
             }
             _ => {
-                message.push_str(expected_text);
+                message.push_str(&expected_text);
                 message.push_str(INFO);
                 message.push_str(field_name);
                 message.push_str(RESET);
                 message.push_str(" is expected to have type: ");
             }
         }
-        append_type_clash_type(
-            type_ctx,
-            trace,
-            false,
-            INFO,
-            expected,
-            &mut message,
-        );
+        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+    } else if let Some(TypeClashContext::FunctionArgument { optional, name }) = context {
+        message.push_str("But this");
+        if *optional {
+            message.push_str(" optional");
+        }
+        message.push_str(" function argument");
+        if let Some(name) = name {
+            message.push(' ');
+            message.push_str(INFO);
+            message.push('~');
+            message.push_str(name);
+            message.push_str(RESET);
+        }
+        message.push_str(" is expecting:");
+        if type_is_object(type_ctx, expected) {
+            message.push_str("\n  ");
+            if let Some((field_name, expected_field_ty)) =
+                object_field_expected_line(type_ctx, trace)
+            {
+                message.push_str(INFO);
+                message.push_str("{..");
+                message.push('"');
+                message.push_str(&field_name);
+                message.push('"');
+                message.push_str(": ");
+                message.push_str(&format_type_expr(type_ctx, expected_field_ty));
+                message.push('}');
+                message.push_str(RESET);
+                append_extra_type_clash_help(
+                    type_ctx,
+                    arena,
+                    source,
+                    loc,
+                    context,
+                    trace,
+                    &mut message,
+                );
+
+                if type_clash_array_to_tuple(type_ctx, trace)
+                    || type_clash_expected_unit_actual(type_ctx, trace).is_some()
+                {
+                    let message = format_type_clash_message_with_empty_blank_lines(&message);
+                    return format_compiler_error_report_raw_message(
+                        arena, source, filename, loc, &message,
+                    );
+                }
+
+                return format_compiler_error_report(arena, source, filename, loc, &message);
+            }
+        } else {
+            message.push(' ');
+        }
+        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
     } else {
-        message.push_str(expected_text);
-        append_type_clash_type(
-            type_ctx,
-            trace,
-            false,
-            INFO,
-            expected,
-            &mut message,
-        );
+        message.push_str(&expected_text);
+        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
     }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
-    if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
+    if matches!(
+        context,
+        Some(TypeClashContext::ArrayLiteral) | Some(TypeClashContext::MathOperator { .. })
+    ) {
         let message = format_array_type_clash_message(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
@@ -2562,6 +2952,9 @@ fn format_expr_type_clash_report(
             | Some(TypeClashContext::IfCondition)
             | Some(TypeClashContext::StatementFunctionCall)
     ) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_array_to_tuple(type_ctx, trace)
@@ -2641,18 +3034,30 @@ fn rendered_alias_expansion(
 ) -> Option<TypeExprRef> {
     let first = trace.first()?;
     let (top_actual, top_expected) = *first;
-    let top = if actual_side { top_actual } else { top_expected };
+    let top = if actual_side {
+        top_actual
+    } else {
+        top_expected
+    };
     let top_text = format_type_expr(type_ctx, top);
     if let Some(expansion) = trace.iter().skip(1).find_map(|pair| {
         let ty = if actual_side { pair.0 } else { pair.1 };
-        (type_ctx.repr(ty) != type_ctx.repr(top) && format_type_expr(type_ctx, ty) == top_text)
+        (!type_is_object(type_ctx, ty)
+            && type_ctx.repr(ty) != type_ctx.repr(top)
+            && format_type_expr(type_ctx, ty) == top_text)
             .then_some(ty)
     }) {
         return Some(expansion);
     }
 
-    let counterpart_text =
-        format_type_expr(type_ctx, if actual_side { top_expected } else { top_actual });
+    let counterpart_text = format_type_expr(
+        type_ctx,
+        if actual_side {
+            top_expected
+        } else {
+            top_actual
+        },
+    );
     trace.iter().skip(1).find_map(|pair| {
         let left_text = format_type_expr(type_ctx, pair.0);
         let right_text = format_type_expr(type_ctx, pair.1);
@@ -2896,6 +3301,15 @@ fn append_extra_type_clash_help(
         message.push_str("\n\n\n");
     }
 
+    if append_let_unwrap_return_help(type_ctx, trace, context, message) {
+        return;
+    }
+
+    if append_optional_function_argument_help(type_ctx, arena, source, loc, context, trace, message)
+    {
+        return;
+    }
+
     if !matches!(context, Some(TypeClashContext::StatementFunctionCall))
         && let Some(actual) = type_clash_expected_unit_actual(type_ctx, trace)
     {
@@ -2940,9 +3354,360 @@ fn append_extra_type_clash_help(
         return;
     }
 
-    append_incompatible_type_parts(type_ctx, trace, message);
-    append_dict_literal_help(type_ctx, trace, message);
-    append_simple_conversion_help(type_ctx, trace, message);
+    if append_object_literal_record_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    let is_math_operator = append_math_operator_help(type_ctx, trace, context, message);
+    let is_object_field_mismatch = append_object_field_mismatch_help(type_ctx, trace, message);
+    let is_object_field_missing = append_object_field_missing_help(type_ctx, trace, message);
+    if !is_math_operator && !is_object_field_mismatch && !is_object_field_missing {
+        append_incompatible_type_parts(type_ctx, trace, message);
+        append_dict_literal_help(type_ctx, trace, message);
+    }
+    append_simple_conversion_help(type_ctx, arena, source, loc, trace, message);
+}
+
+fn append_math_operator_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::MathOperator {
+        for_float,
+        operator,
+        is_constant,
+    }) = context
+    else {
+        return false;
+    };
+
+    let bottom_aliases = bottom_type_clash_aliases(trace);
+    if operator == "+"
+        && bottom_aliases.is_some_and(|(actual, expected)| {
+            type_is_predef_path(type_ctx, actual, &crate::types::predef::path_string())
+                || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_string())
+        })
+    {
+        message.push_str("\n\nAre you looking to concatenate strings? Use the operator ");
+        message.push_str(INFO);
+        message.push_str("++");
+        message.push_str(RESET);
+        message.push_str(", which concatenates strings.\n\nPossible solutions:\n- Change the ");
+        message.push_str(INFO);
+        message.push('+');
+        message.push_str(RESET);
+        message.push_str(" operator to ");
+        message.push_str(INFO);
+        message.push_str("++");
+        message.push_str(RESET);
+        message.push_str(" to concatenate strings instead.");
+        return true;
+    }
+
+    let operator_for_other_type = match operator.as_str() {
+        "+" => "+.",
+        "+." => "+",
+        "/" => "/.",
+        "/." => "/",
+        "-" => "-.",
+        "*" => "*.",
+        "*." => "*",
+        other => other,
+    };
+    let operator_text = match operator.as_bytes().first().copied() {
+        Some(b'+') => "add",
+        Some(b'-') => "subtract",
+        Some(b'/') => "divide",
+        Some(b'*') => "multiply",
+        _ => "compute",
+    };
+    let target_type = if *for_float { "float" } else { "int" };
+
+    message.push_str(
+        "\n\nFloats and ints have their own mathematical operators. This means you cannot ",
+    );
+    message.push_str(operator_text);
+    message.push_str(" a float and an int without converting between the two.\n\nPossible solutions:\n- Ensure all values in this calculation have the type ");
+    message.push_str(INFO);
+    message.push_str(target_type);
+    message.push_str(RESET);
+    message.push_str(". You can convert between floats and ints via ");
+    message.push_str(INFO);
+    message.push_str("Float.toInt");
+    message.push_str(RESET);
+    message.push_str(" and ");
+    message.push_str(INFO);
+    message.push_str("Int.fromFloat");
+    message.push_str(RESET);
+    message.push('.');
+
+    if let Some(constant) = is_constant {
+        message.push_str("\n- Make ");
+        message.push_str(INFO);
+        message.push_str(constant);
+        message.push_str(RESET);
+        message.push_str(if *for_float { " a " } else { " an " });
+        message.push_str(INFO);
+        message.push_str(target_type);
+        message.push_str(RESET);
+        if *for_float {
+            message.push_str(" by adding a trailing dot: ");
+            message.push_str(INFO);
+            message.push_str(constant);
+            message.push('.');
+            message.push_str(RESET);
+        } else {
+            message.push_str(" by removing the dot or explicitly converting to int");
+        }
+    } else if [
+        bottom_aliases,
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        type_pair_has_names(type_ctx, actual, expected, "float", "int")
+            || type_pair_has_names(type_ctx, actual, expected, "int", "float")
+    }) {
+        message.push_str("\n- Change the operator to ");
+        message.push_str(INFO);
+        message.push_str(operator_for_other_type);
+        message.push_str(RESET);
+        message.push_str(", which works on ");
+        message.push_str(INFO);
+        message.push_str(if *for_float { "int" } else { "float" });
+        message.push_str(RESET);
+    }
+
+    true
+}
+
+fn type_pair_has_names(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+    actual_name: &str,
+    expected_name: &str,
+) -> bool {
+    simple_type_constr_name(type_ctx, actual).as_deref() == Some(actual_name)
+        && simple_type_constr_name(type_ctx, expected).as_deref() == Some(expected_name)
+}
+
+fn append_let_unwrap_return_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if !matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
+        return false;
+    }
+
+    enum LetUnwrapKind {
+        Option,
+        Result,
+        Unknown,
+    }
+
+    let kind = [
+        trace.first().copied(),
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|(actual, expected)| {
+        if type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option())
+            || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_option())
+        {
+            Some(LetUnwrapKind::Option)
+        } else if type_is_predef_path(type_ctx, actual, &crate::types::predef::path_result())
+            || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_result())
+        {
+            Some(LetUnwrapKind::Result)
+        } else {
+            None
+        }
+    })
+    .unwrap_or(LetUnwrapKind::Unknown);
+
+    match kind {
+        LetUnwrapKind::Option => {
+            message.push_str("\n\nThis ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" unwraps an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str("; use it where the enclosing function or let binding returns an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(" so ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(" can propagate.\n\nPossible solutions:\n- Change the enclosing function or let binding to return ");
+            message.push_str(INFO);
+            message.push_str("option<'t>");
+            message.push_str(RESET);
+            message.push_str(" and use ");
+            message.push_str(INFO);
+            message.push_str("Some");
+            message.push_str(RESET);
+            message.push_str(" for success; ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" will propagate ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+        LetUnwrapKind::Result => {
+            message.push_str("\n\nThis ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" unwraps a ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str("; use it where the enclosing function or let binding returns a ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str(" so ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(" can propagate.\n\nPossible solutions:\n- Change the enclosing function or let binding to return ");
+            message.push_str(INFO);
+            message.push_str("result<'ok, 'error>");
+            message.push_str(RESET);
+            message.push_str("; use ");
+            message.push_str(INFO);
+            message.push_str("Ok");
+            message.push_str(RESET);
+            message.push_str(" for success, and ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" will propagate ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Result.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+        LetUnwrapKind::Unknown => {
+            message.push_str("\n\n");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" can only be used in a context that expects ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str(".\n\nPossible solutions:\n- Change the enclosing function or let binding to return an ");
+            message.push_str(INFO);
+            message.push_str("option<'t>");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("result<'ok, 'error>");
+            message.push_str(RESET);
+            message.push_str(" and propagate with ");
+            message.push_str(INFO);
+            message.push_str("Some/Ok");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("None/Error");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr(default)");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("Result.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+    }
+
+    true
+}
+
+fn type_is_predef_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expected_path: &crate::types::path::Path,
+) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.same(expected_path),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            type_is_predef_path(type_ctx, *next, expected_path)
+        }
+        _ => false,
+    }
 }
 
 fn append_optional_record_field_help(
@@ -2981,10 +3746,14 @@ fn append_optional_record_field_help(
     message.push_str(field_name);
     message.push_str(RESET);
     if jsx.is_some() {
-        message.push_str(" is an optional component prop, and you're passing an optional value to it.\n");
+        message.push_str(
+            " is an optional component prop, and you're passing an optional value to it.\n",
+        );
         message.push_str("Values passed to an optional component prop don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
     } else {
-        message.push_str(" is an optional record field, and you're passing an optional value to it.\n");
+        message.push_str(
+            " is an optional record field, and you're passing an optional value to it.\n",
+        );
         message.push_str("Values passed to an optional record field don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
     }
     message.push_str("     \n");
@@ -3010,10 +3779,163 @@ fn append_optional_record_field_help(
     true
 }
 
+fn append_optional_function_argument_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::FunctionArgument { optional: true, .. }) = context else {
+        return false;
+    };
+    let Some((actual, _expected)) = trace.first().copied() else {
+        return false;
+    };
+    if !type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option()) {
+        return false;
+    }
+
+    let passed_text = source_text_at_loc(arena, source, loc).unwrap_or_default();
+    message.push_str("\n\n");
+    message.push_str("You're passing an optional value into an optional function argument.\n");
+    message.push_str("Values passed to an optional function argument don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    message.push_str("     \n");
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Unwrap the option from the value you're passing in\n");
+    message.push_str("- If you really do want to pass the optional value, prepend the value with ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(RESET);
+    message.push_str(" to show you want to pass the option, like: ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(&passed_text);
+    message.push_str(RESET);
+
+    true
+}
+
 fn source_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> Option<String> {
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
     source.get(start..end).map(str::trim).map(str::to_string)
+}
+
+fn append_object_literal_record_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let has_object_record_mismatch = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        type_is_object(type_ctx, actual) && type_is_record(type_ctx, expected)
+    });
+    if !has_object_record_mismatch {
+        return false;
+    }
+
+    message.push_str("\n\nYou're passing a ");
+    message.push_str(ERROR);
+    message.push_str("ReScript object");
+    message.push_str(RESET);
+    message.push_str(" where a ");
+    message.push_str(INFO);
+    message.push_str("record");
+    message.push_str(RESET);
+    message.push_str(
+        " is expected. Objects are written with quoted keys, and records with unquoted keys.",
+    );
+    message.push_str("\n\nPossible solutions: \n- Rewrite the object to a record");
+    if let Some(rewrite) = source_text_at_loc(arena, source, loc)
+        .and_then(|text| object_literal_to_record_rewrite(&text))
+    {
+        message.push_str(", like: ");
+        message.push_str(INFO);
+        message.push_str(&rewrite);
+        message.push_str(RESET);
+    }
+    message.push('\n');
+    message.push('\n');
+
+    true
+}
+
+fn object_literal_to_record_rewrite(text: &str) -> Option<String> {
+    let mut output = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < chars.len() {
+        if chars[index] != '"' {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        let start = index + 1;
+        let mut end = start;
+        let mut escaped = false;
+        while end < chars.len() {
+            let ch = chars[end];
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= chars.len() {
+            return None;
+        }
+
+        let key: String = chars[start..end].iter().collect();
+        let mut after = end + 1;
+        while after < chars.len() && chars[after].is_whitespace() {
+            after += 1;
+        }
+        if after < chars.len() && chars[after] == ':' && is_record_field_rewrite_key(&key) {
+            output.push_str(&key);
+            changed = true;
+        } else {
+            output.push('"');
+            output.push_str(&key);
+            output.push('"');
+        }
+        index = end + 1;
+    }
+
+    changed.then_some(output)
+}
+
+fn is_record_field_rewrite_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn append_jsx_element_type_clash_help(
@@ -3030,9 +3952,7 @@ fn append_jsx_element_type_clash_help(
 
     let repr = type_ctx.repr(actual);
     match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tconstr { path, args: _, .. }
-            if path.same(&crate::types::predef::path_int()) =>
-        {
+        TypeDesc::Tconstr { path, args: _, .. } if path.same(&crate::types::predef::path_int()) => {
             message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert int to a JSX element with ");
             message.push_str(INFO);
             message.push_str("React.int");
@@ -3088,7 +4008,9 @@ fn append_jsx_element_type_clash_help(
                 message.push_str(INFO);
                 message.push_str("React.array");
                 message.push_str(RESET);
-                message.push_str(" to convert the array of JSX elements into a single JSX element.\n\n");
+                message.push_str(
+                    " to convert the array of JSX elements into a single JSX element.\n\n",
+                );
             }
             true
         }
@@ -3185,6 +4107,161 @@ fn append_incompatible_type_parts(
     message.push_str(RESET);
 }
 
+fn append_object_field_mismatch_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((field_name, actual_ty, expected_ty)) = trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
+    else {
+        return false;
+    };
+
+    message.push_str("\n\nTypes for field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" are incompatible:\n");
+    message.push_str("Field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" in the passed object has type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(type_ctx, actual_ty));
+    message.push_str(RESET);
+    message.push_str(", but is expected to have type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, expected_ty));
+    message.push_str(RESET);
+    message.push('.');
+
+    true
+}
+
+fn append_object_field_missing_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((first_object, field_name, field_ty)) = trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_missing_pair(type_ctx, *actual, *expected))
+    else {
+        return false;
+    };
+
+    message.push_str("\n\nThe ");
+    message.push_str(if first_object { "first" } else { "second" });
+    message.push_str(" object is expected to have a field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" of type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, field_ty));
+    message.push_str(RESET);
+    message.push_str(", but it does not.");
+
+    true
+}
+
+fn object_field_expected_line(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(String, TypeExprRef)> {
+    trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
+        .map(|(field_name, _, expected_field_ty)| (field_name, expected_field_ty))
+        .or_else(|| {
+            trace
+                .iter()
+                .find_map(|(actual, expected)| {
+                    object_field_missing_pair(type_ctx, *actual, *expected)
+                })
+                .map(|(_, field_name, field_ty)| (field_name, field_ty))
+        })
+}
+
+fn object_field_mismatch_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(String, TypeExprRef, TypeExprRef)> {
+    let actual_repr = type_ctx.repr(actual);
+    let expected_repr = type_ctx.repr(expected);
+    let actual_desc = type_ctx.get_desc(actual_repr);
+    let expected_desc = type_ctx.get_desc(expected_repr);
+    let result = match (&*actual_desc, &*expected_desc) {
+        (
+            TypeDesc::Tfield {
+                name: actual_name,
+                typ: actual_ty,
+                rest: actual_rest,
+                ..
+            },
+            TypeDesc::Tfield {
+                name: expected_name,
+                typ: expected_ty,
+                rest: expected_rest,
+                ..
+            },
+        ) if actual_name == expected_name
+            && type_is_nil(type_ctx, *actual_rest)
+            && type_is_nil(type_ctx, *expected_rest) =>
+        {
+            Some((actual_name.clone(), *actual_ty, *expected_ty))
+        }
+        _ => None,
+    };
+    drop(actual_desc);
+    drop(expected_desc);
+    result
+}
+
+fn object_field_missing_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(bool, String, TypeExprRef)> {
+    let actual_repr = type_ctx.repr(actual);
+    let expected_repr = type_ctx.repr(expected);
+    let actual_desc = type_ctx.get_desc(actual_repr);
+    let expected_desc = type_ctx.get_desc(expected_repr);
+    let result = match (&*actual_desc, &*expected_desc) {
+        (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name, typ, .. }) => {
+            Some((true, name.clone(), *typ))
+        }
+        (TypeDesc::Tfield { name, typ, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
+            Some((false, name.clone(), *typ))
+        }
+        _ => None,
+    };
+    drop(actual_desc);
+    drop(expected_desc);
+    result
+}
+
+fn type_is_nil(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    matches!(&*type_ctx.get_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
+}
+
 fn append_dict_literal_help(
     type_ctx: &TypeContext,
     trace: &[(TypeExprRef, TypeExprRef)],
@@ -3220,6 +4297,43 @@ fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     )
 }
 
+fn type_is_record(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => type_path_is_record(type_ctx, path),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_record(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn type_path_is_record(type_ctx: &TypeContext, path: &crate::types::Path) -> bool {
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+    {
+        return matches!(
+            &decl.type_kind,
+            crate::types::decl::TypeKind::TypeRecord(_, _)
+        );
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
+        return matches!(
+            &decl.type_kind,
+            crate::types::decl::TypeKind::TypeRecord(_, _)
+        );
+    }
+
+    type_ctx
+        .find_type_decl(path.head_name())
+        .is_some_and(|decl| {
+            matches!(
+                &decl.type_kind,
+                crate::types::decl::TypeKind::TypeRecord(_, _)
+            )
+        })
+}
+
 fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let repr = type_ctx.repr(ty);
     match &*type_ctx.get_desc(repr) {
@@ -3244,8 +4358,10 @@ fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, Type
             TypeDesc::Tconstr { path, .. } => path.head_name() == "array",
             _ => false,
         };
-        let expected_is_tuple =
-            matches!(&*type_ctx.get_desc(type_ctx.repr(expected)), TypeDesc::Ttuple(_));
+        let expected_is_tuple = matches!(
+            &*type_ctx.get_desc(type_ctx.repr(expected)),
+            TypeDesc::Ttuple(_)
+        );
 
         actual_is_array && expected_is_tuple
     })
@@ -3265,13 +4381,18 @@ fn suggested_array_to_tuple_rewrite(
 
 fn append_simple_conversion_help(
     type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
     message: &mut String,
 ) {
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let Some((actual_name, expected_name, converter)) = simple_conversion_candidate(type_ctx, trace) else {
+    let Some((actual_name, expected_name, converter)) =
+        simple_conversion_candidate(type_ctx, trace)
+    else {
         return;
     };
 
@@ -3288,6 +4409,45 @@ fn append_simple_conversion_help(
     message.push_str(converter);
     message.push_str(RESET);
     message.push('.');
+    if actual_name == "float"
+        && expected_name == "int"
+        && source_loc_is_float_literal_with_trailing_dot(arena, source, loc)
+    {
+        message.push('\n');
+        message.push_str("If this is a literal, try a number without a trailing dot (e.g. ");
+        message.push_str(INFO);
+        message.push_str("20");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+    if actual_name == "int" && expected_name == "float" {
+        message.push('\n');
+        message.push_str("If this is a literal, try a number with a trailing dot (e.g. ");
+        message.push_str(INFO);
+        message.push_str("20.");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+}
+
+fn source_loc_is_float_literal_with_trailing_dot(
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> bool {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    let Some(text) = source.get(start..end).map(str::trim) else {
+        return false;
+    };
+    let (text, loc_has_dot) = if let Some(text) = text.strip_suffix('.') {
+        (text, true)
+    } else {
+        (text, false)
+    };
+    !text.is_empty()
+        && text.chars().all(|ch| ch.is_ascii_digit() || ch == '_')
+        && (loc_has_dot || source.as_bytes().get(end).is_some_and(|byte| *byte == b'.'))
 }
 
 fn simple_conversion_candidate(
@@ -3321,17 +4481,22 @@ fn nested_type_clash_pair(
     let (top_actual, top_expected) = trace.first().copied()?;
     let top_actual_text = format_type_expr(type_ctx, top_actual);
     let top_expected_text = format_type_expr(type_ctx, top_expected);
-    trace.iter().skip(1).rev().copied().find(|(actual, expected)| {
-        let actual_text = format_type_expr(type_ctx, *actual);
-        let expected_text = format_type_expr(type_ctx, *expected);
-        let is_top_alias_expansion =
-            (actual_text == top_actual_text && expected_text != top_expected_text)
+    trace
+        .iter()
+        .skip(1)
+        .rev()
+        .copied()
+        .find(|(actual, expected)| {
+            let actual_text = format_type_expr(type_ctx, *actual);
+            let expected_text = format_type_expr(type_ctx, *expected);
+            let is_top_alias_expansion = (actual_text == top_actual_text
+                && expected_text != top_expected_text)
                 || (expected_text == top_expected_text && actual_text != top_actual_text)
                 || (actual_text == top_expected_text && expected_text != top_actual_text)
                 || (expected_text == top_actual_text && actual_text != top_expected_text);
-        !is_top_alias_expansion
-            && (actual_text != top_actual_text || expected_text != top_expected_text)
-    })
+            !is_top_alias_expansion
+                && (actual_text != top_actual_text || expected_text != top_expected_text)
+        })
 }
 
 fn bottom_type_clash_aliases(
@@ -3378,8 +4543,7 @@ fn expr_type_clash_uncurried_arity_mismatch(
 fn uncurried_arrow_arity(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<i32> {
     match &*type_ctx.get_desc(type_ctx.repr(ty)) {
         TypeDesc::Tarrow {
-            arity: Some(arity),
-            ..
+            arity: Some(arity), ..
         } => Some(*arity),
         _ => None,
     }
@@ -3416,6 +4580,66 @@ fn format_function_arity_mismatch_report(
     message.push_str(ERROR);
     message.push_str(&actual_arity.to_string());
     message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -> usize {
+    let mut current = ty;
+    let mut seen = AHashSet::new();
+
+    loop {
+        let repr = type_ctx.repr(current);
+        if !seen.insert(repr) {
+            return count;
+        }
+
+        match &*type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { ret, .. } => {
+                count += 1;
+                current = *ret;
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                current = *next;
+            }
+            _ => return count,
+        }
+    }
+}
+
+fn format_apply_non_function_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    typ: TypeExprRef,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let repr = type_ctx.repr(typ);
+    let mut message = String::new();
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tarrow { ret, .. } => {
+            let count = count_arrow_args(type_ctx, *ret, 1);
+            message.push_str("This function has type ");
+            message.push_str(INFO);
+            message.push_str(&format_type_expr(type_ctx, typ));
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("It only accepts ");
+            message.push_str(&count.to_string());
+            message.push(' ');
+            message.push_str(if count == 1 { "argument" } else { "arguments" });
+            message.push_str("; here, it's called with more.");
+        }
+        _ => {
+            message.push_str("This can't be called, it's not a function.\n");
+            message.push_str("The function has type: ");
+            message.push_str(&format_type_expr(type_ctx, typ));
+        }
+    }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
@@ -3496,7 +4720,9 @@ fn format_unbound_record_field_report(
             message.push_str("option");
             message.push_str(RESET);
             message.push_str(".\n");
-            message.push_str("You need to unwrap the option first before accessing the record field.\n");
+            message.push_str(
+                "You need to unwrap the option first before accessing the record field.\n",
+            );
             message.push('\n');
             message.push_str("Possible solutions:\n");
             message.push_str("- Use ");
@@ -3548,7 +4774,9 @@ fn format_unbound_record_field_report(
             message.push_str(INFO);
             message.push_str(field_name);
             message.push_str(RESET);
-            message.push_str(" refers to a record field, but no corresponding record type is in scope.");
+            message.push_str(
+                " refers to a record field, but no corresponding record type is in scope.",
+            );
         }
     }
 
@@ -3793,6 +5021,7 @@ fn collect_function_arg_labels(
         }
     }
 
+    labels.reverse();
     labels
 }
 
@@ -3986,6 +5215,13 @@ pub fn compile_source_to_js_with_options(
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     reject_disabled_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
+    reject_enabled_invalid_let_unwrap_in_structure(
         experimental_let_unwrap,
         &structure,
         parser.arena(),
@@ -4931,6 +6167,13 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let experimental_let_unwrap =
             experimental_let_unwrap_for_structure(&structure, options, parser.arena());
         reject_disabled_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+        reject_enabled_invalid_let_unwrap_in_structure(
             experimental_let_unwrap,
             &structure,
             parser.arena(),
@@ -6116,6 +7359,13 @@ pub fn compile_source_in_process(
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     reject_disabled_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
+    reject_enabled_invalid_let_unwrap_in_structure(
         experimental_let_unwrap,
         &structure,
         parser.arena(),

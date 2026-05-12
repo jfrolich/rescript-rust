@@ -1190,9 +1190,7 @@ fn deprecated_payload_has_migration_template(value: &OcamlValue) -> bool {
             return false;
         }
         match value {
-            OcamlValue::String(value) => {
-                value == "migrate" || value == "migrateInPipeChain"
-            }
+            OcamlValue::String(value) => value == "migrate" || value == "migrateInPipeChain",
             OcamlValue::Block(_, fields) => fields.iter().any(|field| visit(field, depth + 1)),
             _ => false,
         }
