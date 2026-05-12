@@ -36,14 +36,12 @@ pub type IncludeModResult<T> = Result<T, IncludeModError>;
 /// Errors that can occur during module inclusion checking.
 #[derive(Debug, Clone)]
 pub enum IncludeModError {
-    /// Missing value in implementation.
-    MissingValue(Ident),
-    /// Missing type in implementation.
-    MissingType(Ident),
-    /// Missing module in implementation.
-    MissingModule(Ident),
-    /// Missing module type in implementation.
-    MissingModuleType(Ident),
+    /// Missing signature field in implementation.
+    MissingField {
+        id: Ident,
+        loc: crate::location::Location,
+        kind: &'static str,
+    },
     /// Value type mismatch.
     ValueTypeMismatch {
         name: Ident,
@@ -163,25 +161,20 @@ fn format_include_error(
                 output.push('\n');
             }
         }
-        IncludeModError::MissingValue(id) => {
-            output.push_str("  The value `");
+        IncludeModError::MissingField { id, loc, kind } => {
+            output.push_str("  The ");
+            output.push_str(kind);
+            output.push_str(" `");
             output.push_str(id.name());
             output.push_str("' is required but not provided\n");
-        }
-        IncludeModError::MissingType(id) => {
-            output.push_str("  The type `");
-            output.push_str(id.name());
-            output.push_str("' is required but not provided\n");
-        }
-        IncludeModError::MissingModule(id) => {
-            output.push_str("  The module `");
-            output.push_str(id.name());
-            output.push_str("' is required but not provided\n");
-        }
-        IncludeModError::MissingModuleType(id) => {
-            output.push_str("  The module type `");
-            output.push_str(id.name());
-            output.push_str("' is required but not provided\n");
+            output.push_str("  ");
+            output.push_str(&code_frame::format_location(
+                filename,
+                &loc.loc_start,
+                &loc.loc_end,
+            ));
+            output.push_str(":\n");
+            output.push_str("    Expected declaration\n");
         }
         IncludeModError::ValueTypeMismatch {
             name,
@@ -1297,14 +1290,25 @@ fn register_paired_signature_substitution(
     }
 }
 
-fn missing_signature_item_error(item: &SignatureItem, id: &Ident) -> IncludeModError {
-    match item {
-        SignatureItem::SigValue(_, _) => IncludeModError::MissingValue(id.clone()),
-        SignatureItem::SigType(_, _, _) => IncludeModError::MissingType(id.clone()),
-        SignatureItem::SigTypext(_, _, _) => IncludeModError::MissingValue(id.clone()),
-        SignatureItem::SigModule(_, _, _) => IncludeModError::MissingModule(id.clone()),
-        SignatureItem::SigModtype(_, _) => IncludeModError::MissingModuleType(id.clone()),
-        SignatureItem::SigClass | SignatureItem::SigClassType => unreachable!(),
+fn field_desc_kind(field_desc: &FieldDesc) -> &'static str {
+    match field_desc {
+        FieldDesc::Value(_) => "value",
+        FieldDesc::Type(_) => "type",
+        FieldDesc::Typext(_) => "extension constructor",
+        FieldDesc::Module(_) => "module",
+        FieldDesc::Modtype(_) => "module type",
+    }
+}
+
+fn missing_signature_item_error(
+    id: &Ident,
+    loc: &crate::location::Location,
+    field_desc: &FieldDesc,
+) -> IncludeModError {
+    IncludeModError::MissingField {
+        id: id.clone(),
+        loc: loc.clone(),
+        kind: field_desc_kind(field_desc),
     }
 }
 
@@ -1319,7 +1323,7 @@ fn pair_signature_items<'a>(
     let mut errors = Vec::new();
 
     for sig_item in sig_sig {
-        let (sig_id, _, _) = item_ident_name(sig_item);
+        let (sig_id, sig_loc, _) = item_ident_name(sig_item);
         let (field_desc, report_missing) = adjusted_item_field_desc(sig_item);
         if let Some(entry) = component_table.get(&field_desc).copied() {
             let pair = PairedSignatureItem {
@@ -1330,7 +1334,7 @@ fn pair_signature_items<'a>(
             register_paired_signature_substitution(pair, sig_access_path, subst);
             paired.push(pair);
         } else if report_missing {
-            errors.push(missing_signature_item_error(sig_item, sig_id));
+            errors.push(missing_signature_item_error(sig_id, sig_loc, &field_desc));
         }
     }
 

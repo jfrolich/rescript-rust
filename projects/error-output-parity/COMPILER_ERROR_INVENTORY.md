@@ -378,7 +378,8 @@ through higher-level errors such as `Typemod.Not_included`,
 Coverage should include representative include mismatch symptoms rather than
 only the wrapper variant:
 
-- missing values
+- missing values (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_missing_value.res`)
 - value description mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
 - type declaration mismatch
