@@ -6363,11 +6363,15 @@ fn normalize_for_of_pattern(
     match &*pattern.ppat_desc {
         super::ast::PatternDesc::Ppat_any | super::ast::PatternDesc::Ppat_var(_) => pattern,
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "A `for...of` or `for await...of` loop only supports a variable or `_` on the \
-                 left side. Destructuring patterns are not supported here."
-                    .to_string(),
-            ));
+            p.err_at(
+                p.loc_start(pattern.ppat_loc),
+                p.loc_end(pattern.ppat_loc),
+                DiagnosticCategory::Message(
+                    "A `for...of` or `for await...of` loop only supports a variable or `_` on the \
+                     left side. Destructuring patterns are not supported here."
+                        .to_string(),
+                ),
+            );
             super::ast::Pattern {
                 ppat_desc: Box::new(super::ast::PatternDesc::Ppat_any),
                 ppat_loc: pattern.ppat_loc,
