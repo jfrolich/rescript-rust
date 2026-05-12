@@ -2468,6 +2468,17 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         },
+        TypeModError::CoreError(TypeCoreError::JsxNotEnabled { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Cannot compile JSX expression because JSX support is not enabled. Add \"jsx\" settings to rescript.json to enable JSX support.",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::InvalidForLoopIndex { loc }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

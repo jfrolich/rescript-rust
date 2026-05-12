@@ -645,7 +645,7 @@ pub enum TypeCoreError {
     NotAnObjectType { loc: LocIdx, ty: TypeExprRef },
 
     /// JSX not enabled.
-    JsxNotEnabled,
+    JsxNotEnabled { loc: LocIdx },
 
     /// Other error (catch-all for module type checking errors propagated from typemod).
     Other(String),
@@ -19108,26 +19108,8 @@ fn type_jsx_element(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    // JSX elements are typically transformed to function calls before type checking
-    // by the JSX PPX. If we encounter one here, we create a placeholder.
-    //
-    // In a full implementation, this would:
-    // 1. Look up the component (lowercase = intrinsic, uppercase = component)
-    // 2. Type check props
-    // 3. Type check children
-    // 4. Return appropriate React element type
-
-    let _ = tctx; // May be used for JSX type checking
-
-    // For now, return a placeholder with the expected type
-    // Real JSX handling would create Texp_apply calls
-    Ok(Expression::new(
-        ExpressionDesc::Texp_constant(Constant::Int(0)), // Placeholder
-        loc.clone(),
-        expected_ty,
-        EnvRef(0),
-        attributes.to_vec().into(),
-    ))
+    let _ = (tctx, expected_ty, attributes);
+    Err(TypeCoreError::JsxNotEnabled { loc })
 }
 
 fn module_type_from_package_binding(

@@ -119,6 +119,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/break_outside_loop.res`.
 - `Continue_outside_loop`: covered by
   `tests/error_output_parity/compiler/fixtures/continue_outside_loop.res`.
+- `Jsx_not_enabled`: covered by
+  `tests/error_output_parity/compiler/cases/jsx_not_enabled.res` through the
+  explicit no-`-bs-jsx` compiler case in
+  `tests/error_output_parity/compiler/cases.tsv`.
 
 ## Typetexp Coverage Notes
 
