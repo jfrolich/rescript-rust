@@ -217,6 +217,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/polyvariant_constructor_mismatch.res`.
 - `Not_a_variant`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res`.
+- `Not_an_object`: covered by
+  `tests/error_output_parity/compiler/fixtures/typetexp_not_an_object.res`.
 
 ## `compiler/ml/typetexp.ml`
 
