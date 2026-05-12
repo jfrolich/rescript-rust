@@ -332,6 +332,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/rebind_wrong_type.res`.
 - `Rebind_mismatch`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/rebind_mismatch.res`.
 - `Rebind_private`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/rebind_private.res`.
@@ -346,6 +348,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.
 - `Varying_anonymous`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.
 - `Val_in_structure`
 - `Invalid_attribute`
   - Covered for `@notUndefined` misuse by
