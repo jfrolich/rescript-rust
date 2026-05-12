@@ -338,9 +338,13 @@ pub enum ExpressionDesc {
     /// OCaml compiler/ml/typecore.ml:2833-2842 stores one entry per label from
     /// the shared `lbl_all` array. Keep the same external typedtree shape by
     /// expanding in serializers, but avoid copying hundreds of label
-    /// descriptions into every sparse JSX record internally. Do not remove this
-    /// during parity cleanup unless the replacement keeps the same external
-    /// typedtree/lambda/JS behavior and comparable large-record performance.
+    /// descriptions into every sparse JSX record internally. The shared
+    /// `all_labels` table is part of that optimization; consumers are expected
+    /// to expand it at typedtree/lambda/raw-lambda boundaries.
+    ///
+    /// Do not remove this during parity cleanup unless the replacement keeps
+    /// the same external typedtree/lambda/JS behavior and comparable
+    /// large-record performance.
     Texp_record_sparse {
         fields: Vec<RecordField>,
         all_labels: std::sync::Arc<Vec<LabelDescription>>,

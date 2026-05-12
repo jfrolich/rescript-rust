@@ -224,6 +224,9 @@ impl<'a> LambdaConverter<'a> {
                 omitted_loc,
                 ..
             } => {
+                // Intentional Rust performance representation: sparse typed
+                // records expand at the lambda boundary to the same field
+                // stream OCaml compiler/ml/translcore.ml:1139-1191 receives.
                 let expanded_fields =
                     self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
                 self.convert_record(self.loc(expr.exp_loc), &expanded_fields, None)
@@ -1100,6 +1103,10 @@ impl<'a> LambdaConverter<'a> {
             if let Some(field) = explicit_by_pos.get(&pos) {
                 expanded.push((*field).clone());
             } else if label.lbl_optional {
+                // Intentional Rust performance representation: reconstruct
+                // the omitted optional `None` node that OCaml
+                // compiler/ml/typecore.ml:2833-2842 stores eagerly in the
+                // typedtree field list.
                 let label_lid = Located {
                     txt: placeholder_lid.txt,
                     loc: omitted_loc,

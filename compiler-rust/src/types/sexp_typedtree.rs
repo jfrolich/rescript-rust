@@ -1075,6 +1075,10 @@ fn sexp_record_definition(
             sexp_longident_idx(arena, ctx, li.txt),
             sexp_expression(arena, ctx, with_locs, dedup, e),
         ]),
+        // Intentional Rust performance representation: `OmittedOptionalNone`
+        // is the sparse internal form of the `option_none` expression that
+        // OCaml compiler/ml/typecore.ml:2833-2842 materializes. Sexp output
+        // must expand it here, not remove the sparse storage optimization.
         RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
             Sexp::atom("Overridden"),
             sexp_longident_idx(arena, ctx, li.txt),
@@ -1301,6 +1305,9 @@ fn sexp_expression_desc(
             omitted_loc,
             extended_expression,
         } => {
+            // Intentional Rust performance representation: this is the
+            // typedtree boundary that expands sparse records back to OCaml's
+            // full record-field shape for parity output.
             let mut explicit_by_pos: HashMap<usize, &RecordField> =
                 HashMap::with_capacity(fields.len());
             for field in fields.iter() {

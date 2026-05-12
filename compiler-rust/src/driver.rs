@@ -328,6 +328,9 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 extended_expression,
                 ..
             } => {
+                // Intentional Rust performance representation: omitted
+                // optional fields are synthetic, so traversal only visits
+                // explicit overridden expressions and the optional base.
                 for (_, _, field, _) in fields {
                     if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
                         field
