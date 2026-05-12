@@ -287,6 +287,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/duplicate_label.res`.
 - `Object_spread_with_record_field`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.
 - `Recursive_abbrev`
 - `Cycle_in_def`
 - `Definition_mismatch`
