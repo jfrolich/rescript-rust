@@ -317,6 +317,18 @@ fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
 }
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    format_module_type_with_weak_names(type_ctx, mty, false)
+}
+
+pub(crate) fn format_module_type_show_weak(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+    format_module_type_with_weak_names(type_ctx, mty, true)
+}
+
+fn format_module_type_with_weak_names(
+    type_ctx: &TypeContext,
+    mty: &ModuleType,
+    weak_names: bool,
+) -> String {
     match mty {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => path.name(),
         ModuleType::MtySignature(sig) => {
@@ -325,7 +337,9 @@ pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> St
             } else {
                 let items = sig
                     .iter()
-                    .map(|item| indent_lines(&format_signature_item(type_ctx, item), "  "))
+                    .map(|item| {
+                        indent_lines(&format_signature_item(type_ctx, item, weak_names), "  ")
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!("{{\n{items}\n}}")
@@ -338,30 +352,34 @@ pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> St
         } => {
             let param_type = param_type
                 .as_ref()
-                .map(|mty| format_module_type(type_ctx, mty))
+                .map(|mty| format_module_type_with_weak_names(type_ctx, mty, weak_names))
                 .unwrap_or_else(|| "_".to_string());
-            let result = format_module_type(type_ctx, result);
+            let result = format_module_type_with_weak_names(type_ctx, result, weak_names);
             format!("({}: {}) => {}", param.name(), param_type, result)
         }
     }
 }
 
-fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem) -> String {
+fn format_signature_item(type_ctx: &TypeContext, item: &SignatureItem, weak_names: bool) -> String {
     match item {
-        SignatureItem::SigType(id, decl, _) => format_type_declaration(type_ctx, id, decl),
-        SignatureItem::SigValue(id, desc) => format_value_description(type_ctx, id, desc),
+        SignatureItem::SigType(id, decl, _) => {
+            format_type_declaration_with_weak_names(type_ctx, id, decl, weak_names)
+        }
+        SignatureItem::SigValue(id, desc) => {
+            format_value_description_with_weak_names(type_ctx, id, desc, weak_names)
+        }
         SignatureItem::SigModule(id, decl, _) => {
             format!(
                 "module {}: {}",
                 id.name(),
-                format_module_type(type_ctx, &decl.md_type)
+                format_module_type_with_weak_names(type_ctx, &decl.md_type, weak_names)
             )
         }
         SignatureItem::SigModtype(id, decl) => match &decl.mtd_type {
             Some(mty) => format!(
                 "module type {} = {}",
                 id.name(),
-                format_module_type(type_ctx, mty)
+                format_module_type_with_weak_names(type_ctx, mty, weak_names)
             ),
             None => format!("module type {}", id.name()),
         },
@@ -398,15 +416,33 @@ fn format_value_description(
     id: &Ident,
     desc: &ValueDescription,
 ) -> String {
+    format_value_description_with_weak_names(type_ctx, id, desc, false)
+}
+
+fn format_value_description_with_weak_names(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    desc: &ValueDescription,
+    weak_names: bool,
+) -> String {
     format!(
         "let {}: {}",
         id.name(),
-        TypeExprErrorPrinter::new(type_ctx).format(desc.val_type)
+        TypeExprErrorPrinter::new_with_weak_names(type_ctx, weak_names).format(desc.val_type)
     )
 }
 
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
-    let mut printer = TypeExprErrorPrinter::new(type_ctx);
+    format_type_declaration_with_weak_names(type_ctx, id, decl, false)
+}
+
+fn format_type_declaration_with_weak_names(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    decl: &TypeDeclaration,
+    weak_names: bool,
+) -> String {
+    let mut printer = TypeExprErrorPrinter::new_with_weak_names(type_ctx, weak_names);
     let name = id.name();
     let params = format_type_params(&mut printer, &decl.type_params);
     let prefix = if decl.type_unboxed.unboxed {
@@ -590,15 +626,25 @@ fn optional_field_payload_type(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeE
 struct TypeExprErrorPrinter<'a> {
     type_ctx: &'a TypeContext,
     vars: HashMap<TypeExprRef, String>,
+    weak_vars: HashMap<TypeExprRef, String>,
     next_var: usize,
+    next_weak_var: usize,
+    weak_names: bool,
 }
 
 impl<'a> TypeExprErrorPrinter<'a> {
     fn new(type_ctx: &'a TypeContext) -> Self {
+        Self::new_with_weak_names(type_ctx, false)
+    }
+
+    fn new_with_weak_names(type_ctx: &'a TypeContext, weak_names: bool) -> Self {
         Self {
             type_ctx,
             vars: HashMap::new(),
+            weak_vars: HashMap::new(),
             next_var: 0,
+            next_weak_var: 1,
+            weak_names,
         }
     }
 
@@ -669,6 +715,16 @@ impl<'a> TypeExprErrorPrinter<'a> {
     }
 
     fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
+        if self.weak_names && self.type_ctx.get_level(ty) != crate::types::GENERIC_LEVEL {
+            if let Some(existing) = self.weak_vars.get(&ty) {
+                return existing.clone();
+            }
+            let name = format!("'_weak{}", self.next_weak_var);
+            self.next_weak_var += 1;
+            self.weak_vars.insert(ty, name.clone());
+            return name;
+        }
+
         if let Some(name) = name
             && !name.is_empty()
             && name != "_"

@@ -15472,7 +15472,7 @@ fn type_structure_item<'a>(
                 crate::types::decl::ModuleDeclaration {
                     md_type: localized_decl_mod_type,
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: arena.to_location(mb.pmb_loc),
                     md_path: None,
                 },
             );
@@ -15481,7 +15481,7 @@ fn type_structure_item<'a>(
                 crate::types::decl::ModuleDeclaration {
                     md_type: item_sig_mod_type,
                     md_attributes: vec![],
-                    md_loc: crate::location::Location::none(),
+                    md_loc: arena.to_location(mb.pmb_loc),
                     md_path: None,
                 },
                 crate::types::decl::RecStatus::TrecNot,

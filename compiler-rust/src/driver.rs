@@ -3457,7 +3457,7 @@ fn type_mod_error_to_anyhow(
         )
         .into(),
         TypeModError::NonGeneralizableModule { loc, mty } => UserDiagnostic::new(
-            format_non_generalizable_module_report(source, filename, loc, mty),
+            format_non_generalizable_module_report(source, filename, loc, type_ctx, mty),
             2,
         )
         .into(),
@@ -3556,14 +3556,34 @@ fn format_non_generalizable_module_report(
     source: &str,
     filename: &str,
     loc: &Location,
+    type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    let rendered_type = format!("{mty:?}");
-    let message = non_generalizable_help_message(
-        "The type of this module contains type variables that cannot be generalized:",
-        &rendered_type,
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let rendered_type = crate::types::includemod::format_module_type_show_weak(type_ctx, mty);
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+    output.push_str(
+        "  The type of this module contains type variables that cannot be generalized:\n",
     );
-    format_compiler_error_report_from_location(source, filename, loc, &message)
+    output.push_str("  ");
+    output.push_str(ERROR);
+    output.push_str(&rendered_type);
+    output.push_str(RESET);
+    output.push('\n');
+    output.push_str("  \n");
+    output.push_str("  This happens when the type system senses there's a mutation/side-effect,\n");
+    output.push_str("  in combination with a polymorphic value.\n");
+    output.push_str("  ");
+    output.push_str(INFO);
+    output.push_str("Using or annotating that value usually solves it.");
+    output.push_str(RESET);
+    output.push_str("\n\n");
+    output
 }
 
 fn push_compiler_error_report_header_from_location(

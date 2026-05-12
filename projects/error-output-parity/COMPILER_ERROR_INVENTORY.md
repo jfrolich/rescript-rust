@@ -333,6 +333,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/non_generalizable_ref_none.res`.
 - `Non_generalizable_module`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/non_generalizable_module.res`.
 - `Interface_not_compiled`
 - `Not_allowed_in_functor_body`
 - `Not_a_packed_module`
