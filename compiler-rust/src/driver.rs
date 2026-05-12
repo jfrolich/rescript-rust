@@ -2737,6 +2737,11 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::WithMismatch { loc, lid, error } => UserDiagnostic::new(
+            format_with_mismatch_report(type_ctx, arena, source, filename, *loc, lid, error),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -3720,6 +3725,26 @@ fn format_typemod_module_type(
         }
         _ => crate::types::includemod::format_module_type(type_ctx, mty),
     }
+}
+
+fn format_with_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    error: &crate::types::includemod::IncludeModError,
+) -> String {
+    let mut message = String::new();
+    message.push_str("  In this `with' constraint, the new definition of ");
+    message.push_str(&format_longident_for_report(arena, lid));
+    message.push('\n');
+    message.push_str("  does not match its original definition in the constrained signature:\n");
+    message.push_str(&crate::types::includemod::format_error_without_signature_header(
+        type_ctx, filename, error,
+    ));
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
 
 fn format_not_a_variant_type_report(

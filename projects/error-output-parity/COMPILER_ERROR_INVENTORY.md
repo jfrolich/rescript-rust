@@ -319,6 +319,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_no_component_type.res`.
 - `With_mismatch`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/with_mismatch_type.res`.
 - `With_makes_applicative_functor_ill_typed`
 - `With_changes_module_alias`
 - `With_cannot_remove_constrained_type`

@@ -84,6 +84,16 @@ pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModEr
     output
 }
 
+pub(crate) fn format_error_without_signature_header(
+    type_ctx: &TypeContext,
+    filename: &str,
+    error: &IncludeModError,
+) -> String {
+    let mut output = String::new();
+    format_include_error(type_ctx, filename, error, &mut output);
+    output
+}
+
 fn format_include_error(
     type_ctx: &TypeContext,
     filename: &str,
@@ -2069,7 +2079,7 @@ fn substitute_value_type_paths<'a>(
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.
-fn type_declarations<'a>(
+pub(crate) fn type_declarations<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
     id: Ident,
@@ -2089,6 +2099,21 @@ fn type_declarations<'a>(
     }
 
     force_package_manifest_inclusion_side_effects(type_ctx, env, impl_decl, sig_decl);
+
+    let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
+    if let Some(sig_manifest) = sig_decl.type_manifest {
+        let manifests_match = impl_decl.type_manifest.is_some_and(|impl_manifest| {
+            type_exprs_equal_for_inclusion(type_ctx, &param_map, impl_manifest, sig_manifest)
+        });
+        if !manifests_match {
+            return Err(IncludeModError::TypeDeclarationMismatch {
+                name: id,
+                actual: impl_decl.clone(),
+                expected: sig_decl.clone(),
+                detail: String::new(),
+            });
+        }
+    }
 
     // Match OCaml's Includecore.type_declarations variance check.
     let sig_is_abstract = matches!(

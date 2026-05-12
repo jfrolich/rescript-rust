@@ -3164,6 +3164,15 @@ pub enum TypeModError {
         /// Missing constrained component path.
         lid: Longident,
     },
+    /// A `with` constraint replacement is not included in the original component.
+    WithMismatch {
+        /// Whole constrained module type location.
+        loc: LocIdx,
+        /// Constrained component path.
+        lid: Longident,
+        /// Inclusion error from checking the replacement against the original.
+        error: crate::types::includemod::IncludeModError,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -6899,7 +6908,11 @@ fn collect_pmty_with_type_constraints<'a>(
 }
 
 enum ResolvedWithConstraintTarget {
-    Type { path: Path, id: Ident },
+    Type {
+        path: Path,
+        id: Ident,
+        decl: crate::types::decl::TypeDeclaration,
+    },
     Module { path: Path },
 }
 
@@ -6924,10 +6937,11 @@ fn resolve_with_constraint_target_in_sig(
 
     for item in sig_items {
         match item {
-            SignatureItem::SigType(id, _, _) if id.name() == head.as_str() && tail.is_empty() => {
+            SignatureItem::SigType(id, decl, _) if id.name() == head.as_str() && tail.is_empty() => {
                 return Some(ResolvedWithConstraintTarget::Type {
                     path: resolved_constraint_path(prefix, id),
                     id: id.clone(),
+                    decl: decl.clone(),
                 });
             }
             SignatureItem::SigModule(id, md, _) if id.name() == head.as_str() => {
@@ -6983,6 +6997,7 @@ fn transl_with_constraints<'a>(
     arena: &'a ParseArena,
     base_mty: Option<&crate::types::decl::ModuleType>,
     constraints: &[crate::parser::ast::WithConstraint],
+    loc: LocIdx,
 ) -> TypeModResult<
     Vec<(
         Path,
@@ -6998,7 +7013,11 @@ fn transl_with_constraints<'a>(
         match constraint {
             ParsedWithConstraint::Pwith_type(lid, decl) => {
                 let longident = tctx.resolve_lid(lid.txt).clone();
-                if let Some(ResolvedWithConstraintTarget::Type { path, id }) =
+                if let Some(ResolvedWithConstraintTarget::Type {
+                    path,
+                    id,
+                    decl: original_decl,
+                }) =
                     resolve_with_constraint_target(tctx, env, arena, base_mty, &longident)
                 {
                     let mut typed_decls = transl_sig_type_declarations_with_ids(
@@ -7010,6 +7029,18 @@ fn transl_with_constraints<'a>(
                         Some(std::slice::from_ref(&id)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
+                        crate::types::includemod::type_declarations(
+                            tctx.type_ctx,
+                            env,
+                            id.clone(),
+                            &typed_decl.typ_type,
+                            &original_decl,
+                        )
+                        .map_err(|error| TypeModError::WithMismatch {
+                            loc,
+                            lid: longident.clone(),
+                            error,
+                        })?;
                         typed_constraints.push((
                             path,
                             lid.clone(),
@@ -7037,7 +7068,11 @@ fn transl_with_constraints<'a>(
             }
             ParsedWithConstraint::Pwith_typesubst(lid, decl) => {
                 let longident = tctx.resolve_lid(lid.txt).clone();
-                if let Some(ResolvedWithConstraintTarget::Type { path, id }) =
+                if let Some(ResolvedWithConstraintTarget::Type {
+                    path,
+                    id,
+                    decl: original_decl,
+                }) =
                     resolve_with_constraint_target(tctx, env, arena, base_mty, &longident)
                 {
                     let mut typed_decls = transl_sig_type_declarations_with_ids(
@@ -7049,6 +7084,18 @@ fn transl_with_constraints<'a>(
                         Some(std::slice::from_ref(&id)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
+                        crate::types::includemod::type_declarations(
+                            tctx.type_ctx,
+                            env,
+                            id.clone(),
+                            &typed_decl.typ_type,
+                            &original_decl,
+                        )
+                        .map_err(|error| TypeModError::WithMismatch {
+                            loc,
+                            lid: longident.clone(),
+                            error,
+                        })?;
                         typed_constraints.push((
                             path,
                             lid.clone(),
@@ -11821,7 +11868,7 @@ fn transl_modtype<'a>(
                 )?;
             }
             let typed_constraints =
-                transl_with_constraints(tctx, env, arena, base_mty.as_ref(), constraints)?;
+                transl_with_constraints(tctx, env, arena, base_mty.as_ref(), constraints, loc)?;
             TMtyDesc::Tmty_with(Box::new(typed_body), typed_constraints)
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
