@@ -2444,6 +2444,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::MultiplyBoundVariable { loc, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("Variable {name} is bound several times in this matching"),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::BreakOutsideLoop { loc }) => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,

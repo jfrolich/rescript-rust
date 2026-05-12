@@ -413,7 +413,7 @@ pub enum TypeCoreError {
     OrPatternTypeClash(Ident, Vec<(TypeExprRef, TypeExprRef)>),
 
     /// Variable bound multiple times.
-    MultiplyBoundVariable(String),
+    MultiplyBoundVariable { loc: LocIdx, name: String },
 
     /// Variables don't match in or-pattern.
     OrpatVars(Ident, Vec<Ident>),
@@ -826,7 +826,10 @@ impl PatternState {
             .iter()
             .any(|pv| pv.id.name() == name_str)
         {
-            return Err(TypeCoreError::MultiplyBoundVariable(name_str.to_string()));
+            return Err(TypeCoreError::MultiplyBoundVariable {
+                loc,
+                name: name_str.to_string(),
+            });
         }
 
         let id = type_ctx.create_ident(name_str);
@@ -29937,7 +29940,10 @@ mod tests {
 
         // Duplicate should fail
         let id2 = state.enter_variable(&ctx, loc, &name, ty, false, false, &arena);
-        assert!(matches!(id2, Err(TypeCoreError::MultiplyBoundVariable(_))));
+        assert!(matches!(
+            id2,
+            Err(TypeCoreError::MultiplyBoundVariable { .. })
+        ));
     }
 
     #[test]

@@ -64,6 +64,8 @@ with a reason after checking raise sites.
 
 - `Empty_record_literal`: covered by
   `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
+- `Multiply_bound_variable`: covered by
+  `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Uncurried_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
