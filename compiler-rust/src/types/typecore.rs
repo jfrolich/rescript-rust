@@ -13158,6 +13158,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                 crate::types::instance(ctx, ty_arg)
             };
             let mut state = PatternState::new();
+            state.reset(true);
             let typed_pat = type_pattern(
                 tctx,
                 env,
@@ -14431,6 +14432,7 @@ fn type_case_pattern_impl<'a>(
     let needs_case_local_constraints = force_case_local_constraints || case_has_gadt;
 
     let mut state = PatternState::new();
+    state.reset(true);
 
     // For GADT cases, set the unify state env to a fresh clone of case_env.
     // OCaml passes a per-case `env ref` to unify_gadt; in Rust, we must
