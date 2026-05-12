@@ -770,9 +770,23 @@ fn parse_type_constr_with_start(
     let mut path_parts: Vec<String> = vec![];
     loop {
         match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
+            Token::Lident(name) => {
                 path_parts.push(name.to_string());
                 p.next();
+            }
+            Token::Uident(name) => {
+                let token_start = p.start_pos.clone();
+                let token_end = p.end_pos.clone();
+                let token = Token::Uident(Cow::Owned(name.to_string()));
+                path_parts.push(name.to_string());
+                p.next();
+                if p.token == Token::Dot {
+                    p.next();
+                    continue;
+                }
+                p.err_at(token_start, token_end, DiagnosticCategory::Lident(token));
+                p.next();
+                break;
             }
             _ => break,
         }

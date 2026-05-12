@@ -4177,7 +4177,12 @@ fn parse_constructor_impl(
                 let arg_idx = p.arena_mut().push_core_type(arg);
                 args.push(arg_idx);
                 is_first = false;
-                if !p.optional(&Token::Comma) {
+                if p.optional(&Token::Comma) {
+                    continue;
+                }
+                if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan {
+                    continue;
+                } else {
                     break;
                 }
             }
