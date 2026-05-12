@@ -2721,6 +2721,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::RecursiveModuleRequiresExplicitType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Recursive modules require an explicit module type.",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
             format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
             2,

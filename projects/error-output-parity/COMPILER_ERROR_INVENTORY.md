@@ -343,6 +343,8 @@ with a reason after checking raise sites.
 - `Incomplete_packed_module`
 - `Scoping_pack`
 - `Recursive_module_require_explicit_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`.
 - `Apply_generative`
 - `Cannot_scrape_alias`
 

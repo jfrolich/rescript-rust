@@ -3150,6 +3150,11 @@ pub enum TypeModError {
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// Recursive modules require an explicit module type constraint.
+    RecursiveModuleRequiresExplicitType {
+        /// Module expression location to report.
+        loc: LocIdx,
+    },
     /// A module was opened where a structure signature was expected.
     StructureExpected {
         /// Module path location to report.
@@ -15514,9 +15519,14 @@ fn type_structure_item<'a>(
             let mut rec_bindings = Vec::with_capacity(mbs.len());
             for mb in mbs.iter() {
                 let mod_name_str = arena.get_string(mb.pmb_name.txt);
-                let (inner_expr, mty) = match &*arena.get_mod_expr(mb.pmb_expr).pmod_desc {
+                let mb_expr = arena.get_mod_expr(mb.pmb_expr);
+                let (inner_expr, mty) = match &*mb_expr.pmod_desc {
                     ParsedModuleExprDesc::Pmod_constraint(inner_expr, mty) => (*inner_expr, *mty),
-                    _ => return Err(TypeModError::InvalidModuleExpr(arena.to_location(loc))),
+                    _ => {
+                        return Err(TypeModError::RecursiveModuleRequiresExplicitType {
+                            loc: mb_expr.pmod_loc,
+                        });
+                    }
                 };
                 rec_bindings.push((
                     mod_name_str.to_string(),
