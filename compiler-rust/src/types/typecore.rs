@@ -14368,26 +14368,16 @@ fn type_pack(
     let (pack_path, pack_lids, expected_pack_args) = match package_info {
         Some(info) => info,
         None => {
-            // Keep placeholder behavior when the package expectation is not
-            // available yet. This preserves existing compilation coverage while
-            // still emitting OCaml-like module packing for inferred packages.
-            let placeholder_lid = tctx.arena.placeholder_located(loc);
-            return Ok(Expression::new(
-                ExpressionDesc::Texp_pack(Box::new(crate::types::typedtree::ModuleExpr {
-                    mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                        crate::types::Path::pident(Ident::create_local("placeholder")),
-                        placeholder_lid,
-                    ),
-                    mod_loc: loc,
-                    mod_type: crate::types::decl::ModuleType::MtySignature(vec![]),
-                    mod_env: EnvRef(0),
-                    mod_attributes: Attributes::new(),
-                })),
-                loc,
-                expected_ty,
-                EnvRef(0),
-                attributes.to_vec().into(),
-            ));
+            // OCaml compiler/ml/typecore.ml:3518-3525 does not synthesize a
+            // placeholder module when `Ctype.expand_head (instance ty_expected)`
+            // is not a package. It reports the same two errors directly.
+            let desc = ctx.get_desc(ctx.repr(expanded));
+            return match &*desc {
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                    Err(TypeCoreError::CannotInferSignature)
+                }
+                _ => Err(TypeCoreError::NotAPackedModule(expected_ty)),
+            };
         }
     };
     // OCaml compiler/ml/typecore.ml:3518-3525 expands `instance env ty_expected`
