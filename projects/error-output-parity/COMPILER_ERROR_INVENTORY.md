@@ -80,6 +80,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/labels_missing.res`.
 - `Label_not_mutable`: covered by
   `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`.
+- `Wrong_name`: covered by
+  `tests/error_output_parity/compiler/fixtures/wrong_name.res`.
 - `Apply_non_function`: covered by
   `tests/error_output_parity/compiler/fixtures/apply_non_function.res`.
 - `Apply_wrong_label`: covered by

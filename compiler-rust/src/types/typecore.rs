@@ -15507,8 +15507,22 @@ fn type_record(
             )
         } else {
             None
+        };
+        if unqualified_with_opath && disambiguated.is_none() {
+            if let Some(record_opath_ty) = record_opath_ty {
+                if let Some(err) = wrong_record_field_name_error(
+                    tctx,
+                    env,
+                    field.lid.loc,
+                    record_opath_ty,
+                    field_name,
+                    "This record expression is expected to have",
+                ) {
+                    return Err(err);
+                }
+            }
         }
-        .or_else(|| {
+        let disambiguated = disambiguated.or_else(|| {
             lookup_label_by_lid(
                 resolved_lid,
                 tctx.arena,
@@ -15544,19 +15558,6 @@ fn type_record(
                 false,
             )
         });
-        if unqualified_with_opath && disambiguated.is_none() {
-            if let Some(record_opath_ty) = record_opath_ty {
-                if let Some(err) = wrong_record_field_name_error(
-                    tctx,
-                    env,
-                    field.lid.loc,
-                    record_opath_ty,
-                    field_name,
-                ) {
-                    return Err(err);
-                }
-            }
-        }
         explicit_fields.push(ExplicitField {
             original_index: idx,
             field,
@@ -16524,6 +16525,7 @@ fn wrong_record_field_name_error(
     loc: LocIdx,
     record_ty: TypeExprRef,
     field_name: &str,
+    expected: &str,
 ) -> Option<TypeCoreError> {
     let (path, _args, decl) =
         extract_concrete_record_type_info(record_ty, env, &mut tctx.persistent_env, tctx.type_ctx)?;
@@ -16541,7 +16543,7 @@ fn wrong_record_field_name_error(
         loc,
         kind: "record".to_string(),
         ty: record_ty,
-        expected: "This record expression is expected to have".to_string(),
+        expected: expected.to_string(),
         path,
         name: field_name.to_string(),
         alternatives,
@@ -16913,6 +16915,16 @@ fn type_field(
         );
         (env_label, ty_arg, ty_res)
     } else {
+        if let Some(err) = wrong_record_field_name_error(
+            tctx,
+            env,
+            field_lid.loc,
+            ty_exp,
+            &field_name,
+            "This expression has",
+        ) {
+            return Err(err);
+        }
         let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
         if matches!(
             &*tctx.type_ctx.get_desc(ty_exp_repr),
@@ -17044,6 +17056,16 @@ fn type_setfield(
         unify_expression_types(tctx, loc, ty_res, record_ty, None)?;
         (env_label, ty_arg)
     } else {
+        if let Some(err) = wrong_record_field_name_error(
+            tctx,
+            env,
+            field_lid.loc,
+            ty_exp,
+            &field_name,
+            "This expression has",
+        ) {
+            return Err(err);
+        }
         let field_ty = ctx.new_var(None);
         (
             crate::types::LabelDescription {
@@ -24647,7 +24669,7 @@ fn disambiguate_label<'a>(
         }
     }
 
-    if selected.is_none() {
+    if selected.is_none() && opath.is_none() {
         selected = all_labels.last().map(|l| (*l).clone());
     }
 
