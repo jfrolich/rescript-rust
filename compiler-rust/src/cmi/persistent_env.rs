@@ -3324,24 +3324,13 @@ pub fn substitute_type_paths_in_child_sig(
 ) {
     let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
-    // OCaml compiler/ml/env.ml:1530 builds distinct type and module mappings
-    // with `prefix_idents`; compiler/ml/subst.ml:87-95 rewrites a module path
-    // only when that path names a substituted module identifier. If Rust sees a
-    // flattened backing head from the CMI reader (for example
-    // `AWS__DocumentClient.DocumentClient.t`), translate only the parent
-    // signature's module children through the selected component path. Direct
-    // parent type paths such as `Mistakes__Types.storyID` are not module
-    // substitutions in OCaml and must remain under the persistent backing unit.
-    for flat_head in ctx.flattened_alias_heads_for_component_path(parent_module_path) {
-        let flat_parent = Path::pident(Ident::create_persistent(&flat_head));
-        for item in parent_sig {
-            if let SignatureItem::SigModule(id, _, _) = item {
-                let old_prefix = Path::pdot(flat_parent.clone(), id.name());
-                let new_prefix = Path::pdot(parent_module_path.clone(), id.name());
-                rewrite_sig_by_path_prefix(child_sig, &old_prefix, &new_prefix, ctx);
-            }
-        }
-    }
+    // OCaml compiler/ml/env.ml:1454-1486 builds `prefix_idents` from the real
+    // signature binders, and compiler/ml/subst.ml:69-95 rewrites module paths
+    // only through those explicit bindings. Do not synthesize extra flattened
+    // backing-head substitutions here: a scraped alias value type such as
+    // `Crypto-NodeJs.KeyObject.t` is not a path to the parent `KeyObject`
+    // binder, so OCaml leaves it unchanged while building child components at
+    // compiler/ml/env.ml:1516-1578.
     restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
 }
 
