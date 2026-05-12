@@ -4575,17 +4575,29 @@ fn force_qualified_value_type_paths<'a>(
                 // forcing `lookup_qualified_module` would run
                 // compiler/ml/subst.ml:330-364 and freshen child binders
                 // before OCaml's value lookup observes them.
-                with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                    components
-                        .lookup_module(module_name.as_str())
-                        .and_then(|(_, _, md)| match &md.md_type {
-                            crate::types::decl::ModuleType::MtyAlias(_, target)
-                            | crate::types::decl::ModuleType::MtyIdent(target) => {
-                                Some(target.clone())
-                            }
-                            _ => None,
-                        })
-                })
+                with_resolved_module_components_for_path_with_cache_mode(
+                    parent,
+                    env,
+                    pers_env,
+                    ctx,
+                    // OCaml compiler/ml/env.ml:781-793 `find_module_descr`
+                    // is the path used before env.ml:1091-1100 reads a
+                    // qualified value. Stay on that descriptor path while
+                    // recovering the selected component alias; env.ml:865-882
+                    // `find_module` is only for real module lookup/normalizing.
+                    ComponentLookupCacheMode::FindModuleDescr,
+                    |components| {
+                        components
+                            .lookup_module(module_name.as_str())
+                            .and_then(|(_, _, md)| match &md.md_type {
+                                crate::types::decl::ModuleType::MtyAlias(_, target)
+                                | crate::types::decl::ModuleType::MtyIdent(target) => {
+                                    Some(target.clone())
+                                }
+                                _ => None,
+                            })
+                    },
+                )
                 .flatten()
             }
             Path::Papply(_, _) => None,
@@ -4612,11 +4624,16 @@ fn force_qualified_value_type_paths<'a>(
             // only need the presence of a type component here, so query the
             // cached component table directly instead of cloning the whole
             // resolved signature and scanning it.
-            with_resolved_module_components_for_path(
+            with_resolved_module_components_for_path_with_cache_mode(
                 module_path,
                 env,
                 &mut no_persistent_env,
                 ctx,
+                // OCaml compiler/ml/env.ml:781-813 can inspect component
+                // descriptors for type/value disambiguation without forcing
+                // env.ml:1568 module-declaration thunks. This is only a
+                // presence probe for the component type table.
+                ComponentLookupCacheMode::ProbeModuleDescr,
                 |components| components.lookup_type(type_name).is_some(),
             )
             .unwrap_or(false)
@@ -5031,60 +5048,15 @@ fn force_qualified_value_type_paths<'a>(
                     // compiler/ml/typecore.ml:2579-2582 `lower_args`.
                     return;
                 }
-                // OCaml compiler/ml/typecore.ml:2421-2457 instances the
-                // selected value scheme after Env.find_value, and env.ml:781-813
-                // then reaches component tables for non-local type paths in that
-                // scheme. A local module alias such as `UploadManager.registerFile`
-                // still forces imported paths like `Js.TypedArray2.Uint8Array.t`
-                // before the next binder.
-                let should_force_component_type_lookup =
-                    !value_access_root_is_local || !path_root_is_local(&path);
-                if should_force_component_type_lookup && let Path::Pdot(parent, name, _) = &path {
-                    // OCaml compiler/ml/typecore.ml:2421-2457 types
-                    // `Pexp_ident` by calling `Typetexp.find_value`, checking
-                    // the recarg shape with `repr desc.val_type`, then
-                    // instancing `desc.val_type`. Qualified lookup reaches
-                    // compiler/ml/env.ml:800-813, whose component values were
-                    // built by env.ml:1530-1538 with
-                    // compiler/ml/subst.ml:303-309 `Subst.value_description`.
-                    // For value types such as `Set_gen.of_sorted_list :
-                    // Belt.List.t<_> -> _`, OCaml has forced the selected
-                    // type component before the next source binding is typed.
-                    // But env.ml:781-793 resolves local module aliases through
-                    // the local component path, so do not force the underlying
-                    // persistent path again for alias-rooted values like
-                    // `J.classify`.
-                    let nested_inside_selected_module = selected_module_path
-                        .and_then(|selected| path_descendant_depth(parent, selected))
-                        .is_some_and(|depth| depth > 1);
-                    let type_parent_is_selected_alias_sibling =
-                        selected_alias_targets.iter().any(|target| {
-                            let Some(target_parent) = target.parent() else {
-                                return false;
-                            };
-                            let Some(type_parent_parent) = parent.parent() else {
-                                return false;
-                            };
-                            type_parent_parent.same(&target_parent) && !parent.same(target)
-                        });
-                    if !(nested_inside_selected_module || type_parent_is_selected_alias_sibling) {
-                        // OCaml compiler/ml/typecore.ml:2421-2457 value lookup
-                        // reads the selected value description from
-                        // compiler/ml/env.ml:1091-1100's component value
-                        // table. It does not force env.ml:1568 child module
-                        // declarations for nested type paths in that value
-                        // type or sibling modules under the selected alias target;
-                        // compiler/ml/ctype.ml:666-695 reaches those later through
-                        // `get_level` while lowering arguments.
-                        drop(lookup_type_decl_in_resolved_path(
-                            parent,
-                            name.as_str(),
-                            env,
-                            &mut tctx.persistent_env,
-                            ctx,
-                        ));
-                    }
-                }
+                // OCaml compiler/ml/typecore.ml:2421-2457 handles
+                // `Pexp_ident` by taking the value found by
+                // Typetexp.find_value, then instancing `desc.val_type`;
+                // compiler/ml/subst.ml:303-309 rewrites paths already present
+                // in that component value description. It does not call
+                // Env.find_type for every Tconstr in the selected scheme here.
+                // Later expansion/unification paths, such as ctype.ml:666-673
+                // `get_level` and ctype.ml:1367-1372 `expand_head`, perform
+                // the real Env.find_type/Env.normalize_path effects lazily.
                 let rewritten_path = selected_opened_alias_type_path(
                     &path,
                     value_access_root_is_local,
@@ -24186,13 +24158,21 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
         type_name: &str,
         env: &Env,
         ctx: &'a crate::types::context::TypeContext,
+        cache_mode: ComponentLookupCacheMode,
     ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+        // OCaml compiler/ml/env.ml:1095-1105 and 1138-1143 resolve labels
+        // through descriptor component tables; env.ml:800-813 does the same
+        // for type lookup. Preserve the caller's descriptor/probe mode here
+        // instead of falling back to env.ml:865-882 `find_module`, otherwise a
+        // self-manifest fallback can force sibling module declarations while it
+        // is only checking raw component type presence.
         let mut no_persistent_env = None;
-        with_resolved_module_components_for_path(
+        with_resolved_module_components_for_path_with_cache_mode(
             module_path,
             env,
             &mut no_persistent_env,
             ctx,
+            cache_mode,
             |components| {
                 components
                     .lookup_type(type_name)
@@ -24402,7 +24382,13 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     }
 
                     if let Some(raw_decl) =
-                        lookup_raw_type_decl_from_module_path(parent, type_name.as_str(), env, ctx)
+                        lookup_raw_type_decl_from_module_path(
+                            parent,
+                            type_name.as_str(),
+                            env,
+                            ctx,
+                            cache_mode,
+                        )
                     {
                         return Some(raw_decl);
                     }
