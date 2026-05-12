@@ -518,6 +518,13 @@ pub enum TypeCoreError {
     /// A functor was used as if it were a structure.
     AccessFunctorAsStructure { loc: LocIdx, lid: Longident },
 
+    /// A module path is an alias to a missing module.
+    CannotScrapeAlias {
+        loc: LocIdx,
+        lid: Longident,
+        path: Path,
+    },
+
     /// Unbound constructor identifier.
     UnboundConstructor { loc: LocIdx, lid: Longident },
 
@@ -1824,6 +1831,74 @@ pub(crate) fn resolve_type_constructor_path(
     }
 }
 
+fn module_alias_error_for_lid(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> Option<TypeCoreError> {
+    let md = module_decl_for_lid_without_scraping(tctx, env, lid)?;
+    if let crate::types::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
+        Some(TypeCoreError::CannotScrapeAlias {
+            loc,
+            lid: lid.clone(),
+            path: alias_path.clone(),
+        })
+    } else {
+        None
+    }
+}
+
+fn module_decl_for_lid_without_scraping(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Option<crate::types::decl::ModuleDeclaration> {
+    match lid {
+        Longident::Lident(name_idx) => {
+            let name = tctx.arena.get_string(*name_idx);
+            env.find_module_with_origin(name)
+                .ok()
+                .map(|(_, md, _)| md.clone())
+        }
+        Longident::Ldot(prefix, child_idx) => {
+            let parent_path = env.resolve_module_access_path_for_lid(
+                prefix,
+                tctx.arena,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )?;
+            let child_name = tctx.arena.get_string(*child_idx);
+            lookup_module_in_resolved_path(
+                &parent_path,
+                child_name,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+            )
+            .map(|(_, _, md)| md)
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+fn cannot_scrape_alias_type_constructor_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> Option<TypeCoreError> {
+    // OCaml typetexp.ml `narrow_unbound_lid_error` reports
+    // Cannot_scrape_alias when the module prefix exists only as an alias to a
+    // missing module, instead of falling through to Unbound_type_constructor.
+    match lid {
+        Longident::Ldot(prefix, _) => module_alias_error_for_lid(tctx, env, loc, prefix),
+        Longident::Lapply(functor, arg) => module_alias_error_for_lid(tctx, env, loc, functor)
+            .or_else(|| module_alias_error_for_lid(tctx, env, loc, arg)),
+        Longident::Lident(_) => None,
+    }
+}
+
 /// Inner function for type translation.
 fn transl_type_inner(
     tctx: &mut TypeCheckContext<'_>,
@@ -1994,6 +2069,11 @@ fn transl_type_inner(
 
             let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
             let Some(decl) = type_decl else {
+                if let Some(error) =
+                    cannot_scrape_alias_type_constructor_error(tctx, env, lid.loc, longident)
+                {
+                    return Err(error);
+                }
                 return Err(TypeCoreError::UnboundTypeConstructor {
                     loc: lid.loc,
                     lid: longident.clone(),

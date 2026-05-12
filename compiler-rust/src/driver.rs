@@ -3160,6 +3160,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::CannotScrapeAlias { loc, lid, path }) => {
+            UserDiagnostic::new(
+                format_cannot_scrape_alias_report(arena, source, filename, *loc, lid, path),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundConstructor { loc, lid }) => {
             UserDiagnostic::new(
                 format_unbound_constructor_report(arena, source, filename, *loc, lid),
@@ -5174,6 +5181,25 @@ fn format_access_functor_as_structure_report(
         filename,
         loc,
         &format!("The module {name} is a functor, not a structure"),
+    )
+}
+
+fn format_cannot_scrape_alias_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    path: &crate::types::Path,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    let alias = format_type_path_for_report(path);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The module {name} is an alias for module {alias}, which is missing"),
     )
 }
 
