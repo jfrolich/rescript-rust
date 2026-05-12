@@ -2755,6 +2755,13 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::PolymorphicLabel { loc, lid }) => {
+            UserDiagnostic::new(
+                format_polymorphic_label_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::LabelMismatch { loc, lid, trace }) => {
             UserDiagnostic::new(
                 format_label_mismatch_report(type_ctx, arena, source, filename, *loc, lid, trace),
@@ -4431,6 +4438,20 @@ fn format_label_mismatch_report(
         format_longident_for_report(arena, lid),
         format_type_expr(type_ctx, actual),
         format_type_expr(type_ctx, expected)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_polymorphic_label_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let message = format!(
+        "The record field {} is polymorphic. You cannot instantiate it in a pattern.",
+        format_longident_for_report(arena, lid)
     );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

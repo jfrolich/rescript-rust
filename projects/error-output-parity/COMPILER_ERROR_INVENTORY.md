@@ -62,6 +62,8 @@ with a reason after checking raise sites.
 
 ### Typecore Coverage Notes
 
+- `Polymorphic_label`: covered by
+  `tests/error_output_parity/compiler/fixtures/polymorphic_label.res`.
 - `Empty_record_literal`: covered by
   `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
 - `Constructor_arity_mismatch`: covered by

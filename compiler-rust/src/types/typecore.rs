@@ -389,7 +389,7 @@ pub(crate) fn inline_record_type_params(
 #[derive(Debug, Clone)]
 pub enum TypeCoreError {
     /// Polymorphic label in pattern.
-    PolymorphicLabel(Longident),
+    PolymorphicLabel { loc: LocIdx, lid: Longident },
 
     /// Constructor arity mismatch.
     ConstructorArityMismatch {
@@ -4484,7 +4484,10 @@ fn type_pattern_record(
                     || ctx.get_level(ctx.repr(expanded)) != crate::types::GENERIC_LEVEL;
                 drop(desc);
                 if instantiated {
-                    return Err(TypeCoreError::PolymorphicLabel(field_lid_for_error.clone()));
+                    return Err(TypeCoreError::PolymorphicLabel {
+                        loc: field.lid.loc,
+                        lid: field_lid_for_error.clone(),
+                    });
                 }
             }
         }
