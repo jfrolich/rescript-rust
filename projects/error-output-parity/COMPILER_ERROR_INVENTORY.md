@@ -305,6 +305,8 @@ with a reason after checking raise sites.
 ## `compiler/ml/typemod.ml`
 
 - `Cannot_apply`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/cannot_apply_module.res`.
 - `Not_included`
 - `Cannot_eliminate_dependency`
 - `Signature_expected`

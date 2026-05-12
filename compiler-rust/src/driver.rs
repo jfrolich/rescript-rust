@@ -2692,6 +2692,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::CannotApplyModule { loc, mty }) => {
+            UserDiagnostic::new(
+                format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+                2,
+            )
+            .into()
+        }
         TypeModError::NotAPackedModule { loc, ty } => {
             UserDiagnostic::new(
                 format_compiler_error_report_with_unindented_break(
@@ -2706,6 +2713,11 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CannotApply { loc, mty } => UserDiagnostic::new(
+            format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -3618,6 +3630,29 @@ fn format_compiler_error_report_with_unindented_break(
     output.push_str(first_line);
     output.push('\n');
     output.push_str(second_line);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_cannot_apply_module_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type = crate::types::includemod::format_module_type(type_ctx, mty);
+    let rendered = if rendered_module_type == "{}" {
+        ""
+    } else {
+        rendered_module_type.as_str()
+    };
+    output.push_str("  This module is not a functor; it has type ");
+    output.push_str(rendered);
     output.push_str("\n\n");
     output
 }

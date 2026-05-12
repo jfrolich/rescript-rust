@@ -3143,6 +3143,13 @@ pub enum TypeModError {
         /// Type of the unpack payload.
         ty: TypeExprRef,
     },
+    /// A module expression was applied but its module type is not a functor.
+    CannotApply {
+        /// Functor expression location to report.
+        loc: LocIdx,
+        /// Actual module type.
+        mty: crate::types::decl::ModuleType,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -11278,9 +11285,10 @@ fn type_module_expr_with_alias<'a>(
                         })?
                 }
                 _ => {
-                    return Err(TypeModError::FunctorApplicationError(
-                        "applied module is not a functor".to_string(),
-                    ));
+                    return Err(TypeModError::CannotApply {
+                        loc: functor.pmod_loc,
+                        mty: typed_functor.mod_type.clone(),
+                    });
                 }
             };
             let applied_mty = match &functor_mty {

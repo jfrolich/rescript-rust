@@ -208,7 +208,7 @@ fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
     actual.len() + expected.len() > 120
 }
 
-fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
+pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
     match mty {
         ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => path.name(),
         ModuleType::MtySignature(sig) => {

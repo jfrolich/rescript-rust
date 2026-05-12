@@ -628,6 +628,12 @@ pub enum TypeCoreError {
     /// Not a packed module.
     NotAPackedModule { loc: LocIdx, ty: TypeExprRef },
 
+    /// A module expression was applied but its module type is not a functor.
+    CannotApplyModule {
+        loc: LocIdx,
+        mty: crate::types::decl::ModuleType,
+    },
+
     /// Recursive local constraint.
     RecursiveLocalConstraint(Vec<(TypeExprRef, TypeExprRef)>),
 
@@ -19565,7 +19571,12 @@ fn type_pack(
         module_expr,
         false,
     )
-    .map_err(|e| TypeCoreError::Other(format!("pack: {e:?}")));
+    .map_err(|e| match e {
+        crate::types::typemod::TypeModError::CannotApply { loc, mty } => {
+            TypeCoreError::CannotApplyModule { loc, mty }
+        }
+        other => TypeCoreError::Other(format!("pack: {other:?}")),
+    });
     if typed_module_result.is_err() {
         ctx.end_def();
     }
