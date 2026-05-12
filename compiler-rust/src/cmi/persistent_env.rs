@@ -3824,6 +3824,29 @@ pub fn substitute_type_paths_in_value_from_sig(
         ctx,
         &mut visited,
     );
+
+    for flat_head in ctx.flattened_alias_heads_for_component_path(module_path) {
+        let flat_parent = Path::pident(Ident::create_persistent(&flat_head));
+        for item in sig_items {
+            let SignatureItem::SigType(id, _, _) = item else {
+                continue;
+            };
+            let old_path = Path::pdot(flat_parent.clone(), id.name());
+            let new_path = Path::pdot(module_path.clone(), id.name());
+            if old_path.same(&new_path) {
+                continue;
+            }
+            // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents`
+            // creates a selected component type path for each `Sig_type`,
+            // and env.ml:1530-1538 applies compiler/ml/subst.ml:303-309
+            // `Subst.value_description` before typecore.ml:2421-2457
+            // instances the selected value. Rust CMI type graphs can still
+            // contain the flattened persistent backing path for that same
+            // component type, so rewrite only the current component's direct
+            // type binders at the Env substitution boundary.
+            rewrite_type_expr_by_path_prefix_pub(desc.val_type, &old_path, &new_path, ctx);
+        }
+    }
 }
 
 fn direct_manifest_substitution_would_self_alias(

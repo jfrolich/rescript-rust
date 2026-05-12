@@ -4604,102 +4604,6 @@ fn force_qualified_value_type_paths<'a>(
         }
     }
 
-    fn persistent_nested_type_path(
-        ctx: &TypeContext,
-        env: &Env,
-        pers_env: &Option<crate::cmi::persistent_env::PersistentEnv>,
-        path: &Path,
-        value_access_root: Option<&Ident>,
-        selected_module_path: Option<&Path>,
-    ) -> Option<Path> {
-        fn module_signature_declares_type_component(
-            ctx: &TypeContext,
-            env: &Env,
-            module_path: &Path,
-            type_name: &str,
-        ) -> bool {
-            let mut no_persistent_env = None;
-            // OCaml env.ml:781-793 descends through `comp_components`, and
-            // env.ml:1513-1514 keeps those component tables lazy/cached. We
-            // only need the presence of a type component here, so query the
-            // cached component table directly instead of cloning the whole
-            // resolved signature and scanning it.
-            with_resolved_module_components_for_path_with_cache_mode(
-                module_path,
-                env,
-                &mut no_persistent_env,
-                ctx,
-                // OCaml compiler/ml/env.ml:781-813 can inspect component
-                // descriptors for type/value disambiguation without forcing
-                // env.ml:1568 module-declaration thunks. This is only a
-                // presence probe for the component type table.
-                ComponentLookupCacheMode::ProbeModuleDescr,
-                |components| components.lookup_type(type_name).is_some(),
-            )
-            .unwrap_or(false)
-        }
-
-        let Path::Pdot(parent, type_name, _) = path else {
-            return None;
-        };
-        if type_name != "t" {
-            return None;
-        }
-        let Path::Pident(flat_parent) = parent.as_ref() else {
-            return None;
-        };
-        if !flat_parent.is_persistent() {
-            return None;
-        }
-
-        // OCaml compiler/ml/env.ml:1513-1519 scrapes explicit aliases before
-        // compiler/ml/env.ml:1530-1538 prefixes component paths. Recover the
-        // visible parent path for flattened runtime units only from that
-        // registered alias relation, not from underscore spelling.
-        let registered_parent = pers_env
-            .as_ref()
-            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(flat_parent.name()))
-            .or_else(|| ctx.find_flattened_alias_component_path(flat_parent.name()))?;
-        let root = value_access_root?;
-        if !root.is_persistent()
-            || !path_root_ident(&registered_parent).is_some_and(|candidate| candidate.same(root))
-        {
-            return None;
-        }
-
-        for candidate_parent in [registered_parent] {
-            // OCaml compiler/ml/env.ml:1530-1538 builds the substitution for
-            // exactly the selected component table, and compiler/ml/subst.ml:303-309
-            // applies that substitution to value descriptions. Keep that
-            // selected-module restriction instead of inferring additional
-            // implicit-open rewrites from flattened path spelling.
-            if let Some(selected_module_path) = selected_module_path {
-                if !candidate_parent.same(selected_module_path) {
-                    continue;
-                }
-            }
-            let candidate = Path::pdot(candidate_parent.clone(), type_name.clone());
-            if candidate.same(path) {
-                continue;
-            }
-            // OCaml compiler/ml/env.ml:800-813 resolves type components
-            // through the parent `comp_components` table. Do not accept a
-            // flattened alias rewrite unless that component table exposes the
-            // type at the selected parent.
-            if !module_signature_declares_type_component(ctx, env, &candidate_parent, type_name) {
-                continue;
-            }
-
-            return Some(candidate);
-        }
-
-        // Preserve the selected-root rewrite first. Avoid forcing persistent
-        // signatures just to prove this rewrite, because OCaml only forces
-        // compiler/ml/env.ml:1568 module thunks when that component is actually
-        // selected.
-        None
-    }
-
     fn selected_module_is_opened_component_path(env: &Env, selected_module_path: &Path) -> bool {
         env.find_module_with_origin(selected_module_path.last())
             .ok()
@@ -4960,16 +4864,6 @@ fn force_qualified_value_type_paths<'a>(
                         );
                     }
                     None
-                })
-                .or_else(|| {
-                    persistent_nested_type_path(
-                        ctx,
-                        env,
-                        &tctx.persistent_env,
-                        &path,
-                        value_access_root,
-                        selected_module_path,
-                    )
                 });
                 if let Some(rewritten_path) = rewritten_path {
                     ctx.set_desc(
