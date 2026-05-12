@@ -84,6 +84,22 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/unknown_integer_literal_modifier.res`
   and
   `tests/error_output_parity/compiler/fixtures/unknown_float_literal_modifier.res`.
+- `Cannot_infer_signature`: covered by
+  `tests/error_output_parity/compiler/fixtures/cannot_infer_pack_signature.res`.
+- `Not_a_packed_module`: covered by
+  `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
+- `Inlined_record_expected`: covered by
+  `tests/error_output_parity/compiler/fixtures/inlined_record_expected.res`.
+- `Invalid_extension_constructor_payload`: covered by
+  `tests/error_output_parity/compiler/fixtures/invalid_extension_constructor_payload.res`.
+- `Not_an_extension_constructor`: covered by
+  `tests/error_output_parity/compiler/fixtures/not_an_extension_constructor.res`.
+- `Typemod.Not_a_packed_module`: covered by
+  `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`.
+- `Break_outside_loop`: covered by
+  `tests/error_output_parity/compiler/fixtures/break_outside_loop.res`.
+- `Continue_outside_loop`: covered by
+  `tests/error_output_parity/compiler/fixtures/continue_outside_loop.res`.
 
 ## `compiler/ml/typetexp.ml`
 

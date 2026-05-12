@@ -2568,6 +2568,99 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::ModulesNotAllowed { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Modules are not allowed in this pattern.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::CannotInferSignature { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "The signature for this packaged module couldn't be inferred.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAPackedModule { loc, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This expression is packed module, but the expected type is",
+                    &format_type_expr(type_ctx, *ty),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InlinedRecordExpected { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This constructor expects an inlined record argument.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidExtensionConstructorPayload { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid [%extension_constructor] payload, a constructor is expected.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAnExtensionConstructor { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This constructor is not an extension constructor.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::NotAPackedModule { loc, ty } => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This expression is not a packed module. It has type",
+                    &format_type_expr(type_ctx, *ty),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

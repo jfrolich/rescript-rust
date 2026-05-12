@@ -3078,6 +3078,13 @@ pub enum TypeModError {
         /// Non-closed module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// A module unpack payload is not a packaged module expression.
+    NotAPackedModule {
+        /// Module expression location to report.
+        loc: LocIdx,
+        /// Type of the unpack payload.
+        ty: TypeExprRef,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -11289,12 +11296,15 @@ fn type_module_expr_with_alias<'a>(
                 }
                 crate::types::type_expr::TypeDesc::Tvar(_)
                 | crate::types::type_expr::TypeDesc::Tunivar(_) => {
-                    return Err(TypeModError::CoreError(TypeCoreError::CannotInferSignature));
+                    return Err(TypeModError::CoreError(
+                        TypeCoreError::CannotInferSignature { loc },
+                    ));
                 }
                 _ => {
-                    return Err(TypeModError::CoreError(TypeCoreError::NotAPackedModule(
-                        expanded,
-                    )));
+                    return Err(TypeModError::NotAPackedModule {
+                        loc,
+                        ty: expanded,
+                    });
                 }
             };
             let env_ref = tctx.type_ctx.store_typed_env(env);

@@ -526,13 +526,13 @@ pub enum TypeCoreError {
     LessGeneral(String, Vec<(TypeExprRef, TypeExprRef)>),
 
     /// Modules not allowed.
-    ModulesNotAllowed,
+    ModulesNotAllowed { loc: LocIdx },
 
     /// Cannot infer signature.
-    CannotInferSignature,
+    CannotInferSignature { loc: LocIdx },
 
     /// Not a packed module.
-    NotAPackedModule(TypeExprRef),
+    NotAPackedModule { loc: LocIdx, ty: TypeExprRef },
 
     /// Recursive local constraint.
     RecursiveLocalConstraint(Vec<(TypeExprRef, TypeExprRef)>),
@@ -562,13 +562,13 @@ pub enum TypeCoreError {
     InlinedRecordEscape { loc: LocIdx },
 
     /// Inlined record expected.
-    InlinedRecordExpected,
+    InlinedRecordExpected { loc: LocIdx },
 
     /// Invalid extension constructor payload.
-    InvalidExtensionConstructorPayload,
+    InvalidExtensionConstructorPayload { loc: LocIdx },
 
     /// Not an extension constructor.
-    NotAnExtensionConstructor,
+    NotAnExtensionConstructor { loc: LocIdx },
 
     /// Break outside a directly enclosing loop body.
     BreakOutsideLoop { loc: LocIdx },
@@ -833,7 +833,7 @@ impl PatternState {
 
         if is_module {
             if !self.allow_modules {
-                return Err(TypeCoreError::ModulesNotAllowed);
+                return Err(TypeCoreError::ModulesNotAllowed { loc });
             }
             self.module_variables.push((full_name, full_loc));
         }
@@ -14772,7 +14772,7 @@ fn type_construct(
         if inline_record_arg_shape {
             RecArg::Required
         } else {
-            return Err(TypeCoreError::InlinedRecordExpected);
+            return Err(TypeCoreError::InlinedRecordExpected { loc });
         }
     };
 
@@ -17996,6 +17996,64 @@ fn type_extension_expr(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let extension_name = tctx.arena.get_string(extension.0.txt);
+    if extension_name == "extension_constructor" || extension_name == "ocaml.extension_constructor"
+    {
+        let constructor_lid = match &extension.1 {
+            crate::parser::ast::Payload::PStr(items) => {
+                let [item] = items.as_slice() else {
+                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
+                };
+                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+                else {
+                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
+                };
+                let expr = tctx.arena.get_expr(eval.0);
+                let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
+                    &*expr.pexp_desc
+                else {
+                    return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
+                };
+                lid.clone()
+            }
+            _ => return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc }),
+        };
+
+        let longident = tctx.resolve_lid(constructor_lid.txt).clone();
+        let constructor_name = tctx.longident_last_name(&longident);
+        let constructor = if matches!(longident, Longident::Ldot(..)) {
+            lookup_constructor_in_module(
+                &longident,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                None,
+            )
+            .map(|(_, desc)| desc)
+        } else {
+            env.find_constructor(&constructor_name).ok().cloned()
+        };
+        let Some(constructor) = constructor else {
+            return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
+        };
+        let crate::types::decl::ConstructorTag::CstrExtension(path) = constructor.cstr_tag else {
+            return Err(TypeCoreError::NotAnExtensionConstructor {
+                loc: constructor_lid.loc,
+            });
+        };
+
+        let ctx = tctx.type_ctx;
+        let ty = ctx.new_generic_constr(crate::types::predef::path_extension_constructor(), vec![]);
+        rue_unify(tctx, loc, ty, expected_ty, None)?;
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_extension_constructor(constructor_lid, path),
+            loc,
+            ty,
+            ctx.store_typed_env(env),
+            attributes.to_vec().into(),
+        ));
+    }
+
     if extension_name == "todo" {
         let todo_message = todo_payload_message(tctx.arena, &extension.1);
         tctx.report_warning(
@@ -18805,39 +18863,14 @@ fn type_pack(
     let ctx = tctx.type_ctx;
     let expected_inst = crate::types::ctype::instance(ctx, expected_ty);
     let expanded = crate::types::ctype::expand_head(ctx, env, expected_inst);
-    let package_info = {
+    let (pack_path, pack_lids, expected_pack_args) = {
         let desc = ctx.get_desc(ctx.repr(expanded));
         match &*desc {
             TypeDesc::Tpackage { path, lids, args } => {
-                Some((path.clone(), lids.clone(), args.clone()))
+                (path.clone(), lids.clone(), args.clone())
             }
-            _ => None,
-        }
-    };
-
-    let (pack_path, pack_lids, expected_pack_args) = match package_info {
-        Some(info) => info,
-        None => {
-            // Keep placeholder behavior when the package expectation is not
-            // available yet. This preserves existing compilation coverage while
-            // still emitting OCaml-like module packing for inferred packages.
-            let placeholder_lid = tctx.arena.placeholder_located(loc);
-            return Ok(Expression::new(
-                ExpressionDesc::Texp_pack(Box::new(crate::types::typedtree::ModuleExpr {
-                    mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_ident(
-                        crate::types::Path::pident(Ident::create_local("placeholder")),
-                        placeholder_lid,
-                    ),
-                    mod_loc: loc,
-                    mod_type: crate::types::decl::ModuleType::MtySignature(vec![]),
-                    mod_env: EnvRef(0),
-                    mod_attributes: Attributes::new(),
-                })),
-                loc,
-                expected_ty,
-                EnvRef(0),
-                attributes.to_vec().into(),
-            ));
+            TypeDesc::Tvar(_) => return Err(TypeCoreError::CannotInferSignature { loc }),
+            _ => return Err(TypeCoreError::NotAPackedModule { loc, ty: expected_ty }),
         }
     };
     // OCaml compiler/ml/typecore.ml:3518-3525 expands `instance env ty_expected`
