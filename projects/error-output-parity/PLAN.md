@@ -11,6 +11,8 @@ compare OCaml output to Rust output directly, not to hand-maintained snapshots.
 Snapshots can still exist for existing tests, but they are not the parity source
 of truth.
 
+## Implementation Rule
+
 Implementation fixes should follow the OCaml implementation 1:1 as much as
 possible. When an error differs, read the relevant OCaml source first and port
 the same control flow, location choice, warning/error ordering, and reporting
