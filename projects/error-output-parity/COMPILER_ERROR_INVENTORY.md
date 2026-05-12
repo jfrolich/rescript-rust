@@ -239,7 +239,9 @@ with a reason after checking raise sites.
 - `Unbound_label`: covered for an untyped record literal with no label in
   scope by `tests/error_output_parity/compiler/fixtures/unbound_label.res`.
 - `Unbound_modtype`: covered by
-  `tests/error_output_parity/compiler/fixtures/unbound_modtype.res`.
+  `tests/error_output_parity/compiler/fixtures/unbound_modtype.res` and the
+  signature-item lookup path in
+  `tests/error_output_parity/compiler/fixtures/signature_unbound_modtype.res`.
 - `Access_functor_as_structure`: covered by
   `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`.
 - `Ill_typed_functor_application`: not reachable from normal `.res`/`.resi`
