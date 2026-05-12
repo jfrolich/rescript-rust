@@ -3034,6 +3034,15 @@ fn make_typed_spread_label(
 /// Result type for module type checking operations.
 pub type TypeModResult<T> = Result<T, TypeModError>;
 
+/// `Includecore.type_mismatch` cases used by type-extension compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeExtensionMismatch {
+    /// The extension and type declaration have different arities.
+    Arity,
+    /// The extension variance annotations are incompatible with the type declaration.
+    Variance,
+}
+
 /// Errors that can occur during module type checking.
 #[derive(Debug, Clone)]
 pub enum TypeModError {
@@ -3128,6 +3137,29 @@ pub enum TypeModError {
     BoxedAndUnboxed { loc: LocIdx },
     /// `@immediate` was used on a type that can contain pointer values.
     BadImmediateAttribute { loc: LocIdx },
+    /// A declaration constructor extends a private extensible type.
+    CannotExtendPrivateType {
+        /// Constructor declaration location.
+        loc: LocIdx,
+        /// Extended type path.
+        path: Path,
+    },
+    /// A type extension targeted a type that is not extensible.
+    NotExtensibleType {
+        /// Type extension location.
+        loc: LocIdx,
+        /// Extended type path.
+        path: Path,
+    },
+    /// A type extension does not match the extensible type declaration.
+    ExtensionMismatch {
+        /// Type extension location.
+        loc: LocIdx,
+        /// Extended type path.
+        path: Path,
+        /// Specific mismatch reported by `Includecore`.
+        mismatch: TypeExtensionMismatch,
+    },
     /// Invalid `@as` / `@tag` attributes on variant constructors or inline records.
     AstUntaggedVariantError {
         /// Source location to report.
@@ -15547,6 +15579,63 @@ fn type_structure_item<'a>(
                 }
                 _ => path_from_longident(resolved_lid, |idx| arena.get_string(idx)),
             };
+
+            // OCaml typedecl.ml transl_type_extension rejects incompatible
+            // targets before translating any extension constructors.
+            if let Ok(type_decl) = env.lookup_type(&path) {
+                if !matches!(type_decl.type_kind, crate::types::TypeKind::TypeOpen) {
+                    return Err(TypeModError::NotExtensibleType {
+                        loc,
+                        path: path.clone(),
+                    });
+                }
+
+                if matches!(type_decl.type_private, crate::types::PrivateFlag::Private) {
+                    if let Some(decl_constructor) =
+                        ext.ptyext_constructors.iter().find(|ec| {
+                            matches!(
+                                ec.pext_kind,
+                                crate::parser::ast::ExtensionConstructorKind::Pext_decl(_, _)
+                            )
+                        })
+                    {
+                        return Err(TypeModError::CannotExtendPrivateType {
+                            loc: decl_constructor.pext_loc,
+                            path: path.clone(),
+                        });
+                    }
+                }
+
+                let mismatch = if type_decl.type_arity != ext.ptyext_params.len() as i32 {
+                    Some(TypeExtensionMismatch::Arity)
+                } else {
+                    let variance_ok = type_decl.type_variance.len() == ext.ptyext_params.len()
+                        && type_decl.type_variance.iter().zip(ext.ptyext_params.iter()).all(
+                            |(type_variance, (_, extension_variance))| {
+                                let (co, cn) = type_variance.get_upper();
+                                let type_allows_covariant = !cn;
+                                let type_allows_contravariant = !co;
+                                let (requires_covariant, requires_contravariant) =
+                                    match extension_variance {
+                                        ParserVariance::Covariant => (true, false),
+                                        ParserVariance::Contravariant => (false, true),
+                                        ParserVariance::Invariant => (false, false),
+                                    };
+
+                                (!requires_covariant || type_allows_covariant)
+                                    && (!requires_contravariant || type_allows_contravariant)
+                            },
+                        );
+                    (!variance_ok).then_some(TypeExtensionMismatch::Variance)
+                };
+                if let Some(mismatch) = mismatch {
+                    return Err(TypeModError::ExtensionMismatch {
+                        loc,
+                        path: path.clone(),
+                        mismatch,
+                    });
+                }
+            }
 
             // The result type for the extension constructors
             let ext_res_ty = tctx.type_ctx.new_generic_constr(path.clone(), vec![]);

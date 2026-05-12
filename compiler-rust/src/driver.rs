@@ -38,7 +38,7 @@ use crate::types::sexp_typedtree::{
     print_typed_structure_with_locs,
 };
 use crate::types::typecore::{JsxPropKind, TypeCoreError, TypeCoreWarning};
-use crate::types::typemod::TypeModError;
+use crate::types::typemod::{TypeExtensionMismatch, TypeModError};
 use crate::types::{
     ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
     TypeExprRef, initial_env, transl_signature, type_structure,
@@ -3600,6 +3600,53 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CannotExtendPrivateType { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Cannot extend private type definition {}", path.name()),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::NotExtensibleType { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Type definition {} is not extensible", path.name()),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ExtensionMismatch {
+            loc,
+            path,
+            mismatch,
+        } => {
+            let mismatch_message = match mismatch {
+                TypeExtensionMismatch::Arity => "They have different arities.",
+                TypeExtensionMismatch::Variance => "Their variances do not agree.",
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "This extension does not match the definition of type {}\n{}",
+                        path.name(),
+                        mismatch_message
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::AstUntaggedVariantError { loc, error } => {
             let message = error.message_text();
             UserDiagnostic::new(

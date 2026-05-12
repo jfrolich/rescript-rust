@@ -301,10 +301,19 @@ with a reason after checking raise sites.
 - `Type_clash`
 - `Parameters_differ`
 - `Null_arity_external`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.
 - `Unbound_type_var`
 - `Cannot_extend_private_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/cannot_extend_private_type.res`.
 - `Not_extensible_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/not_extensible_type.res`.
 - `Extension_mismatch`
+  - Covered by arity and variance cases:
+    `tests/error_output_parity/compiler/fixtures/extension_mismatch_arity.res`,
+    `tests/error_output_parity/compiler/fixtures/extension_mismatch_variance.res`.
 - `Rebind_wrong_type`
 - `Rebind_mismatch`
 - `Rebind_private`
