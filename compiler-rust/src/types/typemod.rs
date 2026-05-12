@@ -3202,6 +3202,17 @@ pub enum TypeModError {
         /// Inclusion error from checking the replacement against the original.
         error: crate::types::includemod::IncludeModError,
     },
+    /// A destructive `with` constraint changes a module that is aliased in the signature.
+    WithChangesModuleAlias {
+        /// Whole constrained module type location.
+        loc: LocIdx,
+        /// Constrained component path.
+        lid: Longident,
+        /// Alias module identifier.
+        id: Ident,
+        /// Aliased module path changed by the destructive substitution.
+        path: Path,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -7020,6 +7031,177 @@ fn resolve_with_constraint_target<'a>(
     )
 }
 
+fn path_is_strict_prefix(path: &Path, prefix: &Path) -> bool {
+    let (Ok((path_head, path_components)), Ok((prefix_head, prefix_components))) =
+        (path.flatten(), prefix.flatten())
+    else {
+        return false;
+    };
+
+    path_head.same(prefix_head)
+        && prefix_components.len() < path_components.len()
+        && path_components
+            .iter()
+            .zip(prefix_components.iter())
+            .all(|(path_component, prefix_component)| path_component == prefix_component)
+}
+
+fn check_usage_of_path_of_substituted_item(
+    paths: &[Path],
+    signature: &[crate::types::decl::SignatureItem],
+    loc: LocIdx,
+    lid: &Longident,
+) -> TypeModResult<()> {
+    use crate::types::decl::{ModuleType as DeclMty, SignatureItem};
+
+    fn check_module_type(
+        paths: &[Path],
+        mty: &DeclMty,
+        loc: LocIdx,
+        lid: &Longident,
+    ) -> TypeModResult<()> {
+        match mty {
+            DeclMty::MtySignature(signature) => {
+                check_usage_of_path_of_substituted_item(paths, signature, loc, lid)
+            }
+            DeclMty::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param_type) = param_type {
+                    check_module_type(paths, param_type, loc, lid)?;
+                }
+                check_module_type(paths, result, loc, lid)
+            }
+            DeclMty::MtyIdent(_) | DeclMty::MtyAlias(_, _) => Ok(()),
+        }
+    }
+
+    for item in signature {
+        match item {
+            SignatureItem::SigModule(id, md, _) => {
+                if let DeclMty::MtyAlias(_, aliased_path) = &md.md_type {
+                    if paths
+                        .iter()
+                        .any(|path| path_is_strict_prefix(path, aliased_path))
+                    {
+                        return Err(TypeModError::WithChangesModuleAlias {
+                            loc,
+                            lid: lid.clone(),
+                            id: id.clone(),
+                            path: aliased_path.clone(),
+                        });
+                    }
+                }
+                check_module_type(paths, &md.md_type, loc, lid)?;
+            }
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mtd.mtd_type {
+                    check_module_type(paths, mty, loc, lid)?;
+                }
+            }
+            SignatureItem::SigValue(_, _)
+            | SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigTypext(_, _, _)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn check_destructive_substitution_alias_usage<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    base_mty: &crate::types::decl::ModuleType,
+    constraints: &[crate::parser::ast::WithConstraint],
+    loc: LocIdx,
+) -> TypeModResult<()> {
+    let Some(signature) =
+        resolve_mod_type_to_sig(base_mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)
+    else {
+        return Ok(());
+    };
+
+    fn path_from_ident_and_tail(id: &Ident, tail: &[String]) -> Path {
+        tail.iter().fold(Path::pident(id.clone()), |path, name| {
+            Path::pdot(path, name.as_str())
+        })
+    }
+
+    fn collect_substituted_item_usage_paths<'a>(
+        tctx: &mut TypeCheckContext<'a>,
+        env: &Env,
+        signature: &[crate::types::decl::SignatureItem],
+        components: &[String],
+    ) -> Vec<Path> {
+        use crate::types::decl::SignatureItem;
+
+        let Some((head, tail)) = components.split_first() else {
+            return Vec::new();
+        };
+        if tail.is_empty() {
+            return Vec::new();
+        }
+
+        for item in signature {
+            if let SignatureItem::SigModule(id, md, _) = item {
+                if id.name() != head {
+                    continue;
+                }
+                let mut paths = vec![path_from_ident_and_tail(id, tail)];
+                if tail.len() > 1 {
+                    if let Some(child_signature) = resolve_mod_type_to_sig(
+                        &md.md_type,
+                        Some(env),
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    ) {
+                        paths.extend(collect_substituted_item_usage_paths(
+                            tctx,
+                            env,
+                            &child_signature,
+                            tail,
+                        ));
+                    }
+                }
+                return paths;
+            }
+        }
+
+        Vec::new()
+    }
+
+    for constraint in constraints {
+        let (lid, needs_type) = match constraint {
+            crate::parser::ast::WithConstraint::Pwith_typesubst(lid, _) => (lid, true),
+            crate::parser::ast::WithConstraint::Pwith_modsubst(lid, _) => (lid, false),
+            crate::parser::ast::WithConstraint::Pwith_type(_, _)
+            | crate::parser::ast::WithConstraint::Pwith_module(_, _) => continue,
+        };
+        let longident = tctx.resolve_lid(lid.txt).clone();
+        let components: Vec<String> = longident
+            .flatten_idx()
+            .into_iter()
+            .map(|idx| arena.get_string(idx).to_string())
+            .collect();
+        let target = resolve_with_constraint_target(tctx, env, arena, Some(base_mty), &longident);
+        let path = match (target, needs_type) {
+            (Some(ResolvedWithConstraintTarget::Type { path, .. }), true)
+            | (Some(ResolvedWithConstraintTarget::Module { path }), false) => path,
+            _ => continue,
+        };
+        if matches!(path, Path::Pdot(..)) {
+            let paths =
+                collect_substituted_item_usage_paths(tctx, env, &signature, &components);
+            check_usage_of_path_of_substituted_item(&paths, &signature, loc, &longident)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn transl_with_constraints<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -7209,6 +7391,10 @@ fn transl_with_constraints<'a>(
                 ));
             }
         }
+    }
+
+    if let Some(base_mty) = base_mty {
+        check_destructive_substitution_alias_usage(tctx, env, arena, base_mty, constraints, loc)?;
     }
 
     Ok(typed_constraints)
@@ -9244,6 +9430,14 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             )?;
             let type_constraints =
                 collect_pmty_with_type_constraints(tctx, env, arena, constraints)?;
+            check_destructive_substitution_alias_usage(
+                tctx,
+                env,
+                arena,
+                &base_mty,
+                constraints,
+                mty.pmty_loc,
+            )?;
             let mut constrained_mty = if type_constraints.is_empty() {
                 base_mty
             } else {

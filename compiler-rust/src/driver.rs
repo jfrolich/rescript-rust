@@ -2807,6 +2807,22 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::WithChangesModuleAlias { loc, lid, id, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "This `with' constraint on {} changes {}, which is aliased \nin the constrained signature (as {}).",
+                    format_longident_for_report(arena, lid),
+                    path.name(),
+                    id.name()
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

@@ -327,6 +327,8 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/with_mismatch_type.res`.
 - `With_makes_applicative_functor_ill_typed`
 - `With_changes_module_alias`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/with_changes_module_alias.res`.
 - `With_cannot_remove_constrained_type`
 - `Repeated_name`
   - Covered by
