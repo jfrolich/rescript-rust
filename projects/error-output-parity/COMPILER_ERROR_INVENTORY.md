@@ -307,7 +307,11 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/inconsistent_type_constraint.res`.
 - `Type_clash`
+  - Covered for recursive manifest stub update failure by
+    `tests/error_output_parity/compiler/fixtures/type_clash_recursive_manifest.res`.
 - `Parameters_differ`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/parameters_differ.res`.
 - `Null_arity_external`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.
