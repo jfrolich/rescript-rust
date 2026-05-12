@@ -524,6 +524,9 @@ pub enum TypeCoreError {
     /// Unbound type variable.
     UnboundTypeVariable { loc: LocIdx, name: String },
 
+    /// Invalid type variable name.
+    InvalidVariableName { loc: LocIdx, name: String },
+
     /// Type constructor arity mismatch.
     TypeArityMismatch {
         loc: LocIdx,
@@ -1709,6 +1712,12 @@ fn transl_type_inner(
             // not Ptyp_var. OCaml's typetexp only looks up type variables
             // (used_variables/TyVarEnv), not the type environment, for Ptyp_var.
             let name_str = name.to_string();
+            if name_str.starts_with('_') {
+                return Err(TypeCoreError::InvalidVariableName {
+                    loc,
+                    name: format!("'{name_str}"),
+                });
+            }
             if tctx.fixed_type_variables
                 && !tctx.used_variables.contains_key(&name_str)
                 && !tctx.type_variables.contains_key(&name_str)

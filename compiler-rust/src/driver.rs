@@ -2980,6 +2980,13 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::InvalidVariableName { loc, name }) => {
+            UserDiagnostic::new(
+                format_invalid_variable_name_report(arena, source, filename, *loc, name),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
             loc,
             lid,
@@ -3583,6 +3590,22 @@ fn format_unbound_type_variable_report(
     );
     report.push('\n');
     report
+}
+
+fn format_invalid_variable_name_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type variable name {name} is not allowed in programs"),
+    )
 }
 
 fn format_type_arity_mismatch_report(

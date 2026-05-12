@@ -72,6 +72,19 @@ fn type_decl_manifest_uses_fixed_type_variables(
     !is_fixed_type
 }
 
+fn check_type_variable_name(loc: LocIdx, name: &str) -> TypeModResult<()> {
+    if name.starts_with('_') {
+        Err(TypeModError::CoreError(
+            TypeCoreError::InvalidVariableName {
+                loc,
+                name: format!("'{name}"),
+            },
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 // ============================================================================
 // Helper Functions for Path Conversion
 // ============================================================================
@@ -8478,6 +8491,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         tctx.type_ctx.new_var(Some("_".to_string()))
                                     }
                                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                                        check_type_variable_name(param_ty.ptyp_loc, name)?;
                                         tctx.type_ctx.new_var(Some(name.to_string()))
                                     }
                                     _ => {
@@ -13143,6 +13157,7 @@ fn type_structure_item<'a>(
                             )
                         }
                         crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                            check_type_variable_name(core_type.ptyp_loc, name)?;
                             let type_ref = ctx.new_var(Some(name.to_string()));
                             (
                                 TypedCoreType {
@@ -16002,6 +16017,7 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         )
                     }
                     crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                        check_type_variable_name(core_type.ptyp_loc, name)?;
                         let type_ref = ctx.new_var(Some(name.to_string()));
                         (
                             TypedCoreType {
