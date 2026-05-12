@@ -772,14 +772,16 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // numeric result falls back to `Path.binding_time`.
                 let path_level =
                     get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths);
-                let should_try_expand = current != GENERIC_LEVEL && level < path_level;
+                // OCaml compiler/ml/ctype.ml:742-768 only requires
+                // `level < get_level env p` after the outer `ty.level > level`
+                // check. Generic-level constructor nodes are still eligible
+                // for abbreviation expansion during `moregeneral`.
+                let should_try_expand = level < path_level;
                 drop(desc);
-                // Guard: skip expansion for all local Pident types (not predef).
-                // OCaml's update_level tries expansion but often fails for local types
-                // (Env.find_type raises Not_found). In Rust, try_expand_head succeeds
-                // more often, causing unwanted alias expansion that changes type identity.
-                // Preserving local Pident aliases matches OCaml's effective behavior.
-                let is_local_pident = matches!(&path, Path::Pident(id) if id.stamp() != 0 && !is_predef_type_name(id.name()));
+                // OCaml compiler/ml/ctype.ml:742-768 does not special-case
+                // local Pident constructors here. It attempts abbreviation
+                // expansion whenever `level < get_level env p`, and preserves
+                // the original constructor only when expansion fails.
                 // Match OCaml: skip expansion in update_level for Pdot paths
                 // through first-class module parameters whose manifest is a
                 // locally-abstract type (non-generic, non-predef Pident).
@@ -800,7 +802,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                                         if id.stamp() != 0 && !is_predef_type_name(id.name())))
                         })
                     });
-                if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
+                if should_try_expand && !is_firstclass_module_pdot {
                     if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
                         paths.push(path.clone());
                     }
