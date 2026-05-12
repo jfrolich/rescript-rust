@@ -3263,6 +3263,15 @@ pub enum TypeModError {
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// A normalized internal module path points at a missing compiled interface.
+    MissingModule {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Original internal path.
+        path: Path,
+        /// Normalized dangling path.
+        expanded: Path,
+    },
     /// A functor result still depends on an anonymous argument module.
     CannotEliminateDependency {
         /// Module application location to report.
@@ -9482,6 +9491,63 @@ fn normalize_module_alias_path<'a>(
     normalize_inner(env, pers_env, ctx, path)
 }
 
+fn normalize_module_alias_path_checked<'a>(
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    path: &Path,
+) -> Result<Path, (Path, Path)> {
+    fn normalize_inner<'a>(
+        env: &Env,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &'a crate::types::context::TypeContext,
+        original: &Path,
+        path: &Path,
+    ) -> Result<Path, (Path, Path)> {
+        let path = match path {
+            Path::Pdot(prefix, name, pos) => {
+                let normalized_prefix = normalize_inner(env, pers_env, ctx, original, prefix)?;
+                if normalized_prefix.same(prefix) {
+                    path.clone()
+                } else {
+                    Path::Pdot(std::sync::Arc::new(normalized_prefix), name.clone(), *pos)
+                }
+            }
+            Path::Papply(functor, arg) => Path::Papply(
+                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, original, functor)?),
+                std::sync::Arc::new(normalize_inner(env, pers_env, ctx, original, arg)?),
+            ),
+            Path::Pident(id) if id.is_persistent() && !env.has_module_ident(id) => {
+                if let Some(pers) = pers_env.as_mut()
+                    && pers.find_pers_struct(id.name(), ctx).is_none()
+                    && pers.last_error().is_none()
+                {
+                    return Err((original.clone(), path.clone()));
+                }
+                path.clone()
+            }
+            _ => path.clone(),
+        };
+
+        force_persistent_sigs_for_normalize_path(env, pers_env, ctx, &path);
+        if let Some(alias_target) =
+            crate::types::typecore::alias_target_for_module_path(&path, env, pers_env, ctx)
+            && !alias_target.same(&path)
+        {
+            return normalize_inner(env, pers_env, ctx, original, &alias_target);
+        }
+
+        let env_normalized = env.normalize_path(&path);
+        if !env_normalized.same(&path) {
+            normalize_inner(env, pers_env, ctx, original, &env_normalized)
+        } else {
+            Ok(path)
+        }
+    }
+
+    normalize_inner(env, pers_env, ctx, path, path)
+}
+
 fn force_persistent_sigs_for_normalize_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -12514,12 +12580,21 @@ fn type_module_expr_with_alias<'a>(
                     Some(crate::types::decl::ModuleType::MtyAlias(_, p1)) => {
                         // Match OCaml compiler/ml/typemod.ml:1245-1252:
                         // normalize the alias target before Tcoerce_alias.
-                        normalize_module_alias_path(
+                        match normalize_module_alias_path_checked(
                             env,
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
                             p1,
-                        )
+                        ) {
+                            Ok(alias_target) => alias_target,
+                            Err((path, expanded)) => {
+                                return Err(TypeModError::MissingModule {
+                                    loc,
+                                    path,
+                                    expanded,
+                                });
+                            }
+                        }
                     }
                     _ => path_clone.clone(),
                 };

@@ -2754,6 +2754,21 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::MissingModule {
+            loc,
+            path,
+            expanded,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format_missing_module_message(path, expanded),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CannotEliminateDependency { loc, mty } => UserDiagnostic::new(
             format_cannot_eliminate_dependency_report(
                 type_ctx, arena, source, filename, *loc, mty,
@@ -4114,6 +4129,25 @@ fn format_cannot_apply_module_report(
     output.push_str(&rendered_module_type);
     output.push_str("\n\n");
     output
+}
+
+fn format_missing_module_message(
+    path: &crate::types::path::Path,
+    expanded: &crate::types::path::Path,
+) -> String {
+    let head = expanded.head().name().to_string();
+    if path.same(expanded) {
+        format!(
+            "Internal path {} is dangling.\nThe compiled interface for module {head} was not found.",
+            path.name()
+        )
+    } else {
+        format!(
+            "Internal path {} expands to {} which is dangling.\nThe compiled interface for module {head} was not found.",
+            path.name(),
+            expanded.name()
+        )
+    }
 }
 
 fn format_cannot_eliminate_dependency_report(
