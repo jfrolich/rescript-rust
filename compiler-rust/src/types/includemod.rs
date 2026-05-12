@@ -1122,14 +1122,14 @@ fn modtypes_inner<'a>(
         expand_local(env, path, &mut visiting)
     }
 
-    fn normalized_alias_path(env: &Env, path: &Path) -> Path {
-        env.normalize_path(path)
+    fn normalized_alias_path(type_ctx: &TypeContext, env: &Env, path: &Path) -> Path {
+        ctype::normalize_path_full(type_ctx, env, path)
     }
 
     match (mty_impl, mty_sig) {
         (ModuleType::MtyAlias(pres_impl, impl_path), ModuleType::MtyAlias(pres_sig, sig_path)) => {
-            let impl_path = normalized_alias_path(env, impl_path);
-            let sig_path = normalized_alias_path(env, sig_path);
+            let impl_path = normalized_alias_path(type_ctx, env, impl_path);
+            let sig_path = normalized_alias_path(type_ctx, env, sig_path);
             if !impl_path.same(&sig_path) {
                 return Err(IncludeModError::ModuleTypeMismatch {
                     name: Ident::create_local("module"),
@@ -1150,7 +1150,7 @@ fn modtypes_inner<'a>(
         }
 
         (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
-            let impl_path = normalized_alias_path(env, impl_path);
+            let impl_path = normalized_alias_path(type_ctx, env, impl_path);
             let coercion = if let Some(coercion) =
                 with_local_pident_module_type(env, &impl_path, |expanded| {
                     let expanded = ctype::strengthen_module_type_for_inclusion_path(
