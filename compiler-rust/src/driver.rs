@@ -34,7 +34,7 @@ use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::typecore::{TypeCoreError, TypeCoreWarning};
+use crate::types::typecore::{JsxPropKind, TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::TypeModError;
 use crate::types::{
     ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
@@ -2500,12 +2500,32 @@ fn format_expr_type_clash_report(
         &mut message,
     );
     message.push('\n');
-    if let Some(TypeClashContext::RecordField { field_name, .. }) = context {
-        message.push_str(expected_text);
-        message.push_str(INFO);
-        message.push_str(field_name);
-        message.push_str(RESET);
-        message.push_str(" is expected to have type: ");
+    if let Some(TypeClashContext::RecordField {
+        field_name, jsx, ..
+    }) = context
+    {
+        match (field_name.as_str(), jsx) {
+            ("children", Some(JsxPropKind::Fragment)) => {
+                message.push_str("But children of JSX fragments must be of type:\n  ");
+            }
+            ("children", Some(JsxPropKind::CustomComponent)) => {
+                message.push_str("But children passed to this component must be of type:\n  ");
+            }
+            (_, Some(_)) => {
+                message.push_str("But the component prop ");
+                message.push_str(INFO);
+                message.push_str(field_name);
+                message.push_str(RESET);
+                message.push_str(" is expected to have type: ");
+            }
+            _ => {
+                message.push_str(expected_text);
+                message.push_str(INFO);
+                message.push_str(field_name);
+                message.push_str(RESET);
+                message.push_str(" is expected to have type: ");
+            }
+        }
         append_type_clash_type(
             type_ctx,
             trace,
@@ -2912,9 +2932,196 @@ fn append_extra_type_clash_help(
         return;
     }
 
+    if append_optional_record_field_help(type_ctx, arena, source, loc, context, trace, message) {
+        return;
+    }
+
+    if append_jsx_element_type_clash_help(type_ctx, trace, message) {
+        return;
+    }
+
     append_incompatible_type_parts(type_ctx, trace, message);
     append_dict_literal_help(type_ctx, trace, message);
     append_simple_conversion_help(type_ctx, trace, message);
+}
+
+fn append_optional_record_field_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::RecordField {
+        field_name,
+        optional: true,
+        jsx,
+    }) = context
+    else {
+        return false;
+    };
+    let Some((actual, _expected)) = trace.first().copied() else {
+        return false;
+    };
+    let TypeDesc::Tconstr { path, .. } = &*type_ctx.get_desc(type_ctx.repr(actual)) else {
+        return false;
+    };
+    if !path.same(&crate::types::predef::path_option()) {
+        return false;
+    }
+
+    let passed_text = source_text_at_loc(arena, source, loc).unwrap_or_default();
+    message.push_str("\n\n");
+    message.push_str(INFO);
+    message.push_str(field_name);
+    message.push_str(RESET);
+    if jsx.is_some() {
+        message.push_str(" is an optional component prop, and you're passing an optional value to it.\n");
+        message.push_str("Values passed to an optional component prop don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    } else {
+        message.push_str(" is an optional record field, and you're passing an optional value to it.\n");
+        message.push_str("Values passed to an optional record field don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    }
+    message.push_str("     \n");
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Unwrap the option from the value you're passing in\n");
+    message.push_str("- If you really do want to pass the optional value, prepend the value with ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(RESET);
+    message.push_str(" to show you want to pass the option, like: ");
+    message.push_str(INFO);
+    if jsx.is_some() {
+        message.push_str(field_name);
+        message.push_str("=?");
+        message.push_str(&passed_text);
+    } else {
+        message.push('{');
+        message.push_str(field_name);
+        message.push_str(": ?");
+        message.push_str(&passed_text);
+    }
+    message.push_str(RESET);
+    true
+}
+
+fn source_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> Option<String> {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    source.get(start..end).map(str::trim).map(str::to_string)
+}
+
+fn append_jsx_element_type_clash_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, _expected)) = jsx_element_type_clash_pair(type_ctx, trace) else {
+        return false;
+    };
+
+    let repr = type_ctx.repr(actual);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, args: _, .. }
+            if path.same(&crate::types::predef::path_int()) =>
+        {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert int to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.int");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args: _, .. }
+            if path.same(&crate::types::predef::path_string()) =>
+        {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert string to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.string");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args: _, .. }
+            if path.same(&crate::types::predef::path_float()) =>
+        {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert float to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.float");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args, .. }
+            if args.len() == 1 && path.same(&crate::types::predef::path_option()) =>
+        {
+            message.push_str("\n\nYou need to unwrap this option to its underlying value first, then turn that value into a JSX element.\nFor ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(", you can use ");
+            message.push_str(INFO);
+            message.push_str("React.null");
+            message.push_str(RESET);
+            message.push_str(" to output nothing into JSX.\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args, .. }
+            if args.len() == 1 && path.same(&crate::types::predef::path_array()) =>
+        {
+            if type_is_jsx_element_named(type_ctx, args[0]) {
+                message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert array to a JSX element with ");
+                message.push_str(INFO);
+                message.push_str("React.array");
+                message.push_str(RESET);
+                message.push_str(" (for example by using a pipe: ->React.array.).\n\n");
+            } else {
+                message.push_str("\n\nYou need to convert each item in this array to a JSX element first, then use ");
+                message.push_str(INFO);
+                message.push_str("React.array");
+                message.push_str(RESET);
+                message.push_str(" to convert the array of JSX elements into a single JSX element.\n\n");
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn jsx_element_type_clash_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    [
+        trace.first().copied(),
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|(_, expected)| type_is_expected_jsx_element(type_ctx, trace, *expected))
+}
+
+fn type_is_expected_jsx_element(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    ty: TypeExprRef,
+) -> bool {
+    type_is_jsx_element(type_ctx, ty)
+        || rendered_alias_expansion(type_ctx, trace, false)
+            .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
+}
+
+fn type_is_jsx_element_named(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    type_is_jsx_element(type_ctx, ty) || format_type_expr(type_ctx, ty).ends_with(".element")
 }
 
 fn type_clash_expected_unit_actual(

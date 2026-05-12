@@ -620,7 +620,11 @@ pub enum TypeClashContext {
     /// In a record spread.
     RecordSpread,
     /// In a record field value.
-    RecordField { field_name: String, optional: bool },
+    RecordField {
+        field_name: String,
+        optional: bool,
+        jsx: Option<JsxPropKind>,
+    },
     /// In an array literal.
     ArrayLiteral,
     /// In a tuple.
@@ -650,6 +654,17 @@ pub struct JsxPropErrorInfo {
     pub component_name: Option<String>,
     /// Props.
     pub props: Vec<String>,
+    /// JSX prop record kind.
+    pub jsx_type: JsxPropKind,
+}
+
+/// JSX prop record kind.
+#[derive(Debug, Clone)]
+pub enum JsxPropKind {
+    /// JSX fragment props.
+    Fragment,
+    /// Custom component props.
+    CustomComponent,
 }
 
 /// Result type for type checking.
@@ -14418,7 +14433,10 @@ fn type_record(
 
             let field_context = Some(TypeClashContext::RecordField {
                 field_name: field_name.to_string(),
-                optional: false,
+                optional: label_desc.lbl_optional && !field.opt,
+                jsx: jsx_component_error_info
+                    .as_ref()
+                    .map(|info| info.jsx_type.clone()),
             });
             let typed_expr = type_expect(
                 tctx,
@@ -15162,14 +15180,21 @@ fn jsx_prop_error_info_from_record_parts(
     labels: &[crate::types::decl::LabelDeclaration],
     attrs: &[crate::types::decl::Attribute],
 ) -> Option<JsxPropErrorInfo> {
-    (path.head_name() == "props" && attributes_include_jsx_component_props(attrs)).then(|| {
-        JsxPropErrorInfo {
-            component_name: jsx_component_name_from_props_path(path),
-            props: labels
-                .iter()
-                .map(|label| label.ld_id.name().to_string())
-                .collect(),
-        }
+    let jsx_type = if path.last() == "fragmentProps" {
+        JsxPropKind::Fragment
+    } else if path.last() == "props" && attributes_include_jsx_component_props(attrs) {
+        JsxPropKind::CustomComponent
+    } else {
+        return None;
+    };
+
+    Some(JsxPropErrorInfo {
+        component_name: jsx_component_name_from_props_path(path),
+        props: labels
+            .iter()
+            .map(|label| label.ld_id.name().to_string())
+            .collect(),
+        jsx_type,
     })
 }
 
