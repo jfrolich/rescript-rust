@@ -90,6 +90,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`.
 - `Wrong_name`: covered by
   `tests/error_output_parity/compiler/fixtures/wrong_name.res`.
+- `Name_type_mismatch`: covered by
+  `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res`.
 - `Undefined_method`: covered by
   `tests/error_output_parity/compiler/fixtures/undefined_method.res`.
 - `Apply_non_function`: covered by

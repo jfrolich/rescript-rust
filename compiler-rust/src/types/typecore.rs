@@ -488,6 +488,7 @@ pub enum TypeCoreError {
 
     /// Name/type mismatch.
     NameTypeMismatch {
+        loc: LocIdx,
         kind: String,
         lid: Longident,
         expected: (Path, Path),
@@ -16969,6 +16970,18 @@ fn type_field(
         return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
     }
 
+    if let Some(err) = qualified_label_name_type_mismatch(
+        field_lid.loc,
+        &resolved_lid,
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+        ty_exp,
+    ) {
+        return Err(err);
+    }
+
     // Disambiguate label: use the record expression's type to find the right label
     let env_label = lookup_label_by_lid(
         &resolved_lid,
@@ -17117,6 +17130,18 @@ fn type_setfield(
     let record_ty = ctx.new_var(None);
     let typed_record = type_expect(tctx, env, record_expr, record_ty, None)?;
     let ty_exp = typed_record.exp_type;
+
+    if let Some(err) = qualified_label_name_type_mismatch(
+        field_lid.loc,
+        &resolved_lid,
+        tctx.arena,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+        ty_exp,
+    ) {
+        return Err(err);
+    }
 
     let env_label = lookup_label_by_lid(
         &resolved_lid,
@@ -24270,6 +24295,68 @@ fn lookup_label_by_lid<'a>(
     let mut selected = candidates.into_iter().next()?;
     qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
+}
+
+fn qualified_label_name_type_mismatch<'a>(
+    loc: LocIdx,
+    lid: &Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+    expected_record_ty: TypeExprRef,
+) -> Option<TypeCoreError> {
+    let Longident::Ldot(module_lid, label_idx) = lid else {
+        return None;
+    };
+    let expected_path =
+        extract_type_path_from_expected_with_persistent_env(expected_record_ty, env, pers_env, ctx)?;
+    let label_name = arena.get_string(*label_idx);
+    let candidates = with_resolved_module_components_for_lid(
+        module_lid,
+        arena,
+        env,
+        pers_env,
+        ctx,
+        |components| {
+            let labels = components.lookup_labels(label_name, ctx);
+            (!labels.is_empty()).then(|| labels.as_ref().clone())
+        },
+    )
+    .flatten()?;
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut alternatives = Vec::new();
+    for candidate in &candidates {
+        let Some(candidate_path) = label_result_path(ctx, candidate) else {
+            continue;
+        };
+        if compare_type_paths_for_label_disambiguation(
+            &expected_path,
+            &candidate_path,
+            env,
+            pers_env,
+            ctx,
+        ) {
+            return None;
+        }
+        alternatives.push((candidate_path.clone(), candidate_path));
+    }
+
+    if alternatives.is_empty() {
+        return None;
+    }
+
+    Some(TypeCoreError::NameTypeMismatch {
+        loc,
+        kind: "record".to_string(),
+        lid: lid.clone(),
+        expected: (expected_path.clone(), expected_path),
+        alternatives,
+    })
 }
 
 fn extract_concrete_record_type_info<'a>(

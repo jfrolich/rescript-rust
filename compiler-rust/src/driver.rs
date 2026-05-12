@@ -2858,6 +2858,26 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::NameTypeMismatch {
+            loc,
+            kind,
+            lid,
+            expected,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_name_type_mismatch_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                lid,
+                expected,
+                alternatives,
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::UndefinedMethod {
             loc: Some(loc),
             ty,
@@ -3729,6 +3749,46 @@ fn format_wrong_name_report(
         );
     }
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_name_type_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    lid: &Longident,
+    expected: &(crate::types::Path, crate::types::Path),
+    alternatives: &[(crate::types::Path, crate::types::Path)],
+) -> String {
+    let label = if kind == "record" { "field" } else { kind };
+    let expected_type = format_type_path_for_report(&expected.1);
+    let lid = format_longident_for_report(arena, lid);
+    let message = match alternatives {
+        [(actual, _)] => format!(
+            "The {label} {lid} belongs to the {kind} type {}\nbut a {label} was expected belonging to the {kind} type {expected_type}",
+            format_type_path_for_report(actual)
+        ),
+        _ => {
+            let types = alternatives
+                .iter()
+                .map(|(path, _)| format_type_path_for_report(path))
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            format!(
+                "The {label} {lid} belongs to one of the following {kind} types:\n  {types}\nbut a {label} was expected belonging to the {kind} type {expected_type}"
+            )
+        }
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_type_path_for_report(path: &crate::types::Path) -> String {
+    let name = path.name();
+    name.strip_prefix("Stdlib.")
+        .or_else(|| name.strip_prefix("Stdlib_"))
+        .unwrap_or(&name)
+        .to_string()
 }
 
 fn format_type_application_multiline(type_text: &str) -> Option<(String, Vec<String>)> {
