@@ -9,6 +9,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
+use crate::diagnostics::Warning;
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::location::Location;
@@ -3001,6 +3002,22 @@ pub enum TypeModError {
     },
     /// Invalid untagged variant definition.
     InvalidUntaggedVariantDefinition { loc: Location, reason: String },
+    /// A variant type spread could not resolve its source type.
+    VariantSpreadCouldNotFindType { loc: LocIdx },
+    /// A variant type spread source is not a concrete variant.
+    VariantSpreadInvalidType { loc: LocIdx },
+    /// Type parameters are not supported in variant type spreads.
+    VariantSpreadHasTypeParams { loc: LocIdx },
+    /// Variant type spread would duplicate a constructor already present in the target.
+    VariantSpreadDuplicateConstructor {
+        loc: LocIdx,
+        variant_name: String,
+        constructor_name: String,
+    },
+    /// Variant type spread source and target have different unboxed configuration.
+    VariantSpreadUnboxedMismatch { loc: LocIdx, source_unboxed: bool },
+    /// Variant type spread source and target have different @tag configuration.
+    VariantSpreadTagMismatch { loc: LocIdx },
     /// Duplicate constructor in a variant type declaration.
     DuplicateConstructor {
         /// Source location to report.
@@ -3016,6 +3033,17 @@ pub enum TypeModError {
         label: String,
         /// Enclosing record name, when the label belongs to a named record type.
         record_name: Option<String>,
+    },
+    /// Duplicate structure/signature component name.
+    RepeatedName {
+        /// Current repeated name location.
+        loc: LocIdx,
+        /// Namespace class, e.g. "type" or "module".
+        kind: &'static str,
+        /// Repeated component name.
+        name: String,
+        /// Previous definition location.
+        repeated_loc: LocIdx,
     },
     /// A record declaration mixes object-type spread syntax with record fields.
     ObjectSpreadWithRecordField {
@@ -3035,6 +3063,20 @@ pub enum TypeModError {
     NonrecursiveGadt {
         /// Whole type declaration location.
         loc: LocIdx,
+    },
+    /// An exported value has a weak type variable in its inferred scheme.
+    NonGeneralizable {
+        /// Value declaration location.
+        loc: Location,
+        /// Non-closed value type.
+        typ: TypeExprRef,
+    },
+    /// An exported module has a weak type variable in its inferred module type.
+    NonGeneralizableModule {
+        /// Module declaration location.
+        loc: Location,
+        /// Non-closed module type.
+        mty: crate::types::decl::ModuleType,
     },
     /// Functor application error.
     FunctorApplicationError(String),
@@ -3105,6 +3147,9 @@ fn check_duplicate_constructor_declarations(
     let mut seen = HashSet::default();
     for constructor in constructors {
         let name = arena.get_string(constructor.pcd_name.txt);
+        if name == "..." {
+            continue;
+        }
         if !seen.insert(name.to_string()) {
             return Err(TypeModError::DuplicateConstructor {
                 loc,
@@ -3123,6 +3168,9 @@ fn check_duplicate_label_declarations(
     let mut seen = HashSet::default();
     for label in labels {
         let name = arena.get_string(label.pld_name.txt);
+        if name == "..." {
+            continue;
+        }
         if !seen.insert(name.to_string()) {
             return Err(TypeModError::DuplicateLabel {
                 loc: label.pld_name.loc,
@@ -3130,6 +3178,185 @@ fn check_duplicate_label_declarations(
                 record_name: record_name.map(str::to_string),
             });
         }
+    }
+    Ok(())
+}
+
+fn check_duplicate_typed_label_declarations(
+    loc: LocIdx,
+    labels: &[TypedLabelDeclaration],
+    record_name: Option<&str>,
+) -> TypeModResult<()> {
+    let mut seen = HashSet::default();
+    for label in labels {
+        let name = label.ld_id.name();
+        if !seen.insert(name.to_string()) {
+            return Err(TypeModError::DuplicateLabel {
+                loc,
+                label: name.to_string(),
+                record_name: record_name.map(str::to_string),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct Names {
+    types: HashMap<String, LocIdx>,
+    modules: HashMap<String, LocIdx>,
+    modtypes: HashMap<String, LocIdx>,
+    typexts: HashMap<String, LocIdx>,
+}
+
+fn check_name(
+    table: &mut HashMap<String, LocIdx>,
+    kind: &'static str,
+    loc: LocIdx,
+    name: &str,
+) -> TypeModResult<()> {
+    if let Some(repeated_loc) = table.get(name).copied() {
+        return Err(TypeModError::RepeatedName {
+            loc,
+            kind,
+            name: name.to_string(),
+            repeated_loc,
+        });
+    }
+    table.insert(name.to_string(), loc);
+    Ok(())
+}
+
+fn check_structure_item_names(
+    names: &mut Names,
+    arena: &ParseArena,
+    item: &ParsedStructureItem,
+) -> TypeModResult<()> {
+    match &*item.pstr_desc {
+        ParsedStructureItemDesc::Pstr_type(inner) => {
+            let (_, decls) = &**inner;
+            for decl in decls {
+                check_name(
+                    &mut names.types,
+                    "type",
+                    decl.ptype_name.loc,
+                    arena.get_string(decl.ptype_name.txt),
+                )?;
+            }
+        }
+        ParsedStructureItemDesc::Pstr_typext(ext) => {
+            for constructor in &ext.ptyext_constructors {
+                check_name(
+                    &mut names.typexts,
+                    "extension constructor",
+                    constructor.pext_name.loc,
+                    arena.get_string(constructor.pext_name.txt),
+                )?;
+            }
+        }
+        ParsedStructureItemDesc::Pstr_exception(constructor) => {
+            check_name(
+                &mut names.typexts,
+                "extension constructor",
+                constructor.pext_name.loc,
+                arena.get_string(constructor.pext_name.txt),
+            )?;
+        }
+        ParsedStructureItemDesc::Pstr_module(mb) => {
+            check_name(
+                &mut names.modules,
+                "module",
+                mb.pmb_name.loc,
+                arena.get_string(mb.pmb_name.txt),
+            )?;
+        }
+        ParsedStructureItemDesc::Pstr_recmodule(mbs) => {
+            for mb in mbs.iter() {
+                check_name(
+                    &mut names.modules,
+                    "module",
+                    mb.pmb_name.loc,
+                    arena.get_string(mb.pmb_name.txt),
+                )?;
+            }
+        }
+        ParsedStructureItemDesc::Pstr_modtype(mtd) => {
+            check_name(
+                &mut names.modtypes,
+                "module type",
+                mtd.pmtd_name.loc,
+                arena.get_string(mtd.pmtd_name.txt),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_signature_item_names(
+    names: &mut Names,
+    arena: &ParseArena,
+    item: &crate::parser::ast::SignatureItem,
+) -> TypeModResult<()> {
+    use crate::parser::ast::SignatureItemDesc as PSigDesc;
+
+    match &*item.psig_desc {
+        PSigDesc::Psig_type(inner) => {
+            let (_, decls) = &**inner;
+            for decl in decls {
+                check_name(
+                    &mut names.types,
+                    "type",
+                    decl.ptype_name.loc,
+                    arena.get_string(decl.ptype_name.txt),
+                )?;
+            }
+        }
+        PSigDesc::Psig_typext(ext) => {
+            for constructor in &ext.ptyext_constructors {
+                check_name(
+                    &mut names.typexts,
+                    "extension constructor",
+                    constructor.pext_name.loc,
+                    arena.get_string(constructor.pext_name.txt),
+                )?;
+            }
+        }
+        PSigDesc::Psig_exception(constructor) => {
+            check_name(
+                &mut names.typexts,
+                "extension constructor",
+                constructor.pext_name.loc,
+                arena.get_string(constructor.pext_name.txt),
+            )?;
+        }
+        PSigDesc::Psig_module(md) => {
+            check_name(
+                &mut names.modules,
+                "module",
+                md.pmd_name.loc,
+                arena.get_string(md.pmd_name.txt),
+            )?;
+        }
+        PSigDesc::Psig_recmodule(mds) => {
+            for md in mds.iter() {
+                check_name(
+                    &mut names.modules,
+                    "module",
+                    md.pmd_name.loc,
+                    arena.get_string(md.pmd_name.txt),
+                )?;
+            }
+        }
+        PSigDesc::Psig_modtype(mtd) => {
+            check_name(
+                &mut names.modtypes,
+                "module type",
+                mtd.pmtd_name.loc,
+                arena.get_string(mtd.pmtd_name.txt),
+            )?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -4371,6 +4598,221 @@ where
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TopLevelValueUseCheck {
+    id: Ident,
+    name: String,
+    loc: LocIdx,
+    item_index: usize,
+    rec_flag: RecFlag,
+}
+
+fn collect_bound_pattern_idents_with_loc(
+    pat: &crate::types::typedtree::Pattern,
+    out: &mut Vec<(Ident, String, LocIdx)>,
+) {
+    use crate::types::typedtree::PatternDesc;
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, name) => {
+            out.push((id.clone(), id.name().to_string(), name.loc));
+        }
+        PatternDesc::Tpat_alias(inner, id, name) => {
+            collect_bound_pattern_idents_with_loc(inner, out);
+            out.push((id.clone(), id.name().to_string(), name.loc));
+        }
+        PatternDesc::Tpat_tuple(pats)
+        | PatternDesc::Tpat_construct(_, _, pats)
+        | PatternDesc::Tpat_array(pats) => {
+            for pat in pats {
+                collect_bound_pattern_idents_with_loc(pat, out);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, pat, _) in fields {
+                collect_bound_pattern_idents_with_loc(pat, out);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            collect_bound_pattern_idents_with_loc(inner, out);
+        }
+        PatternDesc::Tpat_or(left, _right, _) => {
+            collect_bound_pattern_idents_with_loc(left, out);
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+fn collect_top_level_value_use_checks(
+    item: &StructureItem,
+    item_index: usize,
+    out: &mut Vec<TopLevelValueUseCheck>,
+) {
+    let StructureItemDesc::Tstr_value(rec_flag, bindings) = &item.str_desc else {
+        return;
+    };
+
+    for binding in bindings {
+        let mut idents = Vec::new();
+        collect_bound_pattern_idents_with_loc(&binding.vb_pat, &mut idents);
+        out.extend(
+            idents
+                .into_iter()
+                .map(|(id, name, loc)| TopLevelValueUseCheck {
+                    id,
+                    name,
+                    loc,
+                    item_index,
+                    rec_flag: *rec_flag,
+                }),
+        );
+    }
+}
+
+fn module_expr_uses_ident(module_expr: &ModuleExpr, target: &Ident) -> bool {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => structure
+            .str_items
+            .iter()
+            .any(|item| structure_item_uses_ident(item, target)),
+        ModuleExprDesc::Tmod_apply(func, arg, _) => {
+            module_expr_uses_ident(func, target) || module_expr_uses_ident(arg, target)
+        }
+        ModuleExprDesc::Tmod_functor(_, _, _, body) => module_expr_uses_ident(body, target),
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => module_expr_uses_ident(inner, target),
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            crate::types::typecore::typed_expression_uses_ident(expr, target)
+        }
+        ModuleExprDesc::Tmod_ident(_, _) => false,
+    }
+}
+
+fn module_type_uses_ident(module_type: &ModuleType, target: &Ident) -> bool {
+    match &module_type.mty_desc {
+        crate::types::typedtree::ModuleTypeDesc::Tmty_typeof(module_expr) => {
+            module_expr_uses_ident(module_expr, target)
+        }
+        crate::types::typedtree::ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
+            arg.as_ref()
+                .is_some_and(|arg| module_type_uses_ident(arg, target))
+                || module_type_uses_ident(body, target)
+        }
+        crate::types::typedtree::ModuleTypeDesc::Tmty_with(inner, _) => {
+            module_type_uses_ident(inner, target)
+        }
+        crate::types::typedtree::ModuleTypeDesc::Tmty_signature(signature) => signature
+            .sig_items
+            .iter()
+            .any(|item| signature_item_uses_ident(item, target)),
+        crate::types::typedtree::ModuleTypeDesc::Tmty_ident(_, _)
+        | crate::types::typedtree::ModuleTypeDesc::Tmty_alias(_, _)
+        | crate::types::typedtree::ModuleTypeDesc::Tmty_placeholder => false,
+    }
+}
+
+fn signature_item_uses_ident(
+    item: &crate::types::typedtree::TypedSignatureItem,
+    target: &Ident,
+) -> bool {
+    match &item.sig_desc {
+        crate::types::typedtree::TypedSignatureItemDesc::Tsig_module(decl) => {
+            module_type_uses_ident(&decl.md_type, target)
+        }
+        crate::types::typedtree::TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
+            .iter()
+            .any(|decl| module_type_uses_ident(&decl.md_type, target)),
+        crate::types::typedtree::TypedSignatureItemDesc::Tsig_modtype(decl) => decl
+            .mtd_type
+            .as_ref()
+            .is_some_and(|module_type| module_type_uses_ident(module_type, target)),
+        crate::types::typedtree::TypedSignatureItemDesc::Tsig_include(include) => {
+            module_type_uses_ident(&include.incl_mod, target)
+        }
+        crate::types::typedtree::TypedSignatureItemDesc::Tsig_value(_)
+        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_type(_, _)
+        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_typext(_)
+        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_exception(_)
+        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_open(_)
+        | crate::types::typedtree::TypedSignatureItemDesc::Tsig_attribute(_) => false,
+    }
+}
+
+fn structure_item_uses_ident(item: &StructureItem, target: &Ident) -> bool {
+    match &item.str_desc {
+        StructureItemDesc::Tstr_eval(expr, _) => {
+            crate::types::typecore::typed_expression_uses_ident(expr, target)
+        }
+        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
+            crate::types::typecore::typed_expression_uses_ident(&binding.vb_expr, target)
+        }),
+        StructureItemDesc::Tstr_module(binding) => module_expr_uses_ident(&binding.mb_expr, target),
+        StructureItemDesc::Tstr_recmodule(bindings) => bindings
+            .iter()
+            .any(|binding| module_expr_uses_ident(&binding.mb_expr, target)),
+        StructureItemDesc::Tstr_modtype(decl) => decl
+            .mtd_type
+            .as_ref()
+            .is_some_and(|module_type| module_type_uses_ident(module_type, target)),
+        StructureItemDesc::Tstr_include(include) => {
+            module_expr_uses_ident(&include.incl_mod, target)
+        }
+        StructureItemDesc::Tstr_primitive(_)
+        | StructureItemDesc::Tstr_type(_, _)
+        | StructureItemDesc::Tstr_typext(_)
+        | StructureItemDesc::Tstr_exception(_)
+        | StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_) => false,
+    }
+}
+
+fn should_warn_unused_value_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('_') && !name.starts_with('#')
+}
+
+fn report_unused_top_level_value_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    typed_items: &[StructureItem],
+    checks: &[TopLevelValueUseCheck],
+    final_values_are_used: bool,
+) {
+    let mut final_visible = HashMap::new();
+    if final_values_are_used {
+        for (index, check) in checks.iter().enumerate() {
+            final_visible.insert(check.name.clone(), index);
+        }
+    }
+
+    for (check_index, check) in checks.iter().enumerate() {
+        if !should_warn_unused_value_name(&check.name)
+            || arena.to_location(check.loc).loc_ghost
+            || final_visible.get(&check.name) == Some(&check_index)
+        {
+            continue;
+        }
+
+        let start_index = if check.rec_flag == RecFlag::Recursive {
+            check.item_index
+        } else {
+            check.item_index + 1
+        };
+        let used = typed_items
+            .iter()
+            .skip(start_index)
+            .any(|item| structure_item_uses_ident(item, &check.id));
+        if !used {
+            tctx.report_warning(
+                check.loc,
+                Warning::UnusedValueDeclaration {
+                    name: check.name.clone(),
+                },
+            );
+        }
     }
 }
 
@@ -11168,8 +11610,10 @@ pub fn transl_signature<'a>(
     // Thread environment through the loop so Psig_open extends it
     // for subsequent items (matching OCaml's transl_signature behavior).
     let mut sig_env = env.clone();
+    let mut names = Names::default();
 
     for item in items {
+        check_signature_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         let loc = item.psig_loc;
@@ -11511,12 +11955,17 @@ pub fn type_structure<'a>(
     let mut typed_items = Vec::new();
     let mut sig_items = Vec::new();
     let mut current_env = env.clone_preserve_id();
+    let mut names = Names::default();
+    let mut unused_value_checks = Vec::new();
 
     for item in items {
+        check_structure_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let item_index = typed_items.len();
+        collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
         }
@@ -11660,6 +12109,14 @@ pub fn type_structure<'a>(
                     str_loc: LocIdx(0),
                     str_env: crate::types::typedtree::EnvRef(0),
                 });
+                let item_index = typed_items.len() - 1;
+                collect_top_level_value_use_checks(
+                    typed_items
+                        .last()
+                        .expect("just pushed generated type-builder item"),
+                    item_index,
+                    &mut unused_value_checks,
+                );
             }
             Ok(crate::types::comptime::TypeBuilderResult::Record(_)) => {
                 // Deferred record emission not yet wired — use early-emit path
@@ -11772,7 +12229,17 @@ pub fn type_structure<'a>(
             str_loc: LocIdx(0),
             str_env: crate::types::typedtree::EnvRef(0),
         });
+        let item_index = typed_items.len() - 1;
+        collect_top_level_value_use_checks(
+            typed_items
+                .last()
+                .expect("just pushed generated monomorph item"),
+            item_index,
+            &mut unused_value_checks,
+        );
     }
+
+    report_unused_top_level_value_warnings(tctx, arena, &typed_items, &unused_value_checks, true);
 
     let structure = Structure {
         str_items: typed_items,
@@ -11781,6 +12248,100 @@ pub fn type_structure<'a>(
     };
 
     Ok((structure, current_env))
+}
+
+fn closed_modtype(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+) -> bool {
+    match mty {
+        crate::types::decl::ModuleType::MtyIdent(_)
+        | crate::types::decl::ModuleType::MtyAlias(_, _) => true,
+        crate::types::decl::ModuleType::MtySignature(sig) => {
+            let mut sig_env = env.clone_preserve_id();
+            for item in sig {
+                add_decl_signature_item_to_env(item, &mut sig_env);
+            }
+            sig.iter()
+                .all(|item| closed_signature_item(ctx, &sig_env, item))
+        }
+        crate::types::decl::ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let mut functor_env = env.clone_preserve_id();
+            functor_env.add_module(
+                param.clone(),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: default_module_type(param_type.as_deref().cloned()),
+                    md_attributes: vec![],
+                    md_loc: Location::none(),
+                    md_path: None,
+                },
+            );
+            closed_modtype(ctx, &functor_env, result)
+        }
+    }
+}
+
+fn closed_signature_item(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    item: &crate::types::decl::SignatureItem,
+) -> bool {
+    match item {
+        crate::types::decl::SignatureItem::SigValue(_, desc) => {
+            crate::types::ctype::closed_schema(ctx, env, desc.val_type)
+        }
+        crate::types::decl::SignatureItem::SigModule(_, md, _) => {
+            closed_modtype(ctx, env, &md.md_type)
+        }
+        _ => true,
+    }
+}
+
+fn check_nongen_scheme(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    item: &crate::types::decl::SignatureItem,
+) -> TypeModResult<()> {
+    match item {
+        crate::types::decl::SignatureItem::SigValue(_, desc)
+            if !crate::types::ctype::closed_schema(ctx, env, desc.val_type) =>
+        {
+            Err(TypeModError::NonGeneralizable {
+                loc: desc.val_loc.clone(),
+                typ: desc.val_type,
+            })
+        }
+        crate::types::decl::SignatureItem::SigModule(_, md, _)
+            if !closed_modtype(ctx, env, &md.md_type) =>
+        {
+            Err(TypeModError::NonGeneralizableModule {
+                loc: md.md_loc.clone(),
+                mty: md.md_type.clone(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check that all core type schemes in a structure signature are closed.
+///
+/// Mirrors OCaml `Typemod.check_nongen_schemes`, which runs after inferred
+/// signature inclusion and before signature normalization when there is no
+/// explicit `.resi` interface.
+pub fn check_nongen_schemes(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    sig: &[crate::types::decl::SignatureItem],
+) -> TypeModResult<()> {
+    for item in sig {
+        check_nongen_scheme(ctx, env, item)?;
+    }
+    Ok(())
 }
 
 /// Apply no_export wrapping: wraps entire structure in
@@ -11797,18 +12358,23 @@ fn type_structure_no_export<'a>(
     let mut typed_items = Vec::new();
     let mut sig_items = Vec::new();
     let mut current_env = env.clone_preserve_id();
+    let mut unused_value_checks = Vec::new();
 
     for item in items {
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let item_index = typed_items.len();
+        collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
         }
         typed_items.push(typed_item);
         current_env = new_env;
     }
+
+    report_unused_top_level_value_warnings(tctx, arena, &typed_items, &unused_value_checks, false);
 
     let inner_structure = Structure {
         str_items: typed_items,
@@ -12614,6 +13180,18 @@ fn type_structure_item<'a>(
                             Option<(Vec<crate::types::ConstructorDeclaration>, bool)>,
                         > = {
                             let mut sources = Vec::new();
+                            let target_type_attributes =
+                                parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+                            let target_unboxed = has_decl_attr(&target_type_attributes, "unboxed");
+                            let target_tag_name =
+                                process_variant_tag_name(&target_type_attributes)?;
+                            let mut all_constructor_names = HashSet::new();
+                            for cstr in cstrs.iter() {
+                                let cstr_name = arena.get_string(cstr.pcd_name.txt);
+                                if cstr_name != "..." {
+                                    all_constructor_names.insert(cstr_name.to_string());
+                                }
+                            }
                             for cstr in cstrs.iter() {
                                 let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
                                 if cstr_name_str != "..." {
@@ -12628,11 +13206,83 @@ fn type_structure_item<'a>(
                                 ) = cstr.pcd_args
                                 {
                                     if let Some(spread_type_ct) = args.first() {
-                                        if let Ok((_typed_ct, type_ref)) = transl_type(
-                                            tctx,
-                                            &temp_env,
-                                            arena.get_core_type(*spread_type_ct),
-                                        ) {
+                                        let spread_core_type = arena.get_core_type(*spread_type_ct);
+                                        let spread_loc = match &*spread_core_type.ptyp_desc {
+                                            crate::parser::ast::CoreTypeDesc::Ptyp_constr(
+                                                inner,
+                                            ) => inner.0.loc,
+                                            _ => spread_core_type.ptyp_loc,
+                                        };
+                                        let mut handle_source_decl =
+                                            |source_decl: &crate::types::TypeDeclaration,
+                                             variant_name: String|
+                                             -> TypeModResult<
+                                                Vec<crate::types::ConstructorDeclaration>,
+                                            > {
+                                                if !source_decl.type_params.is_empty() {
+                                                    return Err(
+                                                        TypeModError::VariantSpreadHasTypeParams {
+                                                            loc: spread_loc,
+                                                        },
+                                                    );
+                                                }
+                                                let source_cstrs =
+                                                    match &source_decl.type_kind {
+                                                        crate::types::TypeKind::TypeVariant(
+                                                            cstrs,
+                                                        ) if !cstrs.is_empty() => cstrs.clone(),
+                                                        _ => {
+                                                            return Err(
+                                                            TypeModError::VariantSpreadInvalidType {
+                                                                loc: spread_loc,
+                                                            },
+                                                        );
+                                                        }
+                                                    };
+                                                let source_unboxed = has_decl_attr(
+                                                    &source_decl.type_attributes,
+                                                    "unboxed",
+                                                );
+                                                if source_unboxed != target_unboxed {
+                                                    return Err(
+                                                        TypeModError::VariantSpreadUnboxedMismatch {
+                                                            loc: spread_loc,
+                                                            source_unboxed,
+                                                        },
+                                                    );
+                                                }
+                                                let source_tag_name = process_variant_tag_name(
+                                                    &source_decl.type_attributes,
+                                                )?;
+                                                if source_tag_name != target_tag_name {
+                                                    return Err(
+                                                        TypeModError::VariantSpreadTagMismatch {
+                                                            loc: spread_loc,
+                                                        },
+                                                    );
+                                                }
+                                                for source_cstr in &source_cstrs {
+                                                    let source_name =
+                                                        source_cstr.cd_id.name().to_string();
+                                                    if all_constructor_names.contains(&source_name)
+                                                    {
+                                                        return Err(TypeModError::VariantSpreadDuplicateConstructor {
+                                                            loc: spread_loc,
+                                                            variant_name,
+                                                            constructor_name: source_name,
+                                                        });
+                                                    }
+                                                }
+                                                for source_cstr in &source_cstrs {
+                                                    all_constructor_names.insert(
+                                                        source_cstr.cd_id.name().to_string(),
+                                                    );
+                                                }
+                                                Ok(source_cstrs)
+                                            };
+                                        if let Ok((_typed_ct, type_ref)) =
+                                            transl_type(tctx, env, spread_core_type)
+                                        {
                                             // Extract the type declaration from the resolved type
                                             let repr = ctx.repr(type_ref);
                                             if let crate::types::type_expr::TypeDesc::Tconstr {
@@ -12652,7 +13302,7 @@ fn type_structure_item<'a>(
                                                         if let Some(parent_sig) =
                                                             resolve_path_to_sig_impl(
                                                                 parent,
-                                                                Some(&temp_env),
+                                                                Some(env),
                                                                 &mut tctx.persistent_env,
                                                                 tctx.type_ctx,
                                                                 &mut visiting,
@@ -12664,76 +13314,53 @@ fn type_structure_item<'a>(
                                                                     decl,
                                                                     _,
                                                                 ) = item
-                                                                {
-                                                                    if id.name() == type_name.as_str() {
-                                                                        if let crate::types::TypeKind::TypeVariant(
-                                                                            ref source_cstrs,
-                                                                        ) = decl.type_kind
-                                                                        {
-                                                                            found = Some(source_cstrs.clone());
+                                                                    {
+                                                                        if id.name() == type_name.as_str() {
+                                                                            found = Some(handle_source_decl(
+                                                                                decl,
+                                                                                path.name(),
+                                                                            )?);
+                                                                            break;
                                                                         }
-                                                                        break;
                                                                     }
-                                                                }
                                                             }
                                                         }
                                                     }
                                                     _ => {
                                                         if let Ok(source_decl) =
-                                                            temp_env.lookup_type(path)
+                                                            env.lookup_type(path)
                                                         {
-                                                            if let crate::types::TypeKind::TypeVariant(
-                                                                ref source_cstrs,
-                                                            ) = source_decl.type_kind
-                                                            {
-                                                                found = Some(source_cstrs.clone());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                // Try global type store by stamp (for Pident paths)
-                                                if found.is_none() {
-                                                    if let Path::Pident(id) = path {
-                                                        if let Some(source_decl) =
-                                                            ctx.find_type_decl_by_stamp(id.stamp())
-                                                        {
-                                                            if let crate::types::TypeKind::TypeVariant(ref source_cstrs) = source_decl.type_kind {
-                                                                found = Some(source_cstrs.clone());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                // Try global type store by full path string (for Pdot paths like S.s)
-                                                if found.is_none() {
-                                                    let path_str = path.name();
-                                                    if let Some(source_decl) =
-                                                        ctx.find_type_decl_by_path(&path_str)
-                                                    {
-                                                        if let crate::types::TypeKind::TypeVariant(
-                                                            ref source_cstrs,
-                                                        ) = source_decl.type_kind
-                                                        {
-                                                            found = Some(source_cstrs.clone());
-                                                        }
-                                                    }
-                                                }
-                                                // Try global type store by short name as last resort
-                                                if found.is_none() {
-                                                    let short_name = path.head_name();
-                                                    if let Some(source_decl) =
-                                                        ctx.find_type_decl(short_name)
-                                                    {
-                                                        if let crate::types::TypeKind::TypeVariant(
-                                                            ref source_cstrs,
-                                                        ) = source_decl.type_kind
-                                                        {
-                                                            found = Some(source_cstrs.clone());
+                                                            found = Some(handle_source_decl(
+                                                                &source_decl,
+                                                                path.name(),
+                                                            )?);
                                                         }
                                                     }
                                                 }
                                             }
+                                            if found.is_none() {
+                                                return Err(
+                                                    TypeModError::VariantSpreadCouldNotFindType {
+                                                        loc: spread_loc,
+                                                    },
+                                                );
+                                            }
+                                        } else {
+                                            return Err(
+                                                TypeModError::VariantSpreadCouldNotFindType {
+                                                    loc: spread_loc,
+                                                },
+                                            );
                                         }
+                                    } else {
+                                        return Err(TypeModError::VariantSpreadCouldNotFindType {
+                                            loc: cstr.pcd_loc,
+                                        });
                                     }
+                                } else {
+                                    return Err(TypeModError::VariantSpreadCouldNotFindType {
+                                        loc: cstr.pcd_loc,
+                                    });
                                 }
                                 sources.push(found.map(|cstrs| (cstrs, is_pdot)));
                             }
@@ -13651,6 +14278,11 @@ fn type_structure_item<'a>(
                                 vec![],
                             )
                         } else {
+                            check_duplicate_typed_label_declarations(
+                                decl.ptype_loc,
+                                &typed_tree_labels,
+                                Some(arena.get_string(decl.ptype_name.txt)),
+                            )?;
                             let repres = if decl_has_unboxed_attr && internal_labels.len() == 1 {
                                 crate::types::RecordRepresentation::RecordUnboxed(false)
                             } else {
@@ -15515,6 +16147,11 @@ fn transl_sig_type_declarations_with_ids<'a>(
                         }
                     }
 
+                    check_duplicate_typed_label_declarations(
+                        decl.ptype_loc,
+                        &typed_tree_labels,
+                        Some(arena.get_string(decl.ptype_name.txt)),
+                    )?;
                     (
                         crate::types::TypeKind::TypeRecord(
                             internal_labels,

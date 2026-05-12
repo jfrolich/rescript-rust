@@ -89,11 +89,133 @@ pub enum SubtypeContext {
     /// Generic error with error code.
     Generic { error_code: String },
 
+    /// Primitive-to-variant coercion target is not unboxed.
+    CoercionTargetVariantNotUnboxed { variant_name: Path, primitive: Path },
+
+    /// Primitive-to-variant coercion target does not cover the primitive type.
+    CoercionTargetVariantDoesNotCoverType { variant_name: Path, primitive: Path },
+
+    /// Variant constructors do not have the runtime representation required by the target.
+    VariantConstructorRuntimeRepresentationMismatch {
+        variant_name: Path,
+        issues: Vec<VariantRuntimeRepresentationIssue>,
+    },
+
+    /// Variant type declarations have incompatible runtime configuration.
+    VariantConfigurationsMismatch {
+        left_variant_name: Path,
+        right_variant_name: Path,
+        issue: VariantConfigurationIssue,
+    },
+
     /// Different type kinds.
     DifferentTypeKinds {
         left_typename: Path,
         right_typename: Path,
+        left_type_kind: SubtypeTypeKind,
+        right_type_kind: SubtypeTypeKind,
     },
+
+    /// Records have fields that are not compatible.
+    RecordFieldsMismatch {
+        left_record_name: Path,
+        right_record_name: Path,
+        issues: Vec<RecordFieldSubtypeViolation>,
+    },
+}
+
+/// User-facing type kind for subtype diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtypeTypeKind {
+    /// Abstract type.
+    Abstract,
+    /// Record type.
+    Record,
+    /// Variant type.
+    Variant,
+    /// Open type.
+    Open,
+}
+
+/// Runtime representation problem for variant-to-primitive coercions.
+#[derive(Debug, Clone)]
+pub enum VariantRuntimeRepresentationIssue {
+    MismatchedUnboxedPayload {
+        constructor_name: String,
+        expected_typename: Path,
+    },
+    MismatchedAsPayload {
+        constructor_name: String,
+        expected_typename: Path,
+        as_payload: Option<VariantConstructorAsPayload>,
+    },
+    AsPayloadNotEligibleForCoercion {
+        constructor_name: String,
+        expected_typename: Path,
+        as_payload: VariantConstructorAsPayload,
+    },
+    InlineRecordCannotBeCoerced {
+        constructor_name: String,
+    },
+    CannotCoerceNonUnboxedWithPayload {
+        constructor_name: String,
+        expected_typename: Path,
+    },
+}
+
+/// Runtime type encoded by a variant constructor `@as` payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantConstructorAsPayload {
+    String,
+    Int,
+    Float,
+    BigInt,
+    Bool,
+    Null,
+    Undefined,
+}
+
+/// Runtime configuration differences for variant-to-variant coercions.
+#[derive(Debug, Clone)]
+pub enum VariantConfigurationIssue {
+    /// The variants differ in whether they are marked `@unboxed`.
+    UnboxedConfigNotMatching {
+        /// Whether the source variant is unboxed.
+        left_unboxed: bool,
+        /// Whether the target variant is unboxed.
+        right_unboxed: bool,
+    },
+    /// The variants differ in their `@tag` attribute.
+    TagNameNotMatching {
+        /// The source variant tag field name.
+        left_tag: Option<String>,
+        /// The target variant tag field name.
+        right_tag: Option<String>,
+    },
+    /// The source variant has constructors the target cannot represent.
+    IncompatibleConstructorCount {
+        /// Constructor names present only on the source variant.
+        constructor_names: Vec<String>,
+    },
+}
+
+/// A record field incompatibility found while checking subtype coercions.
+#[derive(Debug, Clone)]
+pub enum RecordFieldSubtypeViolation {
+    /// One side marks a field optional and the other does not.
+    OptionalMismatch {
+        label: String,
+        left_optional: bool,
+        right_optional: bool,
+    },
+    /// The field runtime names differ, either by label or `@as` payload.
+    FieldRuntimeNameMismatch {
+        label: String,
+        left_as: Option<String>,
+        right_as: Option<String>,
+    },
+    /// A field present in the target record is missing from the source record.
+    FieldMissing { label: String },
 }
 
 /// Result type for type operations.
@@ -3243,6 +3365,218 @@ fn subtype_error(trace: &[(TypeExprRef, TypeExprRef)]) -> TypeError {
     }
 }
 
+fn subtype_error_with_context(
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: SubtypeContext,
+) -> TypeError {
+    TypeError::Subtype {
+        trace: trace.to_vec(),
+        context: Some(context),
+    }
+}
+
+fn primitive_coercion_path(path: &Path) -> bool {
+    path.same(&crate::types::predef::path_string())
+        || path.same(&crate::types::predef::path_int())
+        || path.same(&crate::types::predef::path_float())
+        || path.same(&crate::types::predef::path_bigint())
+}
+
+fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDeclaration) -> bool {
+    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_))
+        && decl.type_params.is_empty()
+        && !path.same(&crate::types::predef::path_bool())
+}
+
+fn variant_coercion_has_unboxed_attr(decl: &crate::types::TypeDeclaration) -> bool {
+    decl.type_attributes
+        .iter()
+        .any(|attr| attr.attr_name.txt == "unboxed")
+}
+
+fn variant_coercion_tag_name(decl: &crate::types::TypeDeclaration) -> Option<String> {
+    decl.type_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "tag"
+            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn variant_configuration_issue(
+    decl1: &crate::types::TypeDeclaration,
+    decl2: &crate::types::TypeDeclaration,
+) -> Option<VariantConfigurationIssue> {
+    let left_unboxed = variant_coercion_has_unboxed_attr(decl1);
+    let right_unboxed = variant_coercion_has_unboxed_attr(decl2);
+    if left_unboxed != right_unboxed {
+        return Some(VariantConfigurationIssue::UnboxedConfigNotMatching {
+            left_unboxed,
+            right_unboxed,
+        });
+    }
+
+    let left_tag = variant_coercion_tag_name(decl1);
+    let right_tag = variant_coercion_tag_name(decl2);
+    if left_tag != right_tag {
+        return Some(VariantConfigurationIssue::TagNameNotMatching {
+            left_tag,
+            right_tag,
+        });
+    }
+
+    None
+}
+
+fn subtype_type_kind(kind: &crate::types::TypeKind) -> SubtypeTypeKind {
+    match kind {
+        crate::types::TypeKind::TypeAbstract => SubtypeTypeKind::Abstract,
+        crate::types::TypeKind::TypeRecord(_, _) => SubtypeTypeKind::Record,
+        crate::types::TypeKind::TypeVariant(_) => SubtypeTypeKind::Variant,
+        crate::types::TypeKind::TypeOpen => SubtypeTypeKind::Open,
+    }
+}
+
+fn type_expr_path_same(ctx: &TypeContext, ty: TypeExprRef, target_path: &Path) -> bool {
+    matches!(
+        &*ctx.get_desc(ctx.repr(ty)),
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() && path.same(target_path)
+    )
+}
+
+fn variant_constructor_as_payload(
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<VariantConstructorAsPayload> {
+    attrs.iter().find_map(|attr| {
+        if attr.attr_name.txt != "as" {
+            return None;
+        }
+        match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(_) => {
+                Some(VariantConstructorAsPayload::String)
+            }
+            crate::types::decl::AttributePayload::Int(_) => Some(VariantConstructorAsPayload::Int),
+            crate::types::decl::AttributePayload::Float(_) => {
+                Some(VariantConstructorAsPayload::Float)
+            }
+            crate::types::decl::AttributePayload::BigInt(_) => {
+                Some(VariantConstructorAsPayload::BigInt)
+            }
+            crate::types::decl::AttributePayload::Bool(_) => {
+                Some(VariantConstructorAsPayload::Bool)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
+                Some(VariantConstructorAsPayload::Null)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(VariantConstructorAsPayload::Undefined)
+            }
+            _ => None,
+        }
+    })
+}
+
+fn variant_constructor_covers_primitive(
+    ctx: &TypeContext,
+    constructor: &crate::types::decl::ConstructorDeclaration,
+    primitive_path: &Path,
+) -> bool {
+    match &constructor.cd_args {
+        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 => {
+            type_expr_path_same(ctx, args[0], primitive_path)
+        }
+        _ => false,
+    }
+}
+
+fn variant_runtime_representation_issues(
+    ctx: &TypeContext,
+    constructors: &[crate::types::decl::ConstructorDeclaration],
+    target_path: &Path,
+    unboxed: bool,
+) -> Vec<VariantRuntimeRepresentationIssue> {
+    constructors
+        .iter()
+        .filter_map(|constructor| {
+            let constructor_name = constructor.cd_id.name().to_string();
+            match &constructor.cd_args {
+                crate::types::decl::ConstructorArguments::CstrTuple(args)
+                    if args.len() == 1 && unboxed =>
+                {
+                    let matches_unboxed_payload = (target_path
+                        .same(&crate::types::predef::path_string())
+                        || target_path.same(&crate::types::predef::path_float())
+                        || target_path.same(&crate::types::predef::path_bigint()))
+                        && type_expr_path_same(ctx, args[0], target_path);
+                    if matches_unboxed_payload {
+                        None
+                    } else {
+                        Some(
+                            VariantRuntimeRepresentationIssue::MismatchedUnboxedPayload {
+                                constructor_name,
+                                expected_typename: target_path.clone(),
+                            },
+                        )
+                    }
+                }
+                crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
+                    let as_payload = variant_constructor_as_payload(&constructor.cd_attributes);
+                    let matches_as_payload = match as_payload {
+                        None | Some(VariantConstructorAsPayload::String) => {
+                            target_path.same(&crate::types::predef::path_string())
+                        }
+                        Some(VariantConstructorAsPayload::Int) => {
+                            target_path.same(&crate::types::predef::path_int())
+                        }
+                        Some(VariantConstructorAsPayload::Float) => {
+                            target_path.same(&crate::types::predef::path_float())
+                        }
+                        Some(VariantConstructorAsPayload::BigInt) => {
+                            target_path.same(&crate::types::predef::path_bigint())
+                        }
+                        Some(
+                            VariantConstructorAsPayload::Bool
+                            | VariantConstructorAsPayload::Null
+                            | VariantConstructorAsPayload::Undefined,
+                        ) => {
+                            return Some(
+                                VariantRuntimeRepresentationIssue::AsPayloadNotEligibleForCoercion {
+                                    constructor_name,
+                                    expected_typename: target_path.clone(),
+                                    as_payload: as_payload.expect("matched Some payload"),
+                                },
+                            );
+                        }
+                    };
+                    if matches_as_payload {
+                        None
+                    } else {
+                        Some(VariantRuntimeRepresentationIssue::MismatchedAsPayload {
+                            constructor_name,
+                            expected_typename: target_path.clone(),
+                            as_payload,
+                        })
+                    }
+                }
+                crate::types::decl::ConstructorArguments::CstrTuple(_) => Some(
+                    VariantRuntimeRepresentationIssue::CannotCoerceNonUnboxedWithPayload {
+                        constructor_name,
+                        expected_typename: target_path.clone(),
+                    },
+                ),
+                crate::types::decl::ConstructorArguments::CstrRecord(_) => Some(
+                    VariantRuntimeRepresentationIssue::InlineRecordCannotBeCoerced {
+                        constructor_name,
+                    },
+                ),
+            }
+        })
+        .collect()
+}
+
 fn subtype_rec(
     ctx: &TypeContext,
     env: &Env,
@@ -3346,10 +3680,57 @@ fn subtype_rec(
 
             if args1.is_empty()
                 && args2.is_empty()
-                && let Some(result) =
-                    subtype_concrete_type_declarations(ctx, env, visited, trace, path1, path2)
+                && primitive_coercion_path(path1)
+                && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path2)
+                && can_try_coerce_variant_to_primitive(path2, &decl2)
+                && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
             {
-                return result;
+                if !variant_coercion_has_unboxed_attr(&decl2) {
+                    return Err(subtype_error_with_context(
+                        trace,
+                        SubtypeContext::CoercionTargetVariantNotUnboxed {
+                            variant_name: path2.clone(),
+                            primitive: path1.clone(),
+                        },
+                    ));
+                }
+                if constructors.iter().any(|constructor| {
+                    variant_constructor_covers_primitive(ctx, constructor, path1)
+                }) {
+                    return Ok(());
+                }
+                return Err(subtype_error_with_context(
+                    trace,
+                    SubtypeContext::CoercionTargetVariantDoesNotCoverType {
+                        variant_name: path2.clone(),
+                        primitive: path1.clone(),
+                    },
+                ));
+            }
+
+            if args1.is_empty()
+                && args2.is_empty()
+                && primitive_coercion_path(path2)
+                && let Some(decl1) = lookup_type_decl_for_path(ctx, env, path1)
+                && can_try_coerce_variant_to_primitive(path1, &decl1)
+                && let crate::types::TypeKind::TypeVariant(constructors) = &decl1.type_kind
+            {
+                let issues = variant_runtime_representation_issues(
+                    ctx,
+                    constructors,
+                    path2,
+                    variant_coercion_has_unboxed_attr(&decl1),
+                );
+                if issues.is_empty() {
+                    return Ok(());
+                }
+                return Err(subtype_error_with_context(
+                    trace,
+                    SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
+                        variant_name: path1.clone(),
+                        issues,
+                    },
+                ));
             }
 
             if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
@@ -3357,6 +3738,14 @@ fn subtype_rec(
             }
             if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
                 return subtype_rec(ctx, env, visited, trace, ty1, expanded2);
+            }
+
+            if args1.is_empty()
+                && args2.is_empty()
+                && let Some(result) =
+                    subtype_concrete_type_declarations(ctx, env, visited, trace, path1, path2)
+            {
+                return result;
             }
 
             Err(subtype_error(trace))
@@ -3442,13 +3831,44 @@ fn subtype_concrete_type_declarations(
             super::TypeKind::TypeRecord(fields1, repr1),
             super::TypeKind::TypeRecord(fields2, repr2),
         ) => Some(if repr1 == repr2 {
-            subtype_record_fields(ctx, env, visited, trace, fields1, fields2)
+            subtype_record_fields(ctx, env, visited, trace, path1, path2, fields1, fields2)
         } else {
             Err(subtype_error(trace))
         }),
-        (super::TypeKind::TypeVariant(_), super::TypeKind::TypeVariant(_)) => {
-            Some(Err(subtype_error(trace)))
-        }
+        (super::TypeKind::TypeVariant(cstrs1), super::TypeKind::TypeVariant(cstrs2)) => Some(
+            if let Some(issue) = variant_configuration_issue(&decl1, &decl2) {
+                Err(subtype_error_with_context(
+                    trace,
+                    SubtypeContext::VariantConfigurationsMismatch {
+                        left_variant_name: path1.clone(),
+                        right_variant_name: path2.clone(),
+                        issue,
+                    },
+                ))
+            } else if cstrs1.len() > cstrs2.len() {
+                let cstrs2_names: HashSet<_> =
+                    cstrs2.iter().map(|cstr| cstr.cd_id.name()).collect();
+                let constructor_names = cstrs1
+                    .iter()
+                    .filter_map(|cstr| {
+                        let name = cstr.cd_id.name();
+                        (!cstrs2_names.contains(name)).then(|| name.to_string())
+                    })
+                    .collect();
+                Err(subtype_error_with_context(
+                    trace,
+                    SubtypeContext::VariantConfigurationsMismatch {
+                        left_variant_name: path1.clone(),
+                        right_variant_name: path2.clone(),
+                        issue: VariantConfigurationIssue::IncompatibleConstructorCount {
+                            constructor_names,
+                        },
+                    },
+                ))
+            } else {
+                Err(subtype_error(trace))
+            },
+        ),
         (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
         | (super::TypeKind::TypeOpen, super::TypeKind::TypeOpen) => None,
         _ => Some(Err(TypeError::Subtype {
@@ -3456,6 +3876,8 @@ fn subtype_concrete_type_declarations(
             context: Some(SubtypeContext::DifferentTypeKinds {
                 left_typename: path1.clone(),
                 right_typename: path2.clone(),
+                left_type_kind: subtype_type_kind(&decl1.type_kind),
+                right_type_kind: subtype_type_kind(&decl2.type_kind),
             }),
         })),
     }
@@ -3466,52 +3888,105 @@ fn subtype_record_fields(
     env: &Env,
     visited: &mut HashSet<(u32, u32)>,
     trace: &[(TypeExprRef, TypeExprRef)],
+    path1: &Path,
+    path2: &Path,
     fields1: &[LabelDeclaration],
     fields2: &[LabelDeclaration],
 ) -> TypeResult<()> {
-    for field2 in fields2 {
-        let Some(field1) = fields1
-            .iter()
-            .find(|field1| field1.ld_id.name() == field2.ld_id.name())
-        else {
-            return Err(subtype_error(trace));
-        };
+    let (issues, mut field_types1, mut field_types2) = check_record_fields(fields1, fields2);
+    if !issues.is_empty() {
+        return Err(subtype_error_with_context(
+            trace,
+            SubtypeContext::RecordFieldsMismatch {
+                left_record_name: path1.clone(),
+                right_record_name: path2.clone(),
+                issues,
+            },
+        ));
+    }
 
-        if field1.ld_optional != field2.ld_optional
-            || label_declaration_runtime_name(field1) != label_declaration_runtime_name(field2)
-        {
-            return Err(subtype_error(trace));
-        }
-
+    // OCaml's Record_coercion.check_record_fields builds these lists with
+    // cons during a left fold, so subtype_list sees target fields in reverse.
+    field_types1.reverse();
+    field_types2.reverse();
+    for (field_type1, field_type2) in field_types1.into_iter().zip(field_types2.into_iter()) {
         let mut field_trace = trace.to_vec();
-        field_trace.push((field1.ld_type, field2.ld_type));
-        subtype_rec(
-            ctx,
-            env,
-            visited,
-            &field_trace,
-            field1.ld_type,
-            field2.ld_type,
-        )?;
+        field_trace.push((field_type1, field_type2));
+        subtype_rec(ctx, env, visited, &field_trace, field_type1, field_type2)?;
     }
 
     Ok(())
 }
 
+fn check_record_fields(
+    fields1: &[LabelDeclaration],
+    fields2: &[LabelDeclaration],
+) -> (
+    Vec<RecordFieldSubtypeViolation>,
+    Vec<TypeExprRef>,
+    Vec<TypeExprRef>,
+) {
+    let mut issues = Vec::new();
+    let mut field_types1 = Vec::new();
+    let mut field_types2 = Vec::new();
+
+    for field2 in fields2 {
+        let Some(field1) = fields1
+            .iter()
+            .find(|field1| field1.ld_id.name() == field2.ld_id.name())
+        else {
+            issues.insert(
+                0,
+                RecordFieldSubtypeViolation::FieldMissing {
+                    label: field2.ld_id.name().to_string(),
+                },
+            );
+            continue;
+        };
+
+        if field1.ld_optional != field2.ld_optional {
+            issues.insert(
+                0,
+                RecordFieldSubtypeViolation::OptionalMismatch {
+                    label: field1.ld_id.name().to_string(),
+                    left_optional: field1.ld_optional,
+                    right_optional: field2.ld_optional,
+                },
+            );
+        }
+
+        if label_declaration_runtime_name(field1) != label_declaration_runtime_name(field2) {
+            issues.insert(
+                0,
+                RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
+                    label: field1.ld_id.name().to_string(),
+                    left_as: label_declaration_as_name(field1),
+                    right_as: label_declaration_as_name(field2),
+                },
+            );
+        }
+
+        field_types1.push(field1.ld_type);
+        field_types2.push(field2.ld_type);
+    }
+
+    (issues, field_types1, field_types2)
+}
+
 fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
-    label
-        .ld_attributes
-        .iter()
-        .find_map(|attr| {
-            if attr.attr_name.txt == "as"
-                && let super::decl::AttributePayload::Str(value) = &attr.attr_payload
-            {
-                Some(value.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| label.ld_id.name().to_string())
+    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+}
+
+fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
+    label.ld_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "as"
+            && let super::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) fn touch_constraint_match_head_expansion(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
@@ -5632,7 +6107,10 @@ fn unify_rows<'a>(
             super::btype::row_field_is_absent(ctx, f1) || super::btype::row_field_is_absent(ctx, f2)
         });
         if (empty(&r1) || row2.row_closed) && (empty(&r2) || row1.row_closed) && all_absent {
-            return Err(TypeError::Unify(vec![]));
+            return Err(TypeError::Unify(vec![(
+                snapshot_row_type_for_trace(ctx, row1),
+                snapshot_row_type_for_trace(ctx, row2),
+            )]));
         }
     }
 
@@ -5731,9 +6209,59 @@ fn unify_rows<'a>(
     if let Err(err) = result {
         ctx.set_desc(rm1, md1.clone());
         ctx.set_desc(rm2, md2.clone());
-        return Err(err);
+        return match err {
+            TypeError::Unify(trace) if trace.is_empty() => Err(TypeError::Unify(vec![(
+                snapshot_row_type_for_trace(ctx, row1),
+                snapshot_row_type_for_trace(ctx, row2),
+            )])),
+            err => Err(err),
+        };
     }
     Ok(())
+}
+
+fn snapshot_row_type_for_trace(ctx: &TypeContext, row: &RowDesc) -> TypeExprRef {
+    let row = row_repr_ref(ctx, row);
+    let row = row.as_ref();
+    let mut cache = HashMap::new();
+    let row_more = copy_type_deep(ctx, row.row_more, &mut cache);
+    let row_fields = row
+        .row_fields
+        .iter()
+        .map(|(label, field)| {
+            let field = super::btype::row_field_repr(ctx, field);
+            let field = match field {
+                RowField::Rpresent(Some(ty)) => {
+                    RowField::Rpresent(Some(copy_type_deep(ctx, ty, &mut cache)))
+                }
+                RowField::Reither {
+                    constant,
+                    types,
+                    matched,
+                    ..
+                } => RowField::Reither {
+                    constant,
+                    types: types
+                        .iter()
+                        .map(|ty| copy_type_deep(ctx, *ty, &mut cache))
+                        .collect(),
+                    matched,
+                    link: ctx.alloc_row_field(None),
+                },
+                RowField::Rpresent(None) => RowField::Rpresent(None),
+                RowField::Rabsent => RowField::Rabsent,
+            };
+            (label.clone(), field)
+        })
+        .collect();
+
+    ctx.new_variant(RowDesc {
+        row_fields,
+        row_more,
+        row_closed: row.row_closed,
+        row_fixed: row.row_fixed,
+        row_name: row.row_name.clone(),
+    })
 }
 
 /// Unify two row fields.
@@ -6655,6 +7183,67 @@ pub fn moregeneral(
     let result = moregen(ctx, inst_nongen, &mut type_pairs, env, patt, subj).is_ok();
     ctx.set_current_level(old_level);
     result
+}
+
+fn closed_schema_rec(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    visited: &mut TypeExprRefSet,
+) -> bool {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return true;
+    }
+
+    enum Action {
+        Tvar,
+        Tconstr(Vec<TypeExprRef>),
+        Children(Vec<TypeExprRef>),
+    }
+
+    let action = {
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) => Action::Tvar,
+            TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.clone()),
+            _ => {
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                Action::Children(children)
+            }
+        }
+    };
+
+    match action {
+        Action::Tvar => ctx.get_level(ty) == GENERIC_LEVEL,
+        Action::Tconstr(children) => {
+            let old_visited = visited.clone();
+            if children
+                .iter()
+                .all(|child| closed_schema_rec(ctx, env, *child, visited))
+            {
+                true
+            } else if let Some(expanded) = expand_head_once(ctx, env, ty) {
+                *visited = old_visited;
+                closed_schema_rec(ctx, env, expanded, visited)
+            } else {
+                false
+            }
+        }
+        Action::Children(children) => children
+            .iter()
+            .all(|child| closed_schema_rec(ctx, env, *child, visited)),
+    }
+}
+
+/// Return whether all variables of type `ty` are generic.
+///
+/// Mirrors OCaml `Ctype.closed_schema`: a non-generic `Tvar` means the inferred
+/// signature contains a weak type variable and must be rejected.
+pub fn closed_schema(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+    let mut visited = TypeExprRefSet::new();
+    closed_schema_rec(ctx, env, ty, &mut visited)
 }
 
 // ============================================================================

@@ -92,7 +92,7 @@ SUPER_ERRORS_DIR="$PROJECT_ROOT/tests/build_tests/super_errors/fixtures"
 
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/error-output"
 mkdir -p "$CACHE_DIR/parser" "$CACHE_DIR/compiler" "$CACHE_DIR/diffs"
-find "$CACHE_DIR" -type f \( -name '*.out' -o -name '*.status' -o -name '*.diff' \) -delete 2>/dev/null || true
+find "$CACHE_DIR" -type f \( -name '*.out' -o -name '*.stdout' -o -name '*.status' -o -name '*.diff' \) -delete 2>/dev/null || true
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -140,6 +140,18 @@ run_capture() {
     shift
     local status=0
     if timeout "$TIMEOUT_SECONDS" "$@" > "$output" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    printf '%s\n' "$status" > "$output.status"
+}
+
+run_capture_stderr() {
+    local output="$1"
+    shift
+    local status=0
+    if timeout "$TIMEOUT_SECONDS" "$@" > "$output.stdout" 2> "$output"; then
         status=0
     else
         status=$?
@@ -236,8 +248,8 @@ run_compiler_case() {
     rust_out="$CACHE_DIR/compiler/rust_${safe}.out"
     diff_out="$CACHE_DIR/diffs/${safe}.diff"
 
-    run_capture "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
-    run_capture "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
+    run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
+    run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
     compare_outputs "compiler" "$source_file" "$ocaml_out" "$rust_out" "$diff_out"
 }
 

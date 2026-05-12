@@ -51,6 +51,10 @@ const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabl
 const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
 const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
+const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
+    "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
+const REACT_COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
+const REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -1173,6 +1177,7 @@ fn structure_needs_jsx_rewrite(
         // External @react.component declarations need JSX PPX lowering.
         StructureItemDesc::Pstr_primitive(vd) => {
             has_react_component_attr(&vd.pval_attributes, arena)
+                || has_react_component_with_props_attr(&vd.pval_attributes, arena)
         }
         StructureItemDesc::Pstr_value(inner) => {
             let (_, bindings) = &**inner;
@@ -1192,6 +1197,185 @@ fn structure_needs_jsx_rewrite(
         }
         _ => false,
     })
+}
+
+enum ReactComponentWithPropsDiagnostic {
+    External(Location),
+    ForwardRef(Location),
+}
+
+fn reject_invalid_react_component_with_props_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    match react_component_with_props_diagnostic_in_structure(structure, arena) {
+        Some(ReactComponentWithPropsDiagnostic::External(loc)) => {
+            return Err(UserDiagnostic::new(
+                format_react_component_with_props_external_report(source, filename, &loc),
+                2,
+            )
+            .into());
+        }
+        Some(ReactComponentWithPropsDiagnostic::ForwardRef(loc)) => {
+            return Err(UserDiagnostic::new(
+                format_compiler_error_report_from_location(
+                    source,
+                    filename,
+                    &loc,
+                    REACT_COMPONENT_WITH_PROPS_FORWARD_REF_MSG,
+                ),
+                2,
+            )
+            .into());
+        }
+        None => {}
+    }
+
+    Ok(())
+}
+
+fn react_component_with_props_diagnostic_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<ReactComponentWithPropsDiagnostic> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_primitive(vd)
+                if has_react_component_with_props_attr(&vd.pval_attributes, arena) =>
+            {
+                return Some(ReactComponentWithPropsDiagnostic::External(
+                    arena.to_location(item.pstr_loc),
+                ));
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                for binding in &value.1 {
+                    if has_react_component_with_props_attr(&binding.pvb_attributes, arena)
+                        && let Some(loc) =
+                            react_forward_ref_argument_loc(arena.get_expr(binding.pvb_expr), arena)
+                    {
+                        return Some(ReactComponentWithPropsDiagnostic::ForwardRef(loc));
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
+                    arena.get_mod_expr(module_binding.pmb_expr),
+                    arena,
+                ) {
+                    return Some(diagnostic);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
+                        arena.get_mod_expr(module_binding.pmb_expr),
+                        arena,
+                    ) {
+                        return Some(diagnostic);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
+                    arena.get_mod_expr(include_decl.pincl_mod),
+                    arena,
+                ) {
+                    return Some(diagnostic);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn react_component_with_props_diagnostic_in_module_expr(
+    module_expr: &ModuleExpr,
+    arena: &ParseArena,
+) -> Option<ReactComponentWithPropsDiagnostic> {
+    match &*module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => {
+            react_component_with_props_diagnostic_in_structure(structure, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            react_component_with_props_diagnostic_in_module_expr(
+                arena.get_mod_expr(functor.2),
+                arena,
+            )
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            react_component_with_props_diagnostic_in_module_expr(arena.get_mod_expr(*lhs), arena)
+                .or_else(|| {
+                    react_component_with_props_diagnostic_in_module_expr(
+                        arena.get_mod_expr(*rhs),
+                        arena,
+                    )
+                })
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            react_component_with_props_diagnostic_in_module_expr(arena.get_mod_expr(*inner), arena)
+        }
+        _ => None,
+    }
+}
+
+fn format_react_component_with_props_external_report(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(
+        filename,
+        &loc.loc_start,
+        &loc.loc_end,
+    ));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+    output.push('\n');
+
+    for (idx, line) in REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG.lines().enumerate() {
+        if idx == 0 {
+            output.push_str("  ");
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn react_forward_ref_argument_loc(expr: &Expression, arena: &ParseArena) -> Option<Location> {
+    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+        return None;
+    };
+    if !is_react_forward_ref_expr(arena.get_expr(apply.funct), arena) {
+        return None;
+    }
+    apply
+        .args
+        .iter()
+        .find_map(|(label, arg)| matches!(label, ParserArgLabel::Nolabel).then_some(*arg))
+        .map(|arg| arena.to_location(arena.get_expr(arg).pexp_loc))
+}
+
+fn is_react_forward_ref_expr(expr: &Expression, arena: &ParseArena) -> bool {
+    let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc else {
+        return false;
+    };
+    let Longident::Ldot(base, field_idx) = arena.get_longident(lid.txt) else {
+        return false;
+    };
+    let Longident::Lident(module_idx) = base.as_ref() else {
+        return false;
+    };
+    arena.get_string(*module_idx) == "React" && arena.get_string(*field_idx) == "forwardRef"
 }
 
 /// A concrete JavaScript output target for one compile.
@@ -1227,6 +1411,10 @@ pub struct CompilerOptions {
     pub runtime_path: Option<PathBuf>,
     /// Additional modules opened implicitly from `-open` flags.
     pub open_modules: Vec<String>,
+    /// Warning enable/disable specs from `-w` flags.
+    pub warning_specs: Vec<String>,
+    /// Warning-as-error specs from `-warn-error` flags.
+    pub warning_error_specs: Vec<String>,
     /// Source filename for interface constraint propagation.
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
@@ -1290,6 +1478,8 @@ impl Default for CompilerOptions {
             include_paths: Vec::new(),
             runtime_path: None,
             open_modules: Vec::new(),
+            warning_specs: Vec::new(),
+            warning_error_specs: Vec::new(),
             source_filename: None,
             output_path: None,
             output_module_format: None,
@@ -1316,6 +1506,15 @@ impl Default for CompilerOptions {
 impl CompilerOptions {
     fn preserve_canonical_typedtree(&self) -> bool {
         self.dump_typed_sexp || self.dump_typed_sexp_locs || self.capture_intermediates
+    }
+}
+
+fn apply_warning_options(tctx: &mut TypeCheckContext<'_>, options: &CompilerOptions) {
+    for spec in &options.warning_specs {
+        tctx.apply_warning_spec(spec);
+    }
+    for spec in &options.warning_error_specs {
+        tctx.apply_warning_error_spec(spec);
     }
 }
 
@@ -1411,6 +1610,264 @@ fn ppx_error_to_anyhow(
         .into()
     } else {
         anyhow!("PPX rewrite failed: {err}")
+    }
+}
+
+fn reject_invalid_polyvariant_int_literals_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_structure(structure, arena) {
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                loc,
+                POLYVARIANT_INT_TOO_LARGE_MSG,
+            ),
+            2,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(eval) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_expr(eval.0, arena) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                for binding in &value.1 {
+                    if let Some(loc) =
+                        polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
+                    {
+                        return Some(loc);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                    module_binding.pmb_expr,
+                    arena,
+                ) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                        module_binding.pmb_expr,
+                        arena,
+                    ) {
+                        return Some(loc);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                    include_decl.pincl_mod,
+                    arena,
+                ) {
+                    return Some(loc);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+    mod_expr: ModExprIdx,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    let mod_expr = arena.get_mod_expr(mod_expr);
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            polyvariant_int_literal_outside_i32_loc_in_structure(items, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(functor.2, arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*lhs, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_mod_expr(*rhs, arena))
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*inner, arena)
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*expr, arena)
+        }
+        _ => None,
+    }
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_expr(
+    expr: ExprIdx,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    let expr = arena.get_expr(expr);
+    if let ExpressionDesc::Pexp_variant(inner) = &*expr.pexp_desc
+        && inner.1.is_none()
+        && is_valid_hash_number_label(&inner.0)
+        && inner.0.parse::<i32>().is_err()
+    {
+        return Some(expr.pexp_loc);
+    }
+
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => inner
+            .1
+            .iter()
+            .find_map(|binding| {
+                polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
+            })
+            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_fun(fun) => fun
+            .default
+            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
+            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(fun.rhs, arena)),
+        ExpressionDesc::Pexp_apply(apply) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(apply.funct, arena).or_else(|| {
+                apply.args.iter().find_map(|(_, arg)| {
+                    polyvariant_int_literal_outside_i32_loc_in_expr(*arg, arena)
+                })
+            })
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena).or_else(|| {
+                inner.1.iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| {
+                            polyvariant_int_literal_outside_i32_loc_in_expr(guard, arena)
+                        })
+                        .or_else(|| {
+                            polyvariant_int_literal_outside_i32_loc_in_expr(case.pc_rhs, arena)
+                        })
+                })
+            })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+            .iter()
+            .find_map(|item| polyvariant_int_literal_outside_i32_loc_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_construct(_, payload) => {
+            payload.and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
+        }
+        ExpressionDesc::Pexp_variant(inner) => inner
+            .1
+            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena)),
+        ExpressionDesc::Pexp_record(record) => record
+            .0
+            .iter()
+            .find_map(|field| polyvariant_int_literal_outside_i32_loc_in_expr(field.expr, arena))
+            .or_else(|| {
+                record
+                    .1
+                    .and_then(|base| polyvariant_int_literal_outside_i32_loc_in_expr(base, arena))
+            }),
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*owner, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
+                .or_else(|| {
+                    inner.2.and_then(|else_expr| {
+                        polyvariant_int_literal_outside_i32_loc_in_expr(else_expr, arena)
+                    })
+                })
+        }
+        ExpressionDesc::Pexp_sequence(lhs, rhs) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*lhs, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*rhs, arena))
+        }
+        ExpressionDesc::Pexp_while(cond, body) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*cond, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*body, arena))
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.4, arena))
+        }
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena).or_else(|| {
+                inner.2.and_then(|payload| {
+                    polyvariant_int_literal_outside_i32_loc_in_expr(payload, arena)
+                })
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_valid_hash_number_label(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    match bytes {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
     }
 }
 
@@ -1947,6 +2404,7 @@ fn type_mod_error_to_anyhow(
     arena: &ParseArena,
     source: &str,
     filename: &str,
+    suppress_info_style: bool,
 ) -> anyhow::Error {
     match &err {
         TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
@@ -1955,6 +2413,7 @@ fn type_mod_error_to_anyhow(
             expected_arity,
             provided_arity,
             provided_args,
+            arity_suggestion,
             use_fallback_message,
             ..
         }) => UserDiagnostic::new(
@@ -1968,7 +2427,28 @@ fn type_mod_error_to_anyhow(
                 *expected_arity,
                 *provided_arity,
                 provided_args,
+                arity_suggestion.as_deref(),
                 *use_fallback_message,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ConstructorArityMismatch {
+            loc,
+            name,
+            is_inline_record,
+            expected,
+            provided,
+        }) => UserDiagnostic::new(
+            format_constructor_arity_mismatch_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                name,
+                *is_inline_record,
+                *expected,
+                *provided,
             ),
             2,
         )
@@ -2014,9 +2494,27 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::CoreError(TypeCoreError::NotSubtype { loc, trace, .. }) => {
+        TypeModError::CoreError(TypeCoreError::NotSubtype {
+            loc,
+            trace,
+            context,
+        }) => {
             UserDiagnostic::new(
-                format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace),
+                format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace, context),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAVariantType { loc, lid }) => {
+            UserDiagnostic::new(
+                format_not_a_variant_type_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::TypeParamsNotSupported { loc, lid }) => {
+            UserDiagnostic::new(
+                format_type_params_not_supported_report(arena, source, filename, *loc, lid),
                 2,
             )
             .into()
@@ -2030,7 +2528,16 @@ fn type_mod_error_to_anyhow(
         }
         TypeModError::CoreError(TypeCoreError::ApplyWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
-                format_apply_wrong_label_report(type_ctx, arena, source, filename, *loc, label, *ty),
+                format_apply_wrong_label_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    label,
+                    *ty,
+                    suppress_info_style,
+                ),
                 2,
             )
             .into()
@@ -2067,6 +2574,7 @@ fn type_mod_error_to_anyhow(
             name,
             qualifier,
             alternatives,
+            module_suggestion,
         }) => UserDiagnostic::new(
             format_unbound_value_report(
                 arena,
@@ -2076,6 +2584,7 @@ fn type_mod_error_to_anyhow(
                 name,
                 qualifier.as_deref(),
                 alternatives,
+                module_suggestion.as_deref(),
             ),
             2,
         )
@@ -2188,6 +2697,88 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::VariantSpreadCouldNotFindType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This type could not be found. It's only possible to spread variants that are known as the spread happens. This means for example that you can't spread variants in recursive definitions.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadInvalidType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This type is not a valid type to spread. It's only possible to spread other variants.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadHasTypeParams { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Type parameters are not supported in variant type spreads.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadDuplicateConstructor {
+            loc,
+            variant_name,
+            constructor_name,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "Variant {variant_name} has a constructor named {constructor_name}, but a constructor named {constructor_name} already exists in the variant it's spread into.\nYou cannot spread variants with overlapping constructors.",
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadUnboxedMismatch {
+            loc,
+            source_unboxed,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "This variant is {}, but the variant where this is spread is not. Both variants unboxed configuration must match.",
+                    if *source_unboxed {
+                        "unboxed"
+                    } else {
+                        "not unboxed"
+                    },
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadTagMismatch { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "The @tag attribute does not match for this variant and the variant where this is spread. Both variants must have the same @tag attribute configuration, or no @tag attribute at all.",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::DuplicateConstructor { loc, name } => UserDiagnostic::new(
             format_compiler_error_report(
                 arena,
@@ -2205,6 +2796,24 @@ fn type_mod_error_to_anyhow(
             record_name,
         } => UserDiagnostic::new(
             format_duplicate_type_label_report(arena, source, filename, *loc, label, record_name),
+            2,
+        )
+        .into(),
+        TypeModError::RepeatedName {
+            loc,
+            kind,
+            name,
+            repeated_loc,
+        } => UserDiagnostic::new(
+            format_repeated_name_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                name,
+                *repeated_loc,
+            ),
             2,
         )
         .into(),
@@ -2237,6 +2846,16 @@ fn type_mod_error_to_anyhow(
                 *loc,
                 "  GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
             ),
+            2,
+        )
+        .into(),
+        TypeModError::NonGeneralizable { loc, typ } => UserDiagnostic::new(
+            format_non_generalizable_report(source, filename, loc, type_ctx, *typ),
+            2,
+        )
+        .into(),
+        TypeModError::NonGeneralizableModule { loc, mty } => UserDiagnostic::new(
+            format_non_generalizable_module_report(source, filename, loc, mty),
             2,
         )
         .into(),
@@ -2278,6 +2897,71 @@ fn format_duplicate_type_label_report(
         )
     };
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_repeated_name_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    name: &str,
+    repeated_loc: LocIdx,
+) -> String {
+    let repeated = code_frame::format_location(
+        filename,
+        arena.loc_start(repeated_loc),
+        arena.loc_end(repeated_loc),
+    );
+    let message = if 2 + "at ".len() + repeated.len() + 1 < 80 {
+        format!(
+            "Multiple definition of the {kind} name {name} \nat {repeated} \nNames must be unique in a given structure or signature."
+        )
+    } else {
+        format!(
+            "Multiple definition of the {kind} name {name} \nat {repeated}\n Names must be unique in a given structure or signature."
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn non_generalizable_help_message(intro: &str, rendered_type: &str) -> String {
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    format!(
+        "{intro}\n{ERROR}{rendered_type}{RESET}\n\nThis happens when the type system senses there's a mutation/side-effect,\nin combination with a polymorphic value.\n{INFO}Using or annotating that value usually solves it.{RESET}"
+    )
+}
+
+fn format_non_generalizable_report(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    type_ctx: &TypeContext,
+    typ: TypeExprRef,
+) -> String {
+    let rendered_type = format_non_generalizable_type_expr(type_ctx, typ);
+    let message = non_generalizable_help_message(
+        "This expression's type contains type variables that cannot be generalized:",
+        &rendered_type,
+    );
+    format_compiler_error_report_from_location(source, filename, loc, &message)
+}
+
+fn format_non_generalizable_module_report(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let rendered_type = format!("{mty:?}");
+    let message = non_generalizable_help_message(
+        "The type of this module contains type variables that cannot be generalized:",
+        &rendered_type,
+    );
+    format_compiler_error_report_from_location(source, filename, loc, &message)
 }
 
 fn format_compiler_error_report_from_location(
@@ -2335,6 +3019,99 @@ fn format_compiler_error_report(
     output
 }
 
+fn format_compiler_error_report_with_unindented_break(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    first_line: &str,
+    second_line: &str,
+) -> String {
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+    output.push_str("  ");
+    output.push_str(first_line);
+    output.push('\n');
+    output.push_str(second_line);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_not_a_variant_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type {}", format_longident_for_report(arena, lid)),
+        "is not a variant type",
+    )
+}
+
+fn format_type_params_not_supported_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type {}", format_longident_for_report(arena, lid)),
+        "has type parameters, but type parameters is not supported here.",
+    )
+}
+
+fn format_compiler_error_report_with_bare_reset_lines(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    const RESET: &str = "\x1b[0m";
+
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+
+    for line in message.lines() {
+        if line == RESET {
+            output.push_str(line);
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
 fn format_compiler_warning_report(
     arena: &ParseArena,
     source: &str,
@@ -2357,10 +3134,28 @@ fn format_compiler_warning_report(
     output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
     output.push('\n');
 
-    for line in warning.warning.message().lines() {
-        if !line.is_empty() {
+    let indent_after_blank = !matches!(
+        warning.warning,
+        crate::diagnostics::Warning::UnusedVariable { .. }
+            | crate::diagnostics::Warning::UnusedVariableStrict { .. }
+    );
+    let mut after_blank = false;
+    for (idx, line) in warning.warning.message().lines().enumerate() {
+        let indent_line = match warning.warning {
+            crate::diagnostics::Warning::NonClosedRecordPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::PartialMatch { .. } => {
+                idx < 2 || line.starts_with("Hint:")
+            }
+            _ => indent_after_blank || !after_blank,
+        };
+        if !line.is_empty() && indent_line {
             output.push_str("  ");
             output.push_str(line);
+        } else if !line.is_empty() {
+            output.push_str(line);
+        }
+        if line.is_empty() {
+            after_blank = true;
         }
         output.push('\n');
     }
@@ -2474,6 +3269,36 @@ fn format_wrong_name_report(
     }
 
     let label = if kind == "record" { "field" } else { kind };
+    let type_text = format_type_expr(type_ctx, ty);
+    if let Some(multiline_type) = format_type_application_multiline(&type_text) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  The ");
+        raw_message.push_str(label);
+        raw_message.push(' ');
+        raw_message.push_str(ERROR);
+        raw_message.push_str(name);
+        raw_message.push_str(RESET);
+        raw_message.push_str(" does not belong to type ");
+        raw_message.push_str(INFO);
+        raw_message.push_str(&path.to_string());
+        raw_message.push_str(RESET);
+        raw_message.push_str("\n  \n  ");
+        raw_message.push_str(expected);
+        raw_message.push_str(" type\n");
+        push_ocaml_multiline_type_application(&mut raw_message, INFO, RESET, &multiline_type);
+        if let Some(hint) = spellcheck_hint(name, alternatives) {
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push_str("?\n");
+        }
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
     let mut message = String::new();
     message.push_str("The ");
     message.push_str(label);
@@ -2489,7 +3314,7 @@ fn format_wrong_name_report(
     message.push_str(expected);
     message.push_str(" type ");
     message.push_str(INFO);
-    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(&type_text);
     message.push_str(RESET);
     if let Some(hint) = spellcheck_hint(name, alternatives) {
         let mut raw_message = format_message_with_compiler_indentation(&message);
@@ -2507,6 +3332,40 @@ fn format_wrong_name_report(
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
+fn format_type_application_multiline(type_text: &str) -> Option<(String, Vec<String>)> {
+    let (head, rest) = type_text.split_once('<')?;
+    let args = rest.strip_suffix('>')?;
+    let args = args.split(", ").map(str::to_string).collect::<Vec<_>>();
+    if args.len() < 4
+        || args
+            .iter()
+            .any(|arg| arg.contains('<') || arg.contains('>'))
+    {
+        return None;
+    }
+    Some((head.to_string(), args))
+}
+
+fn push_ocaml_multiline_type_application(
+    output: &mut String,
+    info: &str,
+    reset: &str,
+    (head, args): &(String, Vec<String>),
+) {
+    output.push_str("    ");
+    output.push_str(info);
+    output.push_str(head);
+    output.push_str("<\n");
+    for arg in args {
+        output.push_str("  ");
+        output.push_str(arg);
+        output.push_str(",\n");
+    }
+    output.push('>');
+    output.push_str(reset);
+    output.push('\n');
+}
+
 fn format_unbound_value_report(
     arena: &ParseArena,
     source: &str,
@@ -2515,6 +3374,7 @@ fn format_unbound_value_report(
     name: &str,
     qualifier: Option<&str>,
     alternatives: &[String],
+    module_suggestion: Option<&str>,
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
@@ -2531,7 +3391,40 @@ fn format_unbound_value_report(
         message.push_str(" can't be found");
     }
 
-    if let Some(hint) = spellcheck_hint(name, alternatives) {
+    let spellcheck = spellcheck_hint(name, alternatives);
+    if let Some(module_suggestion) = module_suggestion {
+        let mut raw_message = String::new();
+        raw_message.push_str("  ");
+        raw_message.push_str(&message);
+        raw_message.push('\n');
+
+        if let Some(hint) = spellcheck {
+            raw_message.push_str("  \n  ");
+            raw_message.push_str(INFO);
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push('?');
+            raw_message.push_str(RESET);
+            raw_message.push_str("\n\n  Or did you mean");
+        } else {
+            raw_message.push_str("\n  Maybe you meant");
+        }
+        raw_message.push_str(" to use the module ");
+        raw_message.push_str(INFO);
+        raw_message.push_str(module_suggestion);
+        raw_message.push_str(RESET);
+        raw_message.push_str("?\n");
+
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    if let Some(hint) = spellcheck {
         message.push_str("\n\n");
         message.push_str(INFO);
         message.push_str("Hint: Did you mean ");
@@ -2793,6 +3686,10 @@ fn format_expr_type_clash_report(
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But it's being compared to something of type: "),
         ),
+        Some(TypeClashContext::StringConcat) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But string concatenation is expecting: "),
+        ),
         Some(TypeClashContext::MathOperator {
             operator,
             is_constant,
@@ -2811,6 +3708,10 @@ fn format_expr_type_clash_report(
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But the record field "),
         ),
+        Some(TypeClashContext::SetRecordField { .. }) => (
+            Cow::Borrowed("You're assigning something to this field that has type: "),
+            Cow::Borrowed("But the record field is of type: "),
+        ),
         Some(TypeClashContext::IfCondition) => (
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But \x1b[1;33mif\x1b[0m conditions must always be of type: "),
@@ -2822,6 +3723,14 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::TernaryReturn) => (
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But this ternary is expected to return: "),
+        ),
+        Some(TypeClashContext::SwitchExpression) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this switch is expected to return: "),
+        ),
+        Some(TypeClashContext::TryReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this try/catch is expected to return: "),
         ),
         Some(TypeClashContext::WhileCondition) => (
             Cow::Borrowed("This has type: "),
@@ -2844,9 +3753,27 @@ fn format_expr_type_clash_report(
             Cow::Borrowed("But it's expected to have type: "),
         ),
     };
+    let suppress_alias_expansion = matches!(
+        context,
+        Some(TypeClashContext::IfCondition)
+            | Some(TypeClashContext::WhileCondition)
+            | Some(TypeClashContext::ForLoopCondition)
+            | Some(TypeClashContext::AssertCondition)
+    );
 
     message.push_str(&error_text);
-    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
+    if suppress_alias_expansion {
+        append_type_clash_type_without_alias_expansion(
+            type_ctx,
+            trace,
+            true,
+            ERROR,
+            actual,
+            &mut message,
+        );
+    } else {
+        append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
+    }
     message.push('\n');
     if let Some(TypeClashContext::RecordField {
         field_name, jsx, ..
@@ -2874,7 +3801,18 @@ fn format_expr_type_clash_report(
                 message.push_str(" is expected to have type: ");
             }
         }
-        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if suppress_alias_expansion {
+            append_type_clash_type_without_alias_expansion(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
     } else if let Some(TypeClashContext::FunctionArgument { optional, name }) = context {
         message.push_str("But this");
         if *optional {
@@ -2942,7 +3880,9 @@ fn format_expr_type_clash_report(
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
         context,
-        Some(TypeClashContext::IfReturn) | Some(TypeClashContext::TernaryReturn)
+        Some(TypeClashContext::IfReturn)
+            | Some(TypeClashContext::TernaryReturn)
+            | Some(TypeClashContext::TryReturn)
     ) {
         let message = format_type_clash_return_message(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
@@ -2954,14 +3894,25 @@ fn format_expr_type_clash_report(
     ) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
-    } else if matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
+    } else if matches!(
+        context,
+        Some(TypeClashContext::LetUnwrapReturn) | Some(TypeClashContext::SwitchExpression)
+    ) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if type_clash_string_to_polyvariant(type_ctx, trace)
+        || type_clash_string_to_variant(type_ctx, trace)
+    {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_array_to_tuple(type_ctx, trace)
         || type_clash_expected_unit_actual(type_ctx, trace).is_some()
+        || type_clash_actual_promise(type_ctx, trace)
     {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if message.contains("These types are compatible at runtime") {
+        format_compiler_error_report_with_bare_reset_lines(arena, source, filename, loc, &message)
     } else {
         format_compiler_error_report(arena, source, filename, loc, &message)
     }
@@ -2986,15 +3937,67 @@ fn format_pattern_type_clash_report(
     let mut message = String::new();
     message.push_str("This pattern matches values of type ");
     message.push_str(ERROR);
-    message.push_str(&format_type_expr(type_ctx, actual));
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, actual),
+    ));
     message.push_str(RESET);
     message.push('\n');
     message.push_str("but a pattern was expected which matches values of type ");
     message.push_str(INFO);
-    message.push_str(&format_type_expr(type_ctx, expected));
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, expected),
+    ));
     message.push_str(RESET);
+    append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
+    append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn append_pattern_option_type_clash_help(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let actual_is_option =
+        type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option());
+    let expected_is_option =
+        type_is_predef_path(type_ctx, expected, &crate::types::predef::path_option());
+
+    if actual_is_option && !expected_is_option {
+        message.push_str("\n\nYou're expecting the value you're pattern matching on to be an ");
+        message.push_str(INFO);
+        message.push_str("option");
+        message.push_str(RESET);
+        message.push_str(", but the value is actually not an option.\n");
+        message.push_str("Change your pattern match to work on the concrete value (remove ");
+        message.push_str(ERROR);
+        message.push_str("Some(_)");
+        message.push_str(RESET);
+        message.push_str(" or ");
+        message.push_str(ERROR);
+        message.push_str("None");
+        message.push_str(RESET);
+        message.push_str(" from the pattern) to make it work.");
+    } else if expected_is_option && !actual_is_option {
+        message.push_str("\n\nThe value you're pattern matching on here is wrapped in an ");
+        message.push_str(INFO);
+        message.push_str("option");
+        message.push_str(RESET);
+        message.push_str(", but you're trying to match on the actual value.\n");
+        message.push_str("Wrap the highlighted pattern in ");
+        message.push_str(INFO);
+        message.push_str("Some()");
+        message.push_str(RESET);
+        message.push_str(" to make it work.");
+    }
 }
 
 fn append_type_clash_type(
@@ -3008,11 +4011,15 @@ fn append_type_clash_type(
     const DIM: &str = "\x1b[2m";
     const RESET: &str = "\x1b[0m";
 
+    let original_ty = ty;
+    let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
     message.push_str(color);
     message.push_str(&format_type_expr(type_ctx, ty));
     message.push_str(RESET);
 
-    if let Some(expansion) = rendered_alias_expansion(type_ctx, trace, actual_side) {
+    if ty == original_ty
+        && let Some(expansion) = rendered_alias_expansion(type_ctx, ty, trace, actual_side)
+    {
         message.push(' ');
         message.push_str(DIM);
         message.push_str("(defined as");
@@ -3027,11 +4034,50 @@ fn append_type_clash_type(
     }
 }
 
-fn rendered_alias_expansion(
+fn append_type_clash_type_without_alias_expansion(
     type_ctx: &TypeContext,
     trace: &[(TypeExprRef, TypeExprRef)],
     actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+) {
+    const RESET: &str = "\x1b[0m";
+
+    let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
+    message.push_str(color);
+    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(RESET);
+}
+
+fn type_clash_display_type(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    if type_is_polyvariant(type_ctx, ty)
+        && let Some((actual, expected)) = polyvariant_diagnostic_type_pair(type_ctx, trace)
+    {
+        if actual_side { actual } else { expected }
+    } else {
+        ty
+    }
+}
+
+fn rendered_alias_expansion(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
 ) -> Option<TypeExprRef> {
+    if let Some(expansion) = type_alias_expansion(type_ctx, ty)
+        && !type_expansion_same(type_ctx, ty, expansion)
+        && !type_is_polyvariant(type_ctx, expansion)
+    {
+        return Some(expand_promise_compat_alias(type_ctx, expansion));
+    }
+
     let first = trace.first()?;
     let (top_actual, top_expected) = *first;
     let top = if actual_side {
@@ -3079,6 +4125,24 @@ fn rendered_alias_expansion(
     })
 }
 
+fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return repr;
+    };
+    let is_promise_alias = path.name() == "Promise.t" || path.name() == "Stdlib.Promise.t";
+    drop(desc);
+    if is_promise_alias
+        && let Some(expansion) = type_alias_expansion(type_ctx, repr)
+        && !type_expansion_same(type_ctx, repr, expansion)
+    {
+        expand_promise_compat_alias(type_ctx, expansion)
+    } else {
+        repr
+    }
+}
+
 fn format_not_subtype_report(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -3086,17 +4150,409 @@ fn format_not_subtype_report(
     filename: &str,
     loc: LocIdx,
     trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<crate::types::SubtypeContext>,
 ) -> String {
     let Some((left, right)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let message = format!(
+    let mut message = format!(
         "Type {} is not a subtype of {} ",
-        format_type_expr(type_ctx, left),
-        format_type_expr(type_ctx, right)
+        format_not_subtype_head_type(type_ctx, left),
+        format_not_subtype_head_type(type_ctx, right)
     );
+    if let Some(extra) = format_subtype_context(context) {
+        message.push_str("\n\n");
+        message.push_str(&extra);
+        if extra.is_empty() {
+            message.push('\n');
+        }
+        return format_compiler_error_report_for_subtype_context(
+            arena, source, filename, loc, &message,
+        );
+    }
+
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_not_subtype_head_type(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    let ty_text = format_type_expr(type_ctx, ty);
+    if let Some(expansion) = type_alias_full_expansion(type_ctx, ty)
+        && type_is_polyvariant(type_ctx, expansion)
+        && !type_expansion_same(type_ctx, ty, expansion)
+    {
+        format!("{ty_text} = {}", format_type_expr(type_ctx, expansion))
+    } else {
+        ty_text
+    }
+}
+
+fn format_subtype_context(context: &Option<crate::types::SubtypeContext>) -> Option<String> {
+    use crate::types::SubtypeContext;
+    use crate::types::ctype::{
+        RecordFieldSubtypeViolation, SubtypeTypeKind, VariantConfigurationIssue,
+        VariantConstructorAsPayload, VariantRuntimeRepresentationIssue,
+    };
+
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    fn variant_as_payload_name(payload: VariantConstructorAsPayload) -> &'static str {
+        match payload {
+            VariantConstructorAsPayload::String => "string",
+            VariantConstructorAsPayload::Int => "int",
+            VariantConstructorAsPayload::Float => "float",
+            VariantConstructorAsPayload::BigInt => "bigint",
+            VariantConstructorAsPayload::Bool => "bool",
+            VariantConstructorAsPayload::Null => "null",
+            VariantConstructorAsPayload::Undefined => "undefined",
+        }
+    }
+
+    fn subtype_type_kind_name(kind: SubtypeTypeKind) -> &'static str {
+        match kind {
+            SubtypeTypeKind::Abstract => "an abstract type",
+            SubtypeTypeKind::Record => "a record",
+            SubtypeTypeKind::Variant => "a variant",
+            SubtypeTypeKind::Open => "an open type",
+        }
+    }
+
+    match context {
+        Some(SubtypeContext::CoercionTargetVariantNotUnboxed {
+            variant_name,
+            primitive,
+        }) => Some(format!(
+            "The variant {INFO}{}{RESET} is not unboxed, so it cannot be coerced to a {INFO}{}{RESET}. \nFix this by adding the {INFO}@unboxed{RESET} attribute to the variant {INFO}{}{RESET}.",
+            variant_name.last(),
+            primitive.last(),
+            variant_name.last()
+        )),
+        Some(SubtypeContext::CoercionTargetVariantDoesNotCoverType {
+            variant_name,
+            primitive,
+        }) => {
+            let primitive_name = primitive.last();
+            let mut chars = primitive_name.chars();
+            let capitalized = match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            };
+            Some(format!(
+                "The variant {INFO}{}{RESET} is unboxed, but has no catch-all case for the primitive {INFO}{primitive_name}{RESET}, and therefore does not cover all values of type {INFO}{primitive_name}{RESET}. \nFix this by adding a catch-all for {INFO}{}{RESET} to {INFO}{primitive_name}{RESET}, like {INFO}{capitalized}({primitive_name}){RESET}.",
+                variant_name.last(),
+                variant_name.last()
+            ))
+        }
+        Some(SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
+            variant_name,
+            issues,
+        }) => {
+            let mut output = String::new();
+            for issue in issues {
+                let mut item = String::new();
+                match issue {
+                    VariantRuntimeRepresentationIssue::CannotCoerceNonUnboxedWithPayload {
+                        constructor_name,
+                        expected_typename,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has a payload, but the variant itself is not unboxed. \nThis means that the constructor {INFO}{constructor_name}{RESET} will be encoded as an object at runtime, which is not compatible with {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            expected_typename.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::InlineRecordCannotBeCoerced {
+                        constructor_name,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an inline record as payload. Currently, inline records cannot be coerced.",
+                            variant_name.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::AsPayloadNotEligibleForCoercion {
+                        constructor_name,
+                        expected_typename,
+                        as_payload,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an {INFO}@as{RESET} payload that has a runtime representation of {INFO}{}{RESET}, which is not compatible with the expected {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            variant_as_payload_name(*as_payload),
+                            expected_typename.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::MismatchedUnboxedPayload { .. } => {}
+                    VariantRuntimeRepresentationIssue::MismatchedAsPayload {
+                        constructor_name,
+                        expected_typename,
+                        as_payload,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has ",
+                            variant_name.last()
+                        ));
+                        if let Some(payload) = as_payload {
+                            item.push_str(&format!(
+                                "an {INFO}@as{RESET} payload that gives it the runtime type of {INFO}{}{RESET}.",
+                                variant_as_payload_name(*payload)
+                            ));
+                        } else {
+                            item.push_str(&format!(
+                                "no {INFO}@as{RESET} payload, which makes it a {INFO}string{RESET} at runtime."
+                            ));
+                        }
+                        item.push_str(&format!(
+                            "\nThat runtime representation is not compatible with the expected runtime representation of {INFO}{}{RESET}.",
+                            expected_typename.last()
+                        ));
+                        item.push_str(&format!(
+                            "\n\nFix this by making sure all constructors in variant {INFO}{}{RESET} has a runtime representation of {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            expected_typename.last()
+                        ));
+                    }
+                }
+                if item.is_empty() {
+                    continue;
+                }
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&item);
+            }
+            (!issues.is_empty()).then_some(output)
+        }
+        Some(SubtypeContext::VariantConfigurationsMismatch {
+            left_variant_name,
+            right_variant_name,
+            issue,
+        }) => match issue {
+            VariantConfigurationIssue::UnboxedConfigNotMatching {
+                left_unboxed,
+                right_unboxed,
+            } => {
+                fn unboxed_status(unboxed: bool) -> String {
+                    if unboxed {
+                        format!("{ERROR}not {RESET}unboxed")
+                    } else {
+                        format!("{ERROR}{RESET}unboxed")
+                    }
+                }
+
+                Some(format!(
+                    "The variants have different {INFO}@unboxed{RESET} configurations.\n- Variant {INFO}{}{RESET} is {}.\n- Variant {INFO}{}{RESET} is {}.\n\nFix this by making sure the variants either both have, or don't have, the {INFO}@unboxed{RESET} attribute.",
+                    left_variant_name.last(),
+                    unboxed_status(*left_unboxed),
+                    right_variant_name.last(),
+                    unboxed_status(*right_unboxed),
+                ))
+            }
+            VariantConfigurationIssue::TagNameNotMatching {
+                left_tag,
+                right_tag,
+            } => {
+                fn tag_status(tag: &Option<String>, variant_name: &crate::types::Path) -> String {
+                    match tag {
+                        Some(tag) => format!(
+                            "{INFO}{}{RESET} has tag {INFO}{tag}{RESET}.",
+                            variant_name.last()
+                        ),
+                        None => {
+                            format!("{INFO}{}{RESET} has no explicit tag.", variant_name.last())
+                        }
+                    }
+                }
+
+                Some(format!(
+                    "The variants have different {INFO}@tag{RESET} configurations.\n- {}\n- {}\n\nFix this by making sure the variants either have the exact same {INFO}@tag{RESET} configuration, or no {INFO}@tag{RESET} at all.",
+                    tag_status(left_tag, left_variant_name),
+                    tag_status(right_tag, right_variant_name),
+                ))
+            }
+            VariantConfigurationIssue::IncompatibleConstructorCount { constructor_names } => {
+                let total_constructor_count = constructor_names.len();
+                let names_to_print = constructor_names.iter().take(3).collect::<Vec<_>>();
+                let not_printed_constructor_count =
+                    total_constructor_count.saturating_sub(names_to_print.len());
+                let mut names = names_to_print
+                    .iter()
+                    .map(|name| format!("{INFO}{name}{RESET}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if not_printed_constructor_count > 0 {
+                    names.push_str(&format!(" (+{not_printed_constructor_count} more)"));
+                }
+                Some(format!(
+                    "{INFO}{}{RESET} has {total_constructor_count} constructor{} that {INFO}{}{RESET} does not have: {names}\nTherefore, it is not possible for {INFO}{}{RESET} to represent {INFO}{}{RESET}.",
+                    left_variant_name.last(),
+                    if total_constructor_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    right_variant_name.last(),
+                    right_variant_name.last(),
+                    left_variant_name.last(),
+                ))
+            }
+        },
+        Some(SubtypeContext::DifferentTypeKinds {
+            left_typename,
+            right_typename,
+            left_type_kind,
+            right_type_kind,
+        }) => Some(format!(
+            "The types of {INFO}{}{RESET} and {INFO}{}{RESET} are different:\n- {INFO}{}{RESET} is {}\n- {INFO}{}{RESET} is {}",
+            left_typename.last(),
+            right_typename.last(),
+            left_typename.last(),
+            subtype_type_kind_name(*left_type_kind),
+            right_typename.last(),
+            subtype_type_kind_name(*right_type_kind)
+        )),
+        Some(SubtypeContext::RecordFieldsMismatch {
+            left_record_name,
+            right_record_name,
+            issues,
+        }) => {
+            let mut output = format!(
+                "The record {INFO}{}{RESET} cannot be coerced to the record {INFO}{}{RESET} because:",
+                left_record_name.last(),
+                right_record_name.last()
+            );
+            for issue in issues {
+                output.push_str("\n- ");
+                match issue {
+                    RecordFieldSubtypeViolation::OptionalMismatch {
+                        label,
+                        left_optional,
+                        right_optional,
+                    } => {
+                        output.push_str(&format!("The field {INFO}{label}{RESET} "));
+                        match (*left_optional, *right_optional) {
+                            (true, false) => output.push_str(&format!(
+                                "is optional in record {INFO}{}{RESET}, but is not optional in record {INFO}{}{RESET}",
+                                left_record_name.last(),
+                                right_record_name.last()
+                            )),
+                            (false, true) => output.push_str(&format!(
+                                "is not optional in record {INFO}{}{RESET}, but is optional in record {INFO}{}{RESET}",
+                                left_record_name.last(),
+                                right_record_name.last()
+                            )),
+                            _ => {}
+                        }
+                    }
+                    RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
+                        label,
+                        left_as,
+                        right_as,
+                    } => {
+                        output.push_str(&format!(
+                            "Field {INFO}{label}{RESET} runtime representation"
+                        ));
+                        if let Some(as_name) = left_as {
+                            output.push_str(&format!(
+                                " is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)"
+                            ));
+                        } else {
+                            output.push_str(&format!(" is {INFO}\"{label}\"{RESET}"));
+                        }
+                        output.push_str(&format!(
+                            " in record {INFO}{}{RESET}, but in record {INFO}{}{RESET}",
+                            right_record_name.last(),
+                            left_record_name.last()
+                        ));
+                        if let Some(as_name) = right_as {
+                            output.push_str(&format!(
+                                " it is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)."
+                            ));
+                        } else {
+                            output.push_str(&format!(" it is {INFO}\"{label}\"{RESET}."));
+                        }
+                        output.push_str(" Runtime representations must match.");
+                    }
+                    RecordFieldSubtypeViolation::FieldMissing { label } => {
+                        output.push_str(&format!(
+                            "The field {INFO}{label}{RESET} is missing in record {INFO}{}{RESET}, but present in record {INFO}{}{RESET}",
+                            right_record_name.last(),
+                            left_record_name.last()
+                        ));
+                    }
+                }
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn format_compiler_error_report_with_empty_blank_lines(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+
+    for line in message.lines() {
+        if !line.is_empty() {
+            output.push_str("  ");
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compiler_error_report_for_subtype_context(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    let mut output = String::new();
+
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+    output.push_str("\n\n");
+    output.push_str(&code_frame::print(source, start_pos, end_pos));
+    output.push('\n');
+
+    let mut blank_lines = 0;
+    for line in message.lines() {
+        if line.is_empty() {
+            if blank_lines == 0 {
+                output.push('\n');
+            } else {
+                output.push_str("  \n");
+            }
+            blank_lines += 1;
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+    output
 }
 
 fn format_array_type_clash_message(message: &str) -> String {
@@ -3228,6 +4684,7 @@ fn append_extra_type_clash_help(
         message.push_str("Promise.resolve");
         message.push_str(RESET);
         message.push_str(" to convert the expression to a promise");
+        return;
     }
 
     if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
@@ -3277,6 +4734,30 @@ fn append_extra_type_clash_help(
         message.push_str(") must return the same type in both branches.");
     }
 
+    if matches!(context, Some(TypeClashContext::SwitchExpression)) {
+        message.push_str("\n\n");
+        message.push_str("All branches in a ");
+        message.push_str(INFO);
+        message.push_str("switch");
+        message.push_str(RESET);
+        message.push_str(" must return the same type.\n");
+        message.push_str("To fix this, change your branch to return the expected type.");
+    }
+
+    if matches!(context, Some(TypeClashContext::TryReturn)) {
+        message.push_str("\n\n");
+        message.push_str("The ");
+        message.push_str(INFO);
+        message.push_str("try");
+        message.push_str(RESET);
+        message.push_str(" body and the ");
+        message.push_str(INFO);
+        message.push_str("catch");
+        message.push_str(RESET);
+        message.push_str(" block must return the same type.\n");
+        message.push_str("To fix this, change your try/catch blocks to return the expected type.");
+    }
+
     if matches!(context, Some(TypeClashContext::StatementFunctionCall)) {
         message.push_str("\n\n");
         message.push_str("- Did you mean to assign this to a variable?\n");
@@ -3310,8 +4791,12 @@ fn append_extra_type_clash_help(
         return;
     }
 
-    if !matches!(context, Some(TypeClashContext::StatementFunctionCall))
-        && let Some(actual) = type_clash_expected_unit_actual(type_ctx, trace)
+    if !matches!(
+        context,
+        Some(TypeClashContext::StatementFunctionCall)
+            | Some(TypeClashContext::SwitchExpression)
+            | Some(TypeClashContext::TryReturn)
+    ) && let Some(actual) = type_clash_expected_unit_actual(type_ctx, trace)
     {
         message.push_str("\n\n");
         if type_is_jsx_element_like(type_ctx, trace, actual) {
@@ -3350,7 +4835,26 @@ fn append_extra_type_clash_help(
         return;
     }
 
+    if append_string_to_polyvariant_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    if append_string_to_variant_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    if type_clash_actual_promise(type_ctx, trace) {
+        message.push_str("\n\n");
+        message.push_str("- Did you mean to await this promise before using it?");
+        message.push_str("\n\n");
+        return;
+    }
+
     if append_jsx_element_type_clash_help(type_ctx, trace, message) {
+        return;
+    }
+
+    if append_braced_ident_record_help(type_ctx, arena, source, loc, context, trace, message) {
         return;
     }
 
@@ -3361,7 +4865,15 @@ fn append_extra_type_clash_help(
     let is_math_operator = append_math_operator_help(type_ctx, trace, context, message);
     let is_object_field_mismatch = append_object_field_mismatch_help(type_ctx, trace, message);
     let is_object_field_missing = append_object_field_missing_help(type_ctx, trace, message);
-    if !is_math_operator && !is_object_field_mismatch && !is_object_field_missing {
+    let is_polyvariant_explanation = append_polyvariant_type_clash_help(type_ctx, trace, message);
+    if !is_math_operator
+        && !is_object_field_mismatch
+        && !is_object_field_missing
+        && !is_polyvariant_explanation
+    {
+        if append_runtime_coercion_help(type_ctx, arena, source, loc, trace, message) {
+            return;
+        }
         append_incompatible_type_parts(type_ctx, trace, message);
         append_dict_literal_help(type_ctx, trace, message);
     }
@@ -3710,6 +5222,14 @@ fn type_is_predef_path(
     }
 }
 
+fn type_clash_actual_promise(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
+    bottom_type_clash_aliases(trace)
+        .or_else(|| trace.first().copied())
+        .is_some_and(|(actual, _)| {
+            type_is_predef_path(type_ctx, actual, &crate::types::predef::path_promise())
+        })
+}
+
 fn append_optional_record_field_help(
     type_ctx: &TypeContext,
     arena: &ParseArena,
@@ -3776,6 +5296,9 @@ fn append_optional_record_field_help(
         message.push_str(&passed_text);
     }
     message.push_str(RESET);
+    if jsx.is_none() {
+        message.push('}');
+    }
     true
 }
 
@@ -3825,6 +5348,507 @@ fn source_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> Option<S
     let start = arena.loc_start(loc).cnum as usize;
     let end = arena.loc_end(loc).cnum as usize;
     source.get(start..end).map(str::trim).map(str::to_string)
+}
+
+fn append_runtime_coercion_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(rewrite) = runtime_coercion_suggestion(type_ctx, arena, source, loc, trace) else {
+        return false;
+    };
+
+    message.push_str("\n\nPossible solutions: \n");
+    message.push_str("- These types are compatible at runtime. You can use the coercion operator to convert to the expected type: ");
+    message.push_str(INFO);
+    message.push_str(&rewrite);
+    message.push_str(RESET);
+    message.push_str("\n\n");
+    true
+}
+
+fn runtime_coercion_suggestion(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<String> {
+    let (actual, expected) = trace.first().copied()?;
+    if type_is_polyvariant(type_ctx, actual) && type_is_polyvariant(type_ctx, expected) {
+        return None;
+    }
+
+    if !runtime_coercion_compatible(type_ctx, actual, expected) {
+        return None;
+    }
+
+    let target_expr_text = source_text_at_loc(arena, source, loc)?;
+    if source_text_is_constant(&target_expr_text) {
+        return None;
+    }
+
+    let target_type_string = format_type_expr(type_ctx, expected);
+    Some(format!("({target_expr_text} :> {target_type_string})\n"))
+}
+
+fn runtime_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let env = crate::types::Env::empty();
+    crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+        || runtime_record_coercion_compatible(type_ctx, actual, expected)
+        || runtime_variant_to_primitive_coercion_compatible(type_ctx, actual, expected)
+}
+
+fn runtime_record_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let Some((actual_repr, actual_fields)) = record_fields_for_type(type_ctx, actual) else {
+        return false;
+    };
+    let Some((expected_repr, expected_fields)) = record_fields_for_type(type_ctx, expected) else {
+        return false;
+    };
+    if actual_repr != expected_repr {
+        return false;
+    }
+
+    expected_fields.iter().all(|expected_field| {
+        let Some(actual_field) = actual_fields
+            .iter()
+            .find(|actual_field| actual_field.ld_id.name() == expected_field.ld_id.name())
+        else {
+            return false;
+        };
+        actual_field.ld_optional == expected_field.ld_optional
+            && label_declaration_runtime_name(actual_field)
+                == label_declaration_runtime_name(expected_field)
+            && runtime_field_type_compatible(type_ctx, actual_field.ld_type, expected_field.ld_type)
+    })
+}
+
+fn record_fields_for_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<(
+    crate::types::decl::RecordRepresentation,
+    Vec<crate::types::decl::LabelDeclaration>,
+)> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return None;
+    };
+    let decl = type_decl_for_path(type_ctx, path)?;
+    match decl.type_kind {
+        crate::types::decl::TypeKind::TypeRecord(fields, record_repr) => {
+            Some((record_repr, fields))
+        }
+        _ => None,
+    }
+}
+
+fn runtime_field_type_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    type_ctx.repr(actual) == type_ctx.repr(expected)
+        || format_type_expr(type_ctx, actual) == format_type_expr(type_ctx, expected)
+        || {
+            let env = crate::types::Env::empty();
+            crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+        }
+}
+
+fn label_declaration_runtime_name(label: &crate::types::decl::LabelDeclaration) -> String {
+    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+}
+
+fn label_declaration_as_name(label: &crate::types::decl::LabelDeclaration) -> Option<String> {
+    label.ld_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "as"
+            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn runtime_variant_to_primitive_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let Some(expected_path) = primitive_coercion_target_path(type_ctx, expected) else {
+        return false;
+    };
+    let Some((actual_path, constructors, type_params, unboxed)) =
+        variant_constructors_for_type(type_ctx, actual)
+    else {
+        return false;
+    };
+    if actual_path.same(&crate::types::predef::path_bool()) || !type_params.is_empty() {
+        return false;
+    }
+
+    constructors.iter().all(|constructor| {
+        variant_constructor_runtime_matches_primitive(
+            type_ctx,
+            constructor,
+            unboxed,
+            &expected_path,
+        )
+    })
+}
+
+fn primitive_coercion_target_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<crate::types::Path> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    [
+        crate::types::predef::path_string(),
+        crate::types::predef::path_int(),
+        crate::types::predef::path_float(),
+        crate::types::predef::path_bigint(),
+    ]
+    .into_iter()
+    .find(|primitive_path| path.same(primitive_path))
+}
+
+fn variant_constructors_for_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<(
+    crate::types::Path,
+    Vec<crate::types::decl::ConstructorDeclaration>,
+    Vec<TypeExprRef>,
+    bool,
+)> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return None;
+    };
+    let decl = type_decl_for_path(type_ctx, path)?;
+    match decl.type_kind {
+        crate::types::decl::TypeKind::TypeVariant(constructors) => Some((
+            path.clone(),
+            constructors,
+            decl.type_params,
+            decl.type_unboxed.unboxed,
+        )),
+        _ => None,
+    }
+}
+
+fn variant_constructor_runtime_matches_primitive(
+    type_ctx: &TypeContext,
+    constructor: &crate::types::decl::ConstructorDeclaration,
+    unboxed: bool,
+    target_path: &crate::types::Path,
+) -> bool {
+    match &constructor.cd_args {
+        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
+            match variant_constructor_as_payload(&constructor.cd_attributes) {
+                None | Some(VariantConstructorAsPayload::String) => {
+                    target_path.same(&crate::types::predef::path_string())
+                }
+                Some(VariantConstructorAsPayload::Int) => {
+                    target_path.same(&crate::types::predef::path_int())
+                }
+                Some(VariantConstructorAsPayload::Float) => {
+                    target_path.same(&crate::types::predef::path_float())
+                }
+                Some(VariantConstructorAsPayload::BigInt) => {
+                    target_path.same(&crate::types::predef::path_bigint())
+                }
+                Some(
+                    VariantConstructorAsPayload::Bool
+                    | VariantConstructorAsPayload::Null
+                    | VariantConstructorAsPayload::Undefined,
+                ) => false,
+            }
+        }
+        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 && unboxed => {
+            !target_path.same(&crate::types::predef::path_int())
+                && type_expr_path_same(type_ctx, args[0], target_path)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VariantConstructorAsPayload {
+    String,
+    Int,
+    Float,
+    BigInt,
+    Bool,
+    Null,
+    Undefined,
+}
+
+fn variant_constructor_as_payload(
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<VariantConstructorAsPayload> {
+    attrs.iter().find_map(|attr| {
+        if attr.attr_name.txt != "as" {
+            return None;
+        }
+        match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(_) => {
+                Some(VariantConstructorAsPayload::String)
+            }
+            crate::types::decl::AttributePayload::Int(_) => Some(VariantConstructorAsPayload::Int),
+            crate::types::decl::AttributePayload::Float(_) => {
+                Some(VariantConstructorAsPayload::Float)
+            }
+            crate::types::decl::AttributePayload::BigInt(_) => {
+                Some(VariantConstructorAsPayload::BigInt)
+            }
+            crate::types::decl::AttributePayload::Bool(_) => {
+                Some(VariantConstructorAsPayload::Bool)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
+                Some(VariantConstructorAsPayload::Null)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(VariantConstructorAsPayload::Undefined)
+            }
+            _ => None,
+        }
+    })
+}
+
+fn type_expr_path_same(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    target_path: &crate::types::Path,
+) -> bool {
+    matches!(
+        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() && path.same(target_path)
+    )
+}
+
+fn source_text_is_constant(source_text: &str) -> bool {
+    let text = source_text.trim();
+    simple_string_literal_value(text).is_some()
+        || (text.starts_with('\'') && text.ends_with('\''))
+        || text
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+fn append_string_to_polyvariant_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(row) = trace.iter().copied().find_map(|(actual, expected)| {
+        (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
+            .then(|| polyvariant_row(type_ctx, expected))
+            .flatten()
+    }) else {
+        return false;
+    };
+    let Some(source_literal) = source_text_at_loc(arena, source, loc) else {
+        return false;
+    };
+    let Some(string_value) = simple_string_literal_value(&source_literal) else {
+        return false;
+    };
+    let fields = visible_polyvariant_fields(type_ctx, &row);
+    if !fields
+        .iter()
+        .any(|(label, _)| label.as_str() == string_value)
+    {
+        return false;
+    }
+
+    message.push_str("\n\nPossible solutions:\n");
+    message.push_str("- The constant passed matches one of the expected polymorphic variant constructors. Did you mean to pass this as a polymorphic variant? If so, rewrite ");
+    message.push_str(INFO);
+    message.push_str(&source_literal);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push('#');
+    message.push_str(&string_value);
+    message.push_str(RESET);
+    true
+}
+
+fn append_string_to_variant_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(constructors) = trace.iter().copied().find_map(|(actual, expected)| {
+        (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
+            .then(|| concrete_variant_constructors(type_ctx, expected))
+            .flatten()
+    }) else {
+        return false;
+    };
+    let Some(source_literal) = source_text_at_loc(arena, source, loc) else {
+        return false;
+    };
+    let Some(string_value) = simple_string_literal_value(&source_literal) else {
+        return false;
+    };
+    let Some(constructor_name) = constructors.iter().find_map(|constructor| {
+        let runtime_repr = variant_constructor_string_runtime_repr(constructor)?;
+        (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
+    }) else {
+        return false;
+    };
+
+    message.push_str("\n\nPossible solutions:\n");
+    message.push_str("- The constant passed matches the runtime representation of one of the expected variant constructors. Did you mean to pass this as a variant constructor? If so, rewrite ");
+    message.push_str(INFO);
+    message.push_str(&source_literal);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push_str(&constructor_name);
+    message.push_str(RESET);
+    true
+}
+
+fn concrete_variant_constructors(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<Vec<crate::types::decl::ConstructorDeclaration>> {
+    let mut current = type_ctx.repr(ty);
+    let mut seen = Vec::new();
+
+    loop {
+        if seen.contains(&current) {
+            return None;
+        }
+        seen.push(current);
+
+        let desc = type_ctx.get_desc(current);
+        match &*desc {
+            TypeDesc::Tconstr { path, .. } => {
+                let decl = type_decl_for_path(type_ctx, path)?;
+                match decl.type_kind {
+                    crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                        return Some(constructors);
+                    }
+                    crate::types::decl::TypeKind::TypeAbstract => {
+                        current = type_ctx.repr(decl.type_manifest?);
+                    }
+                    _ => return None,
+                }
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                current = type_ctx.repr(*next);
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn type_decl_for_path(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+) -> Option<crate::types::TypeDeclaration> {
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+    {
+        return Some(decl.clone());
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
+        return Some(decl.clone());
+    }
+
+    type_ctx
+        .find_type_decl(path.head_name())
+        .map(|decl| decl.clone())
+}
+
+fn variant_constructor_string_runtime_repr(
+    constructor: &crate::types::decl::ConstructorDeclaration,
+) -> Option<String> {
+    for attr in &constructor.cd_attributes {
+        if attr.attr_name.txt != "as" {
+            continue;
+        }
+        return match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
+            _ => None,
+        };
+    }
+
+    Some(constructor.cd_id.name().to_string())
+}
+
+fn type_clash_string_to_polyvariant(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.iter().copied().any(|(actual, expected)| {
+        simple_type_constr_name(type_ctx, actual).as_deref() == Some("string")
+            && polyvariant_row(type_ctx, expected).is_some()
+    })
+}
+
+fn type_clash_string_to_variant(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.iter().copied().any(|(actual, expected)| {
+        simple_type_constr_name(type_ctx, actual).as_deref() == Some("string")
+            && concrete_variant_constructors(type_ctx, expected).is_some()
+    })
+}
+
+fn simple_string_literal_value(source_literal: &str) -> Option<String> {
+    let quoted = source_literal.strip_prefix('"')?.strip_suffix('"')?;
+    if quoted.contains('\\') {
+        return None;
+    }
+    Some(quoted.to_string())
 }
 
 fn append_object_literal_record_help(
@@ -3877,6 +5901,56 @@ fn append_object_literal_record_help(
     message.push('\n');
 
     true
+}
+
+fn append_braced_ident_record_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if !matches!(context, Some(TypeClashContext::BracedIdent)) {
+        return false;
+    }
+    let Some((_, expected)) = trace.first().copied() else {
+        return false;
+    };
+    if !type_is_record(type_ctx, expected) {
+        return false;
+    }
+
+    let rewrite = source_text_at_loc(arena, source, loc)
+        .map(|text| braced_ident_record_rewrite(&text))
+        .unwrap_or_default();
+
+    message
+        .push_str("\n\nYou might have meant to pass this as a record, but wrote it as a block.\n");
+    message.push_str(
+        "Braces with a single identifier counts as a block, not a record with a single (punned) field.\n\n",
+    );
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Write out the full record with field and value, like: ");
+    message.push_str(INFO);
+    message.push_str(&rewrite);
+    message.push_str(RESET);
+    message.push_str("\n- Return the expected record from the block");
+
+    true
+}
+
+fn braced_ident_record_rewrite(text: &str) -> String {
+    let ident = text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    format!("{{{ident}: {ident}}}")
 }
 
 fn object_literal_to_record_rewrite(text: &str) -> Option<String> {
@@ -4038,7 +6112,7 @@ fn type_is_expected_jsx_element(
     ty: TypeExprRef,
 ) -> bool {
     type_is_jsx_element(type_ctx, ty)
-        || rendered_alias_expansion(type_ctx, trace, false)
+        || rendered_alias_expansion(type_ctx, ty, trace, false)
             .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
 }
 
@@ -4071,7 +6145,7 @@ fn type_is_jsx_element_like(
     ty: TypeExprRef,
 ) -> bool {
     type_is_jsx_element(type_ctx, ty)
-        || rendered_alias_expansion(type_ctx, trace, true)
+        || rendered_alias_expansion(type_ctx, ty, trace, true)
             .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
 }
 
@@ -4091,20 +6165,450 @@ fn append_incompatible_type_parts(
 ) {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
-    let Some((actual, expected)) = nested_type_clash_pair(type_ctx, trace) else {
+    let reports = super_trace_reports(type_ctx, trace);
+    if reports.is_empty() {
         return;
     };
 
-    message.push_str("\n\nThe incompatible parts:\n  ");
-    message.push_str(ERROR);
-    message.push_str(&format_type_expr(type_ctx, actual));
+    for (idx, report) in reports.iter().enumerate() {
+        if idx == 0 {
+            message.push_str("\n\nThe incompatible parts:\n  ");
+        } else {
+            message.push_str("\n  \n  Further expanded:\n    ");
+        }
+        append_type_expansion_report(
+            type_ctx,
+            report.actual,
+            report.actual_expansion,
+            ERROR,
+            message,
+        );
+        message.push_str(" vs ");
+        append_type_expansion_report(
+            type_ctx,
+            report.expected,
+            report.expected_expansion,
+            INFO,
+            message,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TypeExpansionReport {
+    actual: TypeExprRef,
+    actual_expansion: TypeExprRef,
+    expected: TypeExprRef,
+    expected_expansion: TypeExprRef,
+}
+
+fn append_type_expansion_report(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expansion: TypeExprRef,
+    color: &str,
+    message: &mut String,
+) {
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    message.push_str(color);
+    message.push_str(&format_type_expr(type_ctx, ty));
     message.push_str(RESET);
-    message.push_str(" vs ");
-    message.push_str(INFO);
-    message.push_str(&format_type_expr(type_ctx, expected));
-    message.push_str(RESET);
+    if !type_expansion_same(type_ctx, ty, expansion) {
+        message.push(' ');
+        message.push_str(DIM);
+        message.push_str("(defined as");
+        message.push_str(RESET);
+        message.push(' ');
+        message.push_str(color);
+        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(RESET);
+        message.push_str(DIM);
+        message.push(')');
+        message.push_str(RESET);
+    }
+}
+
+fn super_trace_reports(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Vec<TypeExpansionReport> {
+    let expanded = expanded_type_clash_trace(type_ctx, trace);
+    if expanded.len() < 4 {
+        return Vec::new();
+    }
+    let top_actual_text = format_type_expr(type_ctx, expanded[0].0);
+    let top_expected_text = format_type_expr(type_ctx, expanded[1].0);
+
+    let groups = expanded[2..]
+        .chunks_exact(2)
+        .map(|chunk| TypeExpansionReport {
+            actual: chunk[0].0,
+            actual_expansion: chunk[0].1,
+            expected: chunk[1].0,
+            expected_expansion: chunk[1].1,
+        })
+        .collect::<Vec<_>>();
+
+    let mut reports = Vec::new();
+    for (idx, group) in groups.iter().copied().enumerate() {
+        let actual_text = format_type_expr(type_ctx, group.actual);
+        let expected_text = format_type_expr(type_ctx, group.expected);
+        let is_top_pair_expansion = (actual_text == top_actual_text
+            && expected_text == top_expected_text)
+            || (actual_text == top_expected_text && expected_text == top_actual_text)
+            || (actual_text == top_actual_text && expected_text != top_expected_text)
+            || (expected_text == top_expected_text && actual_text != top_actual_text)
+            || (actual_text == top_expected_text && expected_text != top_actual_text)
+            || (expected_text == top_actual_text && actual_text != top_expected_text);
+        if is_top_pair_expansion {
+            continue;
+        }
+
+        let is_same_expansion = type_expansion_same(type_ctx, group.actual, group.actual_expansion)
+            && type_expansion_same(type_ctx, group.expected, group.expected_expansion);
+        if is_same_expansion && idx + 1 != groups.len() {
+            continue;
+        }
+        reports.push(group);
+    }
+    reports
+}
+
+fn expanded_type_clash_trace(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Vec<(TypeExprRef, TypeExprRef)> {
+    let mut expanded = Vec::with_capacity(trace.len() * 2);
+    for (actual, expected) in trace {
+        expanded.push(expanded_type_clash_entry(type_ctx, *actual));
+        expanded.push(expanded_type_clash_entry(type_ctx, *expected));
+    }
+    expanded
+}
+
+fn expanded_type_clash_entry(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> (TypeExprRef, TypeExprRef) {
+    let repr = type_ctx.repr(ty);
+    let expansion = type_alias_expansion(type_ctx, repr).unwrap_or(repr);
+    (repr, expansion)
+}
+
+fn type_alias_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+        return None;
+    };
+    let path = path.clone();
+    let args = args.clone();
+    drop(desc);
+
+    let manifest = type_decl_manifest_for_path(type_ctx, &path)?;
+    let (params, manifest) = manifest;
+    let expansion = if params.len() == args.len() {
+        crate::types::ctype::subst_type_params(type_ctx, &params, &args, manifest)
+    } else {
+        manifest
+    };
+    Some(type_ctx.repr(expansion))
+}
+
+fn type_alias_full_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let original = type_ctx.repr(ty);
+    let mut current = original;
+    let mut seen = AHashSet::new();
+    let mut changed = false;
+
+    while seen.insert(current) {
+        let Some(next) = type_alias_expansion(type_ctx, current) else {
+            break;
+        };
+        let next = type_ctx.repr(next);
+        if next == current {
+            break;
+        }
+        current = next;
+        changed = true;
+    }
+
+    changed.then_some(current)
+}
+
+fn type_decl_manifest_for_path(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+) -> Option<(Vec<TypeExprRef>, TypeExprRef)> {
+    let from_decl = |decl: std::cell::Ref<'_, crate::types::TypeDeclaration>| {
+        decl.type_manifest
+            .map(|manifest| (decl.type_params.clone(), manifest))
+    };
+
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl(path.head_name())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    None
+}
+
+fn type_expansion_same(type_ctx: &TypeContext, ty: TypeExprRef, expansion: TypeExprRef) -> bool {
+    type_ctx.repr(ty) == type_ctx.repr(expansion)
+        || format_type_expr(type_ctx, ty) == format_type_expr(type_ctx, expansion)
+}
+
+fn append_polyvariant_type_clash_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual_ty, expected_ty)) = polyvariant_diagnostic_type_pair(type_ctx, trace) else {
+        return false;
+    };
+    let Some((actual_row, expected_row)) = polyvariant_row_pair(type_ctx, actual_ty, expected_ty)
+    else {
+        return false;
+    };
+
+    let actual_fields = visible_polyvariant_fields(type_ctx, &actual_row);
+    let expected_fields = visible_polyvariant_fields(type_ctx, &expected_row);
+    let common_labels = actual_fields
+        .iter()
+        .filter(|(actual_label, _)| {
+            expected_fields
+                .iter()
+                .any(|(expected_label, _)| expected_label == actual_label)
+        })
+        .count();
+
+    if actual_row.row_closed
+        && expected_row.row_closed
+        && common_labels == 0
+        && !actual_fields.is_empty()
+        && !expected_fields.is_empty()
+    {
+        message.push_str(
+            "\n\nThese polymorphic variants are incompatible - they share no common constructors.",
+        );
+        return true;
+    }
+
+    let missing_from_actual = expected_fields
+        .iter()
+        .filter(|(expected_label, _)| {
+            !actual_fields
+                .iter()
+                .any(|(actual_label, _)| actual_label == expected_label)
+        })
+        .map(|(label, _)| label.as_str())
+        .collect::<Vec<_>>();
+    if actual_row.row_closed && !missing_from_actual.is_empty() {
+        let constructors_txt = if missing_from_actual.len() == 1 {
+            "constructor"
+        } else {
+            "constructors"
+        };
+        message.push_str("\n\nThe first polymorphic variant is ");
+        message.push_str(INFO);
+        message.push_str("closed");
+        message.push_str(RESET);
+        message.push_str(" and doesn't include the ");
+        message.push_str(constructors_txt);
+        message.push_str(": ");
+        message.push_str(ERROR);
+        message.push_str(&format_polyvariant_tags(&missing_from_actual));
+        message.push_str(RESET);
+        message.push_str(".\n\nPossible solutions:\n- Either make the first variant ");
+        message.push_str(INFO);
+        message.push_str("open");
+        message.push_str(RESET);
+        message.push_str(" so it can accept additional constructors. To do this, make sure the type starts with ");
+        message.push_str(INFO);
+        message.push_str("[>");
+        message.push_str(RESET);
+        message.push_str(" instead of ");
+        message.push_str(INFO);
+        message.push('[');
+        message.push_str(RESET);
+        message.push_str("\n- Or add the missing ");
+        message.push_str(constructors_txt);
+        message.push_str(" to it.");
+        return true;
+    }
+
+    let missing_from_expected = actual_fields
+        .iter()
+        .filter(|(actual_label, _)| {
+            !expected_fields
+                .iter()
+                .any(|(expected_label, _)| expected_label == actual_label)
+        })
+        .map(|(label, _)| label.as_str())
+        .collect::<Vec<_>>();
+    if expected_row.row_closed && !missing_from_expected.is_empty() {
+        let constructors_txt = if missing_from_expected.len() == 1 {
+            "constructor"
+        } else {
+            "constructors"
+        };
+        message.push_str("\n\nThe second polymorphic variant is ");
+        message.push_str(INFO);
+        message.push_str("closed");
+        message.push_str(RESET);
+        message.push_str(" and doesn't include the ");
+        message.push_str(constructors_txt);
+        message.push_str(": ");
+        message.push_str(ERROR);
+        message.push_str(&format_polyvariant_tags(&missing_from_expected));
+        message.push_str(RESET);
+        message.push_str(".\n\nPossible solutions:\n- Either make the second variant ");
+        message.push_str(INFO);
+        message.push_str("open");
+        message.push_str(RESET);
+        message.push_str(" so it can accept additional constructors. To do this, make sure the type starts with ");
+        message.push_str(INFO);
+        message.push_str("[>");
+        message.push_str(RESET);
+        message.push_str(" instead of ");
+        message.push_str(INFO);
+        message.push('[');
+        message.push_str(RESET);
+        message.push_str("\n- Or add the missing ");
+        message.push_str(constructors_txt);
+        message.push_str(" to it.");
+        return true;
+    }
+
+    if actual_row.row_closed
+        && expected_row.row_closed
+        && actual_fields.len() == 1
+        && expected_fields.len() == 1
+        && actual_fields[0].0 == expected_fields[0].0
+    {
+        let constructor = format_polyvariant_tag(actual_fields[0].0.as_str());
+        message.push_str("\n\nBoth polymorphic variants have the constructor ");
+        message.push_str(INFO);
+        message.push_str(&constructor);
+        message.push_str(RESET);
+        message.push_str(
+            ", but their payload types are incompatible.\nMake sure the payload types for ",
+        );
+        message.push_str(INFO);
+        message.push_str(&constructor);
+        message.push_str(RESET);
+        message.push_str(" match exactly in both polymorphic variants.");
+        return true;
+    }
+
+    false
+}
+
+fn polyvariant_row_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(
+    crate::types::type_expr::RowDesc,
+    crate::types::type_expr::RowDesc,
+)> {
+    Some((
+        polyvariant_row(type_ctx, actual)?,
+        polyvariant_row(type_ctx, expected)?,
+    ))
+}
+
+fn polyvariant_diagnostic_type_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let mut fallback = None;
+    for (actual, expected) in trace.iter().copied() {
+        if polyvariant_row_pair(type_ctx, actual, expected).is_none() {
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = Some((actual, expected));
+        }
+        if format_type_expr(type_ctx, actual) != format_type_expr(type_ctx, expected) {
+            return Some((actual, expected));
+        }
+    }
+    fallback
+}
+
+fn polyvariant_row(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<crate::types::type_expr::RowDesc> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, row),
+        _ => return None,
+    };
+    Some(row)
+}
+
+fn type_is_polyvariant(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    matches!(
+        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        TypeDesc::Tvariant(_)
+    )
+}
+
+fn visible_polyvariant_fields(
+    type_ctx: &TypeContext,
+    row: &crate::types::type_expr::RowDesc,
+) -> Vec<(
+    crate::types::asttypes::Label,
+    crate::types::type_expr::RowField,
+)> {
+    let mut fields = row
+        .row_fields
+        .iter()
+        .filter_map(|(label, field)| {
+            let field = crate::types::btype::row_field_repr(type_ctx, field);
+            (!matches!(field, crate::types::type_expr::RowField::Rabsent))
+                .then(|| (label.clone(), field))
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    fields
+}
+
+fn format_polyvariant_tags(labels: &[&str]) -> String {
+    labels
+        .iter()
+        .map(|label| format_polyvariant_tag(label))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_polyvariant_tag(label: &str) -> String {
+    format!("#{label}")
 }
 
 fn append_object_field_mismatch_help(
@@ -4652,7 +7156,11 @@ fn format_apply_wrong_label_report(
     loc: LocIdx,
     label: &ParserArgLabel,
     ty: TypeExprRef,
+    suppress_info_style: bool,
 ) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
     let mut message = String::new();
     match label {
         ParserArgLabel::Nolabel => {
@@ -4660,8 +7168,14 @@ fn format_apply_wrong_label_report(
         }
         ParserArgLabel::Labelled(loc) | ParserArgLabel::Optional(loc) => {
             message.push_str("This function does not take the argument ");
+            if !suppress_info_style {
+                message.push_str(INFO);
+            }
             message.push('~');
             message.push_str(arena.get_string(loc.txt));
+            if !suppress_info_style {
+                message.push_str(RESET);
+            }
             message.push('.');
         }
     }
@@ -4777,6 +7291,21 @@ fn format_unbound_record_field_report(
             message.push_str(
                 " refers to a record field, but no corresponding record type is in scope.",
             );
+            message.push_str("\n\n");
+            message
+                .push_str("If it's defined in another module or file, bring it into scope by:\n");
+            message.push_str("- Prefixing the field name with the module name: ");
+            message.push_str(INFO);
+            message.push_str("TheModule.");
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("- Or specifying the record type explicitly:\n");
+            message.push_str(INFO);
+            message.push_str("let theValue: TheModule.theType = {");
+            message.push_str(field_name);
+            message.push_str(": VALUE}");
+            message.push_str(RESET);
         }
     }
 
@@ -4837,6 +7366,7 @@ fn format_uncurried_arity_mismatch_report(
     expected_arity: usize,
     provided_arity: usize,
     provided_args: &[crate::parser::ast::ArgLabel],
+    arity_suggestion: Option<&str>,
     use_fallback_message: bool,
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
@@ -4964,7 +7494,81 @@ fn format_uncurried_arity_mismatch_report(
         message.push('.');
     }
 
+    if let Some(suggestion) = arity_suggestion {
+        message.push_str("\n\nHint: Try ");
+        message.push_str(INFO);
+        message.push_str(suggestion);
+        message.push_str(RESET);
+        message.push_str(" instead (takes ");
+        message.push_str(INFO);
+        message.push_str(&provided_arity.to_string());
+        message.push_str(RESET);
+        message.push_str(" argument");
+        if provided_arity != 1 {
+            message.push('s');
+        }
+        message.push_str(").");
+    }
+
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_constructor_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &Longident,
+    is_inline_record: bool,
+    expected: usize,
+    provided: usize,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let name = format_longident_for_report(arena, name);
+    let message = if is_inline_record && expected == 1 {
+        let suffix = if provided == 0 {
+            ", but it's not being passed any arguments"
+        } else {
+            ""
+        };
+        format!(
+            "This variant constructor {INFO}{name}{RESET} expects an inline record as payload{suffix}."
+        )
+    } else {
+        let argument = if expected == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        let only = if provided < expected { " only" } else { "" };
+        format!(
+            "This variant constructor {INFO}{name}{RESET} expects {expected} {argument}, but it's{only} being passed {provided}."
+        )
+    };
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_longident_for_report(arena: &ParseArena, lid: &Longident) -> String {
+    match lid {
+        Longident::Lident(name) => arena.get_string(*name).to_string(),
+        Longident::Ldot(prefix, name) => {
+            format!(
+                "{}.{}",
+                format_longident_for_report(arena, prefix),
+                arena.get_string(*name)
+            )
+        }
+        Longident::Lapply(func, arg) => {
+            format!(
+                "{}({})",
+                format_longident_for_report(arena, func),
+                format_longident_for_report(arena, arg)
+            )
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5029,10 +7633,20 @@ fn format_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
     TypeExprPrinter::new(type_ctx).format(ty)
 }
 
+fn format_non_generalizable_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    TypeExprPrinter::new_with_weak_names(type_ctx).format(ty)
+}
+
 struct TypeExprPrinter<'a> {
     type_ctx: &'a TypeContext,
     vars: ahash::AHashMap<TypeExprRef, String>,
+    weak_vars: ahash::AHashMap<TypeExprRef, String>,
+    recursive_aliases: ahash::AHashMap<TypeExprRef, String>,
+    active: AHashSet<TypeExprRef>,
+    rendered_aliases: AHashSet<TypeExprRef>,
     next_var: usize,
+    next_weak_var: usize,
+    weak_names: bool,
 }
 
 impl<'a> TypeExprPrinter<'a> {
@@ -5040,13 +7654,37 @@ impl<'a> TypeExprPrinter<'a> {
         Self {
             type_ctx,
             vars: ahash::AHashMap::new(),
+            weak_vars: ahash::AHashMap::new(),
+            recursive_aliases: ahash::AHashMap::new(),
+            active: AHashSet::new(),
+            rendered_aliases: AHashSet::new(),
             next_var: 0,
+            next_weak_var: 1,
+            weak_names: false,
+        }
+    }
+
+    fn new_with_weak_names(type_ctx: &'a TypeContext) -> Self {
+        Self {
+            weak_names: true,
+            ..Self::new(type_ctx)
         }
     }
 
     fn format(&mut self, ty: TypeExprRef) -> String {
         let repr = self.type_ctx.repr(ty);
-        match &*self.type_ctx.get_desc(repr) {
+        if self.active.contains(&repr) {
+            return self.recursive_alias_for(repr);
+        }
+        if self.rendered_aliases.contains(&repr)
+            && let Some(alias) = self.recursive_aliases.get(&repr)
+        {
+            return alias.clone();
+        }
+
+        self.active.insert(repr);
+        let desc = (*self.type_ctx.get_desc(repr)).clone();
+        let rendered = match &desc {
             TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
             TypeDesc::Tarrow { .. } => self.format_arrow(repr),
             TypeDesc::Ttuple(types) => {
@@ -5067,9 +7705,28 @@ impl<'a> TypeExprPrinter<'a> {
             TypeDesc::Tobject { fields, .. } => self.format_object(*fields),
             TypeDesc::Tfield { .. } => self.format_object(repr),
             TypeDesc::Tnil => "{}".to_string(),
-            TypeDesc::Tvariant(_) => "<variant>".to_string(),
+            TypeDesc::Tvariant(row) => self.format_variant(row),
             TypeDesc::Tpackage { path, .. } => format!("module({})", path.name()),
+        };
+        self.active.remove(&repr);
+
+        if let Some(alias) = self.recursive_aliases.get(&repr) {
+            self.rendered_aliases.insert(repr);
+            format!("({rendered} as {alias})")
+        } else {
+            rendered
         }
+    }
+
+    fn recursive_alias_for(&mut self, ty: TypeExprRef) -> String {
+        if let Some(alias) = self.recursive_aliases.get(&ty) {
+            return alias.clone();
+        }
+
+        let alias = generated_type_var_name(self.next_var);
+        self.next_var += 1;
+        self.recursive_aliases.insert(ty, alias.clone());
+        alias
     }
 
     fn format_path_name(&self, path: &crate::types::Path) -> String {
@@ -5113,6 +7770,53 @@ impl<'a> TypeExprPrinter<'a> {
         format!("{{{}}}", items.join(", "))
     }
 
+    fn format_variant(&mut self, row: &crate::types::type_expr::RowDesc) -> String {
+        let row = crate::types::btype::row_repr(self.type_ctx, row);
+        let visible_fields = visible_polyvariant_fields(self.type_ctx, &row);
+        let all_present = visible_fields
+            .iter()
+            .all(|(_, field)| matches!(field, crate::types::type_expr::RowField::Rpresent(_)));
+        let fields = visible_fields
+            .iter()
+            .map(|(label, field)| self.format_variant_field(label.as_str(), field))
+            .collect::<Vec<_>>();
+        let prefix = if row.row_closed {
+            ""
+        } else if all_present {
+            "> "
+        } else {
+            "? "
+        };
+
+        if fields.is_empty() {
+            format!("[{}]", prefix.trim_end())
+        } else {
+            format!("[{}{}]", prefix, fields.join(" | "))
+        }
+    }
+
+    fn format_variant_field(
+        &mut self,
+        label: &str,
+        field: &crate::types::type_expr::RowField,
+    ) -> String {
+        use crate::types::type_expr::RowField;
+
+        let tag = format_polyvariant_tag(label);
+        match field {
+            RowField::Rpresent(Some(ty)) => format!("{tag}({})", self.format(*ty)),
+            RowField::Reither {
+                constant: false,
+                types,
+                ..
+            } if !types.is_empty() => {
+                let types = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                format!("{tag}({})", types.join(" & "))
+            }
+            RowField::Rpresent(None) | RowField::Reither { .. } | RowField::Rabsent => tag,
+        }
+    }
+
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
         let mut args = Vec::new();
         let mut current = ty;
@@ -5125,7 +7829,9 @@ impl<'a> TypeExprPrinter<'a> {
             }
 
             match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow { arg, ret, .. } => {
+                TypeDesc::Tarrow {
+                    arg, ret, arity, ..
+                } if arity.is_none() || args.is_empty() => {
                     args.push((
                         self.format_arrow_arg(&arg.lbl, arg.typ),
                         !matches!(arg.lbl, TypeArgLabel::Nolabel),
@@ -5165,6 +7871,16 @@ impl<'a> TypeExprPrinter<'a> {
     }
 
     fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
+        if self.weak_names && self.type_ctx.get_level(ty) != crate::types::GENERIC_LEVEL {
+            if let Some(existing) = self.weak_vars.get(&ty) {
+                return existing.clone();
+            }
+            let name = format!("'_weak{}", self.next_weak_var);
+            self.next_weak_var += 1;
+            self.weak_vars.insert(ty, name.clone());
+            return name;
+        }
+
         if let Some(name) = name {
             if !name.is_empty() && name != "_" {
                 return format!("'{name}");
@@ -5208,6 +7924,12 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
+    reject_invalid_polyvariant_int_literals_in_structure(
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
@@ -5231,13 +7953,20 @@ pub fn compile_source_to_js_with_options(
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
+        reject_invalid_react_component_with_props_in_structure(
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
         jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
     } else {
         structure
     };
 
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+    let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
     // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
     // await, tagged templates, encode externals, and apply spice mapper rewrites.
@@ -5255,6 +7984,7 @@ pub fn compile_source_to_js_with_options(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -5280,6 +8010,7 @@ pub fn compile_source_to_js_with_options(
         match type_structure(&mut tctx, &env, parser.arena(), &structure) {
             Ok(result) => result,
             Err(e) => {
+                let suppress_info_style = !tctx.warnings.is_empty();
                 emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
                 return Err(type_mod_error_to_anyhow(
                     e,
@@ -5287,6 +8018,7 @@ pub fn compile_source_to_js_with_options(
                     parser.arena(),
                     source,
                     filename,
+                    suppress_info_style,
                 ));
             }
         };
@@ -5309,6 +8041,20 @@ pub fn compile_source_to_js_with_options(
         .as_ref()
         .is_some_and(|f| f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists());
     if !has_resi {
+        let simple_signature =
+            crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        if let Err(e) =
+            crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
+        {
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                false,
+            ));
+        }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
     }
 
@@ -5852,6 +8598,7 @@ pub fn typecheck_interface_source(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -6131,6 +8878,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        apply_warning_options(&mut tctx, options);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -6183,12 +8931,19 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
+            reject_invalid_react_component_with_props_in_structure(
+                &structure,
+                parser.arena(),
+                source,
+                filename,
+            )?;
             jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
         } else {
             structure
         };
 
-        let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+        let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
         let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
@@ -6199,6 +8954,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        apply_warning_options(&mut tctx, options);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -6967,7 +9723,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
         structure
     };
 
-    let structure = ppx::expand_extensions(&structure, &mut arena);
+    let structure = ppx::expand_extensions(&structure, &mut arena)
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
     let structure = ppx::rewrite_structure(&structure, &mut arena)
         .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
 
@@ -6980,6 +9737,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -7026,6 +9784,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -7374,6 +10133,12 @@ pub fn compile_source_in_process(
     )?;
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
+        reject_invalid_react_component_with_props_in_structure(
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
         jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
     } else {
         structure
@@ -7636,6 +10401,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -7677,7 +10443,16 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             );
         }
 
+        let simple_signature =
+            crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if !has_interface {
+            if let Err(e) = crate::types::typemod::check_nongen_schemes(
+                &type_ctx,
+                &final_env,
+                &simple_signature,
+            ) {
+                return Err(anyhow!("Type checking failed: {e:?}"));
+            }
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
 
@@ -7688,7 +10463,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             has_interface,
         );
 
-        crate::types::includemod::simplify_signature(&typed_structure.str_type)
+        simple_signature
     };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
@@ -8068,6 +10843,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -8171,6 +10947,7 @@ pub fn typecheck_implementation_in_process(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    apply_warning_options(&mut tctx, options);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);

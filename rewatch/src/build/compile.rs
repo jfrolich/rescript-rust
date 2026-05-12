@@ -1494,6 +1494,8 @@ struct InProcessCompilerFlags {
     jsx_version: Option<i32>,
     experimental_let_unwrap: bool,
     open_modules: Vec<String>,
+    warning_specs: Vec<String>,
+    warning_error_specs: Vec<String>,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1510,6 +1512,8 @@ impl Default for InProcessCompilerFlags {
             jsx_version: None,
             experimental_let_unwrap: false,
             open_modules: Vec::new(),
+            warning_specs: Vec::new(),
+            warning_error_specs: Vec::new(),
         }
     }
 }
@@ -1544,6 +1548,16 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
                     parsed.open_modules.push(mod_name.clone());
                 }
             }
+            "-w" => {
+                if let Some(spec) = iter.next() {
+                    parsed.warning_specs.push(spec.clone());
+                }
+            }
+            "-warn-error" => {
+                if let Some(spec) = iter.next() {
+                    parsed.warning_error_specs.push(spec.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -1563,7 +1577,8 @@ fn build_compiler_options(
     // Parse package compiler-flags for flags the in-process compiler needs to honor.
     // In the subprocess path, these are passed as raw CLI args to bsc.
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
-    let parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
+    let warning_args = package.config.get_warning_args(package.is_local_dep, None);
+    let parsed_flags = parse_in_process_compiler_flags(&[bsc_flags, warning_args].concat());
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
@@ -1638,6 +1653,8 @@ fn build_compiler_options(
         include_paths,
         runtime_path,
         open_modules,
+        warning_specs: parsed_flags.warning_specs,
+        warning_error_specs: parsed_flags.warning_error_specs,
         source_filename,
         output_path,
         output_module_format,

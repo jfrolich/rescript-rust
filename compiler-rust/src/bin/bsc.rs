@@ -91,6 +91,8 @@ struct Options {
     runtime_path: Option<PathBuf>,
     package_name: Option<String>,
     open_modules: Vec<String>,
+    warning_specs: Vec<String>,
+    warning_error_specs: Vec<String>,
     jsx_version: Option<i32>,
     experimental_let_unwrap: bool,
     jsx_preserve: bool,
@@ -222,7 +224,17 @@ fn run() -> Result<()> {
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
-                "-w" | "-warn-error" | "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
+                "-w" => {
+                    if let Some(val) = args.next() {
+                        opts.warning_specs.push(val);
+                    }
+                }
+                "-warn-error" => {
+                    if let Some(val) = args.next() {
+                        opts.warning_error_specs.push(val);
+                    }
+                }
+                "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -284,6 +296,8 @@ fn run() -> Result<()> {
         include_paths: opts.include_paths.clone(),
         runtime_path,
         open_modules: opts.open_modules.clone(),
+        warning_specs: opts.warning_specs.clone(),
+        warning_error_specs: opts.warning_error_specs.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
         output_module_format: package_output
