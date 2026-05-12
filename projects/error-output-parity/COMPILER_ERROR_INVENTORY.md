@@ -325,6 +325,8 @@ with a reason after checking raise sites.
 - `With_changes_module_alias`
 - `With_cannot_remove_constrained_type`
 - `Repeated_name`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/repeated_module_name.res`.
 - `Non_generalizable`
 - `Non_generalizable_module`
 - `Interface_not_compiled`

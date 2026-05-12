@@ -3515,7 +3515,7 @@ fn format_repeated_name_report(
         arena.loc_start(repeated_loc),
         arena.loc_end(repeated_loc),
     );
-    let message = if 2 + "at ".len() + repeated.len() + 1 < 80 {
+    let message = if "at ".len() + repeated.len() + 1 < 76 {
         format!(
             "Multiple definition of the {kind} name {name} \nat {repeated} \nNames must be unique in a given structure or signature."
         )
