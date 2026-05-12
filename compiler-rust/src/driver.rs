@@ -2718,6 +2718,11 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
+            format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -3645,16 +3650,51 @@ fn format_cannot_apply_module_report(
     let mut output = String::new();
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
-    let rendered_module_type = crate::types::includemod::format_module_type(type_ctx, mty);
-    let rendered = if rendered_module_type == "{}" {
-        ""
-    } else {
-        rendered_module_type.as_str()
-    };
+    let rendered_module_type = format_typemod_module_type(type_ctx, mty);
     output.push_str("  This module is not a functor; it has type ");
-    output.push_str(rendered);
+    output.push_str(&rendered_module_type);
     output.push_str("\n\n");
     output
+}
+
+fn format_structure_expected_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type = format_typemod_module_type(type_ctx, mty);
+    output.push_str("  This module is not a structure; it has type ");
+    output.push_str(&rendered_module_type);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_typemod_module_type(
+    type_ctx: &TypeContext,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    match mty {
+        crate::types::decl::ModuleType::MtySignature(sig) if sig.is_empty() => String::new(),
+        crate::types::decl::ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let param_type = param_type
+                .as_ref()
+                .map(|mty| format_typemod_module_type(type_ctx, mty))
+                .unwrap_or_else(|| "_".to_string());
+            let result = format_typemod_module_type(type_ctx, result);
+            format!("({}: {}) => {}", param.name(), param_type, result)
+        }
+        _ => crate::types::includemod::format_module_type(type_ctx, mty),
+    }
 }
 
 fn format_not_a_variant_type_report(

@@ -3150,6 +3150,13 @@ pub enum TypeModError {
         /// Actual module type.
         mty: crate::types::decl::ModuleType,
     },
+    /// A module was opened where a structure signature was expected.
+    StructureExpected {
+        /// Module path location to report.
+        loc: LocIdx,
+        /// Actual module type.
+        mty: crate::types::decl::ModuleType,
+    },
     /// Functor application error.
     FunctorApplicationError(String),
     /// Invalid module expression.
@@ -7717,7 +7724,7 @@ fn specialize_functor_result_value_types(
 /// Mirror OCaml `Env.scrape_alias` enough for functor-application typing:
 /// follow `Mty_alias`/`Mty_ident` module-type paths until reaching a
 /// concrete module type (for example `Mty_functor`).
-fn scrape_alias_module_type<'b>(
+pub(crate) fn scrape_alias_module_type<'b>(
     mty: &crate::types::decl::ModuleType,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -11550,6 +11557,34 @@ pub fn type_module_expr_with_alias_mode<'a>(
     alias: bool,
 ) -> TypeModResult<ModuleExpr> {
     type_module_expr_with_alias(tctx, env, arena, mod_expr, alias)
+}
+
+fn structure_expected_error_for_open(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    lid: &Longident,
+    loc: LocIdx,
+) -> Option<TypeModError> {
+    let path = lookup_module_path_by_lid(
+        lid,
+        arena,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )?;
+    let md = env.lookup_module(&path).ok()?;
+    let mty = scrape_alias_module_type(&md.md_type, env, &mut tctx.persistent_env, tctx.type_ctx)
+        .unwrap_or_else(|| md.md_type.clone());
+    if matches!(
+        mty,
+        crate::types::decl::ModuleType::MtySignature(_)
+            | crate::types::decl::ModuleType::MtyAlias(_, _)
+    ) {
+        None
+    } else {
+        Some(TypeModError::StructureExpected { loc, mty })
+    }
 }
 
 /// Match OCaml `type_module_type_of` behavior for `module type of`.
@@ -15579,6 +15614,15 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
             let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
+            if let Some(err) = structure_expected_error_for_open(
+                tctx,
+                env,
+                arena,
+                &longident,
+                open_desc.popen_lid.loc,
+            ) {
+                return Err(err);
+            }
             let fallback_path = lookup_module_path_by_lid(
                 &longident,
                 arena,

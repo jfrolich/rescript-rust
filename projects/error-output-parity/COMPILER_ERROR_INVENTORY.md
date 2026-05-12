@@ -311,6 +311,8 @@ with a reason after checking raise sites.
 - `Cannot_eliminate_dependency`
 - `Signature_expected`
 - `Structure_expected`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`.
 - `With_no_component`
 - `With_mismatch`
 - `With_makes_applicative_functor_ill_typed`
