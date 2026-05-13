@@ -3927,6 +3927,10 @@ fn unify_pattern_types_gadt(
                 trace
             },
         }),
+        Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
+            loc: _loc,
+            trace: vec![(ty1, ty2)],
+        }),
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
             trace: vec![(ty1, ty2)],
