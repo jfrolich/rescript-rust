@@ -172,9 +172,16 @@ with a reason after checking raise sites.
   local module body with `type_expect`; source-level probes that make the local
   module type escape are rejected during that body expectation as
   `Expr_type_clash` or `Pattern_type_clash` before the later `unify_var` can
-  raise `Scoping_let_module`. The valid arity-one local module primitive probe
-  in `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`
-  covers the observable earlier escape reporter.
+  raise `Scoping_let_module`. The observable earlier reporters are covered by
+  `tests/error_output_parity/compiler/fixtures/scoping_let_module.res`,
+  `tests/error_output_parity/compiler/fixtures/scoping_let_module_value.res`,
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`,
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_expr_constraint.res`,
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_function_param.res`,
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_function_return.res`,
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_tuple_element.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`.
 - `Uncurried_arity_mismatch`: covered for unlabelled count mismatch, missing
   required labelled arguments, superfluous labelled arguments, annotated
   method-send application arity, inferred method-send fallback arity, and
