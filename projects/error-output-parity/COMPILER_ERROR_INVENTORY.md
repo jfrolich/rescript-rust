@@ -86,6 +86,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`
   and the nested function return escape subcase in
   `tests/error_output_parity/compiler/fixtures/let_module_escape_function_return.res`,
+  and the constrained expression local module escape subcase in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_expr_constraint.res`,
   and the package local type escape/coercion subcase in
   `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`.
 - `Multiply_bound_variable`: covered by

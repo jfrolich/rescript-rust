@@ -37,7 +37,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
-    ApplyArg, ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, FunctionParam,
+    ApplyArg, ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
     FunctionParamPattern, PatExtra, Pattern, PatternDesc, ValueBinding,
 };
 use crate::types::{
@@ -19301,8 +19301,19 @@ fn letmodule_local_escape_expression_site(
     let own_escape = || {
         let escaped_ty =
             letmodule_local_escape_type(ctx, expr.exp_type, module_id, &mut HashSet::new())?;
+        let loc = expr
+            .exp_extra
+            .iter()
+            .find_map(|(extra, loc, _)| {
+                matches!(
+                    extra,
+                    ExpExtra::Texp_constraint(_) | ExpExtra::Texp_coerce(_)
+                )
+                .then_some(*loc)
+            })
+            .unwrap_or(expr.exp_loc);
         Some(LetModuleLocalEscapeSite::Expression {
-            loc: expr.exp_loc,
+            loc,
             ty: escaped_ty,
         })
     };
