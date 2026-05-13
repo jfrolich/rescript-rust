@@ -107,7 +107,9 @@ with a reason after checking raise sites.
 - `Label_not_mutable`: covered by
   `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`.
 - `Wrong_name`: covered by
-  `tests/error_output_parity/compiler/fixtures/wrong_name.res`.
+  `tests/error_output_parity/compiler/fixtures/wrong_name.res` and the
+  spellcheck hint branch in
+  `tests/error_output_parity/compiler/fixtures/wrong_name_spellcheck.res`.
 - `Name_type_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res`.
 - `Undefined_method`: covered by
