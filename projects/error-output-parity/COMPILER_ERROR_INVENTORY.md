@@ -1052,6 +1052,7 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_set_get_conflict.res`,
       `tests/error_output_parity/compiler/fixtures/bs_external_set_variadic_conflict.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_module_conflict.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_get_variadic_conflict.res`.
   - `process_obj` argument-shape and unsupported argument-attribute validation
