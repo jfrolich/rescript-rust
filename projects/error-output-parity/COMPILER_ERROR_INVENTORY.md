@@ -251,7 +251,9 @@ with a reason after checking raise sites.
   and
   `tests/error_output_parity/compiler/fixtures/with_module_unbound_module.res`.
 - `Unbound_value`: covered by
-  `tests/error_output_parity/compiler/fixtures/unbound_value.res`.
+  `tests/error_output_parity/compiler/fixtures/unbound_value.res` and the
+  module-name suggestion branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_value_module_suggestion.res`.
 - `Unbound_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
 - `Unbound_type_constructor`: covered by
