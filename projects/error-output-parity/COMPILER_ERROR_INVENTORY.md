@@ -120,7 +120,9 @@ with a reason after checking raise sites.
   multiple-alternative branch in
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch_multiple.res`.
 - `Undefined_method`: covered by
-  `tests/error_output_parity/compiler/fixtures/undefined_method.res`.
+  `tests/error_output_parity/compiler/fixtures/undefined_method.res` and the
+  spellcheck hint branch in
+  `tests/error_output_parity/compiler/fixtures/undefined_method_spellcheck.res`.
 - `Private_type`: covered by
   `tests/error_output_parity/compiler/fixtures/private_type.res`.
 - `Private_label`: covered by
