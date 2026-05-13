@@ -264,6 +264,22 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/cases/jsx_not_enabled.res` through the
   explicit no-`-bs-jsx` compiler case in
   `tests/error_output_parity/compiler/cases.tsv`.
+- Typecore statement-position type errors are covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_error_statement_type_clash.res`.
+- Typecore warning 9 (`Non_closed_record_pattern`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_non_closed_record_pattern.res`.
+- Typecore warning 21 (`Nonreturning_statement`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_nonreturning_statement.res`.
+- Typecore warning 23 (`Useless_record_with`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_useless_record_with.res`.
+- Typecore warning 35 (`Unused_for_index`) is covered for `for`, `for of`, and
+  `for await of` by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_index.res`,
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_of_index.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_await_index.res`.
+- Typecore warning 39 (`Unused_rec_flag`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_rec_flag.res`.
 
 ## Typetexp Coverage Notes
 

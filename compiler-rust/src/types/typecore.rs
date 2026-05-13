@@ -15434,6 +15434,21 @@ fn type_for(
     // OCaml uses type_statement for for-loop bodies and instance_def(type_unit)
     // for the loop expression result.
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
+    if let crate::parser::ast::PatternDesc::Ppat_var(_) = &*pat.ppat_desc {
+        if state.pattern_variables.len() == 1 {
+            let loop_var = &state.pattern_variables[0];
+            if should_warn_unused_name(loop_var.id.name())
+                && !typed_expression_uses_ident(&typed_body, &loop_var.id)
+            {
+                tctx.report_warning(
+                    loc,
+                    Warning::UnusedForIndex {
+                        name: loop_var.id.name().to_string(),
+                    },
+                );
+            }
+        }
+    }
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.
@@ -15581,6 +15596,21 @@ fn type_for_of(
     }
 
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
+    if let crate::parser::ast::PatternDesc::Ppat_var(_) = &*pat.ppat_desc {
+        if state.pattern_variables.len() == 1 {
+            let loop_var = &state.pattern_variables[0];
+            if should_warn_unused_name(loop_var.id.name())
+                && !typed_expression_uses_ident(&typed_body, &loop_var.id)
+            {
+                tctx.report_warning(
+                    loc,
+                    Warning::UnusedForIndex {
+                        name: loop_var.id.name().to_string(),
+                    },
+                );
+            }
+        }
+    }
 
     // Result type is unit, matching OCaml `instance_def Predef.type_unit`.
     let result_unit_ty = env.type_unit(ctx);
@@ -17170,7 +17200,7 @@ fn type_record(
                     .filter_map(|idx| explicit_entries[idx].take()),
             );
         }
-    } else if let Some(all_labels) = all_labels {
+    } else if let Some(ref all_labels) = all_labels {
         let mut explicit_overrides_by_name = build_explicit_overrides_by_name(&explicit_entries);
         if all_labels.len() > typed_fields.capacity() {
             typed_fields.reserve(all_labels.len().saturating_sub(typed_fields.len()));
@@ -17434,6 +17464,17 @@ fn type_record(
                     Some(TypeClashContext::RecordSpread),
                 )?;
             }
+        }
+    }
+
+    if typed_base.is_some() {
+        let num_fields = all_label_descriptions
+            .as_ref()
+            .map(|labels| labels.len())
+            .or_else(|| all_labels.as_ref().map(|labels| labels.len()));
+        if num_fields.is_some_and(|num_fields| fields.len() == num_fields) {
+            tctx.report_warning(loc, Warning::UselessRecordWith);
+            typed_base = None;
         }
     }
 
