@@ -88,6 +88,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/let_module_escape_function_return.res`,
   and the constrained expression local module escape subcase in
   `tests/error_output_parity/compiler/fixtures/let_module_escape_expr_constraint.res`,
+  and the generic tuple-element expected-type subcase in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_tuple_element.res`,
   and the package local type escape/coercion subcase in
   `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`.
 - `Multiply_bound_variable`: covered by
@@ -129,6 +131,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
 - `Abstract_wrong_label`: covered by
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res`.
+- `Scoping_let_module`: checked against the `Pexp_letmodule` raise site in
+  `compiler/ml/typecore.ml`. Normal `.res` source probes found so far are
+  rejected earlier by the body `type_expect` path and surface as
+  `Expr_type_clash` or `Pattern_type_clash`; keep this variant listed until a
+  direct source-level repro is found or the raise site is proven unreachable.
 - `Uncurried_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
@@ -159,6 +166,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/cannot_infer_pack_signature.res`.
 - `Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
+- `Recursive_local_constraint`: checked against the `unify_pat_types_gadt`
+  raise site in `compiler/ml/typecore.ml`. Local GADT constraint cycle probes
+  found so far surface as `Pattern_type_clash`; keep this variant listed until
+  a direct `Unification_recursive_abbrev` source-level repro is found or the
+  raise site is proven unreachable for ReScript syntax.
 - `Not_a_variant_type`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
 - `Not_subtype`: covered by
