@@ -3115,8 +3115,6 @@ pub enum TypeExtensionMismatch {
 pub enum TypeModError {
     /// Core type checking error.
     CoreError(TypeCoreError),
-    /// Module not found.
-    ModuleNotFound(String),
     /// Module type not found.
     UnboundModtype {
         /// Source location to report.
@@ -3425,10 +3423,6 @@ pub enum TypeModError {
         /// Whole constrained module type location.
         loc: LocIdx,
     },
-    /// Functor application error.
-    FunctorApplicationError(String),
-    /// Invalid module expression.
-    InvalidModuleExpr(Location),
 }
 
 impl From<TypeCoreError> for TypeModError {
@@ -12182,18 +12176,15 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
             check_recursive_module_reference_module_expr(env, arena, me)?;
-            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me)
-                .map(|mty| {
-                    remove_module_type_aliases_for_typeof(
-                        &mty,
-                        env,
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    )
-                })
-                .ok_or(TypeModError::InvalidModuleExpr(
-                    arena.to_location(mty.pmty_loc),
-                ))
+            match typed_hint.map(|hint| &hint.mty_desc) {
+                Some(TypedMtyDesc::Tmty_typeof(typed_me)) => {
+                    module_type_of_typed_module_expr(tctx, env, arena, me, typed_me)
+                }
+                _ => {
+                    let (_typed_me, module_type) = type_module_type_of(tctx, env, arena, me)?;
+                    Ok(module_type)
+                }
+            }
         }
         PMtyDesc::Pmty_alias(lid) => {
             check_recursive_module_reference_lid(lid, arena, env)?;
@@ -12491,9 +12482,8 @@ fn approx_modtype<'a>(
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
             check_recursive_module_reference_module_expr(env, arena, me)?;
-            lookup_module_type_from_parsed_module_expr(tctx, env, arena, me).ok_or(
-                TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)),
-            )
+            let (_typed_me, module_type) = type_module_type_of(tctx, env, arena, me)?;
+            Ok(module_type)
         }
         PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
     }
@@ -15090,7 +15080,7 @@ fn structure_expected_error_for_open(
 /// OCaml special-cases `Pmod_ident` to avoid the regular `type_module` path,
 /// which can wrap aliases in an implicit `Tmod_constraint`.
 /// See `compiler/ml/typemod.ml` (`type_module_type_of`).
-fn type_module_type_of_expr<'a>(
+fn type_module_type_of_expr_raw<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
@@ -15126,6 +15116,40 @@ fn type_module_type_of_expr<'a>(
         }
         _ => type_module_expr(tctx, env, arena, mod_expr),
     }
+}
+
+fn module_type_of_typed_module_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+    typed_mod_expr: &ModuleExpr,
+) -> TypeModResult<crate::types::decl::ModuleType> {
+    let module_type = remove_module_type_aliases_for_typeof(
+        &typed_mod_expr.mod_type,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    );
+    if !closed_modtype(tctx.type_ctx, env, &module_type) {
+        return Err(TypeModError::NonGeneralizableModule {
+            loc: arena.to_location(mod_expr.pmod_loc),
+            mty: module_type,
+        });
+    }
+    Ok(module_type)
+}
+
+fn type_module_type_of<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> TypeModResult<(ModuleExpr, crate::types::decl::ModuleType)> {
+    let typed_mod_expr = type_module_type_of_expr_raw(tctx, env, arena, mod_expr)?;
+    let module_type =
+        module_type_of_typed_module_expr(tctx, env, arena, mod_expr, &typed_mod_expr)?;
+    Ok((typed_mod_expr, module_type))
 }
 
 // ============================================================================
@@ -15230,7 +15254,7 @@ fn transl_modtype<'a>(
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
             check_recursive_module_reference_module_expr(env, arena, me)?;
-            let typed_me = type_module_type_of_expr(tctx, env, arena, me)?;
+            let (typed_me, _module_type) = type_module_type_of(tctx, env, arena, me)?;
             TMtyDesc::Tmty_typeof(Box::new(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
