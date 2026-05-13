@@ -1086,6 +1086,14 @@ with a reason after checking raise sites.
   - `error_of_extension` rejects invalid `%%error` payloads
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_payload.res`.
+  - `error_of_extension` reports nested `%%error` payload items as
+    sub-errors
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_sub_message.res`.
+  - `error_of_extension` rejects non-extension nested `%%error` payload
+    items as invalid sub-errors
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_sub.res`.
   - `warning_attribute` reports preprocessor warnings from `@@ppwarning`
     and illegal `@@warning` payloads/lists, and applies OCaml
     warning-as-error semantics for `@@warnerror`

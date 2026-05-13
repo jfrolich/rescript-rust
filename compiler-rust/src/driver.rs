@@ -40,7 +40,9 @@ use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::typecore::{JsxPropKind, TypeCoreError, TypeCoreWarning};
+use crate::types::typecore::{
+    BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning,
+};
 use crate::types::typemod::{TypeExtensionMismatch, TypeModError};
 use crate::types::{
     ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
@@ -2806,9 +2808,9 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::CoreError(TypeCoreError::ExtensionError { loc, message }) => {
+        TypeModError::CoreError(TypeCoreError::ExtensionError(error)) => {
             UserDiagnostic::new(
-                format_compiler_error_report(arena, source, filename, *loc, message),
+                format_builtin_extension_error_report(arena, source, filename, error),
                 2,
             )
             .into()
@@ -4605,6 +4607,22 @@ fn format_compiler_error_report(
         output.push('\n');
     }
     output.push('\n');
+    output
+}
+
+fn format_builtin_extension_error_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    error: &BuiltinExtensionError,
+) -> String {
+    let mut output =
+        format_compiler_error_report(arena, source, filename, error.loc, &error.message);
+    for sub in &error.sub {
+        output.push_str(&format_builtin_extension_error_report(
+            arena, source, filename, sub,
+        ));
+    }
     output
 }
 

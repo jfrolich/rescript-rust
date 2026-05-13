@@ -56,10 +56,56 @@ const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 const TERNARY_ATTRIBUTE: &str = "res.ternary";
 
-fn extension_error_message(
+#[derive(Debug, Clone)]
+pub struct BuiltinExtensionError {
+    pub loc: LocIdx,
+    pub message: String,
+    pub sub: Vec<BuiltinExtensionError>,
+}
+
+fn extension_eval_string(
+    arena: &ParseArena,
+    item: &crate::parser::ast::StructureItem,
+) -> Option<String> {
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc else {
+        return None;
+    };
+    let expr = arena.get_expr(eval.0);
+    let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc else {
+        return None;
+    };
+    let ParsedConstant::String(message, _) = &**constant else {
+        return None;
+    };
+    Some(message.to_string())
+}
+
+fn builtin_extension_sub_errors(
+    arena: &ParseArena,
+    name: &str,
+    loc: LocIdx,
+    items: &[crate::parser::ast::StructureItem],
+) -> Option<Vec<BuiltinExtensionError>> {
+    let mut sub = Vec::new();
+    for item in items {
+        match &*item.pstr_desc {
+            crate::parser::ast::StructureItemDesc::Pstr_extension(extension) => {
+                sub.push(extension_error(arena, &extension.0)?);
+            }
+            _ => sub.push(BuiltinExtensionError {
+                loc,
+                message: format!("Invalid syntax for sub-error of extension '{name}'."),
+                sub: Vec::new(),
+            }),
+        }
+    }
+    Some(sub)
+}
+
+fn extension_error(
     arena: &ParseArena,
     extension: &crate::parser::ast::Extension,
-) -> Option<String> {
+) -> Option<BuiltinExtensionError> {
     let name = arena.get_string(extension.0.txt);
     if matches!(name, "error" | "ocaml.error") {
         return match &extension.1 {
@@ -67,35 +113,45 @@ fn extension_error_message(
                 let Some(item) = items.first() else {
                     return None;
                 };
-                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
-                else {
-                    return Some(format!("Invalid syntax for extension '{name}'."));
+                let Some(message) = extension_eval_string(arena, item) else {
+                    return Some(BuiltinExtensionError {
+                        loc: extension.0.loc,
+                        message: format!("Invalid syntax for extension '{name}'."),
+                        sub: Vec::new(),
+                    });
                 };
-                let expr = arena.get_expr(eval.0);
-                let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc
-                else {
-                    return Some(format!("Invalid syntax for extension '{name}'."));
-                };
-                let ParsedConstant::String(message, _) = &**constant else {
-                    return Some(format!("Invalid syntax for extension '{name}'."));
-                };
-                Some(message.to_string())
+                let inner =
+                    match items.get(1).and_then(|item| extension_eval_string(arena, item)) {
+                        Some(_) => &items[2..],
+                        None => &items[1..],
+                    };
+                let sub = builtin_extension_sub_errors(arena, name, extension.0.loc, inner)?;
+                Some(BuiltinExtensionError {
+                    loc: extension.0.loc,
+                    message,
+                    sub,
+                })
             }
-            _ => Some(format!("Invalid syntax for extension '{name}'.")),
+            _ => Some(BuiltinExtensionError {
+                loc: extension.0.loc,
+                message: format!("Invalid syntax for extension '{name}'."),
+                sub: Vec::new(),
+            }),
         };
     }
-    Some(format!("Uninterpreted extension '{name}'."))
+    Some(BuiltinExtensionError {
+        loc: extension.0.loc,
+        message: format!("Uninterpreted extension '{name}'."),
+        sub: Vec::new(),
+    })
 }
 
 pub fn builtin_extension_error(
     arena: &ParseArena,
     extension: &crate::parser::ast::Extension,
 ) -> TypeCoreError {
-    match extension_error_message(arena, extension) {
-        Some(message) => TypeCoreError::ExtensionError {
-            loc: extension.0.loc,
-            message,
-        },
+    match extension_error(arena, extension) {
+        Some(error) => TypeCoreError::ExtensionError(error),
         None => TypeCoreError::ExtensionAlreadyDisplayed,
     }
 }
@@ -836,7 +892,7 @@ pub enum TypeCoreError {
     JsxNotEnabled { loc: LocIdx },
 
     /// An extension point reached the typechecker without being handled by a PPX.
-    ExtensionError { loc: LocIdx, message: String },
+    ExtensionError(BuiltinExtensionError),
 
     /// OCaml's `Location.Already_displayed_error` sentinel for empty `[%error]` payloads.
     ExtensionAlreadyDisplayed,
