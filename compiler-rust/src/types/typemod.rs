@@ -15089,22 +15089,38 @@ fn type_module_type_of_expr_raw<'a>(
     match &*mod_expr.pmod_desc {
         ParsedModuleExprDesc::Pmod_ident(lid) => {
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let path = lookup_module_path_by_lid(
+            let path = match lookup_module_path_by_lid(
                 &longident,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
-            let semantic_mty = lookup_module_type_by_lid(
+            ) {
+                Some(path) => path,
+                None => {
+                    return Err(TypeModError::CoreError(
+                        crate::types::typecore::unbound_module_lookup_error(
+                            tctx, env, lid.loc, &longident,
+                        ),
+                    ));
+                }
+            };
+            let semantic_mty = match lookup_module_type_by_lid(
                 &longident,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(path.clone()));
+            ) {
+                Some(module_type) => module_type,
+                None => {
+                    return Err(TypeModError::CoreError(
+                        crate::types::typecore::unbound_module_lookup_error(
+                            tctx, env, lid.loc, &longident,
+                        ),
+                    ));
+                }
+            };
 
             Ok(ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_ident(path, lid.clone()),

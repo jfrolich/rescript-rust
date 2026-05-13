@@ -19649,6 +19649,20 @@ fn unbound_module_prefix_error(
     narrowed_module_lookup_error(tctx, env, loc, prefix)
 }
 
+pub(crate) fn unbound_module_lookup_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> TypeCoreError {
+    narrowed_module_lookup_error(tctx, env, loc, lid).unwrap_or_else(|| {
+        TypeCoreError::UnboundModule {
+            loc,
+            name: tctx.longident_to_string(lid),
+        }
+    })
+}
+
 pub(crate) fn unbound_constructor_lookup_error(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
