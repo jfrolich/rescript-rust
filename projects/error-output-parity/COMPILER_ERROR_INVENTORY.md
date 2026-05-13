@@ -320,12 +320,14 @@ with a reason after checking raise sites.
   and
   `tests/error_output_parity/compiler/fixtures/invalid_type_variable_name.res`.
 - `Cannot_quantify`: covered for the non-variable alias branch and the
-  already-bound universal branch by
-  `tests/error_output_parity/compiler/fixtures/cannot_quantify_alias.res` and
-  `tests/error_output_parity/compiler/fixtures/cannot_quantify_already_bound.res`.
-  The `Tvar`/`it escapes its scope` branch remains under investigation; simple
-  recursive type, open-object alias, and mutable polymorphic-field probes either
-  compile successfully or are rejected earlier by `Unbound_type_constructor`.
+  already-bound universal branch, and the `Tvar`/`it escapes its scope` branch
+  by `tests/error_output_parity/compiler/fixtures/cannot_quantify_alias.res`,
+  `tests/error_output_parity/compiler/fixtures/cannot_quantify_already_bound.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/cannot_quantify_escapes_scope.res`.
+  The escape branch depends on the locally abstract type sugar using
+  `Ast_helper.Typ.varify_constructors` for the pattern-side type scheme while
+  leaving the expression-side constraint as a local abstract type constructor.
 - `Multiple_constraints_on_type`: covered for package type constraints by
   `tests/error_output_parity/compiler/fixtures/multiple_constraints_on_package_type.res`.
 - `Present_has_conjunction`: covered by

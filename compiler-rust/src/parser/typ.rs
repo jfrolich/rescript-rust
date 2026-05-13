@@ -104,8 +104,31 @@ pub fn substitute_type_vars(
                 })
                 .collect::<Result<_, _>>()?,
         )),
-        CoreTypeDesc::Ptyp_poly(inner) => CoreTypeDesc::Ptyp_poly(inner),
-        CoreTypeDesc::Ptyp_alias(inner) => CoreTypeDesc::Ptyp_alias(inner),
+        CoreTypeDesc::Ptyp_poly(inner) => {
+            let (poly_vars, body_idx) = *inner;
+            if poly_vars
+                .iter()
+                .any(|var| vars.contains(arena.get_string(var.txt)))
+            {
+                return Err(typ.ptyp_loc);
+            }
+            let body_type = arena.get_core_type(body_idx).clone();
+            let substituted_body = substitute_type_vars(arena, body_type, vars)?;
+            let new_body_idx = arena.push_core_type(substituted_body);
+            CoreTypeDesc::Ptyp_poly(Box::new((poly_vars, new_body_idx)))
+        }
+        CoreTypeDesc::Ptyp_alias(inner) => {
+            let (inner_idx, name) = *inner;
+            if vars.contains(name.as_ref()) {
+                return Err(typ.ptyp_loc);
+            }
+            let inner_type = arena.get_core_type(inner_idx).clone();
+            let substituted_inner = substitute_type_vars(arena, inner_type, vars)?;
+            CoreTypeDesc::Ptyp_alias(Box::new((
+                arena.push_core_type(substituted_inner),
+                name,
+            )))
+        }
         CoreTypeDesc::Ptyp_object(inner) => {
             let (fields, closed) = *inner;
             let new_fields: Vec<ObjectField> = fields
