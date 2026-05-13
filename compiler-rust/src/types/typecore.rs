@@ -11233,6 +11233,24 @@ fn check_partial_simple<'a>(
 ) -> crate::types::typedtree::Partial {
     use crate::types::typedtree::Partial;
 
+    // OCaml Parmatch builds its exhaustiveness matrix from unguarded rows.
+    // Guarded rows can still match at runtime, but they cannot prove totality.
+    let unguarded_cases;
+    let cases = if cases.iter().any(|case| case.c_guard.is_some()) {
+        unguarded_cases = cases
+            .iter()
+            .filter(|case| case.c_guard.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        unguarded_cases.as_slice()
+    } else {
+        cases
+    };
+
+    if cases.is_empty() {
+        return Partial::Partial;
+    }
+
     /// Check if a pattern is irrefutable (matches everything of its type)
     fn is_catch_all(pat: &Pattern) -> bool {
         match &pat.pat_desc {
@@ -11336,6 +11354,21 @@ fn check_partial_simple<'a>(
     }
 
     Partial::Partial
+}
+
+fn report_all_clauses_guarded_if_needed(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    cases: &[crate::types::typedtree::Case],
+    partial: crate::types::typedtree::Partial,
+) -> bool {
+    let all_clauses_guarded = partial == crate::types::typedtree::Partial::Partial
+        && !cases.is_empty()
+        && cases.iter().all(|case| case.c_guard.is_some());
+    if all_clauses_guarded {
+        tctx.report_warning(loc, Warning::AllClausesGuarded);
+    }
+    all_clauses_guarded
 }
 
 fn optional_record_field_missing_example(
@@ -11634,7 +11667,9 @@ fn finish_non_gadt_type_cases<'a>(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         let partial = if partial_flag {
-            check_partial_simple(ctx, env, typed_cases)
+            let partial = check_partial_simple(ctx, env, typed_cases);
+            report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
+            partial
         } else {
             crate::types::typedtree::Partial::Partial
         };
@@ -11648,30 +11683,55 @@ fn finish_non_gadt_type_cases<'a>(
         )?;
         Ok(partial)
     } else if partial_flag {
-        Ok(check_partial_simple(ctx, env, typed_cases))
+        let partial = check_partial_simple(ctx, env, typed_cases);
+        report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
+        Ok(partial)
     } else {
         Ok(crate::types::typedtree::Partial::Partial)
     }
 }
 
-fn literal_pattern_constants(pat: &Pattern) -> Option<Vec<Constant>> {
-    fn collect(pat: &Pattern, constants: &mut Vec<Constant>) -> bool {
+#[derive(Clone)]
+struct SimplePatternKey {
+    key: String,
+    loc: LocIdx,
+}
+
+fn simple_pattern_keys(pat: &Pattern) -> Option<Vec<SimplePatternKey>> {
+    fn collect(pat: &Pattern, keys: &mut Vec<SimplePatternKey>) -> bool {
         match &pat.pat_desc {
             PatternDesc::Tpat_constant(constant) => {
-                constants.push(constant.clone());
+                keys.push(SimplePatternKey {
+                    key: format!("const:{constant:?}"),
+                    loc: pat.pat_loc,
+                });
                 true
             }
-            PatternDesc::Tpat_alias(inner, _, _) => collect(inner, constants),
+            PatternDesc::Tpat_construct(_, cstr, args) if args.is_empty() => {
+                keys.push(SimplePatternKey {
+                    key: format!("ctor:{}", cstr.cstr_name),
+                    loc: pat.pat_loc,
+                });
+                true
+            }
+            PatternDesc::Tpat_variant(label, None, _) => {
+                keys.push(SimplePatternKey {
+                    key: format!("variant:{label}"),
+                    loc: pat.pat_loc,
+                });
+                true
+            }
+            PatternDesc::Tpat_alias(inner, _, _) => collect(inner, keys),
             PatternDesc::Tpat_or(left, right, _) => {
-                collect(left, constants) && collect(right, constants)
+                collect(left, keys) && collect(right, keys)
             }
             _ => false,
         }
     }
 
-    let mut constants = Vec::new();
-    if collect(pat, &mut constants) && !constants.is_empty() {
-        Some(constants)
+    let mut keys = Vec::new();
+    if collect(pat, &mut keys) && !keys.is_empty() {
+        Some(keys)
     } else {
         None
     }
@@ -11701,36 +11761,166 @@ fn report_unused_literal_match_cases(
     tctx: &mut TypeCheckContext<'_>,
     cases: &[crate::types::typedtree::Case],
 ) {
-    let mut covered_literals: Vec<Constant> = Vec::new();
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
+        return;
+    }
+
+    let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
 
     for case in cases {
-        let literal_constants = literal_pattern_constants(&case.c_lhs);
+        let pattern_keys = simple_pattern_keys(&case.c_lhs);
+        let mut keys_in_case: HashSet<String> = HashSet::default();
+        let mut unused_subpatterns = Vec::new();
+        if let Some(keys) = &pattern_keys {
+            for key in keys {
+                if covered_by_catch_all
+                    || covered_keys.contains(&key.key)
+                    || !keys_in_case.insert(key.key.clone())
+                {
+                    unused_subpatterns.push(key.loc);
+                }
+            }
+        }
+
         let is_unused = if covered_by_catch_all {
             true
-        } else if let Some(constants) = &literal_constants {
-            constants.iter().all(|constant| {
-                covered_literals
-                    .iter()
-                    .any(|covered| constants_equal(covered, constant))
-            })
+        } else if let Some(keys) = &pattern_keys {
+            keys.len() == unused_subpatterns.len()
         } else {
             false
         };
 
         if is_unused {
             tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
+        } else {
+            for loc in unused_subpatterns {
+                tctx.report_warning(loc, Warning::UnusedPat);
+            }
         }
 
         if case.c_guard.is_none() {
-            if let Some(constants) = literal_constants {
-                for constant in constants {
-                    add_covered_literal(&mut covered_literals, constant);
+            if let Some(keys) = pattern_keys {
+                for key in keys {
+                    covered_keys.insert(key.key);
                 }
             } else if pattern_is_simple_catch_all(&case.c_lhs) {
                 covered_by_catch_all = true;
             }
         }
+    }
+}
+
+fn pattern_variable_paths(pat: &Pattern) -> HashMap<String, Vec<Vec<usize>>> {
+    fn collect(pat: &Pattern, path: &mut Vec<usize>, vars: &mut HashMap<String, Vec<Vec<usize>>>) {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_var(_, name) => {
+                vars.entry(name.txt.clone()).or_default().push(path.clone());
+            }
+            PatternDesc::Tpat_alias(inner, _, name) => {
+                collect(inner, path, vars);
+                vars.entry(name.txt.clone()).or_default().push(path.clone());
+            }
+            PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+                for (idx, item) in items.iter().enumerate() {
+                    path.push(idx);
+                    collect(item, path, vars);
+                    path.pop();
+                }
+            }
+            PatternDesc::Tpat_construct(_, _, args) => {
+                for (idx, arg) in args.iter().enumerate() {
+                    path.push(idx);
+                    collect(arg, path, vars);
+                    path.pop();
+                }
+            }
+            PatternDesc::Tpat_variant(_, Some(arg), _) => {
+                path.push(0);
+                collect(arg, path, vars);
+                path.pop();
+            }
+            PatternDesc::Tpat_record(fields, _) => {
+                for (idx, (_, _, field_pat, _)) in fields.iter().enumerate() {
+                    path.push(idx);
+                    collect(field_pat, path, vars);
+                    path.pop();
+                }
+            }
+            PatternDesc::Tpat_or(_, _, _) => {}
+            PatternDesc::Tpat_any
+            | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_variant(_, None, _) => {}
+        }
+    }
+
+    let mut vars = HashMap::default();
+    collect(pat, &mut Vec::new(), &mut vars);
+    vars
+}
+
+fn collect_ambiguous_or_pattern_vars(pat: &Pattern, vars: &mut HashSet<String>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_or(left, right, _) => {
+            let left_vars = pattern_variable_paths(left);
+            let right_vars = pattern_variable_paths(right);
+            for (name, left_paths) in left_vars {
+                let Some(right_paths) = right_vars.get(&name) else {
+                    continue;
+                };
+                if left_paths.iter().any(|path| !right_paths.contains(path))
+                    || right_paths.iter().any(|path| !left_paths.contains(path))
+                {
+                    vars.insert(name);
+                }
+            }
+            collect_ambiguous_or_pattern_vars(left, vars);
+            collect_ambiguous_or_pattern_vars(right, vars);
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => collect_ambiguous_or_pattern_vars(inner, vars),
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_ambiguous_or_pattern_vars(item, vars);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_ambiguous_or_pattern_vars(arg, vars);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            collect_ambiguous_or_pattern_vars(arg, vars);
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_ambiguous_or_pattern_vars(field_pat, vars);
+            }
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+fn report_ambiguous_guarded_or_patterns(
+    tctx: &mut TypeCheckContext<'_>,
+    cases: &[crate::types::typedtree::Case],
+) {
+    for case in cases {
+        if case.c_guard.is_none() {
+            continue;
+        }
+
+        let mut vars = HashSet::default();
+        collect_ambiguous_or_pattern_vars(&case.c_lhs, &mut vars);
+        if vars.is_empty() {
+            continue;
+        }
+
+        let mut vars: Vec<String> = vars.into_iter().collect();
+        vars.sort();
+        tctx.report_warning(case.c_lhs.pat_loc, Warning::AmbiguousPattern { vars });
     }
 }
 
@@ -13701,8 +13891,6 @@ fn type_match(
         }
     }
 
-    report_unused_literal_match_cases(tctx, &typed_val_cases);
-
     // OCaml type_cases: `unify_pats (instance env ty_arg)` propagation happens
     // INSIDE begin_def scope (line 3993), already handled by lines 5711-5720 in
     // type_match_cases_batch_non_gadt. Do NOT directly unify pattern types with
@@ -13713,8 +13901,11 @@ fn type_match(
         val_caselist.as_slice(),
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
+    let mut all_clauses_guarded = false;
     let partial = if has_generalized_value_patterns {
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+        all_clauses_guarded =
+            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -13737,6 +13928,8 @@ fn type_match(
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+        all_clauses_guarded =
+            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -13747,9 +13940,15 @@ fn type_match(
         )?;
         partial
     } else {
-        check_partial_simple(ctx, val_case_env, &typed_val_cases)
+        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
+        all_clauses_guarded =
+            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
+        partial
     };
+    report_unused_literal_match_cases(tctx, &typed_val_cases);
+    report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
+        && !all_clauses_guarded
         && let Some(example) = optional_record_field_missing_example(&typed_val_cases)
             .or_else(|| polymorphic_variant_missing_example(ctx, val_case_env, &typed_val_cases))
             .or_else(|| simple_partial_missing_example(tctx, val_case_env, &typed_val_cases))
@@ -15026,12 +15225,15 @@ fn type_function(
             let lev = ctx.current_stamp();
             ctx.init_def(lev + 1000);
             let partial = check_partial_simple(ctx, env, &cases);
+            report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
             ctx.end_def();
             let return_inst = crate::types::instance(ctx, return_ty);
             unify_expression_types(tctx, loc, return_inst, ctx.new_var(None), None)?;
             partial
         } else {
-            check_partial_simple(ctx, env, &cases)
+            let partial = check_partial_simple(ctx, env, &cases);
+            report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
+            partial
         };
         let param_id = name_pattern(ctx, "param", &cases);
         let fp = FunctionParam {

@@ -1171,6 +1171,21 @@ with a reason after checking raise sites.
     only creates ordinary constructor declarations from `Uident` tokens;
     `false`/`true` are rejected earlier as invalid constructor names, while
     `()` parses as a unit type payload rather than a constructor declaration.
+- `compiler/ml/parmatch.ml`
+  - `Warnings.Partial_match` for ordinary exhaustiveness
+    - Covered by `tests/build_tests/super_errors/fixtures/warnings5.res`.
+  - `Warnings.All_clauses_guarded`
+    - Covered under `-warn-error +8` by
+      `tests/error_output_parity/compiler/cases/parmatch_all_guarded.res`.
+  - `Warnings.Unused_match`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parmatch_unused_match.res`.
+  - `Warnings.Unused_pat`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parmatch_unused_subpattern.res`.
+  - `Warnings.Ambiguous_pattern`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parmatch_ambiguous_guarded_or.res`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by

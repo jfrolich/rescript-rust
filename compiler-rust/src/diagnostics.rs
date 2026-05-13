@@ -52,6 +52,8 @@ pub enum Warning {
     MethodOverride { methods: Vec<String> },
     /// Warning 8: Partial match (missing cases).
     PartialMatch { example: String },
+    /// Warning 8: Partial match because every clause has a guard.
+    AllClausesGuarded,
     /// Warning 9: Missing fields in record pattern.
     NonClosedRecordPattern { fields: String },
     /// Warning 10: Statement has non-unit type.
@@ -177,6 +179,7 @@ impl Warning {
             Warning::PartialApplication => 5,
             Warning::MethodOverride { .. } => 7,
             Warning::PartialMatch { .. } => 8,
+            Warning::AllClausesGuarded => 8,
             Warning::NonClosedRecordPattern { .. } => 9,
             Warning::StatementType => 10,
             Warning::UnusedMatch => 11,
@@ -275,6 +278,11 @@ impl Warning {
                     "You forgot to handle a possible case here, for example: \n{}",
                     example
                 )
+            }
+            Warning::AllClausesGuarded => {
+                "this pattern-matching is not exhaustive.\n\
+                 All clauses in this pattern-matching are guarded."
+                    .to_string()
             }
             Warning::NonClosedRecordPattern { fields } => {
                 format!(
@@ -461,7 +469,7 @@ impl Warning {
                 };
                 format!(
                     "Ambiguous or-pattern variables under guard;\n\
-                     {} may match different arguments.",
+                     {} may match different arguments. (See manual section 8.5)",
                     msg
                 )
             }
