@@ -845,6 +845,11 @@ with a reason after checking raise sites.
   - `Ast_payload.ident_or_record_as_config` invalid payload warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/config_invalid_payload_warning.res`.
+- `compiler/frontend/ast_polyvar.ml`
+  - `@string` redundant FFI warning for nullary polymorphic variants without
+    `@as`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_string_redundant_warning.res`.
 - `compiler/frontend/ast_derive*.ml`
   - `Ast_payload.table_dispatch` unsupported `@deriving` action
     - Covered by

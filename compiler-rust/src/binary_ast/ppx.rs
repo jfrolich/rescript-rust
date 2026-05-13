@@ -989,6 +989,7 @@ fn collect_raw_js_warnings_from_structure_item(
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
             collect_obj_optional_as_warnings(vd, arena, warnings);
+            collect_external_string_redundant_warnings(vd, arena, warnings);
         }
         StructureItemDesc::Pstr_eval(inner) => {
             let (expr, _attrs) = &**inner;
@@ -1069,6 +1070,71 @@ fn collect_obj_optional_as_warnings(
             }
         }
     }
+}
+
+fn collect_external_string_redundant_warnings(
+    vd: &ValueDescription,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
+        return;
+    }
+
+    let vd_type = arena.get_core_type(vd.pval_type).clone();
+    let (args, _) = list_of_arrow(&vd_type, arena);
+    for arg in args {
+        let typ = arena.get_core_type(arg.typ).clone();
+        collect_string_redundant_warning_from_type(&typ, arena, warnings);
+    }
+}
+
+fn collect_string_redundant_warning_from_type(
+    typ: &CoreType,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    if check_type_ffi_attrs(typ, arena) != Some("string")
+        || type_ffi_attr_count(typ, arena) != 1
+    {
+        return;
+    }
+
+    let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
+        return;
+    };
+    let (row_fields, closed, labels) = &**variant_inner;
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
+    {
+        return;
+    }
+
+    let redundant = row_fields.iter().all(|field| match field {
+        RowField::Rtag(_tag, attrs, true, types) if types.is_empty() => {
+            !attr_named(attrs, "as", arena)
+        }
+        _ => false,
+    });
+    if redundant {
+        warnings.push(PpxWarning {
+            loc: typ.ptyp_loc,
+            warning: Warning::BsFfiWarning {
+                message: "@string is redundant here, you can safely remove it".to_string(),
+            },
+        });
+    }
+}
+
+fn type_ffi_attr_count(typ: &CoreType, arena: &ParseArena) -> usize {
+    typ.ptyp_attributes
+        .iter()
+        .filter(|(attr_name, _)| {
+            matches!(
+                arena.get_string(attr_name.txt),
+                "string" | "int" | "ignore" | "unwrap"
+            )
+        })
+        .count()
 }
 
 fn collect_raw_js_warnings_from_expr(
