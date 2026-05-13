@@ -421,6 +421,19 @@ fn is_js_function(s: &str) -> bool {
     matches!(classify_js_exp(s), JsExpClassification::JsFunction { .. })
 }
 
+fn is_js_regex_literal(s: &str) -> bool {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Expression;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    matches!(
+        Parser::new(&allocator, s, SourceType::default()).parse_expression(),
+        Ok(Expression::RegExpLiteral(_))
+    )
+}
+
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
@@ -1188,17 +1201,34 @@ fn payload_is_empty_str(payload: &Payload) -> bool {
 }
 
 fn payload_is_single_string_literal(payload: &Payload, arena: &ParseArena) -> bool {
+    payload_single_string_literal(payload, arena).is_some()
+}
+
+fn payload_single_string_literal<'a>(
+    payload: &'a Payload,
+    arena: &'a ParseArena,
+) -> Option<&'a str> {
+    payload_single_string_literal_with_loc(payload, arena).map(|(s, _loc)| s)
+}
+
+fn payload_single_string_literal_with_loc<'a>(
+    payload: &'a Payload,
+    arena: &'a ParseArena,
+) -> Option<(&'a str, LocIdx)> {
     match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
                 let (expr, _) = &**eval_inner;
-                if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc {
-                    return matches!(&**c, Constant::String(_, _));
+                let expr = arena.get_expr(*expr);
+                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
+                    if let Constant::String(s, _) = &**c {
+                        return Some((s.as_ref(), expr.pexp_loc));
+                    }
                 }
             }
-            false
+            None
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -10392,6 +10422,59 @@ fn validate_payload_method_attribute_errors(
     }
 }
 
+fn validate_expression_extension_payload_error(
+    extension: &current::Extension,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let (ext_name, payload) = extension;
+    let name = arena.get_string(ext_name.txt);
+    match name {
+        "debugger" if !payload_is_empty_str(payload) => Err(PpxError::at_loc(
+            ext_name.loc,
+            "%debugger extension doesn't accept arguments",
+        )),
+        "raw" if payload_single_string_literal(payload, arena).is_none() => Err(PpxError::at_loc(
+            ext_name.loc,
+            "%raw extension can only be applied to a string",
+        )),
+        "re" => match payload_single_string_literal_with_loc(payload, arena) {
+            None => Err(PpxError::at_loc(
+                ext_name.loc,
+                "%re extension can only be applied to a string",
+            )),
+            Some((code, loc)) if !is_js_regex_literal(code) => Err(PpxError::at_loc(
+                loc,
+                "Syntax error: a valid JS regex literal expected",
+            )),
+            Some(_) => Ok(()),
+        },
+        "ffi" => match payload_single_string_literal(payload, arena) {
+            Some(code) if is_js_function(code) => Ok(()),
+            _ => Err(PpxError::at_loc(
+                ext_name.loc,
+                "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
+            )),
+        },
+        _ => Ok(()),
+    }
+}
+
+fn validate_structure_extension_payload_error(
+    extension: &current::Extension,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let (ext_name, payload) = extension;
+    let name = arena.get_string(ext_name.txt);
+    if name == "raw" && payload_single_string_literal(payload, arena).is_none() {
+        Err(PpxError::at_loc(
+            ext_name.loc,
+            "%%raw extension can only be applied to a string",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_structure_method_attribute_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
@@ -10459,6 +10542,7 @@ fn validate_structure_method_attribute_errors(
             }
             StructureItemDesc::Pstr_extension(inner) => {
                 let (extension, attrs) = &**inner;
+                validate_structure_extension_payload_error(extension, arena)?;
                 validate_payload_method_attribute_errors(&extension.1, arena)?;
                 for attr in attrs.iter() {
                     validate_payload_method_attribute_errors(&attr.1, arena)?;
@@ -10882,6 +10966,7 @@ fn validate_expression_method_attribute_errors(
             validate_expression_idx_method_attribute_errors(*body, arena)
         }
         ExpressionDesc::Pexp_extension(extension) => {
+            validate_expression_extension_payload_error(extension, arena)?;
             validate_payload_method_attribute_errors(&extension.1, arena)
         }
         ExpressionDesc::Pexp_jsx_element(jsx) => {
@@ -13075,7 +13160,15 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
                     let raw_prim = prim_str(arena, "#raw_expr");
                     handle_raw(expr, payload, arena, raw_prim, ext_name.loc)
                 }
-                "re" => handle_re(expr, payload, arena, ext_name.loc),
+                "re" => {
+                    match payload_single_string_literal_with_loc(payload, arena) {
+                        Some((code, _loc)) if is_js_regex_literal(code) => {
+                            handle_re(expr, payload, arena, ext_name.loc)
+                        }
+                        Some(_) => expr.clone(),
+                        None => handle_re(expr, payload, arena, ext_name.loc),
+                    }
+                }
                 _ => expr.clone(),
             }
         }
