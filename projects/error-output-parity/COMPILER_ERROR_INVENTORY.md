@@ -377,12 +377,11 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.
 - `Val_in_structure`
-  - Not reachable from normal `.res` structure syntax. The ReScript parser only
-    constructs `Pstr_primitive` from `external`; valid externals have
-    non-empty `pval_prim`, and a recovered missing primitive reports the parser
-    diagnostic before this Typedecl error is observable. Signature value
-    descriptions are routed through `Psig_value`, where OCaml permits empty
-    `pval_prim`.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/val_in_structure.res`.
+    ReScript parses a bare annotated value declaration in implementation syntax
+    to `Pstr_primitive` with no primitive, which reaches
+    `Typedecl.transl_value_decl` and reports `Val_in_structure`.
 - `Invalid_attribute`
   - Covered for `@notUndefined` misuse by
     `tests/error_output_parity/compiler/fixtures/invalid_not_undefined_attribute.res`.
@@ -512,7 +511,10 @@ with a reason after checking raise sites.
   - Checked: raised by `Ast_core_type.list_of_arrow` when an external type
     contains `Ptyp_poly` in the arrow spine, but normal `.res` external syntax
     is rejected by the OCaml parser before this frontend raise site is
-    observable.
+    observable. The source-level guard is covered by
+    `tests/error_output_parity/compiler/fixtures/bs_external_unhandled_poly_type.res`;
+    it verifies Rust follows OCaml's parser entry-point split and rejects the
+    attempted nested polytype before frontend external processing.
 - `Invalid_underscore_type_in_external`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_invalid_underscore_external.res`.
@@ -632,6 +634,10 @@ with a reason after checking raise sites.
   - `Circular_dependency`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
+- `compiler/frontend/ast_exp_apply.ml`
+  - `invalid #= assignment`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_hash_set_assignment.res`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by

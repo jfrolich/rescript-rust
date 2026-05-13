@@ -11692,6 +11692,56 @@ fn validate_jsx_props_await_context(
     Ok(())
 }
 
+fn expression_is_lident(expr_idx: ExprIdx, expected: &str, arena: &ParseArena) -> bool {
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc else {
+        return false;
+    };
+    let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+        return false;
+    };
+    arena.get_string(*name_idx) == expected
+}
+
+fn hash_hash_property_access(expr: &Expression, arena: &ParseArena) -> bool {
+    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+        return false;
+    };
+    let PexpApply { funct, args, .. } = &**inner;
+    if args.len() != 2
+        || !matches!(args[0].0, ArgLabel::Nolabel)
+        || !matches!(args[1].0, ArgLabel::Nolabel)
+        || !expression_is_lident(*funct, "##", arena)
+    {
+        return false;
+    }
+
+    let property = arena.get_expr(args[1].1);
+    match &*property.pexp_desc {
+        ExpressionDesc::Pexp_ident(_) => true,
+        ExpressionDesc::Pexp_constant(c) => matches!(&**c, Constant::String(_, None)),
+        _ => false,
+    }
+}
+
+fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
+    let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
+        return false;
+    };
+    let PexpApply { funct, args, .. } = &**inner;
+    if args.len() != 2
+        || !matches!(args[0].0, ArgLabel::Nolabel)
+        || !matches!(args[1].0, ArgLabel::Nolabel)
+        || !expression_is_lident(*funct, "#=", arena)
+    {
+        return false;
+    }
+
+    let lhs = arena.get_expr(args[0].1);
+    !matches!(&*lhs.pexp_desc, ExpressionDesc::Pexp_send(_))
+        && !hash_hash_property_access(lhs, arena)
+}
+
 fn validate_expression_await_context(
     expr: &Expression,
     arena: &mut ParseArena,
@@ -11716,6 +11766,10 @@ fn validate_expression_await_context(
             validate_expression_idx_await_context(inner.rhs, arena, child_async_context, true)?;
         }
         ExpressionDesc::Pexp_apply(inner) => {
+            // Match ast_exp_apply.ml: #= only assigns to send expressions or ## property reads.
+            if invalid_hash_set_assignment(expr, arena) {
+                return Err(PpxError::at_loc(expr.pexp_loc, "invalid #= assignment"));
+            }
             validate_expression_idx_await_context(inner.funct, arena, async_context, false)?;
             for (_label, arg) in &inner.args {
                 validate_expression_idx_await_context(*arg, arena, async_context, false)?;
