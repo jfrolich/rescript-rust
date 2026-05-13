@@ -5443,6 +5443,19 @@ fn format_wrong_name_report(
         return format_compiler_error_report(arena, source, filename, loc, &message);
     }
 
+    if path.is_constructor_typath() {
+        return format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!(
+                "The field {name} is not part of the record argument for the {} constructor",
+                path
+            ),
+        );
+    }
+
     let label = if kind == "record" { "field" } else { kind };
     let type_text = format_type_expr(type_ctx, ty);
     if let Some(multiline_type) = format_type_application_multiline(&type_text) {
