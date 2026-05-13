@@ -111,7 +111,9 @@ with a reason after checking raise sites.
   spellcheck hint branch in
   `tests/error_output_parity/compiler/fixtures/wrong_name_spellcheck.res`.
 - `Name_type_mismatch`: covered by
-  `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res`.
+  `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res` and the
+  multiple-alternative branch in
+  `tests/error_output_parity/compiler/fixtures/name_type_mismatch_multiple.res`.
 - `Undefined_method`: covered by
   `tests/error_output_parity/compiler/fixtures/undefined_method.res`.
 - `Private_type`: covered by
