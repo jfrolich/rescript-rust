@@ -1926,33 +1926,46 @@ fn resolve_module_type_through_env_path<'a>(
         Path::Pident(id) => {
             let name = id.name();
             if id.is_persistent() {
-                let mut persistent_env = in_process_module_resolution_env(ctx);
-                crate::types::typecore::resolve_module_signature_for_path(
-                    path,
-                    env,
-                    &mut persistent_env,
-                    ctx,
-                )
-                .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
-                .or_else(|| {
-                    let load_paths = ctx.load_paths();
-                    if load_paths.is_empty() {
-                        None
-                    } else {
-                        // Mirror OCaml Env.find_module: if not found in local env,
-                        // consult .cmi signatures. Prefer the env_lazy-backed path
-                        // above so persistent module lookups share the same
-                        // qualified-view source of truth as other hot callers.
-                        let mut cmi_visiting = HashSet::new();
-                        resolve_module_signature_through_cmi(
-                            ctx,
-                            &load_paths,
-                            path,
-                            &mut cmi_visiting,
-                        )
-                        .map(super::decl::ModuleType::MtySignature)
-                    }
-                })
+                // OCaml env.ml:865-875 checks the local module table first,
+                // then loads persistent Pident signatures with find_pers_struct.
+                // The component resolver below is intentionally stricter for
+                // flattened namespace heads, so keep the direct persistent path.
+                let mut direct_persistent_env = ctx.persistent_env_clone();
+                if let Some(sig) = direct_persistent_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(name, ctx))
+                    .map(|ps| ps.ps_sig.as_ref().clone())
+                {
+                    Some(super::decl::ModuleType::MtySignature(sig))
+                } else {
+                    let mut persistent_env = in_process_module_resolution_env(ctx);
+                    crate::types::typecore::resolve_module_signature_for_path(
+                        path,
+                        env,
+                        &mut persistent_env,
+                        ctx,
+                    )
+                    .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                    .or_else(|| {
+                        let load_paths = ctx.load_paths();
+                        if load_paths.is_empty() {
+                            None
+                        } else {
+                            // Mirror OCaml Env.find_module: if not found in local env,
+                            // consult .cmi signatures. Prefer the env_lazy-backed path
+                            // above so persistent module lookups share the same
+                            // qualified-view source of truth as other hot callers.
+                            let mut cmi_visiting = HashSet::new();
+                            resolve_module_signature_through_cmi(
+                                ctx,
+                                &load_paths,
+                                path,
+                                &mut cmi_visiting,
+                            )
+                            .map(super::decl::ModuleType::MtySignature)
+                        }
+                    })
+                }
             } else if let Ok(md) = env.lookup_module(path) {
                 Some(md.md_type.clone())
             } else if let Ok(md) = env.find_module(name) {
@@ -2734,6 +2747,16 @@ fn module_path_exists_for_strict_normalize<'a>(
         Path::Pident(id) => {
             if env.find_module_same(id).is_ok() {
                 return true;
+            }
+            if id.is_persistent() {
+                let mut persistent_env = ctx.persistent_env_clone();
+                if persistent_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .is_some()
+                {
+                    return true;
+                }
             }
             if !id.is_persistent() && id.stamp() != 0 {
                 return false;

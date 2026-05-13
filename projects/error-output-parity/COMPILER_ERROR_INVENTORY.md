@@ -1226,6 +1226,13 @@ with a reason after checking raise sites.
       OCaml includes `Filename.temp_file` paths in the printed command line,
       and those paths are intentionally nondeterministic across compiler runs.
 - `compiler/frontend/bs_builtin_ppx.ml`
+  - `await` outside an async context is rejected by the frontend mapper
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/await_outside_async.res`.
+  - `module M = await (X: module type of X)` does not take the dynamic-import
+    rewrite path in the OCaml frontend and must remain accepted
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/await_module_constraint_typeof_success.res`.
   - `%%private` empty structure payload rejection
     - Covered by
       `tests/build_tests/super_errors/fixtures/private_without_body.res`.
@@ -1477,6 +1484,9 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`)
 - lax module alias normalization through persistent components (covered by
   `tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res`)
+- strict module alias normalization through flattened runtime units has a
+  success guard in
+  `tests/error_output_parity/compiler/fixtures/include_alias_strict_flattened_runtime_success.res`
 - unbound module path (covered by
   `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`)
 - unbound module type path is not reachable from normal `.res`/`.resi` source
