@@ -3991,10 +3991,15 @@ fn parse_constructor_impl(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected constructor name".to_string(),
-            ));
-            return None;
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
+            return Some(ConstructorDeclaration {
+                pcd_name: mknoloc(error_idx),
+                pcd_args: ConstructorArguments::Pcstr_tuple(vec![]),
+                pcd_res: None,
+                pcd_loc: p.none_loc(),
+                pcd_attributes: Attributes::new(),
+            });
         }
     };
 

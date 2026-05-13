@@ -658,6 +658,15 @@ with a reason after checking raise sites.
       `tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res`
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/external_missing_primitive.res`.
+  - `parse_type_constructor_declaration` reports `Diagnostics.uident` for
+    non-uppercase variant constructor names and preserves OCaml's dummy `_`
+    recovery constructor in `-recover -print ml` output
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res`
+      and through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/variant_constructor_lowercase_name.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/variant_constructor_reserved_keyword.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask
@@ -951,6 +960,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_let_module.res`
       and the packed-module expression traversal case in
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_packed_module.res`.
+  - Built-in constructor redefinition (`false`, `true`, `()`) was checked
+    against the adjacent `constructor_declaration` raise site. Normal `.res`
+    source for `false`/`true` is rejected earlier by
+    `parse_type_constructor_declaration` as a constructor-name parser
+    diagnostic; `()` parses as a unit type payload, not as a constructor
+    declaration. Keep the frontend branch listed until an AST-generated
+    source-level route is found or the branch is proven unreachable for
+    ReScript syntax.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by
