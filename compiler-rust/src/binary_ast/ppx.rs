@@ -10283,6 +10283,221 @@ fn validate_module_type_deriving_errors(
     }
 }
 
+fn is_builtin_rank0_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "char" | "float" | "bool" | "unit" | "exn" | "string"
+    )
+}
+
+fn validate_type_declaration_builtin_type_redefinition_error(
+    tdcl: &TypeDeclaration,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let name = arena.get_string(tdcl.ptype_name.txt);
+    if is_builtin_rank0_type_name(name) {
+        return Err(PpxError::at_loc(
+            tdcl.ptype_loc,
+            format!("built-in type `{name}` can not be redefined "),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_with_constraint_builtin_type_redefinition_errors(
+    constraint: &WithConstraint,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match constraint {
+        WithConstraint::Pwith_type(_, tdcl) | WithConstraint::Pwith_typesubst(_, tdcl) => {
+            validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)
+        }
+        WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => Ok(()),
+    }
+}
+
+fn validate_payload_builtin_type_redefinition_errors(
+    payload: &Payload,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match payload {
+        Payload::PStr(items) => validate_structure_builtin_type_redefinition_errors(items, arena),
+        Payload::PSig(items) => validate_signature_builtin_type_redefinition_errors(items, arena),
+        Payload::PTyp(_) | Payload::PPat(_) => Ok(()),
+    }
+}
+
+fn validate_structure_builtin_type_redefinition_errors(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_type(inner) => {
+                let (_rec_flag, tdcls) = &**inner;
+                for tdcl in tdcls {
+                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_module(mb) => {
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
+            }
+            StructureItemDesc::Pstr_recmodule(mbs) => {
+                for mb in mbs.iter() {
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_include(incl) => {
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
+            }
+            StructureItemDesc::Pstr_attribute(attr) => {
+                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
+            }
+            StructureItemDesc::Pstr_extension(inner) => {
+                let (extension, _attrs) = &**inner;
+                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
+            }
+            StructureItemDesc::Pstr_eval(_)
+            | StructureItemDesc::Pstr_value(_)
+            | StructureItemDesc::Pstr_primitive(_)
+            | StructureItemDesc::Pstr_typext(_)
+            | StructureItemDesc::Pstr_exception(_)
+            | StructureItemDesc::Pstr_open(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_signature_builtin_type_redefinition_errors(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_type(inner) => {
+                let (_rec_flag, tdcls) = &**inner;
+                for tdcl in tdcls {
+                    validate_type_declaration_builtin_type_redefinition_error(tdcl, arena)?;
+                }
+            }
+            SignatureItemDesc::Psig_module(md) => {
+                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+            }
+            SignatureItemDesc::Psig_recmodule(mds) => {
+                for md in mds.iter() {
+                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+                }
+            }
+            SignatureItemDesc::Psig_modtype(mtd) => {
+                if let Some(mod_type_idx) = mtd.pmtd_type {
+                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+                }
+            }
+            SignatureItemDesc::Psig_include(incl) => {
+                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+            }
+            SignatureItemDesc::Psig_attribute(attr) => {
+                validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
+            }
+            SignatureItemDesc::Psig_extension(inner) => {
+                let (extension, _attrs) = &**inner;
+                validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
+            }
+            SignatureItemDesc::Psig_value(_)
+            | SignatureItemDesc::Psig_typext(_)
+            | SignatureItemDesc::Psig_exception(_)
+            | SignatureItemDesc::Psig_open(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_module_expr_builtin_type_redefinition_errors(
+    mod_expr: &ModuleExpr,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            validate_structure_builtin_type_redefinition_errors(items, arena)
+        }
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_name, param_type, body) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let param_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
+            }
+            let body = arena.get_mod_expr(*body).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&body, arena)
+        }
+        ModuleExprDesc::Pmod_apply(left, right) => {
+            let left = arena.get_mod_expr(*left).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&left, arena)?;
+            let right = arena.get_mod_expr(*right).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&right, arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
+            let inner = arena.get_mod_expr(*inner).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&inner, arena)?;
+            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)
+        }
+        ModuleExprDesc::Pmod_extension(extension) => {
+            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
+        }
+        ModuleExprDesc::Pmod_ident(_) | ModuleExprDesc::Pmod_unpack(_) => Ok(()),
+    }
+}
+
+fn validate_module_type_builtin_type_redefinition_errors(
+    mod_type: &ModuleType,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match &*mod_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(items) => {
+            validate_signature_builtin_type_redefinition_errors(items, arena)
+        }
+        ModuleTypeDesc::Pmty_functor(inner) => {
+            let (_name, param_type, result_type) = &**inner;
+            if let Some(param_type_idx) = *param_type {
+                let param_type = arena.get_mod_type(param_type_idx).clone();
+                validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
+            }
+            let result_type = arena.get_mod_type(*result_type).clone();
+            validate_module_type_builtin_type_redefinition_errors(&result_type, arena)
+        }
+        ModuleTypeDesc::Pmty_with(inner) => {
+            let (mod_type_idx, constraints) = &**inner;
+            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
+            for constraint in constraints {
+                validate_with_constraint_builtin_type_redefinition_errors(constraint, arena)?;
+            }
+            Ok(())
+        }
+        ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
+        }
+        ModuleTypeDesc::Pmty_extension(extension) => {
+            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
+        }
+        ModuleTypeDesc::Pmty_ident(_) | ModuleTypeDesc::Pmty_alias(_) => Ok(()),
+    }
+}
+
 fn validate_method_attribute_config_names<F>(
     payload: &Payload,
     arena: &ParseArena,
@@ -13146,6 +13361,8 @@ pub fn rewrite_structure(
         }
     }
 
+    validate_structure_builtin_type_redefinition_errors(&result, arena)?;
+
     Ok(result)
 }
 
@@ -13418,7 +13635,9 @@ pub fn rewrite_signature(
     validate_signature_deriving_errors(signature, arena)?;
     validate_signature_method_attribute_errors(signature, arena)?;
     validate_signature_await_errors(signature, arena, true)?;
-    try_rewrite_signature_items(signature, arena)
+    let rewritten = try_rewrite_signature_items(signature, arena)?;
+    validate_signature_builtin_type_redefinition_errors(&rewritten, arena)?;
+    Ok(rewritten)
 }
 
 fn try_rewrite_signature_items(
