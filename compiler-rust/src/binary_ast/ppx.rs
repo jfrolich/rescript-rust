@@ -12743,83 +12743,166 @@ fn validate_payload_await_errors(
 }
 
 fn validate_js_string_literal(s: &str, loc: LocIdx) -> PpxResult<()> {
-    let bytes = s.as_bytes();
-    let mut offset = 0;
+    let bytes = js_string_source_bytes(s);
+    let bytes = bytes.as_ref();
+    let mut byte_offset = 0;
+    let mut char_offset = 0;
 
-    while offset < bytes.len() {
-        match bytes[offset] {
+    while byte_offset < bytes.len() {
+        match bytes[byte_offset] {
             b'\\' => {
-                offset += 1;
-                if offset >= bytes.len() {
-                    return Err(PpxError::at_loc(loc, "Offset: 1, \\ ended unexpectedly"));
-                }
-
-                match bytes[offset] {
-                    b'u' if offset + 1 < bytes.len() && bytes[offset + 1] == b'{' => {
-                        offset += 2;
-                        let codepoint_offset = offset;
-                        let mut value: u32 = 0;
-
-                        while offset < bytes.len() && bytes[offset].is_ascii_hexdigit() {
-                            let digit = (bytes[offset] as char).to_digit(16).unwrap_or(16);
-                            if value > 0x10FFFF {
-                                return Err(PpxError::at_loc(
-                                    loc,
-                                    format!(
-                                        "Offset: {codepoint_offset}, Invalid \\u{{…}} codepoint escape sequence"
-                                    ),
-                                ));
-                            }
-                            value = value.saturating_mul(16).saturating_add(digit);
-                            offset += 1;
-                        }
-
-                        if offset < bytes.len()
-                            && bytes[offset] == b'}'
-                            && value <= 0x10FFFF
-                            && !(0xD800..0xE000).contains(&value)
-                        {
-                            offset += 1;
-                        } else {
-                            return Err(PpxError::at_loc(
-                                loc,
-                                format!(
-                                    "Offset: {codepoint_offset}, Invalid \\u{{…}} codepoint escape sequence"
-                                ),
-                            ));
-                        }
-                    }
-                    _ => offset += 1,
-                }
+                (byte_offset, char_offset) =
+                    validate_js_string_escape(bytes, loc, byte_offset + 1, char_offset + 1)?;
             }
-            byte if byte < 0x80 => offset += 1,
+            byte if byte < 0x80 => {
+                byte_offset += 1;
+                char_offset += 1;
+            }
             _ => {
-                let width = if bytes[offset] & 0b1111_1000 == 0b1111_0000 {
+                let width = if bytes[byte_offset] & 0b1111_1000 == 0b1111_0000 {
                     4
-                } else if bytes[offset] & 0b1111_0000 == 0b1110_0000 {
+                } else if bytes[byte_offset] & 0b1111_0000 == 0b1110_0000 {
                     3
-                } else if bytes[offset] & 0b1110_0000 == 0b1100_0000 {
+                } else if bytes[byte_offset] & 0b1110_0000 == 0b1100_0000 {
                     2
                 } else {
                     return Err(PpxError::at_loc(
                         loc,
-                        format!("Offset: {offset}, Invalid code point"),
+                        format!("Offset: {char_offset}, Invalid code point"),
                     ));
                 };
-                if offset + width > bytes.len()
-                    || std::str::from_utf8(&bytes[offset..offset + width]).is_err()
+                if byte_offset + width > bytes.len()
+                    || std::str::from_utf8(&bytes[byte_offset..byte_offset + width]).is_err()
                 {
                     return Err(PpxError::at_loc(
                         loc,
-                        format!("Offset: {offset}, Invalid code point"),
+                        format!("Offset: {char_offset}, Invalid code point"),
                     ));
                 }
-                offset += width;
+                byte_offset += width;
+                char_offset += 1;
             }
         }
     }
 
     Ok(())
+}
+
+fn js_string_source_bytes(s: &str) -> Cow<'_, [u8]> {
+    // Source strings use the compiler's Latin-1 view: one Rust char stores one
+    // original source byte, matching the byte string OCaml validates.
+    if s.is_ascii() {
+        Cow::Borrowed(s.as_bytes())
+    } else {
+        Cow::Owned(s.chars().map(|c| c as u8).collect())
+    }
+}
+
+fn validate_js_string_escape(
+    bytes: &[u8],
+    loc: LocIdx,
+    byte_offset: usize,
+    char_offset: usize,
+) -> PpxResult<(usize, usize)> {
+    if byte_offset >= bytes.len() {
+        return Err(PpxError::at_loc(
+            loc,
+            format!("Offset: {char_offset}, \\ ended unexpectedly"),
+        ));
+    }
+
+    match bytes[byte_offset] {
+        b'\\' | b'b' | b't' | b'n' | b'v' | b'f' | b'r' | b'0' | b'$' => {
+            Ok((byte_offset + 1, char_offset + 1))
+        }
+        b'u' => {
+            if byte_offset + 1 >= bytes.len() {
+                return Err(PpxError::at_loc(
+                    loc,
+                    format!("Offset: {char_offset}, Invalid \\u escape"),
+                ));
+            }
+            if bytes[byte_offset + 1] == b'{' {
+                validate_js_string_codepoint_escape(bytes, loc, byte_offset + 2, char_offset + 2)
+            } else {
+                validate_js_string_fixed_escape_digits(
+                    bytes,
+                    loc,
+                    byte_offset + 1,
+                    char_offset + 1,
+                    4,
+                    "Invalid \\u escape",
+                )?;
+                Ok((byte_offset + 5, char_offset + 5))
+            }
+        }
+        b'x' => {
+            validate_js_string_fixed_escape_digits(
+                bytes,
+                loc,
+                byte_offset + 1,
+                char_offset + 1,
+                2,
+                "Invalid \\x escape",
+            )?;
+            Ok((byte_offset + 3, char_offset + 3))
+        }
+        _ => Ok((byte_offset + 1, char_offset + 1)),
+    }
+}
+
+fn validate_js_string_fixed_escape_digits(
+    bytes: &[u8],
+    loc: LocIdx,
+    byte_offset: usize,
+    char_offset: usize,
+    digits: usize,
+    message: &str,
+) -> PpxResult<()> {
+    for i in 0..digits {
+        if byte_offset + i >= bytes.len() || !bytes[byte_offset + i].is_ascii_hexdigit() {
+            return Err(PpxError::at_loc(
+                loc,
+                format!("Offset: {char_offset}, {message}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_js_string_codepoint_escape(
+    bytes: &[u8],
+    loc: LocIdx,
+    mut byte_offset: usize,
+    char_offset: usize,
+) -> PpxResult<(usize, usize)> {
+    let mut value: u32 = 0;
+
+    while byte_offset < bytes.len() && bytes[byte_offset].is_ascii_hexdigit() {
+        let digit = (bytes[byte_offset] as char).to_digit(16).unwrap_or(16);
+        if value > 0x10FFFF {
+            return Err(PpxError::at_loc(
+                loc,
+                format!("Offset: {char_offset}, Invalid \\u{{…}} codepoint escape sequence"),
+            ));
+        }
+        value = value.saturating_mul(16).saturating_add(digit);
+        byte_offset += 1;
+    }
+
+    if byte_offset < bytes.len()
+        && bytes[byte_offset] == b'}'
+        && value <= 0x10FFFF
+        && !(0xD800..0xE000).contains(&value)
+    {
+        let next_offset = byte_offset + 1;
+        Ok((next_offset, next_offset))
+    } else {
+        Err(PpxError::at_loc(
+            loc,
+            format!("Offset: {char_offset}, Invalid \\u{{…}} codepoint escape sequence"),
+        ))
+    }
 }
 
 fn attributes_have_template_marker(attrs: &[Attribute], arena: &ParseArena) -> bool {

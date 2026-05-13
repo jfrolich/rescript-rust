@@ -659,6 +659,15 @@ with a reason after checking raise sites.
   - JavaScript string `\u{...}` codepoint escape validation after parsing
     - Covered by
       `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`.
+  - JavaScript string fixed-width escape validation reached through template
+    literal patterns, which bypass the normal string scanner and call
+    `Ast_utf8_string.transform` from `Ast_utf8_string_interp.transform_pat`
+    - Covered for invalid `\x`, invalid `\u`, and UTF-8 codepoint-offset
+      reporting by
+      `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_hex_escape.res`,
+      `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_escape.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/template_pattern_utf8_codepoint_escape.res`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
     module expression, structure, and signature extension points
