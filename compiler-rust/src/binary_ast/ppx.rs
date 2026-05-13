@@ -12964,11 +12964,43 @@ fn validate_value_bindings_await_context(
     async_context: bool,
 ) -> PpxResult<()> {
     for vb in bindings {
+        validate_module_record_pattern_binding_error(vb, arena)?;
         validate_expression_idx_await_context(vb.pvb_expr, arena, async_context, false)?;
         for attr in vb.pvb_attributes.iter() {
             validate_payload_await_errors(&attr.1, arena, async_context)?;
         }
     }
+    Ok(())
+}
+
+fn validate_module_record_pattern_binding_error(
+    vb: &ValueBinding,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let pat = arena.get_pat(vb.pvb_pat);
+    let expr = arena.get_expr(vb.pvb_expr);
+
+    let (PatternDesc::Ppat_record(record_inner), ExpressionDesc::Pexp_pack(mod_expr_idx)) =
+        (&*pat.ppat_desc, &*expr.pexp_desc)
+    else {
+        return Ok(());
+    };
+
+    let mod_expr = arena.get_mod_expr(*mod_expr_idx);
+    if !matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_)) {
+        return Ok(());
+    }
+
+    let (lid_pats, _) = &**record_inner;
+    for field in lid_pats {
+        if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
+            return Err(PpxError::at_loc(
+                field.lid.loc,
+                "Not supported pattern match on modules",
+            ));
+        }
+    }
+
     Ok(())
 }
 

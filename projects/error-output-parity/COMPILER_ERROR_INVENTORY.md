@@ -828,6 +828,11 @@ with a reason after checking raise sites.
     - Checked against source-level probes. Normal `.res` source is rejected by
       parser diagnostics before these frontend branches are observable through
       the current ReScript syntax.
+- `compiler/frontend/ast_tuple_pattern_flatten.ml`
+  - Qualified record fields while destructuring a packed module raise
+    `Not supported pattern match on modules`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/module_record_pattern_qualified.res`.
 - `compiler/frontend/bs_ast_invariant.ml`
   - `%identity` primitive arity validation
     - Covered by
