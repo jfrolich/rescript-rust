@@ -787,6 +787,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_escape.res`,
       and
       `tests/error_output_parity/compiler/fixtures/template_pattern_utf8_codepoint_escape.res`.
+- `compiler/frontend/ast_utf8_string_interp.ml`
+  - Internal interpolation segment errors such as `Unterminated_variable`,
+    `Unmatched_paren`, and `Invalid_syntax_of_var` are source-unreachable from
+    normal `.res`/`.resi` compilation. The compiler entry points are
+    `transform_exp` and `transform_pat`; for recognized user delimiters they
+    either preserve backquoted template text or delegate validation to
+    `Ast_utf8_string.transform`. The segment-splitting `transform_test` path is
+    only exercised by `tests/ounit_tests/ounit_unicode_tests.ml`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
     module expression, structure, and signature extension points
