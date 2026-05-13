@@ -279,8 +279,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/invalid_type_parameter_name.res`
   and
   `tests/error_output_parity/compiler/fixtures/invalid_type_variable_name.res`.
-- `Cannot_quantify`: covered for Ptyp_poly alias reuse by
-  `tests/error_output_parity/compiler/fixtures/cannot_quantify_alias.res`.
+- `Cannot_quantify`: covered for Ptyp_poly alias reuse and the already-bound
+  universal branch by
+  `tests/error_output_parity/compiler/fixtures/cannot_quantify_alias.res` and
+  `tests/error_output_parity/compiler/fixtures/cannot_quantify_already_bound.res`.
 - `Multiple_constraints_on_type`: covered for package type constraints by
   `tests/error_output_parity/compiler/fixtures/multiple_constraints_on_package_type.res`.
 - `Present_has_conjunction`: covered by

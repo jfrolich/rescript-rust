@@ -4906,13 +4906,25 @@ fn format_cannot_quantify_report(
     } else {
         "it is not a variable"
     };
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!("The universal type variable '{name} cannot be generalized: {reason}."),
-    )
+    let message = format_cannot_quantify_message(name, reason);
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_cannot_quantify_message(name: &str, reason: &str) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.set_margin(76);
+        ppf.open_hovbox(0);
+        ppf.print(format_args!(
+            "The universal type variable '{name} cannot be generalized:"
+        ));
+        ppf.space();
+        ppf.print(format_args!("{reason}."));
+        ppf.close_box();
+        ppf.flush();
+    }
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 fn format_multiple_constraints_on_type_report(
