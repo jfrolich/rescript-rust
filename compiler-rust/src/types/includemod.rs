@@ -147,6 +147,12 @@ fn format_include_error(
             let expected = format_module_type(type_ctx, expected);
             if should_elide_module_mismatch(&actual, &expected) {
                 output.push_str("  ...\n");
+            } else if !expected.contains('\n') {
+                output.push_str("  Modules do not match: ");
+                output.push_str(&actual);
+                output.push_str(" is not included in ");
+                output.push_str(&expected);
+                output.push('\n');
             } else {
                 output.push_str("  Modules do not match:\n");
                 output.push_str("    ");

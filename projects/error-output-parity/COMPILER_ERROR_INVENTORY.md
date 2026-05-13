@@ -452,7 +452,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/cannot_apply_module.res`.
 - `Not_included`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`.
+    `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`
+    and the functor-argument inclusion path in
+    `tests/error_output_parity/compiler/fixtures/functor_argument_mismatch.res`.
 - `Cannot_eliminate_dependency`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/cannot_eliminate_dependency.res`.

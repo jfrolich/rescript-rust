@@ -14670,10 +14670,10 @@ fn type_module_expr_with_alias<'a>(
                         .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
                     crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &param_mty)
                         .map_err(|err| {
-                            TypeModError::FunctorApplicationError(format!(
-                                "functor argument mismatch: {:?}",
-                                err
-                            ))
+                            TypeModError::SignatureMismatch {
+                                loc: arg.pmod_loc,
+                                error: err,
+                            }
                         })?
                 }
                 _ => {
