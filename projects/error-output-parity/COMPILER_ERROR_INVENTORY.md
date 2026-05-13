@@ -111,7 +111,10 @@ with a reason after checking raise sites.
 - `Wrong_name`: covered by
   `tests/error_output_parity/compiler/fixtures/wrong_name.res` and the
   spellcheck hint branch in
-  `tests/error_output_parity/compiler/fixtures/wrong_name_spellcheck.res`.
+  `tests/error_output_parity/compiler/fixtures/wrong_name_spellcheck.res`,
+  plus the JSX component unknown-prop and children-prop branches in
+  `tests/error_output_parity/compiler/fixtures/jsx_unknown_prop_call.res` and
+  `tests/error_output_parity/compiler/fixtures/jsx_children_not_allowed.res`.
 - `Name_type_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res` and the
   multiple-alternative branch in
