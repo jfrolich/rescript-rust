@@ -1044,6 +1044,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/builtin_private_extension_signature_payload.res`,
       and
       `tests/error_output_parity/compiler/fixtures/builtin_private_extension_pattern_payload.res`.
+- `compiler/frontend/typemod_hide.ml`
+  - `%%private` local-extension structure item validation rejects unsupported
+    items such as type declarations
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/private_type_in_local_extension.res`.
 - `compiler/frontend/ast_exp_extension.ml`
   - `%obj` non-record payload rejection
     - Covered by

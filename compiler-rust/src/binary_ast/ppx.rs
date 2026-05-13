@@ -5676,6 +5676,8 @@ fn handle_private_extension(
         .flat_map(|item| rewrite_structure_item(item, arena))
         .collect();
 
+    check_private_extension_items(&rewritten_items, arena)?;
+
     Ok(wrap_in_local_module(rewritten_items, loc, arena))
 }
 
@@ -5693,6 +5695,47 @@ fn private_extension_structure_items<'a>(
             Err(PpxError::at_loc(loc, "private extension is not support"))
         }
     }
+}
+
+fn check_private_extension_items(items: &[StructureItem], arena: &ParseArena) -> PpxResult<()> {
+    for item in items {
+        if !private_extension_item_allowed(item, arena) {
+            return Err(PpxError::at_loc(
+                item.pstr_loc,
+                "the structure is not supported in local extension",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> bool {
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_eval(_)
+        | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_primitive(_)
+        | StructureItemDesc::Pstr_typext(_)
+        | StructureItemDesc::Pstr_exception(_) => true,
+        StructureItemDesc::Pstr_include(incl) => private_extension_include_allowed(incl, arena),
+        _ => false,
+    }
+}
+
+fn private_extension_include_allowed(incl: &IncludeDeclaration, arena: &ParseArena) -> bool {
+    let mod_expr = arena.get_mod_expr(incl.pincl_mod);
+    let ModuleExprDesc::Pmod_constraint(inner_idx, _) = &*mod_expr.pmod_desc else {
+        return false;
+    };
+
+    let inner = arena.get_mod_expr(*inner_idx);
+    let ModuleExprDesc::Pmod_structure(items) = &*inner.pmod_desc else {
+        return false;
+    };
+
+    matches!(
+        items.as_slice(),
+        [item] if matches!(&*item.pstr_desc, StructureItemDesc::Pstr_primitive(_))
+    )
 }
 
 /// Wraps a set of structure items into a local module + open pair.
@@ -16202,6 +16245,7 @@ pub fn expand_extensions(
             if accumulated_items.is_empty() {
                 Ok(rest)
             } else {
+                check_private_extension_items(&accumulated_items, arena)?;
                 let mut wrapped = wrap_in_local_module(accumulated_items, first_loc, arena);
                 wrapped.append(&mut rest);
                 Ok(wrapped)
