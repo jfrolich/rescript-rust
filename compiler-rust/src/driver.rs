@@ -1449,14 +1449,51 @@ fn apply_warning_options(tctx: &mut TypeCheckContext<'_>, options: &CompilerOpti
     }
 }
 
-fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
-    let mut config = WarningConfig::new();
-    for spec in &options.warning_specs {
+fn apply_warning_specs_to_config(
+    config: &mut WarningConfig,
+    warning_specs: &[String],
+    warning_error_specs: &[String],
+) {
+    for spec in warning_specs {
         let _ = config.parse(spec);
     }
-    for spec in &options.warning_error_specs {
+    for spec in warning_error_specs {
         let _ = config.parse_as_error(spec);
     }
+}
+
+fn apply_file_config_warning_options(
+    tctx: &mut TypeCheckContext<'_>,
+    config: &FileConfigOverrides,
+) {
+    for spec in &config.warning_specs {
+        tctx.apply_warning_spec(spec);
+    }
+    for spec in &config.warning_error_specs {
+        tctx.apply_warning_error_spec(spec);
+    }
+}
+
+fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
+    let mut config = WarningConfig::new();
+    apply_warning_specs_to_config(
+        &mut config,
+        &options.warning_specs,
+        &options.warning_error_specs,
+    );
+    config
+}
+
+fn warning_config_for_options_and_file_config(
+    options: &CompilerOptions,
+    file_config: &FileConfigOverrides,
+) -> WarningConfig {
+    let mut config = warning_config_for_options(options);
+    apply_warning_specs_to_config(
+        &mut config,
+        &file_config.warning_specs,
+        &file_config.warning_error_specs,
+    );
     config
 }
 
@@ -1630,11 +1667,21 @@ fn emit_ppx_warnings(
     options: &CompilerOptions,
     warnings: &[ppx::PpxWarning],
 ) -> bool {
+    let warning_config = warning_config_for_options(options);
+    emit_ppx_warnings_with_config(arena, source, filename, &warning_config, warnings)
+}
+
+fn emit_ppx_warnings_with_config(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warning_config: &WarningConfig,
+    warnings: &[ppx::PpxWarning],
+) -> bool {
     if warnings.is_empty() {
         return false;
     }
 
-    let warning_config = warning_config_for_options(options);
     let mut has_error = false;
     let mut stderr = std::io::stderr();
     for warning in warnings {
@@ -10315,14 +10362,20 @@ pub fn compile_source_to_js_with_options(
     );
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    ppx_warnings_have_errors |=
-        emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     reject_disabled_let_unwrap_in_structure(
         experimental_let_unwrap,
         &structure,
@@ -10338,7 +10391,7 @@ pub fn compile_source_to_js_with_options(
         filename,
     )?;
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
-    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
         reject_invalid_react_component_destructure_in_structure(
             &structure,
@@ -10355,8 +10408,13 @@ pub fn compile_source_to_js_with_options(
         structure
     } else {
         let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-        ppx_warnings_have_errors |=
-            emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &ppx_warnings,
+        );
 
         // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
         let structure = ppx::expand_extensions(&structure, parser.arena_mut())
@@ -10380,6 +10438,7 @@ pub fn compile_source_to_js_with_options(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -11045,9 +11104,16 @@ pub fn typecheck_interface_source(
     );
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_signature(&signature, options, parser.arena());
+    let file_config = extract_file_config_from_signature(&signature, parser.arena());
+    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let _ = emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
@@ -11067,6 +11133,7 @@ pub fn typecheck_interface_source(
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
@@ -11368,9 +11435,16 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         );
         let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
             .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-        let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
-        let experimental_let_unwrap =
-            experimental_let_unwrap_for_signature(&signature, options, parser.arena());
+        let file_config = extract_file_config_from_signature(&signature, parser.arena());
+        let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+        let _ = emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &config_warnings,
+        );
+        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
         let signature = preprocess_signature_for_typecheck_with_source(
             signature,
             options,
@@ -11390,6 +11464,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         apply_warning_options(&mut tctx, options);
+        apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -11423,8 +11498,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
-        let experimental_let_unwrap =
-            experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+        let file_config = extract_file_config_from_structure(&structure, parser.arena());
+        let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
         reject_disabled_let_unwrap_in_structure(
             experimental_let_unwrap,
             &structure,
@@ -11440,7 +11516,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             filename,
         )?;
 
-        let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+        let jsx_version = options.jsx_version.or(file_config.jsx_version);
         let structure = if let Some(jsx_version) = jsx_version {
             reject_invalid_react_component_destructure_in_structure(
                 &structure,
@@ -11457,7 +11533,13 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             structure
         } else {
             let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-            let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
+            let _ = emit_ppx_warnings_with_config(
+                parser.arena(),
+                source,
+                filename,
+                &file_warning_config,
+                &ppx_warnings,
+            );
 
             let structure = ppx::expand_extensions(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
@@ -11473,6 +11555,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         apply_warning_options(&mut tctx, options);
+        apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
@@ -12047,6 +12130,8 @@ fn moregen_link_impl(
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
     pub jsx_version: Option<i32>,
+    pub warning_specs: Vec<String>,
+    pub warning_error_specs: Vec<String>,
 }
 
 fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
@@ -12066,6 +12151,20 @@ fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
                     if let Ok(v) = flags[i + 1].parse::<i32>() {
                         overrides.jsx_version = Some(v);
                     }
+                    i += 2;
+                    continue;
+                }
+            }
+            "-w" => {
+                if i + 1 < flags.len() {
+                    overrides.warning_specs.push(flags[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "-warn-error" => {
+                if i + 1 < flags.len() {
+                    overrides.warning_error_specs.push(flags[i + 1].clone());
                     i += 2;
                     continue;
                 }
@@ -12603,10 +12702,10 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_structure(&structure, options, &arena);
+    let file_config = extract_file_config_from_structure(&structure, &arena);
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
-    let jsx_version = jsx_version_for_structure(&structure, options, &arena);
+    let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
         jsx_ppx::transform_structure_result(structure, jsx_version, &mut arena)
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
@@ -12633,6 +12732,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -12667,8 +12767,8 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_signature(&signature, options, &arena);
+    let file_config = extract_file_config_from_signature(&signature, &arena);
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -12680,6 +12780,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
@@ -13299,6 +13400,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             jsx_preserve_for_structure(structure, options, arena),
         )
     };
+    let file_config = extract_file_config_from_structure(structure, arena);
 
     log::debug!(
         "[compile_source_in_process] {} type-check start",
@@ -13311,8 +13413,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -13730,7 +13833,15 @@ pub fn typecheck_interface_in_process(
     );
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
+    let file_config = extract_file_config_from_signature(&signature, parser.arena());
+    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let _ = emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
@@ -13764,6 +13875,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     )
     .entered();
     let original_alias_count = registry.alias_rewrite_len();
+    let file_config = extract_file_config_from_signature(signature, arena);
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -13771,8 +13883,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
@@ -13868,6 +13981,7 @@ pub fn typecheck_implementation_in_process(
             parser.diagnostics().len()
         ));
     }
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -13875,8 +13989,9 @@ pub fn typecheck_implementation_in_process(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     apply_warning_options(&mut tctx, options);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);

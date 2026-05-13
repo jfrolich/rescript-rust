@@ -953,6 +953,13 @@ with a reason after checking raise sites.
   - `file_level_flags_handler` invalid bsc flags warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/config_bad_flags_warning.res`.
+  - `file_level_flags_handler` applies warning options from `flags` with the
+    same semantics as top-level bsc flags, including later type warnings and
+    frontend PPX warnings
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_warn_error_unused_variable.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/config_warn_error_raw_warning.res`.
   - `Ast_payload.ident_or_record_as_config` invalid payload warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/config_invalid_payload_warning.res`.
