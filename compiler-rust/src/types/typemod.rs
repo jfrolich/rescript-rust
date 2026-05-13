@@ -4973,6 +4973,23 @@ fn check_variant_well_formed(
     Ok(())
 }
 
+fn check_variant_declaration_well_formed(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> TypeModResult<()> {
+    let crate::types::decl::TypeKind::TypeVariant(constructors) = &decl.type_kind else {
+        return Ok(());
+    };
+
+    check_variant_well_formed(
+        ctx,
+        env,
+        constructors,
+        has_decl_attr(&decl.type_attributes, "unboxed"),
+    )
+}
+
 fn path_is_t_of_persistent_module(path: &Path, module_name: &str) -> bool {
     matches!(
         path,
@@ -5077,63 +5094,6 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
 
 fn type_to_instanceof_backed_obj(path: &Path) -> bool {
     type_to_instanceof_backed_obj_name(path).is_some()
-}
-
-fn touch_untagged_constructor_payload_type(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) {
-    if let crate::types::type_expr::TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ty) {
-        if type_to_instanceof_backed_obj(path) {
-            return;
-        }
-    }
-
-    // OCaml compiler/ml/ast_untagged_variants.ml:274-301 calls
-    // `expand_head` and then classifies the expanded type. It does not force the
-    // persistent module's `ps_sig` after recognizing an instance-backed object.
-    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
-    match &*ctx.get_desc(expanded) {
-        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
-            if type_to_instanceof_backed_obj(path) {
-                return;
-            }
-        }
-        crate::types::type_expr::TypeDesc::Tarrow { .. }
-        | crate::types::type_expr::TypeDesc::Ttuple(_) => {}
-        _ => {}
-    }
-}
-
-fn touch_untagged_variant_well_formedness(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    decl: &crate::types::decl::TypeDeclaration,
-) {
-    let crate::types::decl::TypeKind::TypeVariant(constructors) = &decl.type_kind else {
-        return;
-    };
-
-    // OCaml `Typedecl.transl_type_decl` runs
-    // `Ast_untagged_variants.check_well_formed` before computing final
-    // properties. That check classifies constructor payloads by first looking
-    // at the original type and then calling `Ctype.expand_head` only if needed.
-    // The expansion has observable stamp-order effects because it can force
-    // persistent module signatures behind aliases such as Js.Date.t.
-    for constructor in constructors {
-        if !has_decl_attr(&constructor.cd_attributes, "unboxed") {
-            continue;
-        }
-        match &constructor.cd_args {
-            crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                if let [arg] = args.as_slice() {
-                    touch_untagged_constructor_payload_type(ctx, env, *arg);
-                }
-            }
-            crate::types::decl::ConstructorArguments::CstrRecord(_) => {}
-        }
-    }
 }
 
 fn touch_manifest_cyclic_abbrev_check(
@@ -19183,13 +19143,6 @@ fn type_structure_item<'a>(
                             }
                         }
 
-                        check_variant_well_formed(
-                            ctx,
-                            &temp_env,
-                            &internal_cstrs,
-                            decl_has_unboxed_attr,
-                        )?;
-
                         (
                             crate::types::TypeKind::TypeVariant(internal_cstrs),
                             TypedTypeKind::Ttype_variant(typed_tree_cstrs),
@@ -19601,12 +19554,11 @@ fn type_structure_item<'a>(
                 }
             }
 
-            for decl in &internal_decls_for_generalize {
-                touch_untagged_variant_well_formedness(ctx, &new_env, decl);
-            }
-
             // OCaml typedecl.ml:1588-1592 runs untagged checks first, then
             // check_constraints over the finalized declaration group.
+            for decl in &internal_decls_for_generalize {
+                check_variant_declaration_well_formed(ctx, &new_env, decl)?;
+            }
             for decl in &internal_decls_for_generalize {
                 touch_type_declaration_constraints(ctx, &new_env, &mut tctx.persistent_env, decl);
             }
@@ -21719,13 +21671,6 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         });
                     }
 
-                    check_variant_well_formed(
-                        ctx,
-                        &temp_env,
-                        &internal_cstrs,
-                        decl_has_unboxed_attr,
-                    )?;
-
                     (
                         crate::types::TypeKind::TypeVariant(internal_cstrs),
                         TypedTypeKind::Ttype_variant(typed_tree_cstrs),
@@ -21843,7 +21788,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
     // OCaml transl_signature routes Psig_type through
     // Typedecl.transl_type_decl, whose typedecl.ml:1588-1592 runs
-    // check_constraints before compute_properties_fixpoint.
+    // untagged checks before check_constraints and compute_properties_fixpoint.
+    for decl in &internal_decls_for_generalize {
+        check_variant_declaration_well_formed(ctx, &variance_env, decl)?;
+    }
     for decl in &internal_decls_for_generalize {
         touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
     }

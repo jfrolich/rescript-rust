@@ -846,6 +846,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_object.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_array.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_promise.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_recursive_promise_alias_collision.res`,
+  `tests/error_output_parity/compiler/fixtures/untagged_recursive_promise_alias_collision.resi`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_function.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_string.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_number.res`,
