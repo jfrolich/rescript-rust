@@ -690,6 +690,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_component_unlabelled_prop.res`
       and
       `tests/error_output_parity/compiler/fixtures/jsx_component_non_function.res`.
+  - `check_string_int_attribute_iter` rejects `@string` and `@int`
+    attributes inside `@react.component` external and signature types
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_external_string_attr.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_component_signature_int_attr.resi`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by

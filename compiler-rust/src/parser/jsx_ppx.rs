@@ -145,6 +145,8 @@ const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwa
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
 const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
     "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
+const STRING_INT_ATTR_UNSUPPORTED_MSG: &str =
+    "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
 
 // ============================================================================
 // Public API
@@ -1983,6 +1985,9 @@ fn transform_react_component_sig(
     arena: &mut ParseArena,
 ) -> Vec<SignatureItem> {
     check_multiple_components(config, *loc);
+    if let Some(loc) = string_int_attribute_loc_in_core_type(arena, &vd.pval_type) {
+        set_fatal_error(config, loc, STRING_INT_ATTR_UNSUPPORTED_MSG);
+    }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
@@ -2119,6 +2124,9 @@ fn transform_react_component_external(
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     check_multiple_components(config, *loc);
+    if let Some(loc) = string_int_attribute_loc_in_core_type(arena, &vd.pval_type) {
+        set_fatal_error(config, loc, STRING_INT_ATTR_UNSUPPORTED_MSG);
+    }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
@@ -2606,6 +2614,59 @@ fn pattern_is_unit_or_any(arena: &ParseArena, pat: &Pattern) -> bool {
         return arena.is_lident(loc.txt, "()");
     }
     false
+}
+
+fn string_int_attribute_loc_in_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<Location> {
+    attrs.iter().find_map(|attr| {
+        matches!(arena.get_string(attr.0.txt), "string" | "int").then_some(attr.0.loc)
+    })
+}
+
+fn string_int_attribute_loc_in_core_type(
+    arena: &ParseArena,
+    typ_idx: &CoreTypeIdx,
+) -> Option<Location> {
+    let typ = arena.get_core_type(*typ_idx);
+    if let Some(loc) = string_int_attribute_loc_in_attrs(arena, &typ.ptyp_attributes) {
+        return Some(loc);
+    }
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (arg, ret, _) = &**inner;
+            string_int_attribute_loc_in_attrs(arena, &arg.attrs)
+                .or_else(|| string_int_attribute_loc_in_core_type(arena, &arg.typ))
+                .or_else(|| string_int_attribute_loc_in_core_type(arena, ret))
+        }
+        CoreTypeDesc::Ptyp_tuple(items) => items
+            .iter()
+            .find_map(|item| string_int_attribute_loc_in_core_type(arena, item)),
+        CoreTypeDesc::Ptyp_constr(inner) => inner
+            .1
+            .iter()
+            .find_map(|item| string_int_attribute_loc_in_core_type(arena, item)),
+        CoreTypeDesc::Ptyp_object(inner) => inner.0.iter().find_map(|field| match field {
+            ObjectField::Otag(_, attrs, typ) => string_int_attribute_loc_in_attrs(arena, attrs)
+                .or_else(|| string_int_attribute_loc_in_core_type(arena, typ)),
+            ObjectField::Oinherit(typ) => string_int_attribute_loc_in_core_type(arena, typ),
+        }),
+        CoreTypeDesc::Ptyp_alias(inner) => string_int_attribute_loc_in_core_type(arena, &inner.0),
+        CoreTypeDesc::Ptyp_variant(inner) => inner.0.iter().find_map(|field| match field {
+            RowField::Rtag(_, attrs, _, args) => string_int_attribute_loc_in_attrs(arena, attrs)
+                .or_else(|| {
+                    args.iter()
+                        .find_map(|arg| string_int_attribute_loc_in_core_type(arena, arg))
+                }),
+            RowField::Rinherit(typ) => string_int_attribute_loc_in_core_type(arena, typ),
+        }),
+        CoreTypeDesc::Ptyp_poly(inner) => string_int_attribute_loc_in_core_type(arena, &inner.1),
+        CoreTypeDesc::Ptyp_package(package) => package
+            .1
+            .iter()
+            .find_map(|(_, typ)| string_int_attribute_loc_in_core_type(arena, typ)),
+        CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) | CoreTypeDesc::Ptyp_extension(_) => {
+            None
+        }
+    }
 }
 
 fn get_fn_name(arena: &ParseArena, pat: &Pattern) -> String {
