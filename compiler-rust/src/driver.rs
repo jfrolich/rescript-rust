@@ -3420,17 +3420,17 @@ fn type_mod_error_to_anyhow(
             loc: Some(loc),
             ty,
             method,
-            alternatives: _,
+            alternatives,
         }) => UserDiagnostic::new(
-            format_compiler_error_report(
+            format_undefined_method_report(
+                type_ctx,
                 arena,
                 source,
                 filename,
                 *loc,
-                &format!(
-                    "This expression has type {}\nIt has no field {method}",
-                    format_type_expr(type_ctx, *ty)
-                ),
+                *ty,
+                method,
+                alternatives.as_deref(),
             ),
             2,
         )
@@ -5404,6 +5404,46 @@ fn format_name_type_mismatch_report(
         }
     };
     format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_undefined_method_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    method: &str,
+    alternatives: Option<&[String]>,
+) -> String {
+    let type_text = format_type_expr(type_ctx, ty);
+    if let Some(hint) = alternatives.and_then(|alts| spellcheck_hint(method, alts)) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  This expression has type ");
+        raw_message.push_str(&type_text);
+        raw_message.push('\n');
+        raw_message.push_str("  It has no field ");
+        raw_message.push_str(method);
+        raw_message.push('\n');
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("This expression has type {type_text}\nIt has no field {method}"),
+    )
 }
 
 fn format_type_path_for_report(path: &crate::types::Path) -> String {
