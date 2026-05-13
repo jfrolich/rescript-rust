@@ -798,6 +798,32 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/builtin_warning_non_string.res`,
       and
       `tests/error_output_parity/compiler/fixtures/builtin_warning_bad_list.res`.
+- `compiler/ml/translattribute.ml`
+  - `find_attribute` reports duplicate `inline` and `inlined` attributes
+    at the second attribute location
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_inlined_duplicate.res`.
+  - `parse_inline_attribute` reports invalid payloads for `inline` and
+    `inlined`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_invalid_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_inlined_invalid_payload.res`.
+  - `check_attribute` reports misplaced expression attributes for non-function
+    `inline` and non-call-target `inlined`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_misplaced_expr.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_inlined_misplaced_expr.res`.
+  - `add_inline_attribute` reports duplicate `inline` when binding attributes
+    are applied to a function expression that already has an inline attribute
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate_function_expr.res`.
+  - Simple `@inline let x = 1` probes are compiled through the ReScript
+    inline-constant path and did not surface the OCaml `inline1`/`inline2`
+    misplaced branches during this audit.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by

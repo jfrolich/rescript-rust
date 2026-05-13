@@ -1729,19 +1729,21 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
         }]));
     }
 
-    // For other payloads, skip them for now while preserving nesting
-    let mut depth = 1;
-    while depth > 0 && p.token != Token::Eof {
-        match &p.token {
-            Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-            Token::Rparen | Token::Rbrace | Token::Rbracket => depth -= 1,
-            _ => {}
-        }
-        if depth > 0 {
-            p.next();
-        }
+    if p.token == Token::Rparen {
+        return Payload::PStr(Box::new(vec![]));
     }
-    Payload::PStr(Box::new(vec![]))
+
+    let start_pos_idx = p.start_pos_idx();
+    let expr = parse_expr(p);
+    let expr_idx = p.arena_mut().push_expr(expr);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    Payload::PStr(Box::new(vec![StructureItem {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            expr_idx,
+            Attributes::new(),
+        )))),
+        pstr_loc: loc,
+    }]))
 }
 
 // ============================================================================

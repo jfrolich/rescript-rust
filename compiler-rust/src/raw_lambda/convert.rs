@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::context::IdGenerator;
+use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::{Ident, IdentFlags};
 use crate::js_ir::{Kind, ModuleId};
 use crate::lambda::Constant;
@@ -45,6 +46,7 @@ use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{LabelDescription, RecordRepresentation, ValueKind};
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
+use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
     FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
@@ -857,6 +859,9 @@ pub struct RawLambdaConverter<'a> {
     unit_name: String,
     no_assert_false: bool,
     diagnostic: Option<RawLambdaDiagnostic>,
+    warnings: Vec<TypeCoreWarning>,
+    warning_config: WarningConfig,
+    suppress_inlined_attribute_check: usize,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -879,6 +884,9 @@ impl<'a> RawLambdaConverter<'a> {
             unit_name: String::new(),
             no_assert_false: false,
             diagnostic: None,
+            warnings: Vec::new(),
+            warning_config: WarningConfig::new(),
+            suppress_inlined_attribute_check: 0,
         }
     }
 
@@ -902,6 +910,9 @@ impl<'a> RawLambdaConverter<'a> {
             unit_name: String::new(),
             no_assert_false: false,
             diagnostic: None,
+            warnings: Vec::new(),
+            warning_config: WarningConfig::new(),
+            suppress_inlined_attribute_check: 0,
         }
     }
 
@@ -926,6 +937,9 @@ impl<'a> RawLambdaConverter<'a> {
             unit_name,
             no_assert_false: false,
             diagnostic: None,
+            warnings: Vec::new(),
+            warning_config: WarningConfig::new(),
+            suppress_inlined_attribute_check: 0,
         }
     }
 
@@ -938,6 +952,10 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
         self.no_assert_false = no_assert_false;
+    }
+
+    pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
+        self.warning_config = warning_config;
     }
 
     pub fn current_stamp(&self) -> i32 {
@@ -954,6 +972,10 @@ impl<'a> RawLambdaConverter<'a> {
         self.diagnostic.take()
     }
 
+    pub fn take_warnings(&mut self) -> Vec<TypeCoreWarning> {
+        std::mem::take(&mut self.warnings)
+    }
+
     fn report_unknown_builtin_primitive(&mut self, loc: Location, prim_name: &str) {
         if prim_name.starts_with('%') {
             self.report_diagnostic(loc, format!("Unknown builtin primitive \"{prim_name}\""));
@@ -964,6 +986,18 @@ impl<'a> RawLambdaConverter<'a> {
         if self.diagnostic.is_none() {
             self.diagnostic = Some(RawLambdaDiagnostic { loc, message });
         }
+    }
+
+    fn report_warning(&mut self, loc: LocIdx, warning: Warning) {
+        if !self.warning_config.is_active(&warning) {
+            return;
+        }
+        let is_error = self.warning_config.is_error(&warning);
+        self.warnings.push(TypeCoreWarning {
+            loc,
+            warning,
+            is_error,
+        });
     }
 
     fn sync_local_stamp_generators(&mut self) {
@@ -1509,45 +1543,139 @@ impl<'a> RawLambdaConverter<'a> {
             .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
     }
 
-    /// Extract inline attribute from module attributes, matching OCaml's
-    /// Translattribute.get_inline_attribute.
-    fn get_inline_attribute_from(
+    /// Find an inline-style attribute, matching OCaml's
+    /// `Translattribute.find_attribute`: duplicates warn at the second
+    /// attribute and make the attribute unavailable to the caller.
+    fn find_inline_attribute_index(
+        &mut self,
         attrs: &crate::parser::ast::Attributes,
-        arena: &ParseArena,
+        attr_name: &str,
+    ) -> Option<usize> {
+        let mut first = None;
+        for (idx, (located_name, _)) in attrs.iter().enumerate() {
+            let name = self.arena.get_string(located_name.txt);
+            if name != attr_name {
+                continue;
+            }
+            if first.is_some() {
+                self.report_warning(
+                    located_name.loc,
+                    Warning::DuplicatedAttribute {
+                        name: name.to_string(),
+                    },
+                );
+                return None;
+            }
+            first = Some(idx);
+        }
+        first
+    }
+
+    fn parse_inline_attribute(
+        &mut self,
+        attr: Option<&crate::parser::ast::Attribute>,
     ) -> InlineAttribute {
         use crate::parser::ast::{ExpressionDesc, Payload, StructureItemDesc};
         use crate::parser::longident::Longident;
-        for (located_name, payload) in attrs.iter() {
-            let attr_name = arena.get_string(located_name.txt);
-            if attr_name == "inline" {
-                match payload {
-                    Payload::PStr(items) if items.is_empty() => {
-                        // @inline without arguments = always
-                        return InlineAttribute::Always;
-                    }
-                    Payload::PStr(items) if items.len() == 1 => {
-                        if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                            let (expr_idx, _) = &**eval_inner;
-                            let expr = arena.get_expr(*expr_idx);
-                            if let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc {
-                                let lid = arena.get_longident(ident.txt);
-                                if let Longident::Lident(str_idx) = lid {
-                                    let name = arena.get_string(*str_idx);
-                                    if name == "always" {
-                                        return InlineAttribute::Always;
-                                    } else if name == "never" {
-                                        return InlineAttribute::Never;
-                                    }
-                                }
+
+        let Some((located_name, payload)) = attr else {
+            return InlineAttribute::Default;
+        };
+
+        let warn = |this: &mut Self| {
+            this.report_warning(
+                located_name.loc,
+                Warning::AttributePayload {
+                    attr: this.arena.get_string(located_name.txt).to_string(),
+                    message: "It must be either empty, 'always' or 'never'".to_string(),
+                },
+            );
+        };
+
+        match payload {
+            Payload::PStr(items) if items.is_empty() => InlineAttribute::Always,
+            Payload::PStr(items) if items.len() == 1 => {
+                if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                    let (expr_idx, attrs) = &**eval_inner;
+                    let expr = self.arena.get_expr(*expr_idx);
+                    if attrs.is_empty()
+                        && let ExpressionDesc::Pexp_ident(ident) = &*expr.pexp_desc
+                    {
+                        let lid = self.arena.get_longident(ident.txt);
+                        if let Longident::Lident(str_idx) = lid {
+                            let name = self.arena.get_string(*str_idx);
+                            if name == "always" {
+                                return InlineAttribute::Always;
+                            } else if name == "never" {
+                                return InlineAttribute::Never;
                             }
                         }
-                        return InlineAttribute::Default;
                     }
-                    _ => return InlineAttribute::Default,
                 }
+                warn(self);
+                InlineAttribute::Default
+            }
+            _ => {
+                warn(self);
+                InlineAttribute::Default
             }
         }
-        InlineAttribute::Default
+    }
+
+    /// Extract inline attribute from module/value attributes, matching OCaml's
+    /// `Translattribute.get_inline_attribute`.
+    fn get_inline_attribute_from(
+        &mut self,
+        attrs: &crate::parser::ast::Attributes,
+    ) -> InlineAttribute {
+        let idx = self.find_inline_attribute_index(attrs, "inline");
+        self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
+    }
+
+    fn get_inlined_attribute_from(
+        &mut self,
+        attrs: &crate::parser::ast::Attributes,
+    ) -> InlineAttribute {
+        let idx = self.find_inline_attribute_index(attrs, "inlined");
+        self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
+    }
+
+    fn with_inlined_attribute_check_suppressed<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.suppress_inlined_attribute_check += 1;
+        let result = f(self);
+        self.suppress_inlined_attribute_check -= 1;
+        result
+    }
+
+    /// Mirrors `Translattribute.check_attribute` for expression attributes.
+    fn check_expr_attribute(&mut self, expr: &Expression) {
+        for (located_name, _) in expr.exp_attributes.iter() {
+            let name = self.arena.get_string(located_name.txt);
+            match name {
+                "inline" => {
+                    if !matches!(expr.exp_desc, ExpressionDesc::Texp_function { .. }) {
+                        self.report_warning(
+                            located_name.loc,
+                            Warning::MisplacedAttribute {
+                                name: name.to_string(),
+                            },
+                        );
+                    }
+                }
+                "inlined" => {
+                    if self.suppress_inlined_attribute_check > 0 {
+                        continue;
+                    }
+                    self.report_warning(
+                        located_name.loc,
+                        Warning::MisplacedAttribute {
+                            name: name.to_string(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Extract `@directive("...")` from function expression attributes,
@@ -1971,12 +2099,25 @@ impl<'a> RawLambdaConverter<'a> {
     /// Apply inline attribute to a raw lambda expression, matching OCaml's
     /// Translattribute.add_inline_attribute. Walks through Lprim wrappers
     /// to find the inner Lfunction.
-    fn apply_inline_attribute_raw(lam: RawLambda, inline: InlineAttribute) -> RawLambda {
+    fn apply_inline_attribute_raw(
+        &mut self,
+        lam: RawLambda,
+        loc: LocIdx,
+        inline: InlineAttribute,
+    ) -> RawLambda {
         if matches!(inline, InlineAttribute::Default) {
             return lam;
         }
         match lam {
             RawLambda::Lfunction(mut func) => {
+                if !matches!(func.attr.inline, InlineAttribute::Default) {
+                    self.report_warning(
+                        loc,
+                        Warning::DuplicatedAttribute {
+                            name: "inline".to_string(),
+                        },
+                    );
+                }
                 func.attr.inline = inline;
                 RawLambda::Lfunction(func)
             }
@@ -1986,7 +2127,7 @@ impl<'a> RawLambdaConverter<'a> {
                     Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit => {
                         let mut args = prim.args;
                         if let Some(last) = args.pop() {
-                            let inner = Self::apply_inline_attribute_raw(last, inline);
+                            let inner = self.apply_inline_attribute_raw(last, loc, inline);
                             args.push(inner);
                         }
                         RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
@@ -2996,8 +3137,7 @@ impl<'a> RawLambdaConverter<'a> {
         let prim_name = Self::raw_primitive_name(&prim.prim_name).to_string();
 
         if let [arg1] | [arg1, _] = args {
-            if let Some(primitive) =
-                self.translate_unified_ops_primitive(&prim_name, arg1.exp_type)
+            if let Some(primitive) = self.translate_unified_ops_primitive(&prim_name, arg1.exp_type)
             {
                 return primitive;
             }
@@ -4634,8 +4774,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_functor(param, _, _, body) => {
                 let loc = self.loc(module_expr.mod_loc);
-                let inline_attribute =
-                    Self::get_inline_attribute_from(&module_expr.mod_attributes, self.arena);
+                let inline_attribute = self.get_inline_attribute_from(&module_expr.mod_attributes);
                 let (arg_coercion, res_coercion) = match cc {
                     ModuleCoercion::Tcoerce_none => {
                         (&ModuleCoercion::Tcoerce_none, &ModuleCoercion::Tcoerce_none)
@@ -5231,17 +5370,13 @@ impl<'a> RawLambdaConverter<'a> {
     /// 1. `let M = #init_mod(loc, shape)` for modules with shapes
     /// 2. `let M = rhs` for strict modules (no shape)
     /// 3. `seq #update_mod(shape, M, rhs)` to fill in actual values
-    fn eval_rec_bindings(
-        bindings: Vec<RecModuleBinding>,
-        cont: RawLambda,
-    ) -> RawLambda {
+    fn eval_rec_bindings(bindings: Vec<RecModuleBinding>, cont: RawLambda) -> RawLambda {
         if Self::is_strict_or_all_functions(&bindings) {
             // Simple letrec: all modules are just function/const blocks
-            let rec_bindings: Vec<(Ident, RawLambda)> =
-                bindings
-                    .into_iter()
-                    .map(|binding| (binding.id, binding.rhs))
-                    .collect();
+            let rec_bindings: Vec<(Ident, RawLambda)> = bindings
+                .into_iter()
+                .map(|binding| (binding.id, binding.rhs))
+                .collect();
             return RawLambda::Lletrec(rec_bindings, Box::new(cont));
         }
 
@@ -5383,9 +5518,9 @@ impl<'a> RawLambdaConverter<'a> {
                 );
                 // Apply @inline attribute from module binding (matches OCaml's
                 // Translattribute.add_inline_attribute)
-                let inline_attr =
-                    Self::get_inline_attribute_from(&binding.mb_attributes, self.arena);
-                module_body = Self::apply_inline_attribute_raw(module_body, inline_attr);
+                let inline_attr = self.get_inline_attribute_from(&binding.mb_attributes);
+                module_body =
+                    self.apply_inline_attribute_raw(module_body, binding.mb_loc, inline_attr);
                 let result = RawLambda::let_(
                     Self::pure_module(&binding.mb_expr),
                     binding.mb_id.clone(),
@@ -5566,6 +5701,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn convert_expr_raw(&mut self, expr: &Expression) -> RawLambda {
+        self.check_expr_attribute(expr);
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
                 ValueKind::ValPrim(prim) => {
@@ -5606,6 +5742,7 @@ impl<'a> RawLambdaConverter<'a> {
             } if body.len() == 1 && body[0].c_guard.is_none() => {
                 let directive =
                     Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
+                let inline = self.get_inline_attribute_from(&expr.exp_attributes);
                 if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
                     params,
                     &body[0],
@@ -5614,6 +5751,7 @@ impl<'a> RawLambdaConverter<'a> {
                     expr.exp_type,
                     *async_,
                     directive.clone(),
+                    inline,
                     self.loc(expr.exp_loc),
                 ) {
                     return lambda;
@@ -5630,6 +5768,7 @@ impl<'a> RawLambdaConverter<'a> {
                     expr.exp_type,
                     *async_,
                     directive,
+                    inline,
                     self.loc(expr.exp_loc),
                 )
             }
@@ -9667,8 +9806,9 @@ impl<'a> RawLambdaConverter<'a> {
                         .map(|binding| {
                             let mut value = self.convert_expr_raw(&binding.vb_expr);
                             let inline_attr =
-                                Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
-                            value = Self::apply_inline_attribute_raw(value, inline_attr);
+                                self.get_inline_attribute_from(&binding.vb_attributes);
+                            value =
+                                self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
                             (binding, value)
                         })
                         .collect::<Vec<_>>();
@@ -9744,9 +9884,8 @@ impl<'a> RawLambdaConverter<'a> {
                     .map(|binding| {
                         let mut value = self.convert_expr_raw(&binding.vb_expr);
                         // OCaml's transl_let applies inline attributes from vb_attributes
-                        let inline_attr =
-                            Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
-                        value = Self::apply_inline_attribute_raw(value, inline_attr);
+                        let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
+                        value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
                         (binding, value)
                     })
                     .collect::<Vec<_>>();
@@ -9790,8 +9929,9 @@ impl<'a> RawLambdaConverter<'a> {
                         .map(|binding| {
                             let mut value = self.convert_expr_raw(&binding.vb_expr);
                             let inline_attr =
-                                Self::get_inline_attribute_from(&binding.vb_attributes, self.arena);
-                            value = Self::apply_inline_attribute_raw(value, inline_attr);
+                                self.get_inline_attribute_from(&binding.vb_attributes);
+                            value =
+                                self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
                             (
                                 simple_let_binding_id(binding).expect("checked above"),
                                 value,
@@ -9819,6 +9959,7 @@ impl<'a> RawLambdaConverter<'a> {
         function_type: TypeExprRef,
         async_: bool,
         directive: Option<String>,
+        inline: InlineAttribute,
         loc: Location,
     ) -> RawLambda {
         let (all_params, final_body, _partial) =
@@ -9869,6 +10010,7 @@ impl<'a> RawLambdaConverter<'a> {
                 return_unit,
                 async_,
                 directive,
+                inline,
                 ..FunctionAttribute::default()
             },
         );
@@ -9899,6 +10041,7 @@ impl<'a> RawLambdaConverter<'a> {
         function_type: TypeExprRef,
         async_: bool,
         directive: Option<String>,
+        inline: InlineAttribute,
         loc: Location,
     ) -> Option<RawLambda> {
         if case.c_guard.is_some() {
@@ -10009,6 +10152,7 @@ impl<'a> RawLambdaConverter<'a> {
                 return_unit,
                 async_,
                 directive,
+                inline,
                 ..FunctionAttribute::default()
             },
         );
@@ -10072,7 +10216,8 @@ impl<'a> RawLambdaConverter<'a> {
                         return if rest.is_empty() {
                             base
                         } else {
-                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
+                            let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
                         };
                     }
                     let primitive = self.translate_primitive_application_raw(
@@ -10098,13 +10243,16 @@ impl<'a> RawLambdaConverter<'a> {
                     return if rest.is_empty() {
                         base
                     } else {
-                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None)
+                        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
                     };
                 }
             }
         }
 
-        let funct_lam = self.convert_expr_raw(funct);
+        let inlined = self.get_inlined_attribute_from(&funct.exp_attributes);
+        let funct_lam =
+            self.with_inlined_attribute_check_suppressed(|this| this.convert_expr_raw(funct));
         let uncurried_partial_application = if partial {
             self.env_for_expr(funct).and_then(|env| {
                 self.get_function_arity_from_type(env.as_ref(), funct.exp_type)
@@ -10123,6 +10271,7 @@ impl<'a> RawLambdaConverter<'a> {
             loc,
             transformed_jsx,
             uncurried_partial_application,
+            inlined,
         )
     }
 
@@ -10528,19 +10677,21 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
         transformed_jsx: bool,
         uncurried_partial_application: Option<i32>,
+        inlined: InlineAttribute,
     ) -> RawLambda {
         fn lapply(
             loc: Location,
             func: RawLambda,
             args: Vec<RawLambda>,
             transformed_jsx: bool,
+            inlined: InlineAttribute,
         ) -> RawLambda {
             RawLambda::Lapply(crate::raw_lambda::RawApply {
                 ap_func: Box::new(func),
                 ap_args: args,
                 ap_info: ApInfo {
                     loc,
-                    inlined: InlineAttribute::Default,
+                    inlined,
                     status: ApplyStatus::Na,
                 },
                 ap_transformed_jsx: transformed_jsx,
@@ -10565,6 +10716,7 @@ impl<'a> RawLambdaConverter<'a> {
             pending: &[(Option<RawLambda>, bool)],
             loc: Location,
             transformed_jsx: bool,
+            inlined: InlineAttribute,
         ) -> RawLambda {
             match pending.split_first() {
                 Some(((None, optional), tail)) => {
@@ -10597,6 +10749,7 @@ impl<'a> RawLambdaConverter<'a> {
                             lam,
                             args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
                             transformed_jsx,
+                            InlineAttribute::Default,
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
@@ -10621,6 +10774,7 @@ impl<'a> RawLambdaConverter<'a> {
                         &protected_tail,
                         loc,
                         transformed_jsx,
+                        inlined,
                     ) {
                         RawLambda::Lfunction(func) => {
                             RawLambda::Lfunction(crate::raw_lambda::RawLFunction {
@@ -10640,13 +10794,14 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Some(((Some(arg), optional), tail)) => {
                     args_rev.insert(0, (arg.clone(), *optional));
-                    build_apply(conv, lam, args_rev, tail, loc, transformed_jsx)
+                    build_apply(conv, lam, args_rev, tail, loc, transformed_jsx, inlined)
                 }
                 None => lapply(
                     loc,
                     lam,
                     args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
                     transformed_jsx,
+                    inlined,
                 ),
             }
         }
@@ -10671,7 +10826,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(RawLambda::var));
-                let body = lapply(loc.clone(), lam, ap_args, transformed_jsx);
+                let body = lapply(loc.clone(), lam, ap_args, transformed_jsx, inlined);
                 RawLambda::function_(
                     (none_ids.len() + extra_ids.len()) as i32,
                     none_ids.into_iter().chain(extra_ids).collect(),
@@ -10689,7 +10844,15 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     })
                     .collect::<Vec<_>>();
-                build_apply(self, lam, Vec::new(), &pending, loc, transformed_jsx)
+                build_apply(
+                    self,
+                    lam,
+                    Vec::new(),
+                    &pending,
+                    loc,
+                    transformed_jsx,
+                    inlined,
+                )
             }
         }
     }
