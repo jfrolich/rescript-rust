@@ -143,6 +143,9 @@ const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition 
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
 const COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent!";
+const COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
+const COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str =
+    "` is defined several times in this component.";
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
 const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
     "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
@@ -595,7 +598,14 @@ fn transform_react_component_binding(
     let props_type = if let Some(manifest) = &core_type_of_attr {
         make_props_abstract_type(arena, "props", pstr_loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type(arena, "props", pstr_loc, &named_type_list, has_forward_ref)
+        make_props_record_type(
+            arena,
+            config,
+            "props",
+            pstr_loc,
+            &named_type_list,
+            has_forward_ref,
+        )
     };
 
     // Build the internal expression pattern (use inner expression to handle forwardRef)
@@ -2034,7 +2044,7 @@ fn transform_react_component_sig(
         // sharedProps signature: no extra attributes
         make_props_abstract_type_sig(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type_sig(arena, "props", loc, &named_type_list)
+        make_props_record_type_sig(arena, config, "props", loc, &named_type_list)
     };
 
     // Filter attributes
@@ -2174,7 +2184,7 @@ fn transform_react_component_external(
         make_props_abstract_type(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
         // regular external: add live attribute
-        make_props_record_type_with_live(arena, "props", loc, &named_type_list)
+        make_props_record_type_with_live(arena, config, "props", loc, &named_type_list)
     };
 
     // Filter attributes (remove @react.component)
@@ -2268,12 +2278,12 @@ fn transform_react_component_external(
 /// Create props record type with @live attribute (for externals)
 fn make_props_record_type_with_live(
     arena: &mut ParseArena,
+    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
 ) -> StructureItem {
-    // Check for duplicate labels (OCaml: check_duplicated_label)
-    check_duplicated_labels(named_types);
+    set_duplicate_label_error(config, named_types);
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
@@ -3329,26 +3339,37 @@ fn arg_to_type(arena: &ParseArena, arg: &ExtractedArg) -> Option<NamedType> {
     })
 }
 
-/// Create props record type declaration
 /// Check for duplicate labels in props (OCaml: check_duplicated_label)
-fn check_duplicated_labels(named_types: &[NamedType]) {
-    let mut seen = std::collections::HashSet::new();
-    for nt in named_types.iter().rev() {
-        if !seen.insert(&nt.label) {
-            return;
+fn duplicated_label(named_types: &[NamedType]) -> Option<(Location, &str)> {
+    for (idx, nt) in named_types.iter().enumerate().rev() {
+        if named_types[..idx]
+            .iter()
+            .any(|previous| previous.label.as_str() == nt.label.as_str())
+        {
+            return Some((nt.loc, nt.label.as_str()));
         }
+    }
+    None
+}
+
+fn set_duplicate_label_error(config: &mut JsxConfig, named_types: &[NamedType]) {
+    if let Some((loc, label)) = duplicated_label(named_types) {
+        let message = format!(
+            "{COMPONENT_DUPLICATE_PROP_MSG_PREFIX}{label}{COMPONENT_DUPLICATE_PROP_MSG_SUFFIX}"
+        );
+        set_fatal_error(config, loc, &message);
     }
 }
 
 fn make_props_record_type(
     arena: &mut ParseArena,
+    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
     has_forward_ref: bool,
 ) -> StructureItem {
-    // Check for duplicate labels (OCaml: check_duplicated_label)
-    check_duplicated_labels(named_types);
+    set_duplicate_label_error(config, named_types);
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
@@ -3437,12 +3458,12 @@ fn make_props_record_type(
 /// Create props record type declaration for signatures
 fn make_props_record_type_sig(
     arena: &mut ParseArena,
+    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
 ) -> SignatureItem {
-    // Check for duplicate labels (OCaml: check_duplicated_label)
-    check_duplicated_labels(named_types);
+    set_duplicate_label_error(config, named_types);
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
