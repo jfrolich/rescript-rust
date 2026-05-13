@@ -654,6 +654,13 @@ with a reason after checking raise sites.
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/external_missing_primitive.res`.
 - `compiler/syntax/src/jsx_v4.ml`
+  - `check_multiple_components` rejects more than one `@react.component`
+    definition in the same module before generated React type lookups can mask
+    the PPX error
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_multiple_definitions.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_signature_multiple_definitions.resi`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by
