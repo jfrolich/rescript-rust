@@ -836,6 +836,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
       and
       `tests/error_output_parity/compiler/fixtures/unused_module_hidden_by_module_constraint.res`.
+  - `Warnings.Open_shadow_identifier` value shadowing from an `open`, reported
+    only when the opened value is later used
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_identifier.res`.
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
     - Covered by

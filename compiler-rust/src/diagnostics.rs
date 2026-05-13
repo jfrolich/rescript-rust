@@ -122,6 +122,10 @@ pub enum Warning {
     },
     /// Warning 43: Nonoptional label.
     NonoptionalLabel { name: String },
+    /// Warning 44: Open shadows an identifier.
+    OpenShadowIdentifier { kind: String, name: String },
+    /// Warning 45: Open shadows a label or constructor.
+    OpenShadowLabelConstructor { kind: String, name: String },
     /// Warning 47: Illegal attribute payload.
     AttributePayload { attr: String, message: String },
     /// Warning 48: Eliminated optional arguments.
@@ -207,6 +211,8 @@ impl Warning {
             Warning::UnusedRecFlag => 39,
             Warning::AmbiguousName { .. } => 41,
             Warning::NonoptionalLabel { .. } => 43,
+            Warning::OpenShadowIdentifier { .. } => 44,
+            Warning::OpenShadowLabelConstructor { .. } => 45,
             Warning::AttributePayload { .. } => 47,
             Warning::EliminatedOptionalArguments { .. } => 48,
             Warning::NoCmiFile { .. } => 49,
@@ -430,6 +436,18 @@ The first one was selected. Disambiguate if this is wrong.",
                 }
             }
             Warning::NonoptionalLabel { name } => format!("the label {} is not optional.", name),
+            Warning::OpenShadowIdentifier { kind, name } => {
+                format!(
+                    "this open statement shadows the {} identifier {} (which is later used)",
+                    kind, name
+                )
+            }
+            Warning::OpenShadowLabelConstructor { kind, name } => {
+                format!(
+                    "this open statement shadows the {} {} (which is later used)",
+                    kind, name
+                )
+            }
             Warning::AttributePayload { attr, message } => {
                 format!("illegal payload for attribute '{}'.\n{}", attr, message)
             }

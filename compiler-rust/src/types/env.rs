@@ -669,6 +669,17 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
+    /// Find a value by name with its local/opened origin flag.
+    pub fn find_value_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ValueDescription, bool)> {
+        self.values
+            .find_by_name_with_origin(name)
+            .map(|(id, v, is_local)| (id, v.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
+    }
+
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
         self.values.iter().map(|(id, v)| (id, v.as_ref()))
