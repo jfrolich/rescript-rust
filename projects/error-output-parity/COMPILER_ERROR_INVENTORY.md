@@ -803,6 +803,13 @@ with a reason after checking raise sites.
       `tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res`
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/attribute_payload_comma.res`.
+  - `is_es6_arrow_expression` classifies parenthesized parameters followed by
+    a non-ternary `:` as arrow candidates before parsing the return type, which
+    preserves OCaml's missing-`=>` recovery for polymorphic return annotations
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype.res`
+      and through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/arrow_return_polytype_recovery.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask

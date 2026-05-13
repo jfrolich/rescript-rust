@@ -998,9 +998,19 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                         match &state.token {
                             Token::Colon if !in_ternary => {
                                 state.next();
-                                // Check for `() :typ =>`
-                                super::typ::parse_typ_expr_no_arrow(state);
-                                matches!(state.token, Token::EqualGreater)
+                                match &state.token {
+                                    Token::Lident(_) => {
+                                        state.next();
+                                        if state.token == Token::LessThan {
+                                            state.set_diamond_mode();
+                                            state.next();
+                                            go_to_closing(&Token::GreaterThan, state);
+                                            state.pop_diamond_mode();
+                                        }
+                                        matches!(state.token, Token::EqualGreater)
+                                    }
+                                    _ => true,
+                                }
                             }
                             Token::EqualGreater => true,
                             _ => false,
@@ -1012,11 +1022,7 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                         go_to_closing(&Token::Rparen, state);
                         match &state.token {
                             Token::EqualGreater => true,
-                            Token::Colon if !in_ternary => {
-                                state.next();
-                                super::typ::parse_typ_expr_no_arrow(state);
-                                matches!(state.token, Token::EqualGreater)
-                            }
+                            Token::Colon if !in_ternary => true,
                             Token::Rparen => false,
                             _ => {
                                 state.next_unsafe();
