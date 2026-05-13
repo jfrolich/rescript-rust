@@ -143,6 +143,8 @@ pub enum Warning {
     AmbiguousPattern { vars: Vec<String> },
     /// Warning 60: Unused module.
     UnusedModule { name: String },
+    /// Warning 62: Type constraint on GADT type declaration.
+    ConstraintOnGadt,
     /// Warning 101: Unused ReScript attribute.
     BsUnusedAttribute { name: String },
     /// Warning 102: Polymorphic comparison.
@@ -214,6 +216,7 @@ impl Warning {
             Warning::UnreachableCase => 56,
             Warning::AmbiguousPattern { .. } => 57,
             Warning::UnusedModule { .. } => 60,
+            Warning::ConstraintOnGadt => 62,
             Warning::BsUnusedAttribute { .. } => 101,
             Warning::BsPolymorphicComparison => 102,
             Warning::BsFfiWarning { .. } => 103,
@@ -476,6 +479,9 @@ and may change in future versions. (See manual section 8.5)"
                 )
             }
             Warning::UnusedModule { name } => format!("unused module {}.", name),
+            Warning::ConstraintOnGadt => {
+                "Type constraints do not apply to GADT cases of variant types.".to_string()
+            }
             Warning::BsUnusedAttribute { name } => {
                 format!(
                     "Unused attribute: @{}\n\

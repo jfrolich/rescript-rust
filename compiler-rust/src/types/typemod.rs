@@ -3599,6 +3599,21 @@ fn check_type_declaration_duplicate_definitions(
     }
 }
 
+fn check_type_declaration_constraint_on_gadt(
+    tctx: &mut TypeCheckContext<'_>,
+    decl: &crate::parser::ast::TypeDeclaration,
+) {
+    let Some((_, _, loc)) = decl.ptype_cstrs.first() else {
+        return;
+    };
+    let crate::parser::ast::TypeKind::Ptype_variant(constructors) = &decl.ptype_kind else {
+        return;
+    };
+    if constructors.iter().any(|constructor| constructor.pcd_res.is_some()) {
+        tctx.report_warning(*loc, Warning::ConstraintOnGadt);
+    }
+}
+
 fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
     matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
 }
@@ -17540,6 +17555,10 @@ fn type_structure_item<'a>(
                     typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
                 }
 
+                // OCaml typedecl.ml warns after translating type constraints
+                // when those constraints are attached to a GADT declaration.
+                check_type_declaration_constraint_on_gadt(tctx, decl);
+
                 check_unboxed_type_attributes(arena, decl)?;
 
                 // Check for @unboxed attribute (only applies to single-constructor variants)
@@ -20636,6 +20655,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 let (typed_ct2, _) = transl_type(tctx, &temp_env, arena.get_core_type(*ct2))?;
                 typ_cstrs.push((typed_ct1, typed_ct2, *cstr_loc));
             }
+
+            // OCaml typedecl.ml warns after translating type constraints
+            // when those constraints are attached to a GADT declaration.
+            check_type_declaration_constraint_on_gadt(tctx, decl);
 
             check_unboxed_type_attributes(arena, decl)?;
 

@@ -479,6 +479,11 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/typedecl_warning_duplicate_label_definition.res`;
     the signature translation path is covered by
     `tests/error_output_parity/compiler/fixtures/typedecl_warning_duplicate_constructor_definition_signature.resi`.
+- `Warnings.Constraint_on_gadt`
+  - Covered for implementation and signature declarations by
+    `tests/error_output_parity/compiler/fixtures/typedecl_warning_constraint_on_gadt.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/typedecl_warning_constraint_on_gadt_signature.resi`.
 - `Object_spread_with_record_field`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.
