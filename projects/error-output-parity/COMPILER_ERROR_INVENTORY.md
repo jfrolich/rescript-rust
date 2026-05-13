@@ -133,17 +133,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/field_not_optional_inline_record.res`.
 - `Illegal_letrec_pat`: covered by
   `tests/error_output_parity/compiler/fixtures/illegal_letrec_pattern.res`.
-- `Modules_not_allowed`: unreachable from normal `.res` source in the current
-  OCaml code. The only raise is in `enter_variable ~is_module:true` when
-  `allow_modules` is false, but the normal pattern entry points found in
-  `compiler/ml/typecore.ml` call `reset_pattern` with `true`, and Rust mirrors
-  this with `PatternState::reset(true)`.
+- `Modules_not_allowed`: covered by
+  `tests/error_output_parity/compiler/fixtures/modules_not_allowed_toplevel_unpack.res`.
 - `Invalid_for_loop_index`: covered by
   `tests/error_output_parity/compiler/fixtures/invalid_for_loop_index.res`.
-- `Invalid_for_of_pattern`: parser-gated for normal `.res` source by
-  `normalize_for_of_pattern` in `compiler/syntax/src/res_core.ml`; destructuring
-  patterns in `for...of` report a syntax error before Typecore. Keep this marked
-  as unreachable from normal source unless a PPX/binary AST fixture is added.
+- `Invalid_for_of_pattern`: covered by
+  `tests/error_output_parity/compiler/fixtures/invalid_for_of_pattern.res`.
 - `Invalid_interval`: covered by
   `tests/error_output_parity/compiler/fixtures/invalid_interval_pattern.res`.
 - `No_value_clauses`: covered by
@@ -252,16 +247,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/signature_unbound_modtype.res`.
 - `Access_functor_as_structure`: covered by
   `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`.
-- `Ill_typed_functor_application`: not reachable from normal `.res`/`.resi`
-  source found so far. OCaml raises this while narrowing an unresolved
-  `Longident.Lapply` component path, but the ReScript parser does not expose
-  applicative functor applications as source-level longidents in type/value
-  paths.
-- `Apply_structure_as_functor`: not reachable from normal `.res`/`.resi`
-  source found so far for the same reason as
-  `Ill_typed_functor_application`: the OCaml raise site requires an
-  `Lapply` longident, and normal ReScript functor application syntax is parsed
-  as a module expression instead.
+- `Ill_typed_functor_application`: covered by
+  `tests/error_output_parity/compiler/fixtures/ill_typed_functor_application_type_path.res`.
+- `Apply_structure_as_functor`: covered by
+  `tests/error_output_parity/compiler/fixtures/apply_structure_as_functor_type_path.res`.
 - `Illegal_reference_to_recursive_module`: covered by
   `tests/error_output_parity/compiler/fixtures/illegal_reference_to_recursive_module.res`.
   A non-error parity guard for OCaml's recursive-module inclusion unrolling is
@@ -452,23 +441,14 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_mismatch_type.res`.
 - `With_makes_applicative_functor_ill_typed`
-  - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
-    raise site only fires for deep destructive substitutions when an
-    applicative functor path such as `F(M).t` remains in the constrained
-    signature and becomes ill typed after substituting a nested module path.
-    The ReScript parser does not expose source syntax for applicative functor
-    type paths in signatures; a direct `F(M).u` type path is rejected by the
-    parser before Typemod.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/with_makes_applicative_functor_ill_typed.res`.
 - `With_changes_module_alias`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_changes_module_alias.res`.
 - `With_cannot_remove_constrained_type`
-  - Not reachable from normal `.res`/`.resi` source found so far. OCaml raises
-    this only for non-alias destructive `with type ... := ...` substitutions
-    whose translated parameters are constrained. In ReScript source, explicit
-    `constraint` clauses are accepted on ordinary type declarations but not
-    inside module-type `with type` constraints; duplicate parameters are
-    rejected earlier by `Typedecl.Repeated_parameter`.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/with_cannot_remove_constrained_type.res`.
 - `Repeated_name`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/repeated_module_name.res`.
@@ -491,13 +471,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/incomplete_packed_module.res`.
 - `Scoping_pack`
-  - No reachable `.res`/`.resi` fixture found yet. The OCaml raise site is
-    limited to first-class module packing with package constraints after
-    `type_package` rebuilds constrained package arguments and checks whether
-    they can be exported without local dependencies. Reduced ReScript probes
-    with locally abstract types either compile in OCaml or fail earlier for
-    other reasons. The package local type escape fixture covers the related
-    `Typecore.Expr_type_clash` path, not this `Typemod.Scoping_pack` raise.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/package_scoping_pack_local_type.res`.
 - `Recursive_module_require_explicit_type`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`.

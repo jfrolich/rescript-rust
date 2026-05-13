@@ -523,6 +523,56 @@ fn external_desc_is_plain_get(desc: &ExternalDesc) -> bool {
         && !desc.splice
 }
 
+fn external_desc_is_plain_obj(desc: &ExternalDesc) -> bool {
+    desc.mk_obj
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+        && !desc.splice
+        && desc.scopes.is_empty()
+        && desc.return_wrapper == ReturnWrapper::ReturnUnset
+}
+
+fn validate_plain_obj_arg_type_errors(
+    vd_type: &CoreType,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let (args, _result) = list_of_arrow(vd_type, arena);
+    for arg in args {
+        let typ = arena.get_core_type(arg.typ);
+        match arg.lbl {
+            ArgLabel::Labelled(_) => {
+                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
+                    && get_as_string_attr(&arg.attrs, arena).is_none()
+                    && get_as_int_attr(&arg.attrs, arena).is_none()
+                {
+                    return Err(PpxError::at_loc(
+                        typ.ptyp_loc,
+                        "_ is not allowed in combination with external optional type",
+                    ));
+                }
+            }
+            ArgLabel::Optional(_) => {
+                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+                    return Err(PpxError::at_loc(
+                        typ.ptyp_loc,
+                        "_ is not allowed in combination with external optional type",
+                    ));
+                }
+            }
+            ArgLabel::Nolabel => {}
+        }
+    }
+    Ok(())
+}
+
 fn validate_external_attribute_errors(
     vd: &ValueDescription,
     arena: &mut ParseArena,
@@ -553,6 +603,19 @@ fn validate_external_attribute_errors(
             vd.pval_loc,
             "Ill defined attribute @get (unit argument is not allowed)",
         ));
+    }
+
+    // OCaml Ast_external_process.process_obj rejects non-empty primitive names
+    // for plain @obj externals before reconstructing the external type.
+    if external_desc_is_plain_obj(&desc) && !prim_name.is_empty() {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "@obj expect external names to be empty string",
+        ));
+    }
+
+    if external_desc_is_plain_obj(&desc) {
+        validate_plain_obj_arg_type_errors(&vd_type, arena)?;
     }
 
     Ok(())
