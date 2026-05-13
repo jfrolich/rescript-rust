@@ -1776,6 +1776,9 @@ fn ppx_error_to_anyhow(
             },
         ));
     }
+    if err.loc().is_none() && err.message_text().starts_with("Fatal error: exception ") {
+        return UserDiagnostic::new(format!("{prefix}{}", err.message_text()), 2).into();
+    }
     if let Some(loc) = err.loc() {
         let message = err.message_text();
         let mut report = if message.contains('\n') {

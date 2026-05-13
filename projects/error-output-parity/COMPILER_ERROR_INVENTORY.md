@@ -1178,6 +1178,10 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_max_warning.res`.
 - `compiler/ml/ast_payload.ml`
+  - `is_single_int` lets `int_of_string` overflow escape for oversized
+    integer payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_int_as_overflow.res`.
   - `%re` JavaScript regex literal validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/raw_re_non_regex.res`.

@@ -90,6 +90,10 @@ impl PpxError {
         }
     }
 
+    fn int_of_string_failure() -> Self {
+        Self::message("Fatal error: exception Failure(\"int_of_string\")\n")
+    }
+
     fn with_warning(mut self, loc: LocIdx, warning: Warning) -> Self {
         self.warnings.push(PpxWarning { loc, warning });
         self
@@ -2759,7 +2763,9 @@ fn validate_string_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResul
 
 fn validate_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
-        if arena.get_string(attr_name.txt) == "as" && get_payload_int(payload, arena).is_none() {
+        if arena.get_string(attr_name.txt) == "as"
+            && get_payload_int_result(payload, arena)?.is_none()
+        {
             return Err(PpxError::at_loc(attr_name.loc, "expect int literal "));
         }
     }
@@ -2771,7 +2777,7 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
         if arena.get_string(attr_name.txt) != "as" {
             continue;
         }
-        if get_payload_int(payload, arena).is_some() {
+        if get_payload_int_result(payload, arena)?.is_some() {
             continue;
         }
         let Some((payload, delim, loc, flow_offset)) =
@@ -3924,7 +3930,10 @@ fn return_wrapper_config_warning(
 }
 
 /// Extract integer from attribute payload (mirrors OCaml's Ast_payload.is_single_int)
-fn get_payload_int(payload: &current::Payload, arena: &ParseArena) -> Option<i32> {
+fn get_payload_int_result(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> PpxResult<Option<i32>> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
@@ -3933,16 +3942,23 @@ fn get_payload_int(payload: &current::Payload, arena: &ParseArena) -> Option<i32
                     if let current::Constant::Integer(name, suffix) = &**c {
                         // OCaml's is_single_int rejects 'n' suffix (bigint)
                         if matches!(suffix, Some('n')) {
-                            return None;
+                            return Ok(None);
                         }
-                        return name.parse::<i32>().ok();
+                        return name
+                            .parse::<i32>()
+                            .map(Some)
+                            .map_err(|_| PpxError::int_of_string_failure());
                     }
                 }
             }
-            None
+            Ok(None)
         }
-        _ => None,
+        _ => Ok(None),
     }
+}
+
+fn get_payload_int(payload: &current::Payload, arena: &ParseArena) -> Option<i32> {
+    get_payload_int_result(payload, arena).ok().flatten()
 }
 
 /// Extract string with delimiter from attribute payload.
