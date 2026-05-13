@@ -1398,7 +1398,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/await_module_constraint_typeof_success.res`.
   - `%%private` empty structure payload rejection
     - Covered by
-      `tests/build_tests/super_errors/fixtures/private_without_body.res`.
+      `tests/error_output_parity/compiler/fixtures/builtin_private_extension_empty.res`.
   - `%%private` non-structure payload rejection for `PTyp`, `PSig`, and `PPat`
     payloads
     - Covered by
