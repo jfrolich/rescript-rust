@@ -8110,6 +8110,429 @@ pub fn compute_variance_decl(
         .collect()
 }
 
+pub(crate) fn compute_variance_map_for_fields(
+    ctx: &TypeContext,
+    env: &Env,
+    fields: &[(bool, TypeExprRef)],
+) -> ahash::AHashMap<TypeExprRef, Variance> {
+    let roots: Vec<_> = fields
+        .iter()
+        .map(|(is_mutable, ty)| {
+            let initial_variance = if *is_mutable {
+                Variance::FULL
+            } else {
+                Variance::covariant()
+            };
+            (initial_variance, *ty)
+        })
+        .collect();
+    compute_variance_map_with_initial(ctx, env, &roots)
+}
+
+pub(crate) fn compute_variance_map_with_initial(
+    ctx: &TypeContext,
+    env: &Env,
+    roots: &[(Variance, TypeExprRef)],
+) -> ahash::AHashMap<TypeExprRef, Variance> {
+    let mut visited: HashMap<TypeExprRef, Variance> = HashMap::new();
+    for (initial_variance, ty) in roots {
+        compute_variance_rec(ctx, env, &mut visited, *initial_variance, *ty, 0);
+    }
+    visited
+}
+
+pub(crate) fn equal_type_exprs_without_renaming(
+    ctx: &TypeContext,
+    env: &Env,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> bool {
+    let mut type_pairs = HashSet::new();
+    equal_type_exprs_without_renaming_rec(ctx, env, &mut type_pairs, left, right).is_ok()
+}
+
+fn equal_type_exprs_without_renaming_rec(
+    ctx: &TypeContext,
+    env: &Env,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> TypeResult<()> {
+    if left == right {
+        return Ok(());
+    }
+
+    let left = ctx.repr(left);
+    let right = ctx.repr(right);
+    if left == right {
+        return Ok(());
+    }
+
+    {
+        let left_desc = ctx.get_desc(left);
+        let right_desc = ctx.get_desc(right);
+        if let (
+            TypeDesc::Tconstr {
+                path: left_path,
+                args: left_args,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: right_path,
+                args: right_args,
+                ..
+            },
+        ) = (&*left_desc, &*right_desc)
+        {
+            if left_args.is_empty() && right_args.is_empty() && left_path.same(right_path) {
+                return Ok(());
+            }
+        }
+    }
+
+    let left_expanded = ctx.repr(expand_head(ctx, env, left));
+    let right_expanded = ctx.repr(expand_head(ctx, env, right));
+    if left_expanded == right_expanded {
+        return Ok(());
+    }
+    if !type_pairs.insert((left_expanded, right_expanded)) {
+        return Ok(());
+    }
+
+    let left_desc = ctx.get_desc(left_expanded);
+    let right_desc = ctx.get_desc(right_expanded);
+    match (&*left_desc, &*right_desc) {
+        (
+            TypeDesc::Tarrow {
+                arg: left_arg,
+                ret: left_ret,
+                ..
+            },
+            TypeDesc::Tarrow {
+                arg: right_arg,
+                ret: right_ret,
+                ..
+            },
+        ) if left_arg.lbl.same_label(&right_arg.lbl) => {
+            let left_arg = left_arg.typ;
+            let right_arg = right_arg.typ;
+            let left_ret = *left_ret;
+            let right_ret = *right_ret;
+            drop(left_desc);
+            drop(right_desc);
+            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_arg, right_arg)?;
+            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_ret, right_ret)
+        }
+        (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
+            let left_items = left_items.clone();
+            let right_items = right_items.clone();
+            drop(left_desc);
+            drop(right_desc);
+            equal_type_expr_lists_without_renaming(ctx, env, type_pairs, &left_items, &right_items)
+        }
+        (
+            TypeDesc::Tconstr {
+                path: left_path,
+                args: left_args,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: right_path,
+                args: right_args,
+                ..
+            },
+        ) if left_path.same(right_path) => {
+            let left_args = left_args.clone();
+            let right_args = right_args.clone();
+            drop(left_desc);
+            drop(right_desc);
+            equal_type_expr_lists_without_renaming(ctx, env, type_pairs, &left_args, &right_args)
+        }
+        (
+            TypeDesc::Tpackage {
+                path: left_path,
+                lids: left_lids,
+                args: left_args,
+            },
+            TypeDesc::Tpackage {
+                path: right_path,
+                lids: right_lids,
+                args: right_args,
+            },
+        ) => {
+            let left_path = left_path.clone();
+            let right_path = right_path.clone();
+            let left_lids = left_lids.clone();
+            let right_lids = right_lids.clone();
+            let left_args = left_args.clone();
+            let right_args = right_args.clone();
+            drop(left_desc);
+            drop(right_desc);
+            let complete_right = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                Some(env),
+                crate::types::decl::ModuleType::MtyIdent(right_path.clone()),
+                &left_lids,
+                &right_lids,
+            );
+            let complete_left = package_type_lists_have_ocaml_same_label_completion_side_effect(
+                ctx,
+                Some(env),
+                crate::types::decl::ModuleType::MtyIdent(left_path.clone()),
+                &right_lids,
+                &left_lids,
+            );
+            if !(complete_right && complete_left && left_path.same(&right_path)) {
+                return Err(TypeError::Unify(vec![]));
+            }
+            equal_type_expr_lists_without_renaming(ctx, env, type_pairs, &left_args, &right_args)
+        }
+        (TypeDesc::Tvariant(left_row), TypeDesc::Tvariant(right_row)) => {
+            let left_row = left_row.clone();
+            let right_row = right_row.clone();
+            drop(left_desc);
+            drop(right_desc);
+            equal_rows_without_renaming(ctx, env, type_pairs, &left_row, &right_row)
+        }
+        (
+            TypeDesc::Tobject {
+                fields: left_fields,
+                ..
+            },
+            TypeDesc::Tobject {
+                fields: right_fields,
+                ..
+            },
+        ) => {
+            let left_fields = *left_fields;
+            let right_fields = *right_fields;
+            drop(left_desc);
+            drop(right_desc);
+            equal_object_fields_without_renaming(ctx, env, type_pairs, left_fields, right_fields)
+        }
+        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => {
+            drop(left_desc);
+            drop(right_desc);
+            equal_object_fields_without_renaming(
+                ctx,
+                env,
+                type_pairs,
+                left_expanded,
+                right_expanded,
+            )
+        }
+        (TypeDesc::Tnil, TypeDesc::Tnil) => Ok(()),
+        (
+            TypeDesc::Tpoly {
+                body: left_body,
+                vars,
+            },
+            TypeDesc::Tpoly {
+                body: right_body,
+                vars: right_vars,
+            },
+        ) if vars.is_empty() && right_vars.is_empty() => {
+            let left_body = *left_body;
+            let right_body = *right_body;
+            drop(left_desc);
+            drop(right_desc);
+            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_body, right_body)
+        }
+        (
+            TypeDesc::Tpoly {
+                body: left_body,
+                vars,
+            },
+            TypeDesc::Tpoly {
+                body: right_body,
+                vars: right_vars,
+            },
+        ) if vars.len() == right_vars.len() => {
+            let left_body = *left_body;
+            let right_body = *right_body;
+            drop(left_desc);
+            drop(right_desc);
+            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_body, right_body)
+        }
+        (TypeDesc::Tunivar(left_name), TypeDesc::Tunivar(right_name))
+            if left_name == right_name =>
+        {
+            Ok(())
+        }
+        _ => Err(TypeError::Unify(vec![])),
+    }
+}
+
+fn equal_type_expr_lists_without_renaming(
+    ctx: &TypeContext,
+    env: &Env,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    left: &[TypeExprRef],
+    right: &[TypeExprRef],
+) -> TypeResult<()> {
+    if left.len() != right.len() {
+        return Err(TypeError::Unify(vec![]));
+    }
+    for (left_item, right_item) in left.iter().zip(right.iter()) {
+        equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, *left_item, *right_item)?;
+    }
+    Ok(())
+}
+
+fn equal_rows_without_renaming(
+    ctx: &TypeContext,
+    env: &Env,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    left: &RowDesc,
+    right: &RowDesc,
+) -> TypeResult<()> {
+    let left = row_repr_ref(ctx, left);
+    let right = row_repr_ref(ctx, right);
+    let left = left.as_ref();
+    let right = right.as_ref();
+    let (left_only, right_only, pairs) = merge_row_fields(&left.row_fields, &right.row_fields);
+    if left.row_closed != right.row_closed
+        || (!left.row_closed && (!left_only.is_empty() || !right_only.is_empty()))
+        || left_only
+            .iter()
+            .chain(right_only.iter())
+            .any(|(_, field)| !btype::row_field_is_absent(ctx, field))
+    {
+        return Err(TypeError::Unify(vec![]));
+    }
+
+    if !btype::static_row(ctx, left) {
+        equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left.row_more, right.row_more)?;
+    }
+    for (_, left_field, right_field) in pairs {
+        equal_row_fields_without_renaming(ctx, env, type_pairs, left_field, right_field)?;
+    }
+    Ok(())
+}
+
+fn equal_row_fields_without_renaming(
+    ctx: &TypeContext,
+    env: &Env,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    left: &RowField,
+    right: &RowField,
+) -> TypeResult<()> {
+    let left = btype::row_field_repr(ctx, left);
+    let right = btype::row_field_repr(ctx, right);
+    match (&left, &right) {
+        (RowField::Rpresent(None), RowField::Rpresent(None))
+        | (RowField::Rabsent, RowField::Rabsent) => Ok(()),
+        (RowField::Rpresent(Some(left_ty)), RowField::Rpresent(Some(right_ty))) => {
+            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, *left_ty, *right_ty)
+        }
+        (
+            RowField::Reither {
+                constant: left_constant,
+                types: left_types,
+                ..
+            },
+            RowField::Reither {
+                constant: right_constant,
+                types: right_types,
+                ..
+            },
+        ) if left_constant == right_constant && left_types.is_empty() && right_types.is_empty() => {
+            Ok(())
+        }
+        (
+            RowField::Reither {
+                constant: left_constant,
+                types: left_types,
+                ..
+            },
+            RowField::Reither {
+                constant: right_constant,
+                types: right_types,
+                ..
+            },
+        ) if left_constant == right_constant
+            && !left_types.is_empty()
+            && !right_types.is_empty() =>
+        {
+            equal_type_exprs_without_renaming_rec(
+                ctx,
+                env,
+                type_pairs,
+                left_types[0],
+                right_types[0],
+            )?;
+            if left_types.len() == right_types.len() {
+                equal_type_expr_lists_without_renaming(
+                    ctx,
+                    env,
+                    type_pairs,
+                    &left_types[1..],
+                    &right_types[1..],
+                )
+            } else {
+                for right_ty in right_types.iter().skip(1) {
+                    equal_type_exprs_without_renaming_rec(
+                        ctx,
+                        env,
+                        type_pairs,
+                        left_types[0],
+                        *right_ty,
+                    )?;
+                }
+                for left_ty in left_types.iter().skip(1) {
+                    equal_type_exprs_without_renaming_rec(
+                        ctx,
+                        env,
+                        type_pairs,
+                        *left_ty,
+                        right_types[0],
+                    )?;
+                }
+                Ok(())
+            }
+        }
+        _ => Err(TypeError::Unify(vec![])),
+    }
+}
+
+fn equal_object_fields_without_renaming(
+    ctx: &TypeContext,
+    env: &Env,
+    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> TypeResult<()> {
+    let (left_fields, left_rest) = flatten_fields(ctx, left);
+    let (right_fields, right_rest) = flatten_fields(ctx, right);
+    let same_row = left_rest == right_rest || type_pairs.contains(&(left_rest, right_rest));
+    if !same_row {
+        let right_rest_expanded = ctx.repr(expand_head(ctx, env, right_rest));
+        if let TypeDesc::Tobject { fields, .. } = &*ctx.get_desc(right_rest_expanded) {
+            return equal_object_fields_without_renaming(ctx, env, type_pairs, left, *fields);
+        }
+    }
+
+    let (pairs, missing_left, missing_right) = associate_fields(left_fields, right_fields);
+    equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_rest, right_rest)?;
+    if !missing_left.is_empty() || !missing_right.is_empty() {
+        return Err(TypeError::Unify(vec![]));
+    }
+    for (_, left_kind, left_ty, right_kind, right_ty) in pairs {
+        equal_field_kinds_without_renaming(&left_kind, &right_kind)?;
+        equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_ty, right_ty)?;
+    }
+    Ok(())
+}
+
+fn equal_field_kinds_without_renaming(left: &FieldKind, right: &FieldKind) -> TypeResult<()> {
+    match (left, right) {
+        (FieldKind::Fvar(_), FieldKind::Fvar(_)) | (FieldKind::Fpresent, FieldKind::Fpresent) => {
+            Ok(())
+        }
+        _ => Err(TypeError::Unify(vec![])),
+    }
+}
+
 fn compute_variance_rec(
     ctx: &TypeContext,
     env: &Env,

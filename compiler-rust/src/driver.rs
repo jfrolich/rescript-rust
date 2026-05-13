@@ -5241,23 +5241,35 @@ fn format_bad_variance_report(
     source: &str,
     filename: &str,
     loc: LocIdx,
-    param_index: usize,
+    param_index: i32,
     actual: (bool, bool, bool),
     expected: (bool, bool, bool),
 ) -> String {
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!(
-            "In this definition, expected parameter variances are not satisfied.\nThe {}{} type parameter was expected to be {},\nbut it is {}.",
-            param_index,
-            variance_suffix(param_index),
+    let message = match param_index {
+        -1 => format!(
+            "In this definition, a type variable has a variance that\nis not reflected by its occurrence in type parameters.\nIt was expected to be {}, but it is {}.",
             format_variance(expected),
             format_variance(actual),
         ),
-    )
+        -2 => "In this definition, a type variable cannot be deduced\nfrom the type parameters."
+            .to_string(),
+        -3 => format!(
+            "In this definition, a type variable has a variance that\ncannot be deduced from the type parameters.\nIt was expected to be {}, but it is {}.",
+            format_variance(expected),
+            format_variance(actual),
+        ),
+        _ => {
+            let param_index = param_index as usize;
+            format!(
+                "In this definition, expected parameter variances are not satisfied.\nThe {}{} type parameter was expected to be {},\nbut it is {}.",
+                param_index,
+                variance_suffix(param_index),
+                format_variance(expected),
+                format_variance(actual),
+            )
+        }
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_compiler_error_report_with_bare_reset_lines(

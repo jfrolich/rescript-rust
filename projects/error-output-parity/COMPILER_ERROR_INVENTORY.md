@@ -498,11 +498,10 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_variance_third_parameter.res`,
     and
     `tests/error_output_parity/compiler/fixtures/bad_variance_fourth_parameter.res`.
-  - The OCaml propagation report codes `-1`, `-2`, and `-3` require a type
-    declaration parameter that is not a plain type variable. Normal ReScript
-    type parameters parse only as `Ptyp_var` or `Ptyp_any`, and generated JSX
-    type declarations use the same forms, so no `.res`/`.resi` source trigger
-    has been found for those branches.
+  - Covered for constrained-parameter propagation code `-1` by
+    `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_propagation.res`.
+  - A broader source-level probe has not yet found `.res`/`.resi` triggers for
+    propagation report codes `-2` or `-3`.
 - `Unavailable_type_constructor`
   - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
     raise sites are second-pass checks over already translated `Tconstr` nodes

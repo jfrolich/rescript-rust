@@ -3151,7 +3151,7 @@ pub enum TypeModError {
     /// A type parameter variance annotation is not satisfied by the declaration.
     BadVariance {
         loc: LocIdx,
-        param_index: usize,
+        param_index: i32,
         actual: (bool, bool, bool),
         expected: (bool, bool, bool),
     },
@@ -3539,8 +3539,205 @@ fn parser_variance_requirement(variance: ParserVariance) -> (bool, bool, bool) {
     }
 }
 
+fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
+    matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+}
+
+fn collect_free_type_variables(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+    result: &mut HashSet<TypeExprRef>,
+    visited: &mut HashSet<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return;
+    }
+    if matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) {
+        result.insert(ty);
+        return;
+    }
+
+    let mut children = Vec::new();
+    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+    for child in children {
+        collect_free_type_variables(ctx, child, result, visited);
+    }
+}
+
+fn type_decl_variance_fields(
+    decl: &crate::types::decl::TypeDeclaration,
+) -> Vec<(bool, TypeExprRef)> {
+    let mut fields = Vec::new();
+    if let Some(manifest) = decl.type_manifest {
+        fields.push((false, manifest));
+    }
+
+    match &decl.type_kind {
+        crate::types::decl::TypeKind::TypeRecord(labels, _) => {
+            fields.extend(labels.iter().map(|label| {
+                (
+                    label.ld_mutable == crate::types::asttypes::MutableFlag::Mutable,
+                    label.ld_type,
+                )
+            }));
+        }
+        crate::types::decl::TypeKind::TypeVariant(constructors) => {
+            for constructor in constructors {
+                match &constructor.cd_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                        fields.extend(args.iter().copied().map(|arg| (false, arg)));
+                    }
+                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                        fields.extend(labels.iter().map(|label| {
+                            (
+                                label.ld_mutable == crate::types::asttypes::MutableFlag::Mutable,
+                                label.ld_type,
+                            )
+                        }));
+                    }
+                }
+                if let Some(result) = constructor.cd_res {
+                    fields.push((false, result));
+                }
+            }
+        }
+        crate::types::decl::TypeKind::TypeAbstract | crate::types::decl::TypeKind::TypeOpen => {}
+    }
+
+    fields
+}
+
+fn variance_from_requirement(requirement: (bool, bool, bool)) -> TypesVariance {
+    let (positive, negative, _) = requirement;
+    if positive {
+        if negative {
+            TypesVariance::full()
+        } else {
+            TypesVariance::covariant()
+        }
+    } else {
+        TypesVariance::covariant().conjugate()
+    }
+}
+
+fn check_type_decl_variance_propagation(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    parsed_decl: &crate::parser::ast::TypeDeclaration,
+    typed_decl: &TypedTypeDeclaration,
+) -> TypeModResult<()> {
+    let params: Vec<TypeExprRef> = typed_decl
+        .typ_params
+        .iter()
+        .map(|(param, _)| param.ctyp_type)
+        .collect();
+    if params.is_empty() {
+        return Ok(());
+    }
+    let mut free_variables = HashSet::default();
+    let mut free_visited = HashSet::default();
+    let args = ctx.new_tuple(params.clone());
+    collect_free_type_variables(ctx, args, &mut free_variables, &mut free_visited);
+    for param in &params {
+        free_variables.remove(param);
+    }
+    if free_variables.is_empty() {
+        return Ok(());
+    }
+
+    let required: Vec<_> = parsed_decl
+        .ptype_params
+        .iter()
+        .map(|(_, variance)| parser_variance_requirement(*variance))
+        .collect();
+
+    let mut constrained_param_fields = Vec::new();
+    for (param, requirement) in params.iter().copied().zip(required.iter().copied()) {
+        if !type_is_tvar_without_repr(ctx, param) {
+            constrained_param_fields.push((variance_from_requirement(requirement), param));
+        }
+    }
+
+    let tvl2 =
+        crate::types::ctype::compute_variance_map_with_initial(ctx, env, &constrained_param_fields);
+
+    let fields = type_decl_variance_fields(&typed_decl.typ_type);
+    let tvl = crate::types::ctype::compute_variance_map_for_fields(ctx, env, &fields);
+    let mut visited = HashSet::default();
+
+    fn check_type(
+        ctx: &crate::types::context::TypeContext,
+        env: &Env,
+        loc: LocIdx,
+        ty: TypeExprRef,
+        tvl: &HashMap<TypeExprRef, TypesVariance>,
+        tvl2: &HashMap<TypeExprRef, TypesVariance>,
+        free_variables: &HashSet<TypeExprRef>,
+        visited: &mut HashSet<TypeExprRef>,
+    ) -> TypeModResult<()> {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return Ok(());
+        }
+
+        let v1 = tvl.get(&ty).copied().unwrap_or_else(TypesVariance::null);
+        let v2 = tvl2
+            .iter()
+            .filter_map(|(candidate, variance)| {
+                crate::types::ctype::equal_type_exprs_without_renaming(ctx, env, ty, *candidate)
+                    .then_some(*variance)
+            })
+            .fold(TypesVariance::null(), |acc, variance| acc.union(&variance));
+
+        let (c1, n1) = v1.get_upper();
+        let (c2, n2, _, i2) = v2.get_lower();
+        if (c1 && !c2) || (n1 && !n2) {
+            if free_variables.contains(&ty) {
+                let code = if !i2 {
+                    -2
+                } else if c2 || n2 {
+                    -1
+                } else {
+                    -3
+                };
+                return Err(TypeModError::BadVariance {
+                    loc,
+                    param_index: code,
+                    actual: (c1, n1, false),
+                    expected: (c2, n2, false),
+                });
+            }
+
+            let mut children = Vec::new();
+            crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+            for child in children {
+                check_type(ctx, env, loc, child, tvl, tvl2, free_variables, visited)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    for (_, ty) in fields {
+        check_type(
+            ctx,
+            env,
+            parsed_decl.ptype_loc,
+            ty,
+            &tvl,
+            &tvl2,
+            &free_variables,
+            &mut visited,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn check_type_decl_variance_requirements(
     ctx: &crate::types::context::TypeContext,
+    env: &Env,
     parsed_decl: &crate::parser::ast::TypeDeclaration,
     typed_decl: &TypedTypeDeclaration,
     variance_row: &[TypesVariance],
@@ -3551,7 +3748,7 @@ fn check_type_decl_variance_requirements(
         .zip(parsed_decl.ptype_params.iter())
         .enumerate()
     {
-        if !crate::types::btype::is_tvar(ctx, typed_param.ctyp_type) {
+        if !type_is_tvar_without_repr(ctx, typed_param.ctyp_type) {
             continue;
         }
         let expected = parser_variance_requirement(*parser_variance);
@@ -3564,13 +3761,13 @@ fn check_type_decl_variance_requirements(
         if (actual_co && !expected.0) || (actual_cn && !expected.1) || (!actual.2 && expected.2) {
             return Err(TypeModError::BadVariance {
                 loc: parsed_decl.ptype_loc,
-                param_index: idx + 1,
+                param_index: (idx + 1) as i32,
                 actual,
                 expected,
             });
         }
     }
-    Ok(())
+    check_type_decl_variance_propagation(ctx, env, parsed_decl, typed_decl)
 }
 
 fn type_kind_needs_coherence_check(kind: &crate::types::decl::TypeKind) -> bool {
@@ -18625,6 +18822,7 @@ fn type_structure_item<'a>(
                     if let Some(typed_decl) = typed_tree_decls.get(idx) {
                         check_type_decl_variance_requirements(
                             ctx,
+                            &new_env,
                             &decls[idx],
                             typed_decl,
                             variance_row,
@@ -20831,7 +21029,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     if resolved_variances.len() == declared_type_ids.len() {
         for (idx, variance_row) in resolved_variances.iter().enumerate() {
             if let Some(typed_decl) = typed_tree_decls.get(idx) {
-                check_type_decl_variance_requirements(ctx, &decls[idx], typed_decl, variance_row)?;
+                check_type_decl_variance_requirements(
+                    ctx,
+                    &variance_env,
+                    &decls[idx],
+                    typed_decl,
+                    variance_row,
+                )?;
             }
             if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
                 typed_decl.typ_type.type_variance = variance_row.clone();
