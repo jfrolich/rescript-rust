@@ -97,3 +97,5 @@ warning,22,tests/syntax_tests/data/ppx/react/warnings/optionalReactElement.res,t
 error,95,tests/syntax_tests/data/parsing/errors/scanner/unclosedTemplate.res,tests/syntax_tests/data/parsing/errors/scanner/expected/unclosedTemplate.res.txt
 error,96,tests/syntax_tests/data/parsing/errors/structure/moduleNameNumber.res,tests/syntax_tests/data/parsing/errors/structure/expected/moduleNameNumber.res.txt
 error,97,tests/syntax_tests/data/parsing/errors/expressions/arrayMutationMissingRhs.res,tests/syntax_tests/data/parsing/errors/expressions/expected/arrayMutationMissingRhs.res.txt
+error,98,tests/syntax_tests/data/parsing/errors/expressions/binaryOperatorMissingRhs.res,tests/syntax_tests/data/parsing/errors/expressions/expected/binaryOperatorMissingRhs.res.txt
+error,99,tests/syntax_tests/data/parsing/errors/expressions/unaryOperatorMissingOperand.res,tests/syntax_tests/data/parsing/errors/expressions/expected/unaryOperatorMissingOperand.res.txt

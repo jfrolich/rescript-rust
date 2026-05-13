@@ -633,9 +633,11 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         | Token::Bnot
         | Token::Question => {
             let token = p.token.clone();
+            p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
             let token_end_idx = p.prev_end_pos_idx();
             let operand = parse_unary_expr(p);
+            p.eat_breadcrumb();
             (
                 super::core::make_unary_expr(p, start_pos_idx, token_end_idx, token, operand),
                 false,
@@ -732,9 +734,11 @@ pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
         | Token::Bnot
         | Token::Question => {
             let token = p.token.clone();
+            p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
             let token_end_idx = p.prev_end_pos_idx();
             let operand = parse_unary_expr(p);
+            p.eat_breadcrumb();
             super::core::make_unary_expr(p, start_pos_idx, token_end_idx, token, operand)
         }
         _ => {
@@ -1803,6 +1807,7 @@ pub fn parse_binary_expr(
             _ => break,
         };
 
+        p.leave_breadcrumb(Grammar::ExprBinaryAfterOp(token.clone()));
         let op_start_idx = p.start_pos_idx();
         p.next();
         let op_end_idx = p.prev_end_pos_idx();
@@ -1810,6 +1815,7 @@ pub fn parse_binary_expr(
         // Handle special case for assignment
         if token == Token::ColonEqual {
             let right = parse_expr_with_context(p, context);
+            p.eat_breadcrumb();
             let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
             let op =
                 super::core::make_infix_operator(p, Token::ColonEqual, op_start_idx, op_end_idx);
@@ -1831,6 +1837,7 @@ pub fn parse_binary_expr(
             prec + 1
         };
         let right = parse_binary_expr(p, right, next_prec, context);
+        p.eat_breadcrumb();
 
         let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
 
