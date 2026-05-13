@@ -463,7 +463,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`.
 - `Structure_expected`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`.
+    `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`
+    and the include path in
+    `tests/error_output_parity/compiler/fixtures/structure_expected_include_functor.res`.
 - `With_no_component`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/with_no_component_type.res`.
