@@ -2257,6 +2257,13 @@ fn validate_non_obj_optional_arg_type_errors(
         };
 
         let typ = arena.get_core_type(arg.typ);
+        if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+            return Err(PpxError::at_loc(
+                typ.ptyp_loc,
+                "_ is not allowed in combination with external optional type",
+            ));
+        }
+
         if matches!(get_opt_arg_type(false, typ, arena), Attr::PolyVar { .. }) {
             let label = arena.get_string(label_loc.txt);
             return Err(PpxError::at_loc(
@@ -3502,8 +3509,8 @@ fn process_obj_type(
 
 /// Get optional arg type (for Optional labels).
 /// Mirrors OCaml's get_opt_arg_type.
-/// OCaml's implementation simply calls `spec_of_ptyp nolabel ptyp` which handles
-/// all FFI attribute types (@string, @int, @unwrap, @ignore).
+/// OCaml rejects Ptyp_any before this path; Rust validates that separately so
+/// encoding can keep using a plain Attr return.
 fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     let attr_type = check_type_ffi_attrs(typ, arena);
     match attr_type {

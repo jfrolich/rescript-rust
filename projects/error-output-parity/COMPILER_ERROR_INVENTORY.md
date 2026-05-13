@@ -1568,8 +1568,10 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_module_val_as_var.res`.
   - Non-object optional argument validation in `handle_attributes`
-    - Covered for payload `@string` optionals and all `@variadic` last-argument
-      validations (optional, underscore, FFI-attributed, and non-array) by
+    - Covered for underscore optional arguments, payload `@string` optionals,
+      and all `@variadic` last-argument validations (optional, underscore,
+      FFI-attributed, and non-array) by
+      `tests/error_output_parity/compiler/fixtures/bs_optional_underscore_external.res`,
       `tests/error_output_parity/compiler/fixtures/bs_optional_string_payload.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_variadic_optional_last_arg.res`,
