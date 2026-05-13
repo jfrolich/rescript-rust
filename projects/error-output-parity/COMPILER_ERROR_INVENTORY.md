@@ -228,7 +228,9 @@ with a reason after checking raise sites.
 - `Unbound_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
 - `Unbound_type_constructor`: covered by
-  `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`.
+  `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`
+  and the type spellcheck hint in
+  `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_spellcheck.res`.
 - `Unbound_type_constructor_2`: covered for a recursive polyvariant
   inheritance before the type is fully defined by
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_incomplete.res`.

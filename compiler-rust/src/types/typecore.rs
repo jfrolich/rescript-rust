@@ -584,7 +584,11 @@ pub enum TypeCoreError {
     },
 
     /// Unbound type constructor identifier.
-    UnboundTypeConstructor { loc: LocIdx, lid: Longident },
+    UnboundTypeConstructor {
+        loc: LocIdx,
+        lid: Longident,
+        alternatives: Vec<String>,
+    },
 
     /// Type constructor exists but is not completely defined yet.
     UnboundTypeConstructorIncomplete { loc: LocIdx, path: Path },
@@ -2140,6 +2144,7 @@ fn transl_type_inner(
                 return Err(TypeCoreError::UnboundTypeConstructor {
                     loc: lid.loc,
                     lid: longident.clone(),
+                    alternatives: unbound_type_constructor_alternatives(tctx, env, longident),
                 });
             };
             if let Some(warning) = deprecated_warning_for_type(&path, &decl) {
@@ -3130,9 +3135,11 @@ fn extract_type_from_pat_variant_spread(
     let (spread_path, type_decl) = match resolve_type_constructor_path(tctx, env, &lid_txt) {
         (path, Some(type_decl)) => (path, type_decl),
         (_, None) => {
+            let alternatives = unbound_type_constructor_alternatives(tctx, env, &lid_txt);
             return Err(TypeCoreError::UnboundTypeConstructor {
                 loc: lid.loc,
                 lid: lid_txt,
+                alternatives,
             });
         }
     };
@@ -19767,6 +19774,33 @@ fn unbound_module_alternatives(
                 sig.iter()
                     .filter_map(|item| match item {
                         crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                            Some(id.name().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Longident::Lapply(_, _) => Vec::new(),
+    }
+}
+
+fn unbound_type_constructor_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    match lid {
+        Longident::Lident(_) => env
+            .iter_types()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        Longident::Ldot(prefix, _) => env
+            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+            .map(|(_, sig)| {
+                sig.iter()
+                    .filter_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigType(id, _, _) => {
                             Some(id.name().to_string())
                         }
                         _ => None,

@@ -768,6 +768,11 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
+    /// Iterate over visible type bindings.
+    pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
+        self.types.iter().map(|(id, decl)| (id, decl.as_ref()))
+    }
+
     pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
         // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
         // `IdTbl.find_same`, so same-name bindings must not be treated as an

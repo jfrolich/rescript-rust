@@ -3509,9 +3509,20 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructor { loc, lid }) => {
+        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructor {
+            loc,
+            lid,
+            alternatives,
+        }) => {
             UserDiagnostic::new(
-                format_unbound_type_constructor_report(arena, source, filename, *loc, lid),
+                format_unbound_type_constructor_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    alternatives,
+                ),
                 2,
             )
             .into()
@@ -4747,8 +4758,25 @@ fn format_unbound_type_constructor_report(
     filename: &str,
     loc: LocIdx,
     lid: &Longident,
+    alternatives: &[String],
 ) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
     let name = format_longident_for_report(arena, lid);
+    let spellcheck_name = arena.get_string(lid.last_idx());
+    if let Some(hint) = spellcheck_hint(spellcheck_name, alternatives) {
+        return format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!(
+                "This type constructor, `{name}`, can't be found.\n\n\n{INFO}Hint: Did you mean {hint}?{RESET}"
+            ),
+        );
+    }
+
     format_compiler_error_report(
         arena,
         source,
