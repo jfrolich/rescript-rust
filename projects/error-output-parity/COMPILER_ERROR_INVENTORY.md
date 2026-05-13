@@ -1556,8 +1556,11 @@ with a reason after checking raise sites.
     - Covered under `-warn-error +8` by
       `tests/error_output_parity/compiler/cases/parmatch_all_guarded.res`.
   - `Warnings.Unused_match`
-    - Covered by
-      `tests/error_output_parity/compiler/fixtures/parmatch_unused_match.res`.
+    - Covered for duplicate cases and a GADT catch-all after exhaustive
+      constructor coverage by
+      `tests/error_output_parity/compiler/fixtures/parmatch_unused_match.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parmatch_gadt_unused_catchall.res`.
   - `Warnings.Unused_pat`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/parmatch_unused_subpattern.res`.

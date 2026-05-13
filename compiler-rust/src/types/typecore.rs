@@ -12092,16 +12092,30 @@ fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) 
 
 fn report_unused_literal_match_cases(
     tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
     cases: &[crate::types::typedtree::Case],
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
         return;
     }
 
+    let ctx = tctx.type_ctx;
+    let mut previous_unguarded_cases = Vec::new();
     let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
 
     for case in cases {
+        if !previous_unguarded_cases.is_empty()
+            && check_partial_simple(ctx, env, &previous_unguarded_cases)
+                == crate::types::typedtree::Partial::Total
+        {
+            tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
+            if case.c_guard.is_none() {
+                previous_unguarded_cases.push(case.clone());
+            }
+            continue;
+        }
+
         let pattern_keys = simple_pattern_keys(&case.c_lhs);
         let mut keys_in_case: HashSet<String> = HashSet::default();
         let mut unused_subpatterns = Vec::new();
@@ -12140,6 +12154,7 @@ fn report_unused_literal_match_cases(
             } else if pattern_is_simple_catch_all(&case.c_lhs) {
                 covered_by_catch_all = true;
             }
+            previous_unguarded_cases.push(case.clone());
         }
     }
 }
@@ -14302,7 +14317,7 @@ fn type_match(
         report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         partial
     };
-    report_unused_literal_match_cases(tctx, &typed_val_cases);
+    report_unused_literal_match_cases(tctx, val_case_env, &typed_val_cases);
     report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
         && !all_clauses_guarded
