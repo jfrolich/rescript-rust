@@ -99,7 +99,9 @@ with a reason after checking raise sites.
   and the package local type escape/coercion subcase in
   `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`,
   and the optional arrow argument hidden-type printer subcase in
-  `tests/error_output_parity/compiler/fixtures/expr_type_clash_optional_hidden_arg.res`.
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash_optional_hidden_arg.res`,
+  and the field-access option-receiver branch in
+  `tests/error_output_parity/compiler/fixtures/field_access_option_receiver_type_clash.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
@@ -201,10 +203,14 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/illegal_letrec_pattern.res`.
 - `Modules_not_allowed`: covered by
   `tests/error_output_parity/compiler/fixtures/modules_not_allowed_toplevel_unpack.res`.
+  The allowed match-case module-pattern path is guarded by
+  `tests/error_output_parity/compiler/fixtures/module_unpack_pattern_allowed.res`.
 - `Invalid_for_loop_index`: covered by
   `tests/error_output_parity/compiler/fixtures/invalid_for_loop_index.res`.
 - `Invalid_for_of_pattern`: covered by
-  `tests/error_output_parity/compiler/fixtures/invalid_for_of_pattern.res`.
+  `tests/error_output_parity/compiler/fixtures/invalid_for_of_pattern.res`
+  and the parser-normalized destructuring-pattern location case in
+  `tests/error_output_parity/compiler/fixtures/for_of_destructuring_pattern.res`.
 - `Invalid_interval`: covered by
   `tests/error_output_parity/compiler/fixtures/invalid_interval_pattern.res`.
 - `No_value_clauses`: covered by
@@ -299,6 +305,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/unbound_constructor_qualified.res`,
   the spellcheck branch in
   `tests/error_output_parity/compiler/fixtures/unbound_constructor_spellcheck.res`,
+  the constructor-expression payload location branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_constructor_payload_loc.res`,
   and the extension-rebind lookup paths in
   `tests/error_output_parity/compiler/fixtures/rebind_unbound_constructor.res`
   and
@@ -440,11 +448,17 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.
 - `Recursive_abbrev`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/recursive_abbrev.res`.
+    `tests/error_output_parity/compiler/fixtures/recursive_abbrev.res`
+    and recursive-module constraint paths in
+    `tests/error_output_parity/compiler/fixtures/recursive_module_self_type_abbrev.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/recursive_module_container_type_abbrev.res`.
 - `Cycle_in_def`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/cycle_in_def.res` and
-    `tests/error_output_parity/compiler/fixtures/parameters_differ.res`.
+    `tests/error_output_parity/compiler/fixtures/cycle_in_def.res`,
+    `tests/error_output_parity/compiler/fixtures/parameters_differ.res`,
+    and the recursive-module constraint path in
+    `tests/error_output_parity/compiler/fixtures/recursive_module_indirect_type_abbrev.res`.
 - `Definition_mismatch`
   - Covered for constructor-name and constructor-payload mismatches in an
     equation plus variant representation by
@@ -575,7 +589,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/cannot_eliminate_dependency.res`.
 - `Signature_expected`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`.
+    `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`
+    and the signature `include` functor branch in
+    `tests/error_output_parity/compiler/fixtures/signature_expected_include_functor.res`.
 - `Structure_expected`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`
@@ -604,7 +620,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/non_generalizable_ref_none.res`.
 - `Non_generalizable_module`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/non_generalizable_module.res`.
+    `tests/error_output_parity/compiler/fixtures/non_generalizable_module.res`
+    and the `module type of` branch in
+    `tests/error_output_parity/compiler/fixtures/module_type_of_non_generalizable.res`.
 - `Interface_not_compiled`
   - Covered by
     `tests/error_output_parity/compiler/cases/interface_not_compiled.res`.
@@ -768,6 +786,13 @@ with a reason after checking raise sites.
   - `Illegal_value_name`
     - Covered by
       `tests/error_output_parity/compiler/cases/illegal_value_name.res`.
+  - Delayed unused value/type/module warnings for implementation bindings
+    hidden by an explicit module constraint
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/unused_value_hidden_by_module_constraint.res`,
+      `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/unused_module_hidden_by_module_constraint.res`.
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
     - Covered by
@@ -804,6 +829,21 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/variant_constructor_lowercase_name.res`
       and
       `tests/error_output_parity/compiler/fixtures/variant_constructor_reserved_keyword.res`.
+  - Constructor payload type expressions reject uppercase type names and keep
+    the same follow-on recovery diagnostics for angle and paren arguments
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parser_uppercase_constructor_payload_type.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_uppercase_constructor_payload_type_angle_args.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_uppercase_constructor_payload_type_paren_args.res`.
+  - Uppercase type arguments in functor-tail type paths avoid a cascading dot
+    diagnostic after the primary lowercase-name diagnostic
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parser_uppercase_type_arg_functor_tail.res`.
+  - Type-parameter constraints inside module-type `with type` constraints
+    reject the `constraint` reserved keyword at the parser layer
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/with_type_constraint_keyword.res`.
   - `parse_payload` stops attribute payload structure parsing at a comma before
     `Parser.expect Rparen`, preserving the reference parser diagnostic and
     recovery AST for unsupported comma-separated payloads
@@ -1024,7 +1064,9 @@ with a reason after checking raise sites.
 - `compiler/ml/transl_recmodule.ml`
   - `Circular_dependency`
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
+      `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`
+      and the `module type of` recursive-module approximation path in
+      `tests/error_output_parity/compiler/fixtures/module_type_of_structure_recursive_module.res`.
 - `compiler/core/lam_compile.ml`
   - Dynamic import missing/extra module argument
     - Covered by
@@ -1290,6 +1332,13 @@ with a reason after checking raise sites.
       The full warning-name set (`@as`, `@config`, `@ignore`, `@int`,
       `@optional`, `@string`, `@unwrap`) is covered by those plus
       `tests/error_output_parity/compiler/fixtures/bs_unused_builtin_attrs_value.res`.
+  - Built-in rank-0 type redefinition is rejected in structures, nested
+    module structures, and signatures
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_type_redefinition.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_type_redefinition_nested.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/builtin_type_redefinition_signature.resi`.
   - GADT constructor result syntax without `type rec`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/gadt_requires_type_rec.res`.
@@ -1400,9 +1449,11 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_get_variadic_conflict.res`.
   - `process_obj` argument-shape and unsupported argument-attribute validation
-    - Covered for unlabeled non-`unit`, payload `@string`, `@unwrap`
+    - Covered for non-empty primitive names, unlabeled non-`unit`, payload
+      `@string`, `@unwrap`
       labeled/optional arguments, unused optional `@as` attributes, and the
       final `@obj` conflict catch by
+      `tests/error_output_parity/compiler/fixtures/bs_obj_nonempty_external_name.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_unlabelled_non_unit.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_label_string_payload.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_label_unwrap.res`,
@@ -1438,6 +1489,7 @@ with a reason after checking raise sites.
   - `valid_global_name` rejects invalid global/call/constructor names
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_invalid_global_name.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_global_name.res`,
       `tests/error_output_parity/compiler/fixtures/bs_external_invalid_call_name.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_invalid_new_name.res`.
@@ -1480,6 +1532,8 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
 - module type mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_modtype_mismatch.res`)
+- module type declaration permutation mismatch (covered by
+  `tests/error_output_parity/compiler/fixtures/modtype_permutation.res`)
 - invalid module alias / functor-argument alias requirement (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`)
 - lax module alias normalization through persistent components (covered by
