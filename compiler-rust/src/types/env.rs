@@ -1996,6 +1996,13 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         let add_exception =
             |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
                 let path = Path::pident(id.clone());
+                let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
+                    attr_name: crate::types::asttypes::Located::noloc(
+                        "ocaml.warn_on_literal_pattern".to_string(),
+                    ),
+                    attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
+                    attr_loc: Location::none(),
+                };
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
                     cstr_res: exn_ty,
@@ -2008,7 +2015,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
                     cstr_loc: Location::none(),
-                    cstr_attributes: vec![],
+                    cstr_attributes: vec![warn_on_literal_pattern_attr],
                     cstr_inlined: None,
                 };
                 env.add_constructor(id, cstr_desc);

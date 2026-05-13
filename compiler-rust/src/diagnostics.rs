@@ -412,13 +412,13 @@ impl Warning {
                 if *is_label {
                     format!(
                         "these field labels belong to several types: {}\n\
-                         The first one was selected. Disambiguate if this is wrong.",
+The first one was selected. Disambiguate if this is wrong.",
                         types.join(" ")
                     )
                 } else if names.len() == 1 {
                     format!(
                         "{} belongs to several types: {}\n\
-                         The first one was selected. Disambiguate if this is wrong.",
+The first one was selected. Disambiguate if this is wrong.",
                         names[0],
                         types.join(" ")
                     )
@@ -446,7 +446,9 @@ impl Warning {
                 None => format!("no cmi file was found in path for module {}", name),
             },
             Warning::FragileLiteralPattern => {
-                "Code should not depend on the actual values of this constructor's arguments."
+                "Code should not depend on the actual values of\n\
+this constructor's arguments. They are only for information\n\
+and may change in future versions. (See manual section 8.5)"
                     .to_string()
             }
             Warning::MisplacedAttribute { name } => {

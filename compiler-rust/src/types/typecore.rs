@@ -323,6 +323,15 @@ fn has_explicit_arity_attribute(
     })
 }
 
+fn has_warn_on_literal_pattern_attribute(attrs: &[crate::types::decl::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        matches!(
+            attr.attr_name.txt.as_str(),
+            "ocaml.warn_on_literal_pattern" | "warn_on_literal_pattern"
+        )
+    })
+}
+
 fn is_dict_type_path(path: &Path) -> bool {
     // Must match the predef dict type exactly.
     // OCaml uses `Path.same tpath Predef.path_dict` which compares stamps.
@@ -4550,21 +4559,52 @@ fn type_pattern_construct(
         return Err(TypeCoreError::UnexpectedExistential { loc });
     }
 
-    let provided_arity = match arg {
-        None => 0,
+    let (provided_arity, fragile_literal_loc) = match arg {
+        None => (0, None),
         Some(arg_pat) => match &*arg_pat.ppat_desc {
             crate::parser::ast::PatternDesc::Ppat_tuple(items)
                 if cstr_desc.cstr_arity > 1
                     || has_explicit_arity_attribute(tctx.arena, &pat.ppat_attributes) =>
             {
-                items.len()
+                let fragile_literal_loc = if items.len() == 1 {
+                    let item_pat = tctx.arena.get_pat(items[0]);
+                    if matches!(
+                        &*item_pat.ppat_desc,
+                        crate::parser::ast::PatternDesc::Ppat_constant(_)
+                    ) {
+                        Some(item_pat.ppat_loc)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                (items.len(), fragile_literal_loc)
             }
             crate::parser::ast::PatternDesc::Ppat_any if cstr_desc.cstr_arity != 1 => {
-                cstr_desc.cstr_arity.max(0) as usize
+                if cstr_desc.cstr_arity == 0 {
+                    tctx.report_warning(arg_pat.ppat_loc, Warning::WildcardArgToConstantConstr);
+                }
+                (cstr_desc.cstr_arity.max(0) as usize, None)
             }
-            _ => 1,
+            _ => {
+                let fragile_literal_loc = if matches!(
+                    &*arg_pat.ppat_desc,
+                    crate::parser::ast::PatternDesc::Ppat_constant(_)
+                ) {
+                    Some(arg_pat.ppat_loc)
+                } else {
+                    None
+                };
+                (1, fragile_literal_loc)
+            }
         },
     };
+    if let Some(loc) = fragile_literal_loc
+        && has_warn_on_literal_pattern_attribute(&cstr_desc.cstr_attributes)
+    {
+        tctx.report_warning(loc, Warning::FragileLiteralPattern);
+    }
     if provided_arity != cstr_desc.cstr_arity as usize {
         return Err(TypeCoreError::ConstructorArityMismatch {
             loc,
@@ -10818,6 +10858,14 @@ fn type_application(
                 let (call_label, arg_expr_idx) = &args[arg_index];
                 let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
                 let call_is_optional = call_label.is_optional();
+                if !fn_label.is_optional() && call_is_optional {
+                    tctx.report_warning(
+                        arg_expr.pexp_loc,
+                        Warning::NonoptionalLabel {
+                            name: fn_label_name.to_string(),
+                        },
+                    );
+                }
                 let effective_arg_ty = if fn_label.is_optional() && !call_is_optional {
                     crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
                 } else {
@@ -16162,6 +16210,34 @@ fn qualified_record_label_from_info<'a>(
         })
 }
 
+fn ambiguous_record_label_warning_info<'a>(
+    selected: &crate::types::LabelDescription,
+    candidates: &[&crate::types::LabelDescription],
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) -> Option<(Vec<String>, Option<Path>)> {
+    let selected_path = label_result_path(ctx, selected)?;
+    let mut paths = vec![selected_path.clone()];
+    for candidate in candidates.iter().rev() {
+        let Some(candidate_path) = label_result_path(ctx, candidate) else {
+            continue;
+        };
+        if paths.iter().any(|path| {
+            compare_type_paths_for_label_disambiguation(&candidate_path, path, env, pers_env, ctx)
+        }) {
+            continue;
+        }
+        paths.push(candidate_path);
+    }
+    if paths.len() <= 1 {
+        return None;
+    }
+
+    let types = paths.iter().map(Path::name).collect();
+    Some((types, Some(selected_path)))
+}
+
 fn force_unqualified_record_label_disambiguate_by_type_compare<'a>(
     field_name: &str,
     record_opath_ty: Option<TypeExprRef>,
@@ -16512,6 +16588,7 @@ fn type_record(
     let mut explicit_overrides: HashMap<i32, usize> = HashMap::with_capacity(fields.len());
     let mut explicit_overrides_in_order = Vec::with_capacity(fields.len());
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
+    let mut ambiguous_label_warnings: Vec<(String, Vec<String>, Option<Path>)> = Vec::new();
 
     struct ExplicitField<'a> {
         original_index: usize,
@@ -16607,6 +16684,23 @@ fn type_record(
                 false,
             )
         });
+        if record_opath_ty.is_none()
+            && matches!(resolved_lid, Longident::Lident(_))
+            && let Some(label) = disambiguated.as_ref()
+        {
+            let candidates = env.find_all_labels(field_name);
+            if candidates.len() > 1
+                && let Some((types, selected_path)) = ambiguous_record_label_warning_info(
+                    label,
+                    &candidates,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
+            {
+                ambiguous_label_warnings.push((field_name.to_string(), types, selected_path));
+            }
+        }
         explicit_fields.push(ExplicitField {
             original_index: idx,
             field,
@@ -16620,6 +16714,47 @@ fn type_record(
                 resolved_lid,
             ),
         });
+    }
+    if let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned() {
+        let same_selected_path = ambiguous_label_warnings.iter().all(|(_, _, path)| {
+            match (first_path.as_ref(), path.as_ref()) {
+                (Some(first), Some(path)) => {
+                    compare_type_paths_for_label_disambiguation(
+                        first,
+                        path,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    )
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        });
+        if same_selected_path {
+            tctx.report_warning(
+                loc,
+                Warning::AmbiguousName {
+                    names: ambiguous_label_warnings
+                        .iter()
+                        .map(|(name, _, _)| name.clone())
+                        .collect(),
+                    types: first_types,
+                    is_label: true,
+                },
+            );
+        } else {
+            for (name, types, _) in ambiguous_label_warnings {
+                tctx.report_warning(
+                    loc,
+                    Warning::AmbiguousName {
+                        names: vec![name],
+                        types,
+                        is_label: false,
+                    },
+                );
+            }
+        }
     }
     explicit_fields.sort_by_key(|entry| {
         entry

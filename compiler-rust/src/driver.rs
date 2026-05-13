@@ -5334,6 +5334,8 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::BsUnusedAttribute { .. } => idx == 0,
             crate::diagnostics::Warning::AllClausesGuarded => idx == 0,
             crate::diagnostics::Warning::AmbiguousPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::AmbiguousName { .. } => idx == 0,
+            crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {
                 idx < 2 || line.starts_with("Hint:")
             }

@@ -266,12 +266,18 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/cases.tsv`.
 - Typecore statement-position type errors are covered by
   `tests/error_output_parity/compiler/fixtures/typecore_error_statement_type_clash.res`.
+- Typecore warning 5 (`Partial_application`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_partial_application.res`.
 - Typecore warning 9 (`Non_closed_record_pattern`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_non_closed_record_pattern.res`.
+- Typecore warning 20 (`Unused_argument`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_argument.res`.
 - Typecore warning 21 (`Nonreturning_statement`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_nonreturning_statement.res`.
 - Typecore warning 23 (`Useless_record_with`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_useless_record_with.res`.
+- Typecore warning 28 (`Wildcard_arg_to_constant_constr`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_wildcard_constant_constructor.res`.
 - Typecore warning 35 (`Unused_for_index`) is covered for `for`, `for of`, and
   `for await of` by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_index.res`,
@@ -280,6 +286,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_await_index.res`.
 - Typecore warning 39 (`Unused_rec_flag`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_rec_flag.res`.
+- Typecore warning 41 (`Ambiguous_name`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_ambiguous_record_name.res`.
+- Typecore warning 43 (`Nonoptional_label`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_nonoptional_label.res`.
+- Typecore warning 52 (`Fragile_literal_pattern`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_fragile_literal_pattern.res`.
 
 ## Typetexp Coverage Notes
 
