@@ -1070,11 +1070,15 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_module_new_payload.res`.
   - Non-object optional argument validation in `handle_attributes`
-    - Covered for payload `@string` optionals and `@variadic` optional last
-      argument ordering by
+    - Covered for payload `@string` optionals and all `@variadic` last-argument
+      validations (optional, underscore, FFI-attributed, and non-array) by
       `tests/error_output_parity/compiler/fixtures/bs_optional_string_payload.res`
       and
-      `tests/error_output_parity/compiler/fixtures/bs_variadic_optional_last_arg.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_optional_last_arg.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_underscore_last_arg.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_attr_last_arg.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_non_array_last_arg.res`.
 
 ## Include Mismatch Surfaces
 
