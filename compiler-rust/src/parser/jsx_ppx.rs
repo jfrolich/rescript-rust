@@ -1010,17 +1010,9 @@ fn transform_react_component_with_props_binding(
     binding: ValueBinding,
     rec_flag: RecFlag,
     _pstr_loc: &Location,
-    config: &mut JsxConfig,
+    config: &JsxConfig,
     arena: &mut ParseArena,
 ) -> (ValueBinding, Option<ValueBinding>) {
-    // Check for multiple components in the same module
-    if config.has_component {
-        eprintln!(
-            "Only one component definition is allowed for each module. Move to a submodule or other file if necessary."
-        );
-    }
-    config.has_component = true;
-
     // Get function name and location from pattern
     let fn_name = get_fn_name(arena, arena.get_pat(binding.pvb_pat));
     let _fn_name_loc = get_fn_name_loc(arena.get_pat(binding.pvb_pat));

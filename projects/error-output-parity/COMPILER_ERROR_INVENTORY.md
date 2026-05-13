@@ -661,6 +661,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_component_multiple_definitions.res`
       and
       `tests/error_output_parity/compiler/fixtures/jsx_signature_multiple_definitions.resi`.
+  - `@react.componentWithProps` value bindings do not call
+    `check_multiple_components` or update `has_component`, so mixing
+    `@react.component` and `@react.componentWithProps` keeps the later OCaml
+    diagnostic as the source of truth
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_with_props_after_component.res`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by
