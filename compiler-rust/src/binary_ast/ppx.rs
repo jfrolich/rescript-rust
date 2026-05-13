@@ -16,6 +16,7 @@
 
 use std::{borrow::Cow, fmt};
 
+use crate::diagnostics::Warning;
 use crate::intern::StrIdx;
 use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
@@ -60,9 +61,16 @@ pub const ACCESSORS_VARIANT_RECORD_ARG_ERROR: &str = "@deriving(accessors) from 
 pub const AWAIT_NOT_ASYNC_CONTEXT_ERROR: &str = "Await on expression not in an async context";
 
 #[derive(Debug, Clone)]
+pub struct PpxWarning {
+    pub loc: LocIdx,
+    pub warning: Warning,
+}
+
+#[derive(Debug, Clone)]
 pub struct PpxError {
     loc: Option<LocIdx>,
     message: String,
+    warnings: Vec<PpxWarning>,
 }
 
 impl PpxError {
@@ -70,6 +78,7 @@ impl PpxError {
         Self {
             loc: None,
             message: message.into(),
+            warnings: Vec::new(),
         }
     }
 
@@ -77,7 +86,13 @@ impl PpxError {
         Self {
             loc: Some(loc),
             message: message.into(),
+            warnings: Vec::new(),
         }
+    }
+
+    fn with_warning(mut self, loc: LocIdx, warning: Warning) -> Self {
+        self.warnings.push(PpxWarning { loc, warning });
+        self
     }
 
     pub fn loc(&self) -> Option<LocIdx> {
@@ -86,6 +101,10 @@ impl PpxError {
 
     pub fn message_text(&self) -> &str {
         &self.message
+    }
+
+    pub fn warnings(&self) -> &[PpxWarning] {
+        &self.warnings
     }
 }
 
@@ -839,11 +858,22 @@ fn validate_external_attribute_payload_errors(
             }
             "return" => {
                 validate_return_wrapper_config_shape(payload, arena)?;
+                let config_warning =
+                    return_wrapper_config_warning(payload, arena, attr_name.loc);
                 let Some(wrapper) = get_return_wrapper_config(payload, arena) else {
-                    return Err(PpxError::at_loc(
+                    let mut error = PpxError::at_loc(
                         attr_name.loc,
                         "Not supported return directive",
-                    ));
+                    );
+                    if let Some((loc, message)) = config_warning {
+                        error = error.with_warning(
+                            loc,
+                            Warning::BsDeriveWarning {
+                                message: message.to_string(),
+                            },
+                        );
+                    }
+                    return Err(error);
                 };
                 match wrapper.as_str() {
                     "null_to_opt" | "nullable" | "null_undefined_to_opt" | "identity" => {}
@@ -2535,6 +2565,41 @@ fn validate_return_wrapper_config_shape(
         }
     }
     Ok(())
+}
+
+fn return_wrapper_config_warning(
+    payload: &current::Payload,
+    arena: &ParseArena,
+    default_loc: LocIdx,
+) -> Option<(LocIdx, &'static str)> {
+    let current::Payload::PStr(items) = payload else {
+        return Some((default_loc, "invalid attribute config-record, ignoring"));
+    };
+    if items.is_empty() {
+        return None;
+    }
+    if items.len() != 1 {
+        return Some((default_loc, "invalid attribute config-record, ignoring"));
+    }
+    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+        return Some((default_loc, "invalid attribute config-record, ignoring"));
+    };
+    let (expr_idx, _) = &**inner;
+    let expr = arena.get_expr(*expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_record(inner) => {
+            let (_fields, with_obj) = &**inner;
+            with_obj
+                .is_some()
+                .then_some((expr.pexp_loc, "`with` is not supported, discarding"))
+        }
+        ExpressionDesc::Pexp_ident(lid)
+            if matches!(arena.get_longident(lid.txt), Longident::Lident(_)) =>
+        {
+            None
+        }
+        _ => Some((default_loc, "invalid attribute config-record, ignoring")),
+    }
 }
 
 /// Extract integer from attribute payload (mirrors OCaml's Ast_payload.is_single_int)

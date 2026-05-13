@@ -1597,9 +1597,22 @@ fn ppx_error_to_anyhow(
     source: &str,
     filename: &str,
 ) -> anyhow::Error {
+    let mut prefix = String::new();
+    for warning in err.warnings() {
+        prefix.push_str(&format_compiler_warning_report(
+            arena,
+            source,
+            filename,
+            &TypeCoreWarning {
+                loc: warning.loc,
+                warning: warning.warning.clone(),
+                is_error: false,
+            },
+        ));
+    }
     if let Some(loc) = err.loc() {
         let message = err.message_text();
-        let report = if message.contains('\n') {
+        let mut report = if message.contains('\n') {
             let mut raw_message = String::with_capacity(message.len() + 2);
             raw_message.push_str("  ");
             raw_message.push_str(message);
@@ -1607,10 +1620,16 @@ fn ppx_error_to_anyhow(
         } else {
             format_compiler_error_report(arena, source, filename, loc, message)
         };
+        if !prefix.is_empty() {
+            report.insert_str(0, &prefix);
+        }
         UserDiagnostic::new(report, 2).into()
     } else {
-        UserDiagnostic::new(format_compiler_error_report_for_file(filename, err.message_text()), 2)
-            .into()
+        let mut report = format_compiler_error_report_for_file(filename, err.message_text());
+        if !prefix.is_empty() {
+            report.insert_str(0, &prefix);
+        }
+        UserDiagnostic::new(report, 2).into()
     }
 }
 

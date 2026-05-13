@@ -649,6 +649,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_get_predicate_qualified_label.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_return_qualified_label.res`.
+  - `ident_or_record_as_config` invalid config-record warning before
+    `@return` rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by
