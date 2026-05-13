@@ -82,6 +82,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/function_label_mismatch.res`,
   plus the local module escape note subcase in
   `tests/error_output_parity/compiler/fixtures/let_module_escape_type_clash.res`
+  and the nested function return escape subcase in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_function_return.res`,
   and the package local type escape/coercion subcase in
   `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`.
 - `Multiply_bound_variable`: covered by
@@ -260,16 +262,15 @@ with a reason after checking raise sites.
   `Ill_typed_functor_application`: the OCaml raise site requires an
   `Lapply` longident, and normal ReScript functor application syntax is parsed
   as a module expression instead.
-- `Illegal_reference_to_recursive_module`: no reachable error fixture found
-  yet. The OCaml raise site requires `Env.lookup_module` to see the internal
-  `#recmod#` placeholder; recursive-module signatures in ReScript are checked
-  through approximated declarations. A non-error parity guard for OCaml's
-  recursive-module inclusion unrolling is covered by
+- `Illegal_reference_to_recursive_module`: covered by
+  `tests/error_output_parity/compiler/fixtures/illegal_reference_to_recursive_module.res`.
+  A non-error parity guard for OCaml's recursive-module inclusion unrolling is
+  also covered by
   `tests/error_output_parity/compiler/fixtures/recursive_module_sibling_type_alias.res`.
-- `Cannot_scrape_alias`: no reachable `.res`/`.resi` fixture found yet. The
-  Typetexp raise sites require a module alias whose target is missing after the
-  alias itself has already resolved; normal source attempts report the missing
-  module earlier during lookup.
+- `Cannot_scrape_alias`: covered for type paths by
+  `tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res`
+  and for `module type of ... with ...` constraints by
+  `tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res`.
 
 ## `compiler/ml/typetexp.ml`
 
@@ -504,12 +505,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/apply_generative_functor.res`.
 - `Cannot_scrape_alias`
-  - No reachable `.res`/`.resi` fixture found yet. The Typemod raise sites
-    require `Env.scrape_alias` to return a module alias whose target is missing
-    while the alias itself was already accepted into the environment. Normal
-    ReScript source paths tried so far either resolve the alias target earlier
-    or report the missing module through Typetexp before Typemod observes an
-    `Mty_alias`.
+  - Covered by
+    `tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res`.
 
 ## Ast_untagged_variants Coverage Notes
 
