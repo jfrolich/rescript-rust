@@ -173,9 +173,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
 - `Recursive_local_constraint`: checked against the `unify_pat_types_gadt`
   raise site in `compiler/ml/typecore.ml`. Local GADT constraint cycle probes
-  found so far surface as `Pattern_type_clash`; keep this variant listed until
-  a direct `Unification_recursive_abbrev` source-level repro is found or the
-  raise site is proven unreachable for ReScript syntax.
+  found so far surface as `Pattern_type_clash`; an additional OCaml-only
+  generated probe over 4,992 one- and two-parameter GADT result/payload/scrutinee
+  shapes found no `Recursive local constraint` reporter. Keep this variant
+  listed until a direct `Unification_recursive_abbrev` source-level repro is
+  found or the raise site is proven unreachable for ReScript syntax.
 - `Not_a_variant_type`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
 - `Not_subtype`: covered by
