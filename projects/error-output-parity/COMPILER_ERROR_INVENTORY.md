@@ -392,10 +392,15 @@ with a reason after checking raise sites.
 - `Unbound_type_constructor_2`: covered for a recursive polyvariant
   inheritance before the type is fully defined by
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_incomplete.res`.
-- `Unbound_type_variable`: covered through a type declaration manifest by
-  `tests/error_output_parity/compiler/fixtures/unbound_type_variable.res`
+- `Unbound_type_variable`: covered through direct and nested type declaration
+  manifests, wildcard variables, variant constructor payloads, and record
+  fields by
+  `tests/error_output_parity/compiler/fixtures/unbound_type_variable.res`,
+  `tests/error_output_parity/compiler/fixtures/unbound_type_var_alias.res`,
+  `tests/error_output_parity/compiler/fixtures/unbound_type_variable_wildcard.res`,
+  `tests/error_output_parity/compiler/fixtures/unbound_type_var_decl.res`,
   and
-  `tests/error_output_parity/compiler/fixtures/unbound_type_variable_wildcard.res`.
+  `tests/error_output_parity/compiler/fixtures/unbound_type_var_record.res`.
 - `Type_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/type_arity_mismatch.res`
   and
@@ -577,8 +582,11 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.
 - `Unbound_type_var`
-  - Covered for variant constructor payloads by
-    `tests/error_output_parity/compiler/fixtures/unbound_type_var_decl.res`.
+  - Checked: normal `.res`/`.resi` unbound type-parameter positions found so
+    far are rejected earlier by `Typetexp.Unbound_type_variable`, before the
+    later `Typedecl.closed_type_decl` check can report this verbose internal
+    variant. The observable type-expression paths are covered in the
+    `Typetexp.Unbound_type_variable` section.
 - `Cannot_extend_private_type`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/cannot_extend_private_type.res`.
