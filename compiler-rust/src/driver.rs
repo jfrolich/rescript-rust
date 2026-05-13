@@ -9942,12 +9942,24 @@ fn format_apply_wrong_label_report(
         ParserArgLabel::Nolabel => {
             message.push_str("The argument at this position should be labelled.");
         }
-        ParserArgLabel::Labelled(loc) | ParserArgLabel::Optional(loc) => {
+        ParserArgLabel::Labelled(loc) => {
             message.push_str("This function does not take the argument ");
             if !suppress_info_style {
                 message.push_str(INFO);
             }
             message.push('~');
+            message.push_str(arena.get_string(loc.txt));
+            if !suppress_info_style {
+                message.push_str(RESET);
+            }
+            message.push('.');
+        }
+        ParserArgLabel::Optional(loc) => {
+            message.push_str("This function does not take the argument ");
+            if !suppress_info_style {
+                message.push_str(INFO);
+            }
+            message.push('?');
             message.push_str(arena.get_string(loc.txt));
             if !suppress_info_style {
                 message.push_str(RESET);

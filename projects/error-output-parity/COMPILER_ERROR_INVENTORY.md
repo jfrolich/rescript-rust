@@ -139,8 +139,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/apply_non_function.res` and the
   arrow-result branch in
   `tests/error_output_parity/compiler/fixtures/apply_non_function_too_many_curried_args.res`.
-- `Apply_wrong_label`: covered by
-  `tests/error_output_parity/compiler/fixtures/apply_wrong_label.res`.
+- `Apply_wrong_label`: covered for labelled, unlabelled, and optional call-site
+  labels by `tests/error_output_parity/compiler/fixtures/apply_wrong_label.res`,
+  `tests/error_output_parity/compiler/fixtures/apply_wrong_label_unlabeled.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/apply_wrong_label_optional.res`.
 - `Incoherent_label_order`: covered by
   `tests/error_output_parity/compiler/fixtures/incoherent_label_order.res`.
 - `Less_general`: covered for field values and explicitly polymorphic
