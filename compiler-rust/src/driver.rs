@@ -2746,17 +2746,12 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::OrpatVars { loc, id, .. }) => UserDiagnostic::new(
-            format_compiler_error_report(
-                arena,
-                source,
-                filename,
-                *loc,
-                &format!(
-                    "Variable {} must occur on both sides of this | pattern",
-                    id.name()
-                ),
-            ),
+        TypeModError::CoreError(TypeCoreError::OrpatVars {
+            loc,
+            id,
+            valid_idents,
+        }) => UserDiagnostic::new(
+            format_orpat_vars_report(arena, source, filename, *loc, id, valid_idents),
             2,
         )
         .into(),
@@ -6306,6 +6301,34 @@ fn format_or_pattern_type_clash_report(
         type_clash_display_type(type_ctx, trace, false, right),
     ));
     message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_orpat_vars_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    id: &Ident,
+    valid_idents: &[Ident],
+) -> String {
+    let message = format!(
+        "Variable {} must occur on both sides of this | pattern",
+        id.name()
+    );
+    let alternatives: Vec<String> = valid_idents
+        .iter()
+        .map(|valid| valid.name().to_string())
+        .collect();
+
+    if let Some(hint) = spellcheck_hint(id.name(), &alternatives) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message);
+    }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

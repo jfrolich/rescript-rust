@@ -4286,7 +4286,7 @@ fn merge_or_pattern_variables(
                 return Err(TypeCoreError::OrpatVars {
                     loc,
                     id: v1.id.clone(),
-                    valid_idents: vec![],
+                    valid_idents: p2_sorted[j..].iter().map(|var| var.id.clone()).collect(),
                 });
             }
             std::cmp::Ordering::Greater => {
@@ -4294,7 +4294,7 @@ fn merge_or_pattern_variables(
                 return Err(TypeCoreError::OrpatVars {
                     loc,
                     id: v2.id.clone(),
-                    valid_idents: vec![],
+                    valid_idents: p1_sorted[i..].iter().map(|var| var.id.clone()).collect(),
                 });
             }
         }

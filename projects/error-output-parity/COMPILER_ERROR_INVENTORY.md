@@ -97,7 +97,9 @@ with a reason after checking raise sites.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by
-  `tests/error_output_parity/compiler/fixtures/orpat_vars.res`.
+  `tests/error_output_parity/compiler/fixtures/orpat_vars.res` and the
+  spellcheck hint branch in
+  `tests/error_output_parity/compiler/fixtures/orpat_vars_spellcheck.res`.
 - `Label_multiply_defined`: covered by
   `tests/error_output_parity/compiler/fixtures/label_multiply_defined.res`.
 - `Labels_missing`: covered by
