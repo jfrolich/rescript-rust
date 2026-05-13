@@ -840,6 +840,12 @@ with a reason after checking raise sites.
     only when the opened value is later used
     - Covered by
       `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_identifier.res`.
+  - `Warnings.Open_shadow_label_constructor` constructor and label shadowing from
+    an `open`, reported only when the opened constructor or label is later used
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_constructor.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_label.res`.
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
     - Covered by

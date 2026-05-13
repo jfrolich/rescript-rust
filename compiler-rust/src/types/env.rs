@@ -899,6 +899,17 @@ impl Env {
             .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
     }
 
+    /// Find a constructor by name with its local/opened origin flag.
+    pub fn find_constructor_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ConstructorDescription, bool)> {
+        self.constrs
+            .find_by_name_with_origin(name)
+            .map(|(id, c, is_local)| (id, c.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
+    }
+
     /// Find all constructors with a given name.
     pub fn find_all_constructors(&self, name: &str) -> Vec<&ConstructorDescription> {
         self.constrs
@@ -936,6 +947,17 @@ impl Env {
         self.labels
             .find_by_name(name)
             .map(|l| l.as_ref())
+            .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
+    }
+
+    /// Find a label by name with its local/opened origin flag.
+    pub fn find_label_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &LabelDescription, bool)> {
+        self.labels
+            .find_by_name_with_origin(name)
+            .map(|(id, l, is_local)| (id, l.as_ref(), is_local))
             .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
     }
 

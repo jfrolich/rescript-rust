@@ -6424,6 +6424,30 @@ struct OpenShadowValueUseCheck {
     emitted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenShadowLabelConstructorKind {
+    Constructor,
+    Label,
+}
+
+impl OpenShadowLabelConstructorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            OpenShadowLabelConstructorKind::Constructor => "constructor",
+            OpenShadowLabelConstructorKind::Label => "label",
+        }
+    }
+}
+
+struct OpenShadowLabelConstructorUseCheck {
+    kind: OpenShadowLabelConstructorKind,
+    name: String,
+    res: TypeExprRef,
+    loc: LocIdx,
+    item_index: usize,
+    emitted: bool,
+}
+
 fn collect_bound_pattern_idents_with_loc(
     pat: &crate::types::typedtree::Pattern,
     out: &mut Vec<(Ident, String, LocIdx)>,
@@ -6574,6 +6598,96 @@ fn collect_open_shadow_value_use_checks(
     }
 }
 
+fn same_constructor_result(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> bool {
+    let left = ctx.repr(crate::types::ctype::expand_head(ctx, env, left));
+    let right = ctx.repr(crate::types::ctype::expand_head(ctx, env, right));
+    match (&*ctx.get_desc(left), &*ctx.get_desc(right)) {
+        (TypeDesc::Tconstr { path: left, .. }, TypeDesc::Tconstr { path: right, .. }) => {
+            left.same(right)
+        }
+        _ => false,
+    }
+}
+
+fn collect_open_shadow_label_constructor_use_checks(
+    ctx: &crate::types::TypeContext,
+    env_before_open: &Env,
+    env_after_open: &Env,
+    loc: LocIdx,
+    item_index: usize,
+    out: &mut Vec<OpenShadowLabelConstructorUseCheck>,
+) {
+    let mut seen = HashSet::new();
+    for (previous_id, _) in env_before_open.iter_constructors() {
+        let name = previous_id.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Ok(previous_desc) = env_before_open.find_constructor(name) else {
+            continue;
+        };
+        let Ok((_, opened_desc, is_local)) = env_after_open.find_constructor_with_origin(name)
+        else {
+            continue;
+        };
+        if is_local
+            || same_constructor_result(
+                ctx,
+                env_before_open,
+                previous_desc.cstr_res,
+                opened_desc.cstr_res,
+            )
+        {
+            continue;
+        }
+        out.push(OpenShadowLabelConstructorUseCheck {
+            kind: OpenShadowLabelConstructorKind::Constructor,
+            name: name.to_string(),
+            res: opened_desc.cstr_res,
+            loc,
+            item_index,
+            emitted: false,
+        });
+    }
+
+    seen.clear();
+    for (previous_id, _) in env_before_open.iter_labels() {
+        let name = previous_id.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Ok(previous_desc) = env_before_open.find_label(name) else {
+            continue;
+        };
+        let Ok((_, opened_desc, is_local)) = env_after_open.find_label_with_origin(name) else {
+            continue;
+        };
+        if is_local
+            || same_constructor_result(
+                ctx,
+                env_before_open,
+                previous_desc.lbl_res,
+                opened_desc.lbl_res,
+            )
+        {
+            continue;
+        }
+        out.push(OpenShadowLabelConstructorUseCheck {
+            kind: OpenShadowLabelConstructorKind::Label,
+            name: name.to_string(),
+            res: opened_desc.lbl_res,
+            loc,
+            item_index,
+            emitted: false,
+        });
+    }
+}
+
 fn report_open_shadow_value_warnings_for_item(
     tctx: &mut TypeCheckContext<'_>,
     item_index: usize,
@@ -6591,6 +6705,336 @@ fn report_open_shadow_value_warnings_for_item(
                 check.loc,
                 Warning::OpenShadowIdentifier {
                     kind: "value".to_string(),
+                    name: check.name.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn constructor_matches_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    desc: &crate::types::decl::ConstructorDescription,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    check.kind == OpenShadowLabelConstructorKind::Constructor
+        && desc.cstr_name == check.name
+        && same_constructor_result(ctx, env, desc.cstr_res, check.res)
+}
+
+fn label_matches_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    desc: &crate::types::decl::LabelDescription,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    check.kind == OpenShadowLabelConstructorKind::Label
+        && desc.lbl_name == check.name
+        && same_constructor_result(ctx, env, desc.lbl_res, check.res)
+}
+
+fn pattern_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    pat: &crate::types::typedtree::Pattern,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    match &pat.pat_desc {
+        crate::types::typedtree::PatternDesc::Tpat_alias(inner, _, _) => {
+            pattern_uses_open_shadow_label_constructor(ctx, env, inner, check)
+        }
+        crate::types::typedtree::PatternDesc::Tpat_tuple(pats)
+        | crate::types::typedtree::PatternDesc::Tpat_array(pats) => pats
+            .iter()
+            .any(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)),
+        crate::types::typedtree::PatternDesc::Tpat_construct(_, desc, args) => {
+            constructor_matches_open_shadow_label_constructor(ctx, env, desc, check)
+                || args
+                    .iter()
+                    .any(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check))
+        }
+        crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
+            .as_deref()
+            .is_some_and(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)),
+        crate::types::typedtree::PatternDesc::Tpat_record(fields, _) => {
+            fields.iter().any(|(_, label, pat, _)| {
+                label_matches_open_shadow_label_constructor(ctx, env, label, check)
+                    || pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
+            })
+        }
+        crate::types::typedtree::PatternDesc::Tpat_or(left, right, _) => {
+            pattern_uses_open_shadow_label_constructor(ctx, env, left, check)
+                || pattern_uses_open_shadow_label_constructor(ctx, env, right, check)
+        }
+        crate::types::typedtree::PatternDesc::Tpat_any
+        | crate::types::typedtree::PatternDesc::Tpat_var(_, _)
+        | crate::types::typedtree::PatternDesc::Tpat_constant(_) => false,
+    }
+}
+
+fn function_param_pattern_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    pat: &crate::types::typedtree::FunctionParamPattern,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    match pat {
+        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
+            pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
+        }
+        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
+            params.iter().any(|param| {
+                param.default.as_deref().is_some_and(|expr| {
+                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                }) || function_param_pattern_uses_open_shadow_label_constructor(
+                    ctx, env, &param.pat, check,
+                )
+            })
+        }
+    }
+}
+
+fn typed_case_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    case: &crate::types::typedtree::Case,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    pattern_uses_open_shadow_label_constructor(ctx, env, &case.c_lhs, check)
+        || case.c_guard.as_ref().is_some_and(|guard| {
+            expression_uses_open_shadow_label_constructor(ctx, env, guard, check)
+        })
+        || expression_uses_open_shadow_label_constructor(ctx, env, &case.c_rhs, check)
+}
+
+fn expression_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    expr: &Expression,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    match &expr.exp_desc {
+        crate::types::typedtree::ExpressionDesc::Texp_let(_, bindings, body) => {
+            bindings.iter().any(|binding| {
+                pattern_uses_open_shadow_label_constructor(ctx, env, &binding.vb_pat, check)
+                    || expression_uses_open_shadow_label_constructor(
+                        ctx,
+                        env,
+                        &binding.vb_expr,
+                        check,
+                    )
+            }) || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
+            params.iter().any(|param| {
+                param.default.as_deref().is_some_and(|expr| {
+                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                }) || function_param_pattern_uses_open_shadow_label_constructor(
+                    ctx, env, &param.pat, check,
+                )
+            }) || body
+                .iter()
+                .any(|case| typed_case_uses_open_shadow_label_constructor(ctx, env, case, check))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
+            expression_uses_open_shadow_label_constructor(ctx, env, funct, check)
+                || args.iter().any(|arg| {
+                    arg.expression.as_ref().is_some_and(|expr| {
+                        expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                    })
+                })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_match(
+            scrutinee,
+            value_cases,
+            exn_cases,
+            _,
+        ) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, scrutinee, check)
+                || value_cases.iter().chain(exn_cases.iter()).any(|case| {
+                    typed_case_uses_open_shadow_label_constructor(ctx, env, case, check)
+                })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_try(body, cases) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, body, check)
+                || cases.iter().any(|case| {
+                    typed_case_uses_open_shadow_label_constructor(ctx, env, case, check)
+                })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_tuple(items)
+        | crate::types::typedtree::ExpressionDesc::Texp_array(items) => items
+            .iter()
+            .any(|item| expression_uses_open_shadow_label_constructor(ctx, env, item, check)),
+        crate::types::typedtree::ExpressionDesc::Texp_construct(_, desc, args) => {
+            constructor_matches_open_shadow_label_constructor(ctx, env, desc, check)
+                || args
+                    .iter()
+                    .any(|arg| expression_uses_open_shadow_label_constructor(ctx, env, arg, check))
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_variant(_, payload) => {
+            payload.as_deref().is_some_and(|expr| {
+                expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+            })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | crate::types::typedtree::ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            fields.iter().any(|(_, label, definition, _)| {
+                label_matches_open_shadow_label_constructor(ctx, env, label, check)
+                    || match definition {
+                        crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
+                            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                        }
+                        crate::types::typedtree::RecordLabelDefinition::Kept(_)
+                        | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
+                            _,
+                            _,
+                        ) => false,
+                    }
+            }) || extended_expression.as_deref().is_some_and(|expr| {
+                expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+            })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_field(base, _, label) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, base, check)
+                || label_matches_open_shadow_label_constructor(ctx, env, label, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_setfield(base, _, label, value) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, base, check)
+                || label_matches_open_shadow_label_constructor(ctx, env, label, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, value, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, cond, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, then_expr, check)
+                || else_expr.as_deref().is_some_and(|expr| {
+                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_sequence(first, second)
+        | crate::types::typedtree::ExpressionDesc::Texp_while(first, second)
+        | crate::types::typedtree::ExpressionDesc::Texp_for_of(_, _, first, second)
+        | crate::types::typedtree::ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, first, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, second, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_for(_, pat, start, stop, _, body) => {
+            pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, start, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, stop, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_send(receiver, _, arg) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, receiver, check)
+                || arg.as_deref().is_some_and(|expr| {
+                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+                })
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, module_expr, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_letexception(_, body)
+        | crate::types::typedtree::ExpressionDesc::Texp_assert(body) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, body, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_pack(module_expr) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, module_expr, check)
+        }
+        crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, _)
+        | crate::types::typedtree::ExpressionDesc::Texp_constant(_)
+        | crate::types::typedtree::ExpressionDesc::Texp_break
+        | crate::types::typedtree::ExpressionDesc::Texp_continue
+        | crate::types::typedtree::ExpressionDesc::Texp_extension_constructor(_, _) => false,
+    }
+}
+
+fn module_expr_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    module_expr: &ModuleExpr,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => structure
+            .str_items
+            .iter()
+            .any(|item| structure_item_uses_open_shadow_label_constructor(ctx, env, item, check)),
+        ModuleExprDesc::Tmod_apply(func, arg, _) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, func, check)
+                || module_expr_uses_open_shadow_label_constructor(ctx, env, arg, check)
+        }
+        ModuleExprDesc::Tmod_functor(_, _, _, body) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, body, check)
+        }
+        ModuleExprDesc::Tmod_constraint(inner, _, _, _) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, inner, check)
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+        }
+        ModuleExprDesc::Tmod_ident(_, _) => false,
+    }
+}
+
+fn structure_item_uses_open_shadow_label_constructor(
+    ctx: &crate::types::TypeContext,
+    env: &Env,
+    item: &StructureItem,
+    check: &OpenShadowLabelConstructorUseCheck,
+) -> bool {
+    match &item.str_desc {
+        StructureItemDesc::Tstr_eval(expr, _) => {
+            expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
+        }
+        StructureItemDesc::Tstr_value(_, bindings) => bindings.iter().any(|binding| {
+            pattern_uses_open_shadow_label_constructor(ctx, env, &binding.vb_pat, check)
+                || expression_uses_open_shadow_label_constructor(ctx, env, &binding.vb_expr, check)
+        }),
+        StructureItemDesc::Tstr_module(binding) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, &binding.mb_expr, check)
+        }
+        StructureItemDesc::Tstr_recmodule(bindings) => bindings.iter().any(|binding| {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, &binding.mb_expr, check)
+        }),
+        StructureItemDesc::Tstr_include(include) => {
+            module_expr_uses_open_shadow_label_constructor(ctx, env, &include.incl_mod, check)
+        }
+        StructureItemDesc::Tstr_type(_, _)
+        | StructureItemDesc::Tstr_typext(_)
+        | StructureItemDesc::Tstr_exception(_)
+        | StructureItemDesc::Tstr_primitive(_)
+        | StructureItemDesc::Tstr_modtype(_)
+        | StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_) => false,
+    }
+}
+
+fn report_open_shadow_label_constructor_warnings_for_item(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    item_index: usize,
+    item: &StructureItem,
+    checks: &mut [OpenShadowLabelConstructorUseCheck],
+) {
+    let ctx = tctx.type_ctx;
+    for check in checks.iter_mut() {
+        if check.emitted || check.item_index >= item_index {
+            continue;
+        }
+        if structure_item_uses_open_shadow_label_constructor(ctx, env, item, check) {
+            check.emitted = true;
+            tctx.report_warning(
+                check.loc,
+                Warning::OpenShadowLabelConstructor {
+                    kind: check.kind.as_str().to_string(),
                     name: check.name.clone(),
                 },
             );
@@ -16440,6 +16884,7 @@ pub fn type_structure<'a>(
     let mut names = Names::default();
     let mut unused_value_checks = Vec::new();
     let mut open_shadow_value_checks = Vec::new();
+    let mut open_shadow_label_constructor_checks = Vec::new();
 
     for item in items {
         check_structure_item_names(&mut names, arena, item)?;
@@ -16457,12 +16902,27 @@ pub fn type_structure<'a>(
                 item_index,
                 &mut open_shadow_value_checks,
             );
+            collect_open_shadow_label_constructor_use_checks(
+                tctx.type_ctx,
+                &current_env,
+                &new_env,
+                typed_item.str_loc,
+                item_index,
+                &mut open_shadow_label_constructor_checks,
+            );
         }
         report_open_shadow_value_warnings_for_item(
             tctx,
             item_index,
             &typed_item,
             &mut open_shadow_value_checks,
+        );
+        report_open_shadow_label_constructor_warnings_for_item(
+            tctx,
+            &current_env,
+            item_index,
+            &typed_item,
+            &mut open_shadow_label_constructor_checks,
         );
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
