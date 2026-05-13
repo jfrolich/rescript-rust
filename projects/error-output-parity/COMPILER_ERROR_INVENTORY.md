@@ -652,7 +652,9 @@ with a reason after checking raise sites.
   - `ident_or_record_as_config` invalid config-record warning before
     `@return` rejection
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_return_record_with_payload.res`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by
