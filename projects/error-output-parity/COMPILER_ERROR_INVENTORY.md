@@ -941,6 +941,12 @@ with a reason after checking raise sites.
   - `Variable_in_scope`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/variable_in_scope.res`.
+- `compiler/ml/ast_mapper.ml`
+  - `PpxContext.restore` malformed `[@@@ocaml.ppx.context]` diagnostics are
+    not reached from normal `.res`/`.resi` source in the current compiler
+    pipeline. A source-level `@@ocaml.ppx.context(1)` probe compiles without
+    invoking the restore path; external PPX process failures are covered
+    separately under `Ast_exp_handle_external`.
 - `bsc -bs-ast` parser entrypoint
   - Structure and signature parse diagnostics are rendered through the compiler
     binary, not only through `res_parser`
