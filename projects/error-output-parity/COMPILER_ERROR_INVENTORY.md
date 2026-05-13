@@ -373,8 +373,10 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/duplicate_constructor.res`.
 - `Duplicate_label`
-  - Covered by
-    `tests/error_output_parity/compiler/fixtures/duplicate_label.res`.
+  - Covered for direct duplicate fields and duplicate fields introduced by
+    record type spread by
+    `tests/error_output_parity/compiler/fixtures/duplicate_label.res` and
+    `tests/error_output_parity/compiler/fixtures/duplicate_label_record_spread.res`.
 - `Object_spread_with_record_field`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.
