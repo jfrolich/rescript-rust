@@ -14788,21 +14788,9 @@ fn type_module_expr_with_alias<'a>(
             })
         }
 
-        ParsedModuleExprDesc::Pmod_extension(_ext) => {
-            // Extension: [%id]
-            // Extensions are typically handled by preprocessors
-            let placeholder_lid = arena.placeholder_located(loc);
-            Ok(ModuleExpr {
-                mod_desc: ModuleExprDesc::Tmod_ident(
-                    Path::pident(Ident::create_local("extension")),
-                    placeholder_lid,
-                ),
-                mod_loc: loc,
-                mod_type: crate::types::decl::ModuleType::MtySignature(vec![]),
-                mod_env: tctx.type_ctx.store_typed_env(env),
-                mod_attributes: mod_expr.pmod_attributes.clone(),
-            })
-        }
+        ParsedModuleExprDesc::Pmod_extension(ext) => Err(TypeModError::CoreError(
+            crate::types::typecore::builtin_extension_error(arena, ext),
+        )),
     }
 }
 
@@ -15443,6 +15431,12 @@ pub fn transl_signature<'a>(
                 })
             }
             PSigDesc::Psig_attribute(attr) => TSigDesc::Tsig_attribute((**attr).clone()),
+            PSigDesc::Psig_extension(inner) => {
+                let (extension, _attrs) = &**inner;
+                return Err(TypeModError::CoreError(
+                    crate::types::typecore::builtin_extension_error(arena, extension),
+                ));
+            }
             // For unsupported signature items, use Tsig_attribute as placeholder
             _ => TSigDesc::Tsig_attribute((
                 Located {
@@ -19646,32 +19640,9 @@ fn type_structure_item<'a>(
         }
 
         ParsedStructureItemDesc::Pstr_extension(inner) => {
-            let (ref _ext, ref _attrs) = **inner;
-            // Extension: [%%id]
-            // Extensions like %%raw are expanded by the PPX pass before type checking.
-            // If we get here, the extension wasn't expanded. Return a placeholder.
-            let ctx = tctx.type_ctx;
-            let unit_ty = ctx.new_tuple(vec![]);
-            let desc = StructureItemDesc::Tstr_eval(
-                Expression::new(
-                    crate::types::typedtree::ExpressionDesc::Texp_constant(
-                        crate::types::typedtree::Constant::Int(0),
-                    ),
-                    loc.clone(),
-                    unit_ty,
-                    EnvRef(0),
-                    Attributes::new(),
-                ),
-                Attributes::new(),
-            );
-            Ok((
-                StructureItem {
-                    str_desc: desc,
-                    str_loc: loc,
-                    str_env: EnvRef(0),
-                },
-                vec![],
-                env.clone_preserve_id(),
+            let (extension, _attrs) = &**inner;
+            Err(TypeModError::CoreError(
+                crate::types::typecore::builtin_extension_error(arena, extension),
             ))
         }
     }

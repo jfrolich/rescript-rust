@@ -622,6 +622,27 @@ with a reason after checking raise sites.
   - `Variable_in_scope`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/variable_in_scope.res`.
+- `compiler/ml/builtin_attributes.ml`
+  - `error_of_extension` rejects uninterpreted expression, type, pattern,
+    module expression, and structure extension points
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_expr_uninterpreted.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_type_uninterpreted.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_pattern_uninterpreted.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_module_uninterpreted.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_structure_uninterpreted.res`.
+  - `error_of_extension` reports string payloads for explicit `%%error`
+    extension points
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_message.res`.
+  - `error_of_extension` maps empty `%%error` payloads to
+    `Location.Already_displayed_error`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_already_displayed.res`.
+  - `error_of_extension` rejects invalid `%%error` payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_payload.res`.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by

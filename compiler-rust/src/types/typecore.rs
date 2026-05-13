@@ -56,6 +56,50 @@ const PAT_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patVariantSpread";
 const PAT_FROM_VARIANT_SPREAD_ATTRIBUTE: &str = "res.patFromVariantSpread";
 const TERNARY_ATTRIBUTE: &str = "res.ternary";
 
+fn extension_error_message(
+    arena: &ParseArena,
+    extension: &crate::parser::ast::Extension,
+) -> Option<String> {
+    let name = arena.get_string(extension.0.txt);
+    if matches!(name, "error" | "ocaml.error") {
+        return match &extension.1 {
+            crate::parser::ast::Payload::PStr(items) => {
+                let Some(item) = items.first() else {
+                    return None;
+                };
+                let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &*item.pstr_desc
+                else {
+                    return Some(format!("Invalid syntax for extension '{name}'."));
+                };
+                let expr = arena.get_expr(eval.0);
+                let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &*expr.pexp_desc
+                else {
+                    return Some(format!("Invalid syntax for extension '{name}'."));
+                };
+                let ParsedConstant::String(message, _) = &**constant else {
+                    return Some(format!("Invalid syntax for extension '{name}'."));
+                };
+                Some(message.to_string())
+            }
+            _ => Some(format!("Invalid syntax for extension '{name}'.")),
+        };
+    }
+    Some(format!("Uninterpreted extension '{name}'."))
+}
+
+pub fn builtin_extension_error(
+    arena: &ParseArena,
+    extension: &crate::parser::ast::Extension,
+) -> TypeCoreError {
+    match extension_error_message(arena, extension) {
+        Some(message) => TypeCoreError::ExtensionError {
+            loc: extension.0.loc,
+            message,
+        },
+        None => TypeCoreError::ExtensionAlreadyDisplayed,
+    }
+}
+
 fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
     while x < n {
         if x > (isize::MAX as usize / 2) {
@@ -758,6 +802,12 @@ pub enum TypeCoreError {
 
     /// JSX not enabled.
     JsxNotEnabled { loc: LocIdx },
+
+    /// An extension point reached the typechecker without being handled by a PPX.
+    ExtensionError { loc: LocIdx, message: String },
+
+    /// OCaml's `Location.Already_displayed_error` sentinel for empty `[%error]` payloads.
+    ExtensionAlreadyDisplayed,
 
     /// Other error (catch-all for module type checking errors propagated from typemod).
     Other(String),
@@ -2890,19 +2940,7 @@ fn transl_type_inner(
             Ok((ctyp, package_ty))
         }
 
-        CTD::Ptyp_extension(_) => {
-            // Extension type: [%ext]
-            // Return a fresh type variable for now
-            let ty = ctx.new_var(None);
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                ctyp_type: ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
-            Ok((ctyp, ty))
-        }
+        CTD::Ptyp_extension(extension) => Err(builtin_extension_error(tctx.arena, extension)),
     }
 }
 
@@ -3721,16 +3759,7 @@ fn type_pattern_inner(
             Ok(result)
         }
 
-        PD::Ppat_extension(_) => {
-            // Extension patterns - return wildcard for now
-            Ok(Pattern::new(
-                PatternDesc::Tpat_any,
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
-        }
+        PD::Ppat_extension(extension) => Err(builtin_extension_error(tctx.arena, extension)),
     }
 }
 
@@ -18929,15 +18958,7 @@ fn type_extension_expr(
         ));
     }
 
-    // Extensions are handled by the preprocessor or raise an error
-    // For type checking, treat as an opaque value of the expected type
-    Ok(Expression::new(
-        ExpressionDesc::Texp_constant(Constant::Int(0)), // Placeholder
-        loc.clone(),
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        attributes.to_vec().into(),
-    ))
+    Err(builtin_extension_error(tctx.arena, extension))
 }
 
 fn letmodule_path_root_is_module(path: &Path, module_id: &Ident) -> bool {

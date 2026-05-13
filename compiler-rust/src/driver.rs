@@ -2597,6 +2597,16 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::ExtensionError { loc, message }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, message),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ExtensionAlreadyDisplayed) => {
+            UserDiagnostic::new(String::new(), 2).into()
+        }
         TypeModError::CoreError(TypeCoreError::InvalidForLoopIndex { loc }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
