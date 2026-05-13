@@ -638,6 +638,15 @@ with a reason after checking raise sites.
   - `%re` JavaScript regex literal validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/raw_re_non_regex.res`.
+  - `assert_bool_lit` for method `@get`/`@set` predicate payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_get_predicate_non_bool.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_set_predicate_non_bool.res`.
+  - `ident_or_record_as_config` qualified-label rejection for method
+    predicate payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_get_predicate_qualified_label.res`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by

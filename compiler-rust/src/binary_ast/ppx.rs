@@ -10560,7 +10560,7 @@ fn validate_method_attribute_config_names<F>(
     mut validate_name: F,
 ) -> PpxResult<()>
 where
-    F: FnMut(&str, LocIdx) -> PpxResult<()>,
+    F: FnMut(&str, LocIdx, Option<ExprIdx>) -> PpxResult<()>,
 {
     let Payload::PStr(items) = payload else {
         return Ok(());
@@ -10576,15 +10576,35 @@ where
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => {
             if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
-                validate_name(arena.get_string(*name_idx), lid.loc)?;
+                validate_name(arena.get_string(*name_idx), lid.loc, None)?;
             }
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, _) = &**inner;
+            let (fields, with_obj) = &**inner;
+            if with_obj.is_some() {
+                return Ok(());
+            }
             for field in fields {
-                if let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) {
-                    validate_name(arena.get_string(*name_idx), field.lid.loc)?;
-                }
+                let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                    return Err(PpxError::at_loc(
+                        expr.pexp_loc,
+                        "Qualified label is not allowed",
+                    ));
+                };
+                let name = arena.get_string(*name_idx);
+                let field_expr = arena.get_expr(field.expr);
+                let is_punned = match &*field_expr.pexp_desc {
+                    ExpressionDesc::Pexp_ident(value_lid) => {
+                        matches!(
+                            arena.get_longident(value_lid.txt),
+                            Longident::Lident(value_name_idx)
+                                if arena.get_string(*value_name_idx) == name
+                        )
+                    }
+                    _ => false,
+                };
+                let opt_expr = if is_punned { None } else { Some(field.expr) };
+                validate_name(name, field.lid.loc, opt_expr)?;
             }
         }
         _ => {}
@@ -10592,21 +10612,51 @@ where
     Ok(())
 }
 
+fn validate_method_attribute_bool_payload(
+    opt_expr: Option<ExprIdx>,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let Some(expr_idx) = opt_expr else {
+        return Ok(());
+    };
+    let expr = arena.get_expr(expr_idx);
+    let is_bool_literal = match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_construct(lid, None) => {
+            matches!(
+                arena.get_longident(lid.txt),
+                Longident::Lident(name_idx)
+                    if matches!(arena.get_string(*name_idx), "true" | "false")
+            )
+        }
+        _ => false,
+    };
+    if is_bool_literal {
+        Ok(())
+    } else {
+        Err(PpxError::at_loc(
+            expr.pexp_loc,
+            "expect `true` or `false` in this field",
+        ))
+    }
+}
+
 fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
         match arena.get_string(attr_name.txt) {
             "get" => {
-                validate_method_attribute_config_names(payload, arena, |name, loc| {
+                validate_method_attribute_config_names(payload, arena, |name, loc, opt_expr| {
                     match name {
-                        "null" | "undefined" | "nullable" => Ok(()),
+                        "null" | "undefined" | "nullable" => {
+                            validate_method_attribute_bool_payload(opt_expr, arena)
+                        }
                         _ => Err(PpxError::at_loc(loc, "unsupported predicates")),
                     }
                 })?;
             }
             "set" => {
-                validate_method_attribute_config_names(payload, arena, |name, loc| {
+                validate_method_attribute_config_names(payload, arena, |name, loc, opt_expr| {
                     match name {
-                        "no_get" => Ok(()),
+                        "no_get" => validate_method_attribute_bool_payload(opt_expr, arena),
                         _ => Err(PpxError::at_loc(loc, "unsupported predicates")),
                     }
                 })?;
