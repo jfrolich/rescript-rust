@@ -2152,23 +2152,16 @@ impl<'a> RawLambdaConverter<'a> {
                 func.attr.inline = inline;
                 RawLambda::Lfunction(func)
             }
-            RawLambda::Lprim(prim) => {
-                // Walk through Pjs_fn_make wrappers
-                match &prim.primitive {
-                    Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit => {
-                        let mut args = prim.args;
-                        if let Some(last) = args.pop() {
-                            let inner = self.apply_inline_attribute_raw(last, loc, inline);
-                            args.push(inner);
-                        }
-                        RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
-                            primitive: prim.primitive,
-                            args,
-                            loc: prim.loc,
-                        })
-                    }
-                    _ => RawLambda::Lprim(prim),
-                }
+            RawLambda::Lprim(mut prim)
+                if matches!(
+                    prim.primitive,
+                    Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit
+                ) && prim.args.len() == 1 =>
+            {
+                let inner = prim.args.pop().expect("checked single Pjs_fn_make argument");
+                prim.args
+                    .push(self.apply_inline_attribute_raw(inner, loc, inline));
+                RawLambda::Lprim(prim)
             }
             other => {
                 let name = match inline {

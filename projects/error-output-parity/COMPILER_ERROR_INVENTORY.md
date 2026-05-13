@@ -1003,10 +1003,13 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate_function_expr.res`.
   - `add_inline_attribute` reports `inline1`/`inline2` when binding attributes
     cannot apply to the translated lambda
-    - Covered for a module-body binding by
+    - Covered for value bindings whose translated lambda is a non-wrapper
+      `Lprim` by
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_binding_lprim_misplaced_always.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_inline_binding_lprim_misplaced_never.res`,
+      and for a module-body binding by
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_binding_misplaced.res`.
-      Simple `@inline let x = 1` probes are compiled through the ReScript
-      inline-constant path and did not surface these branches during this audit.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by
