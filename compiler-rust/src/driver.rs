@@ -10245,6 +10245,9 @@ pub fn compile_source_to_js_with_options(
         source,
         filename,
     )?;
+    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
@@ -10939,6 +10942,9 @@ pub fn typecheck_interface_source(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
+    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
     let experimental_let_unwrap =
         experimental_let_unwrap_for_signature(&signature, options, parser.arena());
     let signature = preprocess_signature_for_typecheck_with_source(
@@ -11237,6 +11243,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+            .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+        emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
         let experimental_let_unwrap =
             experimental_let_unwrap_for_signature(&signature, options, parser.arena());
         let signature = preprocess_signature_for_typecheck_with_source(
@@ -12035,6 +12044,12 @@ struct DirectivePayloadError {
     loc: LocIdx,
 }
 
+#[derive(Debug, Clone)]
+struct ConfigPayloadError {
+    loc: LocIdx,
+    message: String,
+}
+
 impl std::fmt::Display for DirectivePayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("expect string literal ")
@@ -12042,6 +12057,372 @@ impl std::fmt::Display for DirectivePayloadError {
 }
 
 impl std::error::Error for DirectivePayloadError {}
+
+impl std::fmt::Display for ConfigPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConfigPayloadError {}
+
+fn config_payload_error_to_anyhow(
+    err: ConfigPayloadError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, err.loc, &err.message),
+        2,
+    )
+    .into()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConfigAction {
+    name: StrIdx,
+    loc: LocIdx,
+    expr: Option<ExprIdx>,
+}
+
+fn push_config_warning(
+    warnings: &mut Vec<ppx::PpxWarning>,
+    loc: LocIdx,
+    warning: crate::diagnostics::Warning,
+) {
+    // OCaml runs Ast_config processing twice on the direct bsc path
+    // (frontend rewrite and js_implementation), so warning-only config
+    // diagnostics are printed twice before compilation continues.
+    for _ in 0..2 {
+        warnings.push(ppx::PpxWarning {
+            loc,
+            warning: warning.clone(),
+        });
+    }
+}
+
+fn push_invalid_config_record_warning(warnings: &mut Vec<ppx::PpxWarning>, loc: LocIdx) {
+    push_config_warning(
+        warnings,
+        loc,
+        crate::diagnostics::Warning::BsDeriveWarning {
+            message: "invalid attribute config-record, ignoring".to_string(),
+        },
+    );
+}
+
+fn config_payload_actions(
+    payload: &Payload,
+    default_loc: LocIdx,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<Vec<ConfigAction>, ConfigPayloadError> {
+    let Payload::PStr(items) = payload else {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    };
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    if items.len() != 1 {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    }
+    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    };
+    let (expr_idx, _) = &**inner;
+    let expr = arena.get_expr(*expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, with_obj) = &**inner;
+            if with_obj.is_some() {
+                push_config_warning(
+                    warnings,
+                    expr.pexp_loc,
+                    crate::diagnostics::Warning::BsDeriveWarning {
+                        message: "`with` is not supported, discarding".to_string(),
+                    },
+                );
+                return Ok(Vec::new());
+            }
+            let mut actions = Vec::with_capacity(fields.len());
+            for field in fields {
+                let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                    return Err(ConfigPayloadError {
+                        loc: default_loc,
+                        message: "Qualified label is not allowed".to_string(),
+                    });
+                };
+                let field_expr = arena.get_expr(field.expr);
+                let punned = match &*field_expr.pexp_desc {
+                    ExpressionDesc::Pexp_ident(lid) => matches!(
+                        arena.get_longident(lid.txt),
+                        Longident::Lident(value_idx) if value_idx == name_idx
+                    ),
+                    _ => false,
+                };
+                actions.push(ConfigAction {
+                    name: *name_idx,
+                    loc: field.lid.loc,
+                    expr: if punned { None } else { Some(field.expr) },
+                });
+            }
+            Ok(actions)
+        }
+        ExpressionDesc::Pexp_ident(lid) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+                push_invalid_config_record_warning(warnings, default_loc);
+                return Ok(Vec::new());
+            };
+            Ok(vec![ConfigAction {
+                name: *name_idx,
+                loc: lid.loc,
+                expr: None,
+            }])
+        }
+        _ => {
+            push_invalid_config_record_warning(warnings, default_loc);
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn validate_config_bool_literal(
+    expr_idx: ExprIdx,
+    arena: &ParseArena,
+) -> Result<(), ConfigPayloadError> {
+    let expr = arena.get_expr(expr_idx);
+    let is_bool_literal = match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+            arena.get_longident(lid.txt),
+            Longident::Lident(name_idx)
+                if matches!(arena.get_string(*name_idx), "true" | "false")
+        ),
+        _ => false,
+    };
+    if is_bool_literal {
+        Ok(())
+    } else {
+        Err(ConfigPayloadError {
+            loc: expr.pexp_loc,
+            message: "expect `true` or `false` in this field".to_string(),
+        })
+    }
+}
+
+fn config_bsc_flags_parse_ok(flags: &[String]) -> bool {
+    let mut i = 0;
+    while i < flags.len() {
+        let flag = flags[i].as_str();
+        match flag {
+            "-bs-jsx" => {
+                if i + 1 >= flags.len() || flags[i + 1] != "4" {
+                    return false;
+                }
+                i += 2;
+            }
+            "-enable-experimental" => {
+                if i + 1 >= flags.len() || flags[i + 1] != "LetUnwrap" {
+                    return false;
+                }
+                i += 2;
+            }
+            "-w"
+            | "-o"
+            | "-output"
+            | "-ppx"
+            | "-open"
+            | "-bs-jsx-module"
+            | "-bs-jsx-mode"
+            | "-bs-package-output"
+            | "-bs-project-root"
+            | "-bs-package-name"
+            | "-bs-ns"
+            | "-bs-gentype-module"
+            | "-bs-gentype-module-resolution"
+            | "-bs-gentype-generated-extension"
+            | "-bs-gentype-suffix"
+            | "-bs-gentype-shim"
+            | "-bs-gentype-debug"
+            | "-bs-gentype-dep"
+            | "-bs-gentype-source-dir"
+            | "-bs-gentype-dep-path"
+            | "-bs-gentype-bsb-project-root"
+            | "-color"
+            | "-e"
+            | "-reprint-source"
+            | "-format"
+            | "-pp"
+            | "-runtime-path"
+            | "-warn-error" => {
+                if i + 1 >= flags.len() {
+                    return false;
+                }
+                i += 2;
+            }
+            "-bs-read-cmi"
+            | "-bs-jsx-preserve"
+            | "-bs-ast"
+            | "-bs-test-ast-conversion"
+            | "-bs-syntax-only"
+            | "-bs-g"
+            | "-as-pp"
+            | "-no-alias-deps"
+            | "-bs-gentype"
+            | "-bs-gentype-export-interfaces"
+            | "-unboxed-types"
+            | "-nostdlib"
+            | "-bs-cmi-only"
+            | "-bs-cmi"
+            | "-bs-cmj"
+            | "-bs-no-version-header"
+            | "-bs-no-builtin-ppx"
+            | "-bs-cross-module-opt"
+            | "-bs-no-cross-module-opt"
+            | "-bs-diagnose"
+            | "-bs-no-check-div-by-zero"
+            | "-bs-noassertfalse"
+            | "-noassert"
+            | "-bs-loc"
+            | "-dtypedtree"
+            | "-dtyped-sexp"
+            | "-dtyped-sexp-locs"
+            | "-dparsetree"
+            | "-dparsetree-sexp-locs"
+            | "-drawlambda"
+            | "-dlambda-sexp"
+            | "-dlambda-sexp-locs"
+            | "-dsource"
+            | "-only-parse"
+            | "-editor-mode"
+            | "-ignore-parse-errors"
+            | "-verbose"
+            | "-keep-locs"
+            | "-no-keep-locs"
+            | "-nopervasives"
+            | "-v"
+            | "-version"
+            | "-absname"
+            | "-bs-no-bin-annot"
+            | "-short-paths"
+            | "-unsafe"
+            | "-warn-help"
+            | "-make-runtime" => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn validate_config_flags(
+    expr_idx: Option<ExprIdx>,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<(), ConfigPayloadError> {
+    let Some(expr_idx) = expr_idx else {
+        return Ok(());
+    };
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_array(elements) = &*expr.pexp_desc else {
+        return Err(ConfigPayloadError {
+            loc: expr.pexp_loc,
+            message: "string array expected".to_string(),
+        });
+    };
+    let mut flags = Vec::with_capacity(elements.len());
+    for elem_idx in elements.iter() {
+        let elem = arena.get_expr(*elem_idx);
+        let ExpressionDesc::Pexp_constant(constant) = &*elem.pexp_desc else {
+            return Err(ConfigPayloadError {
+                loc: elem.pexp_loc,
+                message: "string literal expected".to_string(),
+            });
+        };
+        let Constant::String(value, _) = &**constant else {
+            return Err(ConfigPayloadError {
+                loc: elem.pexp_loc,
+                message: "string literal expected".to_string(),
+            });
+        };
+        flags.push(value.to_string());
+    }
+    if !config_bsc_flags_parse_ok(&flags) {
+        push_config_warning(
+            warnings,
+            expr.pexp_loc,
+            crate::diagnostics::Warning::Preprocessor {
+                message: "invalid flags for bsc".to_string(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_config_payload(
+    payload: &Payload,
+    default_loc: LocIdx,
+    allow_no_export: bool,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<(), ConfigPayloadError> {
+    let actions = config_payload_actions(payload, default_loc, arena, warnings)?;
+    for action in actions {
+        match arena.get_string(action.name) {
+            "no_export" if allow_no_export => {
+                if let Some(expr_idx) = action.expr {
+                    validate_config_bool_literal(expr_idx, arena)?;
+                }
+            }
+            "flags" => validate_config_flags(action.expr, arena, warnings)?,
+            name => {
+                return Err(ConfigPayloadError {
+                    loc: action.loc,
+                    message: format!("{name} is not supported"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_file_config_from_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
+    let mut warnings = Vec::new();
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_attribute(attr) => {
+                if arena.get_string(attr.0.txt) == "config" {
+                    validate_config_payload(&attr.1, attr.0.loc, true, arena, &mut warnings)?;
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(warnings)
+}
+
+fn validate_file_config_from_signature(
+    signature: &Signature,
+    arena: &ParseArena,
+) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
+    let mut warnings = Vec::new();
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_attribute(attr) => {
+                if arena.get_string(attr.0.txt) == "config" {
+                    validate_config_payload(&attr.1, attr.0.loc, false, arena, &mut warnings)?;
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(warnings)
+}
 
 /// Extract `@@config({flags: [...]})` overrides from a parsed structure.
 pub fn extract_file_config_from_structure(
@@ -12497,6 +12878,9 @@ pub fn compile_source_in_process(
             parser.diagnostics().len()
         ));
     }
+    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     reject_disabled_let_unwrap_in_structure(
@@ -13189,6 +13573,9 @@ pub fn typecheck_interface_in_process(
             parser.diagnostics().len()
         ));
     }
+    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,

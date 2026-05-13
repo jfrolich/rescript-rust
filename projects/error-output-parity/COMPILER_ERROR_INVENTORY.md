@@ -655,6 +655,27 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_return_record_with_payload.res`.
+- `compiler/frontend/ast_config.ml`
+  - `Ast_payload.table_dispatch` unsupported `@@config` action
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_unknown.res`.
+  - `no_export` uses `Ast_payload.assert_bool_lit`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_no_export_non_bool.res`.
+  - Signature config table only supports file-level `flags`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_signature_no_export_unsupported.resi`.
+  - `file_level_flags_handler` payload shape validation
+    - Covered for non-array and non-string array-element cases by
+      `tests/error_output_parity/compiler/fixtures/config_flags_non_array.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/config_flags_non_string.res`.
+  - `file_level_flags_handler` invalid bsc flags warning
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_bad_flags_warning.res`.
+  - `Ast_payload.ident_or_record_as_config` invalid payload warning
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_invalid_payload_warning.res`.
 - `compiler/frontend/ast_derive*.ml`
   - `Ast_payload.table_dispatch` unsupported `@deriving` action
     - Covered by

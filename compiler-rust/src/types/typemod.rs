@@ -15504,6 +15504,9 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
                                                 let field_name =
                                                     arena.get_string(longident.last_idx());
                                                 if field_name == "no_export" {
+                                                    if is_false_literal(field.expr, arena) {
+                                                        return false;
+                                                    }
                                                     return true;
                                                 }
                                             }
@@ -15520,6 +15523,17 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
             }
             _ => break, // Stop at first non-attribute item
         }
+    }
+    false
+}
+
+fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -> bool {
+    let expr = arena.get_expr(expr_idx);
+    if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) = &*expr.pexp_desc {
+        return matches!(
+            arena.get_longident(lid.txt),
+            Longident::Lident(name_idx) if arena.get_string(*name_idx) == "false"
+        );
     }
     false
 }
