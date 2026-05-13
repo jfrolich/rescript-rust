@@ -464,7 +464,10 @@ with a reason after checking raise sites.
 - `Not_a_variant`
 - `Variant_tags`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`.
+    `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_type.res`,
+    `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_pattern.res`.
 - `Invalid_variable_name`
 - `Cannot_quantify`
 - `Multiple_constraints_on_type`
