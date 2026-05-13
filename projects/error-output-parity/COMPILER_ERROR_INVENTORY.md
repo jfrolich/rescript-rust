@@ -97,7 +97,9 @@ with a reason after checking raise sites.
   and the generic tuple-element expected-type subcase in
   `tests/error_output_parity/compiler/fixtures/let_module_escape_tuple_element.res`,
   and the package local type escape/coercion subcase in
-  `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`.
+  `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`,
+  and the optional arrow argument hidden-type printer subcase in
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash_optional_hidden_arg.res`.
 - `Multiply_bound_variable`: covered by
   `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`.
 - `Orpat_vars`: covered by

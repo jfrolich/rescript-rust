@@ -10786,9 +10786,11 @@ impl<'a> TypeExprPrinter<'a> {
             TypeArgLabel::Nolabel => self.format(ty),
             TypeArgLabel::Labelled(label) => format!("~{}: {}", label.txt, self.format(ty)),
             TypeArgLabel::Optional(label) => {
-                let inner_ty =
-                    crate::types::ctype::extract_option_type(self.type_ctx, ty).unwrap_or(ty);
-                format!("~{}: {}=?", label.txt, self.format(inner_ty))
+                let inner_ty = crate::types::ctype::extract_option_type(self.type_ctx, ty);
+                let ty = inner_ty
+                    .map(|inner_ty| self.format(inner_ty))
+                    .unwrap_or_else(|| "<hidden>".to_string());
+                format!("~{}: {}=?", label.txt, ty)
             }
         }
     }
