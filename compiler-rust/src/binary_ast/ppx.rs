@@ -838,6 +838,7 @@ fn validate_external_attribute_payload_errors(
                 }
             }
             "return" => {
+                validate_return_wrapper_config_shape(payload, arena)?;
                 let Some(wrapper) = get_return_wrapper_config(payload, arena) else {
                     return Err(PpxError::at_loc(
                         attr_name.loc,
@@ -2501,6 +2502,39 @@ fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> 
         }
         _ => None,
     }
+}
+
+fn validate_return_wrapper_config_shape(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let current::Payload::PStr(items) = payload else {
+        return Ok(());
+    };
+    if items.len() != 1 {
+        return Ok(());
+    }
+    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+        return Ok(());
+    };
+    let (expr_idx, _) = &**inner;
+    let expr = arena.get_expr(*expr_idx);
+    let ExpressionDesc::Pexp_record(inner) = &*expr.pexp_desc else {
+        return Ok(());
+    };
+    let (fields, with_obj) = &**inner;
+    if with_obj.is_some() {
+        return Ok(());
+    }
+    for field in fields {
+        if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
+            return Err(PpxError::at_loc(
+                expr.pexp_loc,
+                "Qualified label is not allowed",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Extract integer from attribute payload (mirrors OCaml's Ast_payload.is_single_int)

@@ -646,7 +646,9 @@ with a reason after checking raise sites.
   - `ident_or_record_as_config` qualified-label rejection for method
     predicate payloads
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/bs_get_predicate_qualified_label.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_get_predicate_qualified_label.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_return_qualified_label.res`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by
