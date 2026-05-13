@@ -2011,6 +2011,26 @@ fn validate_external_attribute_errors(
 
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
 
+    if desc.mk_obj {
+        if external_desc_is_plain_obj(&desc) {
+            // OCaml Ast_external_process.process_obj rejects non-empty
+            // primitive names for plain @obj externals before reconstructing
+            // the external type.
+            if !prim_name.is_empty() {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "@obj expect external names to be empty string",
+                ));
+            }
+            validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena)?;
+            return Ok(());
+        }
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Attribute found that conflicts with @obj",
+        ));
+    }
+
     if desc.set_index && !external_desc_is_plain_set_index(&desc) {
         return Err(PpxError::at_loc(
             vd.pval_loc,
@@ -2134,30 +2154,10 @@ fn validate_external_attribute_errors(
         }
     }
 
-    // OCaml Ast_external_process.process_obj rejects non-empty primitive names
-    // for plain @obj externals before reconstructing the external type.
-    if external_desc_is_plain_obj(&desc) && !prim_name.is_empty() {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "@obj expect external names to be empty string",
-        ));
-    }
-
-    if external_desc_is_plain_obj(&desc) {
-        validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena)?;
-    } else if desc.mk_obj {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "Attribute found that conflicts with @obj",
-        ));
-    }
-
-    if !desc.mk_obj {
-        let result_is_unit = is_unit_type(&result_type, arena);
-        let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
-        validate_ffi_names(&ffi, vd.pval_loc)?;
-        validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
-    }
+    let result_is_unit = is_unit_type(&result_type, arena);
+    let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
+    validate_ffi_names(&ffi, vd.pval_loc)?;
+    validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
 
     Ok(())
 }

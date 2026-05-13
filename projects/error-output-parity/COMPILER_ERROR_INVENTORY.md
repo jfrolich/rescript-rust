@@ -1177,6 +1177,8 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_string_payload.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_unwrap.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_as_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_get_index_conflict.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_set_index_conflict.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_obj_val_conflict.res`.
   - `@module` with payload-bearing `@new`
