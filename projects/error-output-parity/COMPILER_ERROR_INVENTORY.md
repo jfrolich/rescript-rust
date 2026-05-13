@@ -471,6 +471,14 @@ with a reason after checking raise sites.
     record type spread by
     `tests/error_output_parity/compiler/fixtures/duplicate_label.res` and
     `tests/error_output_parity/compiler/fixtures/duplicate_label_record_spread.res`.
+- `Warnings.Duplicate_definitions`
+  - Covered for duplicate constructor and record label names across recursive
+    type declarations by
+    `tests/error_output_parity/compiler/fixtures/typedecl_warning_duplicate_constructor_definition.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/typedecl_warning_duplicate_label_definition.res`;
+    the signature translation path is covered by
+    `tests/error_output_parity/compiler/fixtures/typedecl_warning_duplicate_constructor_definition_signature.resi`.
 - `Object_spread_with_record_field`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/object_spread_with_record_field.res`.

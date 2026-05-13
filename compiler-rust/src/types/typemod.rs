@@ -3544,6 +3544,61 @@ fn normalized_parser_variance_requirement(variance: ParserVariance) -> (bool, bo
     }
 }
 
+fn check_type_declaration_duplicate_definitions(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    decls: &[crate::parser::ast::TypeDeclaration],
+) {
+    let mut labels: HashMap<String, String> = HashMap::default();
+    let mut constructors: HashMap<String, String> = HashMap::default();
+
+    for decl in decls {
+        let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+        match &decl.ptype_kind {
+            crate::parser::ast::TypeKind::Ptype_variant(constructors_in_decl) => {
+                for constructor in constructors_in_decl {
+                    let constructor_name = arena.get_string(constructor.pcd_name.txt);
+                    if let Some(previous_type_name) = constructors.get(constructor_name) {
+                        tctx.report_warning(
+                            constructor.pcd_loc,
+                            Warning::DuplicateDefinitions {
+                                kind: "constructor".to_string(),
+                                name: constructor_name.to_string(),
+                                type1: previous_type_name.clone(),
+                                type2: type_name.clone(),
+                            },
+                        );
+                    } else {
+                        constructors.insert(constructor_name.to_string(), type_name.clone());
+                    }
+                }
+            }
+            crate::parser::ast::TypeKind::Ptype_record(labels_in_decl) => {
+                for label in labels_in_decl {
+                    let label_name = arena.get_string(label.pld_name.txt);
+                    if let Some(previous_type_name) = labels.get(label_name) {
+                        if label_name != "..." {
+                            tctx.report_warning(
+                                label.pld_loc,
+                                Warning::DuplicateDefinitions {
+                                    kind: "label".to_string(),
+                                    name: label_name.to_string(),
+                                    type1: previous_type_name.clone(),
+                                    type2: type_name.clone(),
+                                },
+                            );
+                        }
+                    } else {
+                        labels.insert(label_name.to_string(), type_name.clone());
+                    }
+                }
+            }
+            crate::parser::ast::TypeKind::Ptype_abstract
+            | crate::parser::ast::TypeKind::Ptype_open => {}
+        }
+    }
+}
+
 fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
     matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
 }
@@ -18771,6 +18826,10 @@ fn type_structure_item<'a>(
                 tctx.type_variables = saved_type_variables;
             }
 
+            // OCaml Typedecl.check_duplicates runs after translating the
+            // declaration group and before final env construction/end_def.
+            check_type_declaration_duplicate_definitions(tctx, arena, decls);
+
             // OCaml: Ctype.end_def() + generalize_decl for each declaration
             ctx.end_def();
             for decl in &internal_decls_for_generalize {
@@ -21014,6 +21073,11 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
         Ok(())
     })();
+    if loop_result.is_ok() {
+        // OCaml Typedecl.check_duplicates runs after translating the declaration
+        // group and before final env construction/end_def.
+        check_type_declaration_duplicate_definitions(tctx, arena, decls);
+    }
     ctx.end_def();
     loop_result?;
 
