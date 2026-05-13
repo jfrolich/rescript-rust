@@ -405,8 +405,12 @@ with a reason after checking raise sites.
   hint branch by
   `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res` and
   `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant_type_var_hint.res`.
-- `Variant_tags`: covered by a polymorphic variant hash collision in
-  `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`.
+- `Variant_tags`: covered by polymorphic variant hash collisions in row type
+  translation, expression unification, and pattern unification by
+  `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_type.res`,
+  `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_pattern.res`.
 - `Opened_object`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_opened_object.res`.
 - `Not_an_object`: covered by
