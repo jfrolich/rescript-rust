@@ -10595,6 +10595,18 @@ pub fn compile_source_to_js_with_options(
         &lowered_lambda,
         &possible_required_modules,
     );
+    if let Some(diagnostic) = compiler.take_diagnostic() {
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
 
     // JS IR -> JS source
     let js = print_deps_program_with_directives_and_options(

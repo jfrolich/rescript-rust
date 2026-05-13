@@ -28,9 +28,14 @@ use crate::lambda::{Lambda, TagInfo};
 use crate::location::Location;
 
 impl LambdaCompiler {
-    pub(crate) fn compile_primitive(&mut self, prim: &Primitive, args: &[Lambda]) -> Compiled {
+    pub(crate) fn compile_primitive(
+        &mut self,
+        prim: &Primitive,
+        args: &[Lambda],
+        loc: &Location,
+    ) -> Compiled {
         if matches!(prim, Primitive::Pimport) {
-            return self.compile_import_primitive(args);
+            return self.compile_import_primitive(loc, args);
         }
 
         use Primitive::*;
@@ -441,7 +446,13 @@ impl LambdaCompiler {
                     Box::new(prop.clone()),
                     Box::new(obj.clone()),
                 )),
-                _ => Expression::undefined(false),
+                _ => {
+                    self.report_diagnostic(
+                        loc,
+                        "Invalid external \"%dict_has\" type signature. Expected to have two arguments.",
+                    );
+                    Expression::undefined(false)
+                }
             },
             Pduprecord => match compiled_args.as_slice() {
                 [source] => Expression::new(ExpressionDesc::Object(
@@ -592,7 +603,7 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
-            Pimport => self.compile_import(compiled_args),
+            Pimport => self.compile_import(loc, compiled_args),
             PjsCall {
                 prim_name,
                 arg_types,

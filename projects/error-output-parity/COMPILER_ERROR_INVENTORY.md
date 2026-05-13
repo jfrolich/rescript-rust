@@ -857,7 +857,30 @@ with a reason after checking raise sites.
   - `Circular_dependency`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
+- `compiler/core/lam_compile.ml`
+  - Dynamic import missing/extra module argument
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_too_many_arguments_external.res`.
+      A `unit => "%import"` external reaches the unsupported-argument branch
+      after unit lowering, not the empty-argument branch.
+  - Dynamic import unsupported argument shape
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_value_argument.res`,
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_local_value.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_no_argument_external.res`.
 - `compiler/core/lam_compile_primitive.ml`
+  - `Pimport` module/file argument rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_global_value.res`.
+  - `Pimport` primitive arity guard
+    - Documented as source-unreachable from normal ReScript: `Lam_compile`
+      handles `Pimport` arity before calling `Lam_compile_primitive.translate`.
+      The Rust backend still carries the same diagnostic in its lower primitive
+      helper for 1:1 behavior if an invalid lambda reaches it.
+  - `Pdict_has` invalid external signature
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/dict_has_bad_arity.res`.
   - `Warnings.Bs_polymorphic_comparison` for object comparison, ordering,
     `min`, and `max`
     - Covered by

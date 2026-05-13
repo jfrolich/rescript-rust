@@ -1176,7 +1176,7 @@ impl LambdaCompiler {
         )
     }
 
-    pub(crate) fn compile_import(&self, args: Vec<Expression>) -> Expression {
+    pub(crate) fn compile_import(&mut self, loc: &Location, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
             [
@@ -1187,20 +1187,20 @@ impl LambdaCompiler {
                 },
             ] => arg,
             _ => {
-                return Expression::call(
-                    Expression::var(Ident::create_persistent("import")),
-                    args,
-                    CallInfo::default(),
+                self.report_diagnostic(
+                    loc,
+                    "Invalid argument: Dynamic import must take a single module or module value as its argument.",
                 );
+                return Expression::undefined(false);
             }
         };
 
         let Some((module, member)) = self.module_of_expression(arg) else {
-            return Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                args,
-                CallInfo::default(),
+            self.report_diagnostic(
+                loc,
+                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
             );
+            return Expression::undefined(false);
         };
 
         let path = match &module.kind {
@@ -1212,11 +1212,11 @@ impl LambdaCompiler {
         };
 
         let Some(path) = path else {
-            return Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                args,
-                CallInfo::default(),
+            self.report_diagnostic(
+                loc,
+                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
             );
+            return Expression::undefined(false);
         };
 
         let import_expr = Expression::call(
