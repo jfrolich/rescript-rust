@@ -1118,6 +1118,19 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_tuple_single_pattern.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_module_name_number_equal.res`.
+  - Literal, JSX-name, and type-parameter parser branches reject invalid
+    bigint syntax, JSX names/dots/hyphens/closing names, missing type-parameter
+    singlequotes, old paren type parameters, and invalid type-variable names
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_invalid_bigint_literal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_invalid_name.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_expected_identifier_after_dot.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_trailing_hyphen.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_closing_name_mismatch.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_type_param_missing_singlequote.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_type_params_old_parens.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_type_var_invalid_name.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask

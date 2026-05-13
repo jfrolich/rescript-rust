@@ -40,6 +40,12 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
         Token::Int { i, suffix } => {
             let value = extend_cow_lifetime(i.clone());
             let s = *suffix;
+            if s == Some('n') && !is_valid_bigint_literal(&value) {
+                p.err(DiagnosticCategory::Message(
+                    "Invalid bigint literal. Only decimal literal is allowed for bigint."
+                        .to_string(),
+                ));
+            }
             p.next();
             Constant::Integer(value, s)
         }
@@ -72,6 +78,20 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
             Constant::Integer(Cow::Borrowed("0"), None)
         }
     }
+}
+
+fn is_valid_bigint_literal(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if first != '-' && first != '+' && !first.is_ascii_digit() && first != '_' {
+        return false;
+    }
+
+    chars.all(|c| c.is_ascii_digit() || c == '_')
 }
 
 // ============================================================================
@@ -7211,7 +7231,7 @@ fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
         }
         _ => {
             p.err(DiagnosticCategory::Message(
-                "Expected JSX tag name".to_string(),
+                "A jsx name must be a lowercase or uppercase name, like: div in <div /> or Navbar in <Navbar />".to_string(),
             ));
             JsxTagName::Invalid("error".to_string())
         }
