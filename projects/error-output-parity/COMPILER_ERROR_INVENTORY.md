@@ -277,7 +277,15 @@ with a reason after checking raise sites.
   and the combined spellcheck/module-name suggestion branch in
   `tests/error_output_parity/compiler/fixtures/unbound_value_spellcheck_and_module_suggestion.res`.
 - `Unbound_constructor`: covered by
-  `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`.
+  `tests/error_output_parity/compiler/fixtures/unbound_constructor.res`, the
+  qualified constructor branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_constructor_qualified.res`,
+  the spellcheck branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_constructor_spellcheck.res`,
+  and the extension-rebind lookup paths in
+  `tests/error_output_parity/compiler/fixtures/rebind_unbound_constructor.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/rebind_unbound_qualified_constructor.res`.
 - `Unbound_type_constructor`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`
   and the type spellcheck hint in
