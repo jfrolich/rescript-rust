@@ -5050,16 +5050,21 @@ fn format_not_a_variant_report(
     loc: LocIdx,
     ty: TypeExprRef,
 ) -> String {
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!(
-            "The type {} does not expand to a polymorphic variant type",
-            format_type_expr(type_ctx, ty)
-        ),
-    )
+    let message = format!(
+        "The type {} does not expand to a polymorphic variant type",
+        format_type_expr(type_ctx, ty)
+    );
+    if let TypeDesc::Tvar(Some(name)) = &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        return format_compiler_error_report_with_unindented_break(
+            arena,
+            source,
+            filename,
+            loc,
+            &message,
+            &format!("Hint: Did you mean `{name}?"),
+        );
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
 fn format_method_mismatch_report(

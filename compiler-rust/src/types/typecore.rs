@@ -2016,16 +2016,6 @@ fn transl_type_inner(
                     name: format!("'{name_str}"),
                 });
             }
-            if tctx.fixed_type_variables
-                && !tctx.univars.iter().any(|(name, _)| name == &name_str)
-                && !tctx.used_variables.contains_key(&name_str)
-                && !tctx.type_variables.contains_key(&name_str)
-            {
-                return Err(TypeCoreError::UnboundTypeVariable {
-                    loc,
-                    name: format!("'{name_str}"),
-                });
-            }
             let ty = if let Some((_, existing)) =
                 tctx.univars.iter().find(|(name, _)| name == &name_str)
             {

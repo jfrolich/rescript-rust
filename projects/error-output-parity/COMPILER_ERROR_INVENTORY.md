@@ -291,8 +291,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/present_variant_has_no_type.res`.
 - `Constructor_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/polyvariant_constructor_mismatch.res`.
-- `Not_a_variant`: covered by
-  `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res`.
+- `Not_a_variant`: covered for non-variant constructors and the type-variable
+  hint branch by
+  `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res` and
+  `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant_type_var_hint.res`.
 - `Variant_tags`: covered by a polymorphic variant hash collision in
   `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`.
 - `Opened_object`: covered by
