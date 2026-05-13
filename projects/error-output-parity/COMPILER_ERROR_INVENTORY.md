@@ -177,7 +177,11 @@ with a reason after checking raise sites.
   generated probe over 4,992 one- and two-parameter GADT result/payload/scrutinee
   shapes found no `Recursive local constraint` reporter. Keep this variant
   listed until a direct `Unification_recursive_abbrev` source-level repro is
-  found or the raise site is proven unreachable for ReScript syntax.
+  found or the raise site is proven unreachable for ReScript syntax. Rust now
+  mirrors the OCaml check location: `unify_pattern_types_gadt` maps recursive
+  abbreviation failures to `RecursiveLocalConstraint`, and
+  `add_gadt_equation` uses a `local_non_recursive_abbrev` walk before
+  installing a local constraint.
 - `Not_a_variant_type`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
 - `Not_subtype`: covered by
@@ -1071,6 +1075,12 @@ with a reason after checking raise sites.
   - `%obj` qualified-label rejection
     - Covered by
       `tests/error_output_parity/compiler/fixtures/obj_extension_qualified_label.res`.
+- `compiler/frontend/ast_external.ml`
+  - Empty and multiple primitive string rejection
+    - Source-unreachable from normal `.res`/`.resi`. Probes for
+      `external x: int` and `external x: int = "a" "b"` are rejected by parser
+      diagnostics before `Ast_external.handle_external_in_stru` or
+      `Ast_external.handle_external_in_sig` can inspect `pval_prim`.
 - `compiler/frontend/ast_exp_apply.ml`
   - `property name (...) can not contain speical character #`
     - Covered by

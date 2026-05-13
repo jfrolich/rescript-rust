@@ -3038,6 +3038,15 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
+            UserDiagnostic::new(
+                format_recursive_local_constraint_report(
+                    type_ctx, arena, source, filename, *loc, trace,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::PolymorphicLabel { loc, lid }) => {
             UserDiagnostic::new(
                 format_polymorphic_label_report(arena, source, filename, *loc, lid),
@@ -5883,6 +5892,43 @@ fn format_pattern_type_clash_report(
     if !is_polyvariant_explanation {
         append_incompatible_type_parts(type_ctx, trace, &mut message);
     }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_recursive_local_constraint_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("Recursive local constraint when unifying ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, actual),
+    ));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("with ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, expected),
+    ));
+    message.push_str(RESET);
+    append_incompatible_type_parts(type_ctx, trace, &mut message);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }

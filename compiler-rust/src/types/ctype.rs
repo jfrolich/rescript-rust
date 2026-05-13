@@ -728,6 +728,86 @@ pub(crate) fn nullary_constr_paths_equivalent(
     flattened_alias_paths_equivalent(ctx, env, path1, path2, 0)
 }
 
+fn is_contractive(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
+        matches!(
+            decl.type_kind,
+            super::decl::TypeKind::TypeRecord(..) | super::decl::TypeKind::TypeVariant(..)
+        ) || (is_predef_type_name(path.head_name()) && decl.type_manifest.is_none())
+    })
+}
+
+fn local_non_recursive_abbrev(
+    ctx: &TypeContext,
+    env: &Env,
+    source: &Path,
+    ty: TypeExprRef,
+) -> bool {
+    fn go(
+        ctx: &TypeContext,
+        env: &Env,
+        source: &Path,
+        strict: bool,
+        visited: &mut TypeExprRefSet,
+        ty: TypeExprRef,
+    ) -> bool {
+        let ty = ctx.repr(ty);
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if path.same(source) {
+                    return false;
+                }
+                if !strict && is_contractive(ctx, env, path) {
+                    return true;
+                }
+                let path = path.clone();
+                let args = args.clone();
+                drop(desc);
+
+                if !visited.insert(ty) {
+                    return true;
+                }
+
+                if let Some(expanded) = try_expand_head(ctx, env, ty) {
+                    let expanded = ctx.repr(expanded);
+                    if expanded != ty {
+                        return go(ctx, env, source, strict, visited, expanded);
+                    }
+                }
+
+                let params = lookup_type_decl_for_path(ctx, env, &path)
+                    .map(|decl| decl.type_params)
+                    .unwrap_or_else(|| args.clone());
+                for (param, arg) in params.iter().zip(args.iter()) {
+                    let strict = strict || !btype::is_tvar(ctx, ctx.repr(*param));
+                    if !go(ctx, env, source, strict, visited, *arg) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => {
+                drop(desc);
+                if !strict {
+                    return true;
+                }
+                if !visited.insert(ty) {
+                    return true;
+                }
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                children
+                    .into_iter()
+                    .all(|child| go(ctx, env, source, true, visited, child))
+            }
+        }
+    }
+
+    let mut visited = TypeExprRefSet::new();
+    go(ctx, env, source, false, &mut visited, ty)
+}
+
 /// Add a GADT equation: source_path = destination type.
 /// Creates a local constraint with a manifest type declaration.
 /// Matches OCaml's `add_gadt_equation` in ctype.ml.
@@ -738,13 +818,7 @@ fn add_gadt_equation(
     source_path: &Path,
     destination: TypeExprRef,
 ) -> TypeResult<()> {
-    // local_non_recursive_abbrev check: destination must not reference source
-    let dest_repr = ctx.repr(destination);
-    let is_recursive = matches!(
-        &*ctx.get_desc(dest_repr),
-        TypeDesc::Tconstr { path, .. } if path.same(source_path)
-    );
-    if is_recursive {
+    if !local_non_recursive_abbrev(ctx, env, source_path, destination) {
         return Ok(());
     }
 

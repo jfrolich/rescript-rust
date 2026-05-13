@@ -695,7 +695,10 @@ pub enum TypeCoreError {
     ModuleError(Box<crate::types::typemod::TypeModError>),
 
     /// Recursive local constraint.
-    RecursiveLocalConstraint(Vec<(TypeExprRef, TypeExprRef)>),
+    RecursiveLocalConstraint {
+        loc: LocIdx,
+        trace: Vec<(TypeExprRef, TypeExprRef)>,
+    },
 
     /// Unexpected existential.
     UnexpectedExistential { loc: LocIdx },
@@ -3863,6 +3866,10 @@ fn unify_pattern_types(
             } else {
                 trace
             },
+        }),
+        Err(TypeError::RecursiveAbbrev) => Err(TypeCoreError::RecursiveLocalConstraint {
+            loc: _loc,
+            trace: vec![(ty1, ty2)],
         }),
         Err(_) => Err(TypeCoreError::PatternTypeClash {
             loc: Some(_loc),
