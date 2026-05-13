@@ -9777,16 +9777,28 @@ fn format_unbound_record_field_report(
             message.push_str("You need to access an individual element of the array if you want to access an individual record field.");
         }
         Some((ty, TypeDesc::Tconstr { .. })) => {
-            message.push_str("You're trying to access the record field ");
-            message.push_str(INFO);
-            message.push_str(field_name);
-            message.push_str(RESET);
-            message.push_str(", but the thing you're trying to access it on is not a record. \n");
-            message.push('\n');
-            message.push_str("The type of the thing you're trying to access it on is:\n");
-            message.push_str(&format_type_expr(type_ctx, ty));
-            message.push_str(",\n\n");
-            message.push_str("Only records have fields that can be accessed with dot notation.");
+            let mut raw_message = String::new();
+            raw_message.push_str("  You're trying to access the record field ");
+            raw_message.push_str(INFO);
+            raw_message.push_str(field_name);
+            raw_message.push_str(RESET);
+            raw_message
+                .push_str(", but the thing you're trying to access it on is not a record. \n");
+            raw_message.push_str("  \n");
+            raw_message.push_str("The type of the thing you're trying to access it on is:\n");
+            raw_message.push_str("  \n");
+            raw_message.push_str(&format_type_expr(type_ctx, ty));
+            raw_message.push_str("\n  \n\n");
+            raw_message.push_str(
+                "  Only records have fields that can be accessed with dot notation.",
+            );
+            return format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                loc,
+                &raw_message,
+            );
         }
         _ => {
             message.push_str(INFO);
