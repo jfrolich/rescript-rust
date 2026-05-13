@@ -810,12 +810,14 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_payload.res`.
   - `warning_attribute` reports preprocessor warnings from `@@ppwarning`
-    and illegal `@@warning` payloads/lists
+    and illegal `@@warning` payloads/lists, and applies OCaml
+    warning-as-error semantics for `@@warnerror`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_ppwarning.res`,
       `tests/error_output_parity/compiler/fixtures/builtin_warning_non_string.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_warning_bad_list.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/builtin_warning_bad_list.res`.
+      `tests/error_output_parity/compiler/fixtures/builtin_warnerror_attribute.res`.
 - `compiler/ml/translattribute.ml`
   - `find_attribute` reports duplicate `inline` and `inlined` attributes
     at the second attribute location
