@@ -9982,10 +9982,12 @@ fn transl_with_constraints<'a>(
                     tctx.type_ctx,
                 )
                 .ok_or_else(|| {
-                    TypeModError::CoreError(TypeCoreError::UnboundModule {
+                    TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                        tctx,
+                        env,
                         loc,
-                        name: tctx.longident_to_string(&rhs_longident),
-                    })
+                        &rhs_longident,
+                    ))
                 })?;
                 typed_constraints.push((
                     lhs_path,
@@ -10014,10 +10016,12 @@ fn transl_with_constraints<'a>(
                     tctx.type_ctx,
                 )
                 .ok_or_else(|| {
-                    TypeModError::CoreError(TypeCoreError::UnboundModule {
+                    TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                        tctx,
+                        env,
                         loc,
-                        name: tctx.longident_to_string(&rhs_longident),
-                    })
+                        &rhs_longident,
+                    ))
                 })?;
                 typed_constraints.push((
                     lhs_path,
@@ -12197,10 +12201,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 tctx.type_ctx,
             )
             .ok_or_else(|| {
-                TypeModError::CoreError(TypeCoreError::UnboundModule {
-                    loc: arena.none_loc(),
-                    name: tctx.longident_to_string(&longident),
-                })
+                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                    tctx,
+                    env,
+                    arena.none_loc(),
+                    &longident,
+                ))
             })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
@@ -12442,10 +12448,12 @@ fn approx_modtype<'a>(
                 tctx.type_ctx,
             )
             .ok_or_else(|| {
-                TypeModError::CoreError(TypeCoreError::UnboundModule {
-                    loc: arena.none_loc(),
-                    name: tctx.longident_to_string(&longident),
-                })
+                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                    tctx,
+                    env,
+                    arena.none_loc(),
+                    &longident,
+                ))
             })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
@@ -15284,10 +15292,12 @@ fn transl_modtype<'a>(
                 tctx.type_ctx,
             )
             .ok_or_else(|| {
-                TypeModError::CoreError(TypeCoreError::UnboundModule {
-                    loc: arena.none_loc(),
-                    name: tctx.longident_to_string(&longident),
-                })
+                TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                    tctx,
+                    env,
+                    arena.none_loc(),
+                    &longident,
+                ))
             })?;
             TMtyDesc::Tmty_alias(path, lid.clone())
         }

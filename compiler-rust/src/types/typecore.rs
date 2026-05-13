@@ -557,7 +557,11 @@ pub enum TypeCoreError {
     },
 
     /// Unbound module identifier.
-    UnboundModule { loc: LocIdx, name: String },
+    UnboundModule {
+        loc: LocIdx,
+        name: String,
+        alternatives: Vec<String>,
+    },
 
     /// A functor was used as if it were a structure.
     AccessFunctorAsStructure { loc: LocIdx, lid: Longident },
@@ -19656,9 +19660,11 @@ pub(crate) fn unbound_module_lookup_error(
     lid: &Longident,
 ) -> TypeCoreError {
     narrowed_module_lookup_error(tctx, env, loc, lid).unwrap_or_else(|| {
+        let alternatives = unbound_module_alternatives(tctx, env, lid);
         TypeCoreError::UnboundModule {
             loc,
             name: tctx.longident_to_string(lid),
+            alternatives,
         }
     })
 }
@@ -19698,13 +19704,42 @@ fn narrowed_module_lookup_error(
         &mut tctx.persistent_env,
         tctx.type_ctx,
     ) else {
+        let alternatives = unbound_module_alternatives(tctx, env, lid);
         return Some(TypeCoreError::UnboundModule {
             loc,
             name: tctx.longident_to_string(lid),
+            alternatives,
         });
     };
 
     module_structure_lookup_error(tctx, env, loc, lid, &module_path)
+}
+
+fn unbound_module_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    match lid {
+        Longident::Lident(_) => env
+            .iter_modules()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        Longident::Ldot(prefix, _) => env
+            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+            .map(|(_, sig)| {
+                sig.iter()
+                    .filter_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigModule(id, _, _) => {
+                            Some(id.name().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Longident::Lapply(_, _) => Vec::new(),
+    }
 }
 
 fn module_structure_lookup_error(

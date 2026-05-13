@@ -3455,8 +3455,12 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::CoreError(TypeCoreError::UnboundModule { loc, name }) => UserDiagnostic::new(
-            format_unbound_module_report(arena, source, filename, *loc, name),
+        TypeModError::CoreError(TypeCoreError::UnboundModule {
+            loc,
+            name,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_unbound_module_report(arena, source, filename, *loc, name, alternatives),
             2,
         )
         .into(),
@@ -5520,13 +5524,30 @@ fn format_unbound_module_report(
     filename: &str,
     loc: LocIdx,
     name: &str,
+    alternatives: &[String],
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let message = format!(
-        "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?\n\n"
-    );
+    let mut message = if name == "Str" {
+        format!(
+            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}Js.Re{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
+        )
+    } else {
+        format!(
+            "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?"
+        )
+    };
+    if name != "Str" && let Some(hint) = spellcheck_hint(name, alternatives) {
+        message.push_str("\n\n\n");
+        message.push_str(INFO);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        message.push_str(RESET);
+    } else if name != "Str" {
+        message.push_str("\n\n");
+    }
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

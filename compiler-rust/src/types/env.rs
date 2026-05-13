@@ -1020,6 +1020,11 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Iterate over visible module bindings.
+    pub fn iter_modules(&self) -> impl Iterator<Item = (&Ident, &ModuleDeclaration)> {
+        self.modules.iter().map(|(id, m)| (id, m.as_ref()))
+    }
+
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
         self.modules.find_by_ident(id).is_some()
     }
