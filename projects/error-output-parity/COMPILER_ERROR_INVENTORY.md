@@ -1389,6 +1389,9 @@ with a reason after checking raise sites.
 - `compiler/ml/parmatch.ml`
   - `Warnings.Partial_match` for ordinary exhaustiveness
     - Covered by `tests/build_tests/super_errors/fixtures/warnings5.res`.
+  - `Warnings.Fragile_match`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/parmatch_fragile_match.res`.
   - `Warnings.All_clauses_guarded`
     - Covered under `-warn-error +8` by
       `tests/error_output_parity/compiler/cases/parmatch_all_guarded.res`.

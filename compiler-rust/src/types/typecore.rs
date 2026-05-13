@@ -11443,6 +11443,121 @@ fn report_all_clauses_guarded_if_needed(
     all_clauses_guarded
 }
 
+fn extendable_fragile_match_path(path: &Path) -> bool {
+    // OCaml Parmatch.extendable_path excludes these predef types before
+    // emitting Warnings.Fragile_match.
+    !(path.same(&crate::types::predef::path_bool())
+        || path.same(&crate::types::predef::path_list())
+        || path.same(&crate::types::predef::path_unit())
+        || path.same(&crate::types::predef::path_option()))
+}
+
+fn add_fragile_match_path(paths: &mut Vec<Path>, path: Path) {
+    if !paths.iter().any(|existing| existing.same(&path)) {
+        paths.push(path);
+    }
+}
+
+fn pattern_type_path(ctx: &TypeContext, env: &Env, pat: &Pattern) -> Option<Path> {
+    let ty = crate::types::ctype::expand_head(ctx, env, pat.pat_type);
+    let desc = ctx.get_desc(ctx.repr(ty));
+    match &*desc {
+        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn collect_fragile_match_paths(
+    ctx: &TypeContext,
+    env: &Env,
+    pat: &Pattern,
+    paths: &mut Vec<Path>,
+) {
+    // Mirrors OCaml Parmatch.collect_paths_from_pat: only constructor type
+    // paths contribute, while extension constructors recurse into payloads.
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr_desc, args) => {
+            if !matches!(
+                cstr_desc.cstr_tag,
+                crate::types::decl::ConstructorTag::CstrExtension(_)
+            ) && let Some(path) = pattern_type_path(ctx, env, pat)
+                && extendable_fragile_match_path(&path)
+            {
+                add_fragile_match_path(paths, path);
+            }
+            for arg in args {
+                collect_fragile_match_paths(ctx, env, arg, paths);
+            }
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_fragile_match_paths(ctx, env, item, paths);
+            }
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_fragile_match_paths(ctx, env, field_pat, paths);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) | PatternDesc::Tpat_alias(inner, _, _) => {
+            collect_fragile_match_paths(ctx, env, inner, paths);
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_fragile_match_paths(ctx, env, left, paths);
+            collect_fragile_match_paths(ctx, env, right, paths);
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+fn pattern_has_catch_all_branch(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
+        PatternDesc::Tpat_alias(inner, _, _) => pattern_has_catch_all_branch(inner),
+        PatternDesc::Tpat_or(left, right, _) => {
+            pattern_has_catch_all_branch(left) || pattern_has_catch_all_branch(right)
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            items.iter().all(pattern_has_catch_all_branch)
+        }
+        PatternDesc::Tpat_record(fields, _) => fields
+            .iter()
+            .all(|(_, _, field_pat, _)| pattern_has_catch_all_branch(field_pat)),
+        _ => false,
+    }
+}
+
+fn report_fragile_match_if_needed(
+    tctx: &mut TypeCheckContext<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    cases: &[crate::types::typedtree::Case],
+    partial: crate::types::typedtree::Partial,
+) {
+    if partial != crate::types::typedtree::Partial::Total
+        || !tctx
+            .warning_config
+            .is_active(&Warning::FragileMatch { typ: String::new() })
+        || !cases
+            .iter()
+            .any(|case| pattern_has_catch_all_branch(&case.c_lhs))
+    {
+        return;
+    }
+
+    let mut paths = Vec::new();
+    for case in cases {
+        collect_fragile_match_paths(ctx, env, &case.c_lhs, &mut paths);
+    }
+    for path in paths {
+        tctx.report_warning(loc, Warning::FragileMatch { typ: path.name() });
+    }
+}
+
 fn optional_record_field_missing_example(
     cases: &[crate::types::typedtree::Case],
 ) -> Option<String> {
@@ -11741,6 +11856,7 @@ fn finish_non_gadt_type_cases<'a>(
         let partial = if partial_flag {
             let partial = check_partial_simple(ctx, env, typed_cases);
             report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
+            report_fragile_match_if_needed(tctx, ctx, env, loc, typed_cases, partial);
             partial
         } else {
             crate::types::typedtree::Partial::Partial
@@ -11757,6 +11873,7 @@ fn finish_non_gadt_type_cases<'a>(
     } else if partial_flag {
         let partial = check_partial_simple(ctx, env, typed_cases);
         report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
+        report_fragile_match_if_needed(tctx, ctx, env, loc, typed_cases, partial);
         Ok(partial)
     } else {
         Ok(crate::types::typedtree::Partial::Partial)
@@ -13978,6 +14095,7 @@ fn type_match(
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
         all_clauses_guarded =
             report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
+        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -14002,6 +14120,7 @@ fn type_match(
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
         all_clauses_guarded =
             report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
+        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -14015,6 +14134,7 @@ fn type_match(
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
         all_clauses_guarded =
             report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
+        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         partial
     };
     report_unused_literal_match_cases(tctx, &typed_val_cases);
@@ -15337,6 +15457,7 @@ fn type_function(
             ctx.init_def(lev + 1000);
             let partial = check_partial_simple(ctx, env, &cases);
             report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
+            report_fragile_match_if_needed(tctx, ctx, env, loc, &cases, partial);
             ctx.end_def();
             let return_inst = crate::types::instance(ctx, return_ty);
             unify_expression_types(tctx, loc, return_inst, ctx.new_var(None), None)?;
@@ -15344,6 +15465,7 @@ fn type_function(
         } else {
             let partial = check_partial_simple(ctx, env, &cases);
             report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
+            report_fragile_match_if_needed(tctx, ctx, env, loc, &cases, partial);
             partial
         };
         let param_id = name_pattern(ctx, "param", &cases);
@@ -22441,7 +22563,16 @@ fn report_let_partial_match_warnings<'a>(
             binding.vb_pat.clone(),
             binding.vb_expr.clone(),
         )];
-        if check_partial_simple(ctx, env, &cases) != crate::types::typedtree::Partial::Partial {
+        let partial = check_partial_simple(ctx, env, &cases);
+        if partial != crate::types::typedtree::Partial::Partial {
+            report_fragile_match_if_needed(
+                tctx,
+                ctx,
+                env,
+                binding.vb_pat.pat_loc,
+                &cases,
+                partial,
+            );
             continue;
         }
 
