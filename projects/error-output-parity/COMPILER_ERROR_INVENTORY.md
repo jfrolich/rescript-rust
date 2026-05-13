@@ -708,12 +708,13 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_scope_ident_payload.res`.
   - `@module({from, with})` import-attributes payload validation
-    - Covered for missing `from`, missing `with`, and non-string import
-      attribute values by
+    - Covered for missing `from`, missing `with`, non-string import
+      attribute values, and non-regular import attribute keys by
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_from.res`,
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_with.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_qualified_key.res`.
   - `@get_index`/`@set_index` non-empty primitive-name validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_get_index_named_primitive.res`

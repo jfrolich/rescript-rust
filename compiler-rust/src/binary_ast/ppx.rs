@@ -2586,13 +2586,13 @@ fn validate_module_import_attributes_payload(
     };
 
     for field in with_fields {
+        let field_expr = arena.get_expr(field.expr);
         let Longident::Lident(_) = arena.get_longident(field.lid.txt) else {
             return Err(PpxError::at_loc(
-                field.lid.loc,
+                field_expr.pexp_loc,
                 "Field must be a regular key.",
             ));
         };
-        let field_expr = arena.get_expr(field.expr);
         let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc else {
             return Err(PpxError::at_loc(
                 field_expr.pexp_loc,
