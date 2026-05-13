@@ -121,7 +121,9 @@ with a reason after checking raise sites.
 - `Private_label`: covered by
   `tests/error_output_parity/compiler/fixtures/private_label.res`.
 - `Apply_non_function`: covered by
-  `tests/error_output_parity/compiler/fixtures/apply_non_function.res`.
+  `tests/error_output_parity/compiler/fixtures/apply_non_function.res` and the
+  arrow-result branch in
+  `tests/error_output_parity/compiler/fixtures/apply_non_function_too_many_curried_args.res`.
 - `Apply_wrong_label`: covered by
   `tests/error_output_parity/compiler/fixtures/apply_wrong_label.res`.
 - `Incoherent_label_order`: covered by
@@ -136,7 +138,9 @@ with a reason after checking raise sites.
 - `Unexpected_existential`: covered by
   `tests/error_output_parity/compiler/fixtures/unexpected_existential.res`.
 - `Too_many_arguments`: covered by
-  `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
+  `tests/error_output_parity/compiler/fixtures/too_many_arguments.res` and the
+  inside-function branch in
+  `tests/error_output_parity/compiler/fixtures/too_many_function_parameters.res`.
 - `Abstract_wrong_label`: covered by
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res`.
 - `Scoping_let_module`: source-unreachable from normal ReScript. The
