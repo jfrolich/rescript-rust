@@ -6693,6 +6693,7 @@ fn report_open_shadow_value_warnings_for_item(
     item_index: usize,
     item: &StructureItem,
     checks: &mut [OpenShadowValueUseCheck],
+    mut warning_insert_index: usize,
 ) {
     let ctx = tctx.type_ctx;
     for check in checks.iter_mut() {
@@ -6701,13 +6702,16 @@ fn report_open_shadow_value_warnings_for_item(
         }
         if structure_item_uses_path(ctx, item, &|path| path.same(&check.path)) {
             check.emitted = true;
-            tctx.report_warning(
+            if tctx.report_warning_at(
+                warning_insert_index,
                 check.loc,
                 Warning::OpenShadowIdentifier {
                     kind: "value".to_string(),
                     name: check.name.clone(),
                 },
-            );
+            ) {
+                warning_insert_index += 1;
+            }
         }
     }
 }
@@ -7023,6 +7027,7 @@ fn report_open_shadow_label_constructor_warnings_for_item(
     item_index: usize,
     item: &StructureItem,
     checks: &mut [OpenShadowLabelConstructorUseCheck],
+    mut warning_insert_index: usize,
 ) {
     let ctx = tctx.type_ctx;
     for check in checks.iter_mut() {
@@ -7031,13 +7036,16 @@ fn report_open_shadow_label_constructor_warnings_for_item(
         }
         if structure_item_uses_open_shadow_label_constructor(ctx, env, item, check) {
             check.emitted = true;
-            tctx.report_warning(
+            if tctx.report_warning_at(
+                warning_insert_index,
                 check.loc,
                 Warning::OpenShadowLabelConstructor {
                     kind: check.kind.as_str().to_string(),
                     name: check.name.clone(),
                 },
-            );
+            ) {
+                warning_insert_index += 1;
+            }
         }
     }
 }
@@ -16891,6 +16899,7 @@ pub fn type_structure<'a>(
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
+        let warnings_before_item = tctx.warnings.len();
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
         let item_index = typed_items.len();
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
@@ -16916,6 +16925,7 @@ pub fn type_structure<'a>(
             item_index,
             &typed_item,
             &mut open_shadow_value_checks,
+            warnings_before_item,
         );
         report_open_shadow_label_constructor_warnings_for_item(
             tctx,
@@ -16923,6 +16933,7 @@ pub fn type_structure<'a>(
             item_index,
             &typed_item,
             &mut open_shadow_label_constructor_checks,
+            warnings_before_item,
         );
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);

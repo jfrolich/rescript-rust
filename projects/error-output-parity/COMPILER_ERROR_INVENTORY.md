@@ -286,8 +286,13 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_for_await_index.res`.
 - Typecore warning 39 (`Unused_rec_flag`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_rec_flag.res`.
-- Typecore warning 41 (`Ambiguous_name`) is covered by
-  `tests/error_output_parity/compiler/fixtures/typecore_warning_ambiguous_record_name.res`.
+- Typecore warning 41 (`Ambiguous_name`) is covered for record labels and
+  constructors by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_ambiguous_record_name.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/constructor_warning_ambiguous_name.res`;
+  ordering with open-shadow warning 45 is covered by
+  `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_constructor_with_ambiguous_name.res`.
 - Typecore warning 43 (`Nonoptional_label`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_nonoptional_label.res`.
 - Typecore warning 52 (`Fragile_literal_pattern`) is covered by
@@ -846,6 +851,8 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_constructor.res`
       and
       `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_label.res`.
+    - Ordering with constructor warning 41 is covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_constructor_with_ambiguous_name.res`.
 - `compiler/ml/rec_check.ml`
   - `Illegal_letrec_expr`
     - Covered by

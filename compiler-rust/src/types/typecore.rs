@@ -1237,15 +1237,22 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Report a warning.
     pub fn report_warning(&mut self, loc: LocIdx, warning: Warning) {
+        self.report_warning_at(self.warnings.len(), loc, warning);
+    }
+
+    /// Report a warning at a specific position in the collected warning stream.
+    pub fn report_warning_at(&mut self, index: usize, loc: LocIdx, warning: Warning) -> bool {
         if !self.warning_config.is_active(&warning) {
-            return;
+            return false;
         }
         let is_error = self.warning_config.is_error(&warning);
-        self.warnings.push(TypeCoreWarning {
+        let index = index.min(self.warnings.len());
+        self.warnings.insert(index, TypeCoreWarning {
             loc,
             warning,
             is_error,
         });
+        true
     }
 
     /// Apply a `@warning`/`@@warning` payload.
@@ -4523,6 +4530,16 @@ fn type_pattern_construct(
             tctx.type_ctx,
         ) {
             Some(resolution) => {
+                if !resolution.ambiguous_types.is_empty() {
+                    tctx.report_warning(
+                        lid.loc,
+                        Warning::AmbiguousName {
+                            names: vec![lid_name.clone()],
+                            types: resolution.ambiguous_types.clone(),
+                            is_label: false,
+                        },
+                    );
+                }
                 if let ConstructorDisambiguationSource::ExpectedType { tpath } = &resolution.source
                     && resolution.desc.cstr_generalized
                 {
@@ -15903,7 +15920,19 @@ fn type_construct(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         ) {
-            Some(resolution) => (resolution.path, resolution.desc),
+            Some(resolution) => {
+                if !resolution.ambiguous_types.is_empty() {
+                    tctx.report_warning(
+                        lid.loc,
+                        Warning::AmbiguousName {
+                            names: vec![lid_name.clone()],
+                            types: resolution.ambiguous_types.clone(),
+                            is_label: false,
+                        },
+                    );
+                }
+                (resolution.path, resolution.desc)
+            }
             None => {
                 match lookup_constructor_in_module(
                     &longident,
@@ -26506,6 +26535,7 @@ struct DisambiguatedConstructor {
     path: Path,
     desc: crate::types::decl::ConstructorDescription,
     source: ConstructorDisambiguationSource,
+    ambiguous_types: Vec<String>,
 }
 
 enum ConstructorDisambiguationSource {
@@ -26545,6 +26575,7 @@ fn disambiguate_constructor<'a>(
             path,
             desc,
             source: ConstructorDisambiguationSource::ExpectedType { tpath: opath? },
+            ambiguous_types: Vec::new(),
         });
     }
 
@@ -26577,6 +26608,7 @@ fn disambiguate_constructor<'a>(
                         path,
                         desc: (*cstr).clone(),
                         source: ConstructorDisambiguationSource::InScope,
+                        ambiguous_types: Vec::new(),
                     });
                 }
             }
@@ -26593,6 +26625,7 @@ fn disambiguate_constructor<'a>(
                 source: ConstructorDisambiguationSource::ExpectedType {
                     tpath: target_path.clone(),
                 },
+                ambiguous_types: Vec::new(),
             });
         }
     }
@@ -26602,7 +26635,7 @@ fn disambiguate_constructor<'a>(
     // `ambiguous_types` for this `opath = None` branch, so preserve those
     // compare_type_path/env-normalize side effects before returning.
     let cstr = all_constrs.last().unwrap();
-    force_constructor_ambiguous_type_side_effects(
+    let ambiguous_types = ambiguous_constructor_warning_types(
         cstr,
         all_constrs.iter().rev().skip(1).copied(),
         env,
@@ -26614,6 +26647,7 @@ fn disambiguate_constructor<'a>(
         path,
         desc: (*cstr).clone(),
         source: ConstructorDisambiguationSource::InScope,
+        ambiguous_types,
     })
 }
 
@@ -26674,6 +26708,39 @@ fn force_constructor_ambiguous_type_side_effects<'a, 'b, I>(
             pers_env,
             ctx,
         );
+    }
+}
+
+fn ambiguous_constructor_warning_types<'a, 'b, I>(
+    selected: &crate::types::decl::ConstructorDescription,
+    others: I,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a crate::types::context::TypeContext,
+) -> Vec<String>
+where
+    I: IntoIterator<Item = &'b crate::types::decl::ConstructorDescription>,
+{
+    let Some(selected_path) = constructor_result_path(ctx, selected) else {
+        return Vec::new();
+    };
+    let mut paths = vec![selected_path];
+    for other in others {
+        let Some(other_path) = constructor_result_path(ctx, other) else {
+            continue;
+        };
+        if paths.iter().any(|path| {
+            compare_type_paths_for_constructor_disambiguation(&other_path, path, env, pers_env, ctx)
+        }) {
+            continue;
+        }
+        paths.push(other_path);
+    }
+
+    if paths.len() <= 1 {
+        Vec::new()
+    } else {
+        paths.iter().map(Path::name).collect()
     }
 }
 
