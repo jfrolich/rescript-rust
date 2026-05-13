@@ -674,13 +674,14 @@ fn external_desc_is_plain_new(desc: &ExternalDesc) -> bool {
 
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
-    arena: &ParseArena,
+    external_loc: LocIdx,
+    arena: &mut ParseArena,
 ) -> PpxResult<()> {
     let (args, _result) = list_of_arrow(vd_type, arena);
     for arg in args {
-        let typ = arena.get_core_type(arg.typ);
+        let typ = arena.get_core_type(arg.typ).clone();
         match arg.lbl {
-            ArgLabel::Labelled(_) => {
+            ArgLabel::Labelled(label_loc) => {
                 if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
                     && get_as_string_attr(&arg.attrs, arena).is_none()
                     && get_as_int_attr(&arg.attrs, arena).is_none()
@@ -690,16 +691,57 @@ fn validate_plain_obj_arg_type_errors(
                         "_ is not allowed in combination with external optional type",
                     ));
                 }
+
+                let label = arena.get_string(label_loc.txt).to_string();
+                match spec_of_ptyp(false, &typ, arena) {
+                    Attr::PolyVar { .. } => {
+                        return Err(PpxError::at_loc(
+                            external_loc,
+                            format!("@obj label {label} does not support such arg type"),
+                        ));
+                    }
+                    Attr::Unwrap => {
+                        return Err(PpxError::at_loc(
+                            external_loc,
+                            format!("@obj label {label} does not support @unwrap arguments"),
+                        ));
+                    }
+                    _ => {}
+                }
             }
-            ArgLabel::Optional(_) => {
+            ArgLabel::Optional(label_loc) => {
                 if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
                     return Err(PpxError::at_loc(
                         typ.ptyp_loc,
                         "_ is not allowed in combination with external optional type",
                     ));
                 }
+
+                let label = arena.get_string(label_loc.txt).to_string();
+                match get_opt_arg_type(false, &typ, arena) {
+                    Attr::PolyVar { .. } => {
+                        return Err(PpxError::at_loc(
+                            external_loc,
+                            format!("@obj label {label} does not support such arg type"),
+                        ));
+                    }
+                    Attr::Unwrap => {
+                        return Err(PpxError::at_loc(
+                            external_loc,
+                            format!("@obj label {label} does not support @unwrap arguments"),
+                        ));
+                    }
+                    _ => {}
+                }
             }
-            ArgLabel::Nolabel => {}
+            ArgLabel::Nolabel => {
+                if !is_unit_type(&typ, arena) {
+                    return Err(PpxError::at_loc(
+                        external_loc,
+                        "expect label, optional, or unit here",
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -850,6 +892,28 @@ fn validate_variadic_arg_type_errors(
     }
 }
 
+fn validate_non_obj_optional_arg_type_errors(
+    args: &[TypeArg],
+    external_loc: LocIdx,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    for arg in args {
+        let ArgLabel::Optional(label_loc) = arg.lbl else {
+            continue;
+        };
+
+        let typ = arena.get_core_type(arg.typ);
+        if matches!(get_opt_arg_type(false, typ, arena), Attr::PolyVar { .. }) {
+            let label = arena.get_string(label_loc.txt);
+            return Err(PpxError::at_loc(
+                external_loc,
+                format!("@string does not work with optional when it has arities in label {label}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_external_arg_type_errors(args: &[TypeArg], arena: &ParseArena) -> PpxResult<()> {
     for arg in args {
         validate_external_core_type_arg_errors(arena.get_core_type(arg.typ), arena)?;
@@ -904,6 +968,10 @@ fn validate_external_attribute_errors(
 
     if !desc.mk_obj && desc.splice {
         validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
+    }
+
+    if !desc.mk_obj {
+        validate_non_obj_optional_arg_type_errors(&args, vd.pval_loc, arena)?;
     }
 
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
@@ -1031,7 +1099,7 @@ fn validate_external_attribute_errors(
     }
 
     if external_desc_is_plain_obj(&desc) {
-        validate_plain_obj_arg_type_errors(&vd_type, arena)?;
+        validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena)?;
     }
 
     Ok(())
@@ -1971,6 +2039,16 @@ fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr 
                 let (row_fields, closed_flag, labels_opt) = &**variant_inner;
                 if matches!(closed_flag, current::ClosedFlag::Closed) && labels_opt.is_none() {
                     let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
+                    let has_payload = row_fields.iter().any(|rf| {
+                        matches!(rf, RowField::Rtag(_, _, false, types) if !types.is_empty())
+                    });
+
+                    if has_payload {
+                        return Attr::PolyVar {
+                            descr: if has_as { Some(descr) } else { None },
+                        };
+                    }
+
                     if has_as {
                         return Attr::PolyVarString { descr };
                     }

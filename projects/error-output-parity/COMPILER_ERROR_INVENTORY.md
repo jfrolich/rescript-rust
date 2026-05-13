@@ -689,6 +689,21 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_set_variadic_conflict.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_get_variadic_conflict.res`.
+  - `process_obj` argument-shape and unsupported argument-attribute validation
+    - Covered for unlabeled non-`unit`, payload `@string`, and `@unwrap`
+      labeled/optional arguments by
+      `tests/error_output_parity/compiler/fixtures/bs_obj_unlabelled_non_unit.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_label_string_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_label_unwrap.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_optional_string_payload.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_obj_optional_unwrap.res`.
+  - Non-object optional argument validation in `handle_attributes`
+    - Covered for payload `@string` optionals and `@variadic` optional last
+      argument ordering by
+      `tests/error_output_parity/compiler/fixtures/bs_optional_string_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_optional_last_arg.res`.
 
 ## Include Mismatch Surfaces
 
