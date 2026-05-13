@@ -1470,12 +1470,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                     opt,
                 });
             }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Dict keys must be strings".to_string(),
-                ));
-                break;
-            }
+            _ => break,
         }
 
         if !p.optional(&Token::Comma) {
