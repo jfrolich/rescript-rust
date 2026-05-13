@@ -204,69 +204,102 @@ pub fn parse_typ_expr(p: &mut Parser<'_>) -> CoreType {
 /// This is used for record field types where `'a => T` should NOT include
 /// the `'` in the arrow type's location.
 pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
-    // Special case: single type var followed by =>
     if p.token == Token::SingleQuote {
-        // Try to parse as single type var
-        let result = p.lookahead(|state| {
-            state.next(); // consume '
-            match &state.token {
-                Token::Lident(_) | Token::Uident(_) => {
-                    state.next(); // consume name
-                    // Check if followed by => (not another type var or .)
-                    state.token == Token::EqualGreater
-                }
-                _ => false,
+        let start_pos_idx = p.start_pos_idx();
+        let vars = parse_type_var_list(p);
+        match vars.as_slice() {
+            [_, _, ..] => {
+                p.expect(Token::Dot);
+                let body = parse_typ_expr(p);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let body_idx = p.arena_mut().push_core_type(body);
+                return CoreType {
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                    ptyp_loc: loc,
+                    ptyp_attributes: Attributes::new(),
+                };
             }
-        });
-
-        if result {
-            // It's a single type var followed by =>
-            p.next(); // consume '
-            let var_start_idx = p.start_pos_idx();
-            let name = match &p.token {
-                Token::Lident(n) | Token::Uident(n) => {
-                    let n = extend_cow_lifetime(n.clone());
+            [var] => match p.token {
+                Token::Dot => {
                     p.next();
-                    n
+                    let body = parse_typ_expr(p);
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let body_idx = p.arena_mut().push_core_type(body);
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                        ptyp_loc: loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
                 }
-                _ => Cow::Borrowed("a"),
-            };
-            let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
-            let typ = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                ptyp_loc: var_loc.clone(),
-                ptyp_attributes: Attributes::new(),
-            };
-            p.next(); // consume =>
-            let return_type = parse_typ_expr_inner(p, true);
-            // Use typ.ptyp_loc.loc_start (the var's location, excluding ')
-            let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
-            let end_pos_idx = p.prev_end_pos_idx();
-            let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            let arg = TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: typ_idx,
-            };
-            // LITERAL path: OCaml line 4367 `Typ.arrow ~arity:(Some 1)`
-            // Use static arity to match OCaml's CSE sharing behavior
-            let ret_idx = p.arena_mut().push_core_type(return_type);
-            return CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(arg),
-                    ret_idx,
-                    p.static_arity_1(),
-                )))),
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            };
+                Token::EqualGreater => {
+                    p.next();
+                    let name = p.arena().get_string(var.txt).to_string();
+                    let typ = CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_loc: var.loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                    let return_type = parse_typ_expr_inner(p, true);
+                    let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
+                    let end_pos_idx = p.prev_end_pos_idx();
+                    let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    let arg = TypeArg {
+                        attrs: Attributes::new(),
+                        lbl: ArgLabel::Nolabel,
+                        typ: typ_idx,
+                    };
+                    let ret_idx = p.arena_mut().push_core_type(return_type);
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                            Box::new(arg),
+                            ret_idx,
+                            p.static_arity_1(),
+                        )))),
+                        ptyp_loc: loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                }
+                _ => {
+                    let name = p.arena().get_string(var.txt).to_string();
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_loc: var.loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                }
+            },
+            [] => unreachable!("parse_type_var_list always consumes at least one quote here"),
         }
     }
 
     // Fall through to regular type expression parsing
     let typ = parse_typ_expr_inner(p, true);
     parse_type_alias(p, typ)
+}
+
+fn parse_type_var_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
+    let mut vars = Vec::new();
+    while p.token == Token::SingleQuote {
+        p.next();
+        let var_start_idx = p.start_pos_idx();
+        let (name, loc) = if p.token == Token::Eof {
+            p.err_at(
+                p.start_pos,
+                p.prev_end_pos,
+                DiagnosticCategory::Unexpected {
+                    token: p.token.clone().into_owned(),
+                    context: vec![],
+                },
+            );
+            (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
+        } else {
+            super::core::parse_ident(p, super::core::error_messages::TYPE_PARAM, var_start_idx)
+        };
+        let name_idx = p.arena_mut().push_interned_string(&name);
+        vars.push(with_loc(name_idx, loc));
+    }
+    vars
 }
 
 /// Parse a locally abstract type: `type a b c. SomeType`
@@ -573,54 +606,21 @@ fn parse_atomic_typ_expr_with_start(
     let mut typ = match &p.token {
         Token::SingleQuote => {
             // Type variable: 'a
-            // Polytype: 'a 'b. T
-            let mut vars: Vec<Located<StrIdx>> = vec![];
-
-            while p.token == Token::SingleQuote {
-                p.next(); // consume the single quote first
-                let var_start_idx = p.start_pos_idx(); // capture start position AFTER the quote
-                // OCaml: special case for EOF - emit unexpected token error
-                let (name, var_loc) = if p.token == Token::Eof {
-                    p.err(DiagnosticCategory::Unexpected {
-                        token: p.token.clone().into_owned(),
-                        context: vec![],
-                    });
-                    (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
-                } else {
-                    // OCaml: parse_ident checks for keywords first
-                    super::core::parse_ident(
-                        p,
-                        super::core::error_messages::TYPE_VAR,
-                        var_start_idx,
-                    )
-                };
-                let name_idx = p.arena_mut().push_interned_string(&name);
-                vars.push(with_loc(name_idx, var_loc));
-            }
-
-            if p.token == Token::Dot && !vars.is_empty() {
-                p.next();
-                let body = parse_typ_expr(p);
-                let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.ptyp_loc);
-                let body_idx = p.arena_mut().push_core_type(body);
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
-                    ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
-                }
-            } else if let Some(first) = vars.first() {
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                        p.arena().get_string(first.txt).to_string(),
-                    )))),
-                    ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
-                    ptyp_attributes: Attributes::new(),
-                }
+            p.next();
+            let var_start_idx = p.start_pos_idx();
+            let (name, var_loc) = if p.token == Token::Eof {
+                p.err(DiagnosticCategory::Unexpected {
+                    token: p.token.clone().into_owned(),
+                    context: vec![],
+                });
+                (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
             } else {
-                p.err(DiagnosticCategory::Message(
-                    super::core::error_messages::TYPE_VAR.to_string(),
-                ));
-                recover::default_type(p.arena_mut())
+                super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
+            };
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                ptyp_loc: var_loc,
+                ptyp_attributes: Attributes::new(),
             }
         }
         Token::Underscore => {
