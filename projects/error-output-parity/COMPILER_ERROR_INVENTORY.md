@@ -679,6 +679,22 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/raw_expr_invalid_regex_warning.res`
       and
       `tests/error_output_parity/compiler/fixtures/raw_re_invalid_regex_warning.res`.
+  - Additional `Ast_payload.raw_as_string_exp_exn` Flow parser warning message
+    branches for `%raw` expression payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_expr_keyword_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/raw_expr_function_identifier_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/raw_expr_import_paren_warning.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/raw_expr_class_eof_warning.res`.
+  - Additional `Ast_payload.raw_as_string_exp_exn` Flow parser warning message
+    branches for `%%raw` program payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_structure_invalid_regex_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/raw_structure_function_identifier_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/raw_structure_import_eof_warning.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/raw_structure_return_warning.res`.
   - `%ffi` non-string and non-function-string payload rejection
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_non_string.res`

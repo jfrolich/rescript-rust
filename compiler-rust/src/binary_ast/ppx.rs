@@ -519,6 +519,17 @@ fn is_js_regex_like_literal(s: &str) -> bool {
     trimmed.starts_with('/') && !trimmed.starts_with("//") && !trimmed.starts_with("/*")
 }
 
+fn starts_with_keyword(code: &str, keyword: &str) -> bool {
+    let trimmed = code.trim_start();
+    let Some(after_keyword) = trimmed.strip_prefix(keyword) else {
+        return false;
+    };
+    !after_keyword
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+}
+
 fn flow_like_raw_js_expression_parse_warning(
     code: &str,
     oxc_message: &str,
@@ -531,6 +542,42 @@ fn flow_like_raw_js_expression_parse_warning(
             "Invalid regular expression: missing /".to_string(),
             eof_offset,
             eof_offset,
+        );
+    }
+
+    if let Some((token_offset, '{')) = first_non_whitespace_after_keyword(code, "function") {
+        return (
+            "Unexpected token `{`, expected an identifier".to_string(),
+            token_offset,
+            token_offset,
+        );
+    }
+
+    if oxc_message == "Unexpected token" {
+        for keyword in ["const", "var", "if", "return"] {
+            if starts_with_keyword(code, keyword) {
+                return (
+                    format!("Unexpected token `{keyword}`"),
+                    start_offset,
+                    end_offset,
+                );
+            }
+        }
+
+        if let Some((token_offset, '{')) = first_non_whitespace_after_keyword(code, "import") {
+            return (
+                "Unexpected token `{`, expected the token `(`".to_string(),
+                token_offset,
+                token_offset,
+            );
+        }
+    }
+
+    if oxc_message == "Expected `}` but found `EOF`" {
+        return (
+            "Unexpected end of input, expected the token `}`".to_string(),
+            start_offset,
+            end_offset,
         );
     }
 
@@ -567,6 +614,15 @@ fn flow_like_raw_js_program_parse_warning(
     start_offset: usize,
     end_offset: usize,
 ) -> (String, usize, usize) {
+    if is_js_regex_like_literal(code) && oxc_message == "Unterminated regular expression" {
+        let eof_offset = code.len();
+        return (
+            "Invalid regular expression: missing /".to_string(),
+            eof_offset,
+            eof_offset,
+        );
+    }
+
     for keyword in ["let", "const", "var"] {
         if let Some((token_offset, '=')) = first_non_whitespace_after_keyword(code, keyword) {
             return (
