@@ -1369,6 +1369,11 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/private_type_in_local_extension.res`.
 - `compiler/frontend/ast_exp_extension.ml`
+  - `%todo` emits `Warnings.Bs_todo` for missing and string payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/todo_warning_no_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/todo_warning_with_payload.res`.
   - `%obj` non-record payload rejection
     - Covered by
       `tests/error_output_parity/compiler/fixtures/obj_extension_non_record.res`.
