@@ -161,9 +161,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res` and the
   inside-function branch in
   `tests/error_output_parity/compiler/fixtures/too_many_function_parameters.res`.
-- `Abstract_wrong_label`: covered for labelled and unlabelled inner function
-  parameters by
-  `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res` and
+- `Abstract_wrong_label`: covered for labelled, optional, and unlabelled inner
+  function parameters by
+  `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res`,
+  `tests/error_output_parity/compiler/fixtures/abstract_wrong_label_optional.res`,
+  and
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label_unlabeled.res`.
 - `Scoping_let_module`: source-unreachable from normal ReScript. The
   `Pexp_letmodule` raise site in `compiler/ml/typecore.ml` is after typing the
