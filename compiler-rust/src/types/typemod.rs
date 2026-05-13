@@ -3532,6 +3532,11 @@ fn parser_variance_requirement(variance: ParserVariance) -> (bool, bool, bool) {
         ParserVariance::Contravariant => (false, true, false),
         ParserVariance::Invariant => (false, false, false),
     };
+    (co, cn, inj)
+}
+
+fn normalized_parser_variance_requirement(variance: ParserVariance) -> (bool, bool, bool) {
+    let (co, cn, inj) = parser_variance_requirement(variance);
     if co || cn {
         (co, cn, inj)
     } else {
@@ -3649,7 +3654,7 @@ fn check_type_decl_variance_propagation(
     let required: Vec<_> = parsed_decl
         .ptype_params
         .iter()
-        .map(|(_, variance)| parser_variance_requirement(*variance))
+        .map(|(_, variance)| normalized_parser_variance_requirement(*variance))
         .collect();
 
     let mut constrained_param_fields = Vec::new();
@@ -3751,7 +3756,7 @@ fn check_type_decl_variance_requirements(
         if !type_is_tvar_without_repr(ctx, typed_param.ctyp_type) {
             continue;
         }
-        let expected = parser_variance_requirement(*parser_variance);
+        let expected = normalized_parser_variance_requirement(*parser_variance);
         let actual_variance = variance_row
             .get(idx)
             .copied()
@@ -6213,6 +6218,7 @@ fn compute_type_variance_fixpoint(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     type_ids: &[Ident],
+    required: &[Vec<(bool, bool, bool)>],
 ) -> Vec<Vec<TypesVariance>> {
     let paths: Vec<Path> = type_ids.iter().map(|id| Path::pident(id.clone())).collect();
 
@@ -6243,8 +6249,16 @@ fn compute_type_variance_fixpoint(
 
         let computed: Vec<Vec<TypesVariance>> = paths
             .iter()
-            .filter_map(|path| iter_env.lookup_type(path).ok())
-            .map(|decl| crate::types::ctype::compute_variance_decl(ctx, &iter_env, &decl))
+            .enumerate()
+            .filter_map(|(idx, path)| iter_env.lookup_type(path).ok().map(|decl| (idx, decl)))
+            .map(|(idx, decl)| {
+                crate::types::ctype::compute_variance_decl(
+                    ctx,
+                    &iter_env,
+                    decl,
+                    required.get(idx).map(Vec::as_slice).unwrap_or(&[]),
+                )
+            })
             .collect();
         if computed.len() != variances.len() {
             break;
@@ -18812,8 +18826,21 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml compute_properties_fixpoint:
             // recompute variances for the whole declaration group as a fixpoint.
-            let resolved_variances =
-                compute_type_variance_fixpoint(ctx, &new_env, &declared_type_ids);
+            let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+                .iter()
+                .map(|decl| {
+                    decl.ptype_params
+                        .iter()
+                        .map(|(_, variance)| parser_variance_requirement(*variance))
+                        .collect()
+                })
+                .collect();
+            let resolved_variances = compute_type_variance_fixpoint(
+                ctx,
+                &new_env,
+                &declared_type_ids,
+                &required_variances,
+            );
             if resolved_variances.len() == declared_type_ids.len() {
                 for (idx, type_id) in declared_type_ids.iter().enumerate() {
                     let Some(variance_row) = resolved_variances.get(idx) else {
@@ -21025,7 +21052,21 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
     }
 
-    let resolved_variances = compute_type_variance_fixpoint(ctx, &variance_env, &declared_type_ids);
+    let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+        .iter()
+        .map(|decl| {
+            decl.ptype_params
+                .iter()
+                .map(|(_, variance)| parser_variance_requirement(*variance))
+                .collect()
+        })
+        .collect();
+    let resolved_variances = compute_type_variance_fixpoint(
+        ctx,
+        &variance_env,
+        &declared_type_ids,
+        &required_variances,
+    );
     if resolved_variances.len() == declared_type_ids.len() {
         for (idx, variance_row) in resolved_variances.iter().enumerate() {
             if let Some(typed_decl) = typed_tree_decls.get(idx) {

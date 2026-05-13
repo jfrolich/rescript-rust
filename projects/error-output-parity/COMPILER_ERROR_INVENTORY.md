@@ -542,8 +542,10 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_variance_fourth_parameter.res`.
   - Covered for constrained-parameter propagation code `-1` by
     `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_propagation.res`.
-  - A broader source-level probe has not yet found `.res`/`.resi` triggers for
-    propagation report codes `-2` or `-3`.
+  - Covered for constrained-parameter propagation report codes `-2` and `-3` by
+    `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_nondeducible.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_undeduced_variance.res`.
 - `Unavailable_type_constructor`
   - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
     raise sites are second-pass checks over already translated `Tconstr` nodes

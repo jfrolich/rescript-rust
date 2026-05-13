@@ -8029,36 +8029,35 @@ pub fn compute_variance_decl(
     ctx: &TypeContext,
     env: &Env,
     decl: &super::decl::TypeDeclaration,
+    required: &[(bool, bool, bool)],
 ) -> Vec<Variance> {
     let params = &decl.type_params;
+    let make = |p: bool, n: bool, i: bool| {
+        Variance::null()
+            .set(VarianceFlag::MayPos, p)
+            .set(VarianceFlag::MayNeg, n)
+            .set(VarianceFlag::MayWeak, n)
+            .set(VarianceFlag::Inj, i)
+    };
 
-    // OCaml typedecl.ml compute_variance_decl:
-    // abstract/open types with no manifest derive their semantic variance from
-    // the required declaration variance via:
-    //   make (not n) (not c) (decl.type_kind <> Type_abstract || i)
-    // For ordinary type parameters `i` is false, so unannotated abstract
-    // params become MAY_INV, not FULL.
+    // OCaml typedecl.ml:1277-1285 handles abstract/open types without
+    // manifests before the general occurrence walk. This keeps abstract
+    // covariant parameters non-injective, which is observable in constrained
+    // parameter propagation diagnostics.
     if matches!(
         decl.type_kind,
         super::TypeKind::TypeAbstract | super::TypeKind::TypeOpen
     ) && decl.type_manifest.is_none()
     {
-        let make = |p: bool, n: bool, i: bool| {
-            Variance::null()
-                .set(crate::types::variance::VarianceFlag::MayPos, p)
-                .set(crate::types::variance::VarianceFlag::MayNeg, n)
-                .set(crate::types::variance::VarianceFlag::MayWeak, n)
-                .set(crate::types::variance::VarianceFlag::Inj, i)
-        };
-        return decl
-            .type_variance
+        return params
             .iter()
-            .map(|variance| {
-                let (c, n) = variance.get_upper();
+            .enumerate()
+            .map(|(idx, _)| {
+                let (c, n, i) = required.get(idx).copied().unwrap_or((true, true, false));
                 make(
                     !n,
                     !c,
-                    !matches!(decl.type_kind, super::TypeKind::TypeAbstract),
+                    !matches!(decl.type_kind, super::TypeKind::TypeAbstract) || i,
                 )
             })
             .collect();
@@ -8126,10 +8125,59 @@ pub fn compute_variance_decl(
         compute_variance_rec(ctx, env, &mut visited, initial_variance, *ty, 0);
     }
 
-    // Extract variance for each param
+    let is_type_var =
+        |ty: TypeExprRef| matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
+    let is_concrete = !matches!(decl.type_kind, super::TypeKind::TypeAbstract);
+
+    // Extract variance for each param. This mirrors OCaml typedecl.ml:1200-1224:
+    // occurrence variance is unioned with the parser-required row only where
+    // the declaration kind/private flag makes that row semantically relevant.
     param_reprs
         .iter()
-        .map(|p| visited.get(p).copied().unwrap_or(Variance::NULL))
+        .enumerate()
+        .map(|(idx, p)| {
+            let mut variance = visited.get(p).copied().unwrap_or(Variance::NULL);
+            let (required_pos, required_neg, required_inj) =
+                required.get(idx).copied().unwrap_or((false, false, false));
+            let (required_pos, required_neg) = if required_pos || required_neg {
+                (required_pos, required_neg)
+            } else {
+                (true, true)
+            };
+            let is_tvar = is_type_var(*p);
+            let (pos, neg) = if decl.type_private == PrivateFlag::Private || !is_tvar {
+                (required_pos, required_neg)
+            } else {
+                (false, false)
+            };
+            let inj = is_concrete || (required_inj && decl.type_private == PrivateFlag::Private);
+            variance = variance.union(&make(pos, neg, inj));
+            if is_concrete {
+                let (lower_pos, lower_neg, _, _) = variance.get_lower();
+                if lower_pos && lower_neg {
+                    variance = Variance::full();
+                } else if !is_tvar {
+                    let required_variance = if required_pos {
+                        if required_neg {
+                            Variance::full()
+                        } else {
+                            Variance::covariant()
+                        }
+                    } else {
+                        Variance::covariant().conjugate()
+                    };
+                    variance = variance.union(&required_variance);
+                }
+            }
+            if matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+                && decl.type_private == PrivateFlag::Public
+            {
+                variance
+            } else {
+                let (_, lower_neg, _, _) = variance.get_lower();
+                variance.set(VarianceFlag::MayWeak, lower_neg)
+            }
+        })
         .collect()
 }
 
