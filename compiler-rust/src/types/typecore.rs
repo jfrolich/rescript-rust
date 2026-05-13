@@ -791,7 +791,6 @@ pub enum TypeCoreError {
         provided_args: Vec<ArgLabel>,
         function_name: Option<Longident>,
         arity_suggestion: Option<String>,
-        use_fallback_message: bool,
     },
 
     /// Field not optional.
@@ -10627,7 +10626,6 @@ fn type_application(
             provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
             function_name: None,
             arity_suggestion,
-            use_fallback_message: matches!(typed_funct.exp_desc, ExpressionDesc::Texp_send(..)),
         });
     }
     let max_arity = function_arity.unwrap_or(i32::MAX);
@@ -11192,7 +11190,6 @@ fn type_application(
                 provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
                 function_name: None,
                 arity_suggestion,
-                use_fallback_message: matches!(typed_funct.exp_desc, ExpressionDesc::Texp_send(..)),
             });
         }
         if remaining_arity > 0 {

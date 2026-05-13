@@ -2694,7 +2694,6 @@ fn type_mod_error_to_anyhow(
             provided_arity,
             provided_args,
             arity_suggestion,
-            use_fallback_message,
             ..
         }) => UserDiagnostic::new(
             format_uncurried_arity_mismatch_report(
@@ -2708,7 +2707,6 @@ fn type_mod_error_to_anyhow(
                 *provided_arity,
                 provided_args,
                 arity_suggestion.as_deref(),
-                *use_fallback_message,
             ),
             2,
         )
@@ -10165,7 +10163,6 @@ fn format_uncurried_arity_mismatch_report(
     provided_arity: usize,
     provided_args: &[crate::parser::ast::ArgLabel],
     arity_suggestion: Option<&str>,
-    use_fallback_message: bool,
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
@@ -10180,8 +10177,7 @@ fn format_uncurried_arity_mismatch_report(
         .iter()
         .filter(|arg| matches!(arg, crate::parser::ast::ArgLabel::Nolabel))
         .count();
-    let mismatch_in_unlabelled_args =
-        !use_fallback_message && args_from_type_unlabelled != provided_unlabelled;
+    let mismatch_in_unlabelled_args = args_from_type_unlabelled != provided_unlabelled;
 
     let required_args = args_from_type
         .iter()
@@ -10215,10 +10211,9 @@ fn format_uncurried_arity_mismatch_report(
         .cloned()
         .collect::<Vec<_>>();
 
-    let is_fallback = use_fallback_message
-        || (missing_required_args.is_empty()
-            && superfluous_args.is_empty()
-            && !mismatch_in_unlabelled_args);
+    let is_fallback = missing_required_args.is_empty()
+        && superfluous_args.is_empty()
+        && !mismatch_in_unlabelled_args;
 
     let mut message = String::new();
     message.push_str("This function call is incorrect.\n");
@@ -10408,17 +10403,15 @@ fn collect_function_arg_labels(
     let mut seen = AHashSet::new();
 
     loop {
-        let repr = type_ctx.repr(current);
-        if !seen.insert(repr) {
+        if !seen.insert(current) {
             break;
         }
 
-        match &*type_ctx.get_desc(repr) {
+        match &*type_ctx.get_desc(current) {
             TypeDesc::Tarrow { arg, ret, .. } => {
                 labels.push(arg.lbl.clone());
                 current = *ret;
             }
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
             _ => break,
         }
     }

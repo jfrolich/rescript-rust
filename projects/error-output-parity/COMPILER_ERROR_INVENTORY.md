@@ -165,11 +165,13 @@ with a reason after checking raise sites.
   in `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`
   covers the observable earlier escape reporter.
 - `Uncurried_arity_mismatch`: covered for unlabelled count mismatch, missing
-  required labelled arguments, superfluous labelled arguments, and related
-  arity-suffixed function suggestions by
+  required labelled arguments, superfluous labelled arguments, annotated
+  method-send application arity, and related arity-suffixed function
+  suggestions by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`,
   `tests/error_output_parity/compiler/fixtures/uncurried_arity_missing_required_label.res`,
   `tests/error_output_parity/compiler/fixtures/uncurried_arity_superfluous_label.res`,
+  `tests/error_output_parity/compiler/fixtures/uncurried_arity_method_annotated.res`,
   and
   `tests/error_output_parity/compiler/fixtures/uncurried_arity_suggestion.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
