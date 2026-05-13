@@ -667,6 +667,13 @@ with a reason after checking raise sites.
     diagnostic as the source of truth
     - Covered by
       `tests/error_output_parity/compiler/fixtures/jsx_component_with_props_after_component.res`.
+  - `transform_structure_item` rejects `@react.componentWithProps` on externals,
+    and `map_binding` rejects `React.forwardRef` under
+    `@react.componentWithProps`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_with_props_external.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_component_with_props_forward_ref.res`.
   - `mk_record_from_props` rejects JSX spread props unless the spread appears
     before named props, and also rejects multiple spreads
     - Covered by

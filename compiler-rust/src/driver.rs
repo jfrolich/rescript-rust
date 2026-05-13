@@ -61,8 +61,6 @@ const REACT_COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a c
 const REACT_COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
 const REACT_COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str =
     "` is defined several times in this component.";
-const REACT_COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
-const REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 const JSX_SPREAD_AFTER_PROP_MSG: &str =
     "JSX: use {...p} {x: v} not {x: v} {...p} \n   multiple spreads {...p} {...p} not allowed.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
@@ -1209,43 +1207,6 @@ fn structure_needs_jsx_rewrite(
     })
 }
 
-enum ReactComponentWithPropsDiagnostic {
-    External(Location),
-    ForwardRef(Location),
-}
-
-fn reject_invalid_react_component_with_props_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    match react_component_with_props_diagnostic_in_structure(structure, arena) {
-        Some(ReactComponentWithPropsDiagnostic::External(loc)) => {
-            return Err(UserDiagnostic::new(
-                format_react_component_with_props_external_report(source, filename, &loc),
-                2,
-            )
-            .into());
-        }
-        Some(ReactComponentWithPropsDiagnostic::ForwardRef(loc)) => {
-            return Err(UserDiagnostic::new(
-                format_compiler_error_report_from_location(
-                    source,
-                    filename,
-                    &loc,
-                    REACT_COMPONENT_WITH_PROPS_FORWARD_REF_MSG,
-                ),
-                2,
-            )
-            .into());
-        }
-        None => {}
-    }
-
-    Ok(())
-}
-
 fn reject_invalid_react_component_destructure_in_structure(
     structure: &Structure,
     arena: &ParseArena,
@@ -1957,139 +1918,6 @@ fn format_react_component_destructure_report(filename: &str) -> String {
     )
 }
 
-fn react_component_with_props_diagnostic_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<ReactComponentWithPropsDiagnostic> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_primitive(vd)
-                if has_react_component_with_props_attr(&vd.pval_attributes, arena) =>
-            {
-                return Some(ReactComponentWithPropsDiagnostic::External(
-                    arena.to_location(item.pstr_loc),
-                ));
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                for binding in &value.1 {
-                    if has_react_component_with_props_attr(&binding.pvb_attributes, arena)
-                        && let Some(loc) =
-                            react_forward_ref_argument_loc(arena.get_expr(binding.pvb_expr), arena)
-                    {
-                        return Some(ReactComponentWithPropsDiagnostic::ForwardRef(loc));
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
-                    arena.get_mod_expr(module_binding.pmb_expr),
-                    arena,
-                ) {
-                    return Some(diagnostic);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
-                        arena.get_mod_expr(module_binding.pmb_expr),
-                        arena,
-                    ) {
-                        return Some(diagnostic);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(diagnostic) = react_component_with_props_diagnostic_in_module_expr(
-                    arena.get_mod_expr(include_decl.pincl_mod),
-                    arena,
-                ) {
-                    return Some(diagnostic);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn react_component_with_props_diagnostic_in_module_expr(
-    module_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> Option<ReactComponentWithPropsDiagnostic> {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => {
-            react_component_with_props_diagnostic_in_structure(structure, arena)
-        }
-        ModuleExprDesc::Pmod_functor(functor) => {
-            react_component_with_props_diagnostic_in_module_expr(
-                arena.get_mod_expr(functor.2),
-                arena,
-            )
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            react_component_with_props_diagnostic_in_module_expr(arena.get_mod_expr(*lhs), arena)
-                .or_else(|| {
-                    react_component_with_props_diagnostic_in_module_expr(
-                        arena.get_mod_expr(*rhs),
-                        arena,
-                    )
-                })
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            react_component_with_props_diagnostic_in_module_expr(arena.get_mod_expr(*inner), arena)
-        }
-        _ => None,
-    }
-}
-
-fn format_react_component_with_props_external_report(
-    source: &str,
-    filename: &str,
-    loc: &Location,
-) -> String {
-    let mut output = String::new();
-
-    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
-
-    for (idx, line) in REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG.lines().enumerate() {
-        if idx == 0 {
-            output.push_str("  ");
-        }
-        output.push_str(line);
-        output.push('\n');
-    }
-    output.push('\n');
-    output
-}
-
-fn react_forward_ref_argument_loc(expr: &Expression, arena: &ParseArena) -> Option<Location> {
-    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
-        return None;
-    };
-    if !is_react_forward_ref_expr(arena.get_expr(apply.funct), arena) {
-        return None;
-    }
-    apply
-        .args
-        .iter()
-        .find_map(|(label, arg)| matches!(label, ParserArgLabel::Nolabel).then_some(*arg))
-        .map(|arg| arena.to_location(arena.get_expr(arg).pexp_loc))
-}
-
-fn is_react_forward_ref_expr(expr: &Expression, arena: &ParseArena) -> bool {
-    let ExpressionDesc::Pexp_ident(lid) = &*expr.pexp_desc else {
-        return false;
-    };
-    let Longident::Ldot(base, field_idx) = arena.get_longident(lid.txt) else {
-        return false;
-    };
-    let Longident::Lident(module_idx) = base.as_ref() else {
-        return false;
-    };
-    arena.get_string(*module_idx) == "React" && arena.get_string(*field_idx) == "forwardRef"
-}
-
 /// A concrete JavaScript output target for one compile.
 #[derive(Clone)]
 pub struct JsOutputTarget {
@@ -2383,11 +2211,25 @@ fn jsx_ppx_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     let loc = arena.to_location(err.loc);
-    UserDiagnostic::new(
-        format_compiler_error_report_from_location(source, filename, &loc, &err.message),
-        2,
-    )
-    .into()
+    let output = match err.message_style {
+        jsx_ppx::JsxPreprocessorMessageStyle::PrefixedLines => {
+            format_compiler_error_report_from_location(source, filename, &loc, &err.message)
+        }
+        jsx_ppx::JsxPreprocessorMessageStyle::FirstLineOnlyPrefix => {
+            let mut output = String::new();
+            push_compiler_error_report_header_from_location(&mut output, source, filename, &loc);
+            for (idx, line) in err.message.lines().enumerate() {
+                if idx == 0 {
+                    output.push_str("  ");
+                }
+                output.push_str(line);
+                output.push('\n');
+            }
+            output.push('\n');
+            output
+        }
+    };
+    UserDiagnostic::new(output, 2).into()
 }
 
 fn emit_ppx_warnings(
@@ -11082,12 +10924,6 @@ pub fn compile_source_to_js_with_options(
             source,
             filename,
         )?;
-        reject_invalid_react_component_with_props_in_structure(
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
         jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
             .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
@@ -12163,12 +11999,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 filename,
             )?;
             reject_invalid_react_component_duplicate_prop_in_structure(
-                &structure,
-                parser.arena(),
-                source,
-                filename,
-            )?;
-            reject_invalid_react_component_with_props_in_structure(
                 &structure,
                 parser.arena(),
                 source,
@@ -13763,12 +13593,6 @@ pub fn compile_source_in_process(
             filename,
         )?;
         reject_invalid_react_component_duplicate_prop_in_structure(
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-        reject_invalid_react_component_with_props_in_structure(
             &structure,
             parser.arena(),
             source,

@@ -118,6 +118,13 @@ pub struct JsxPreprocessorWarning {
 pub struct JsxPreprocessorError {
     pub loc: Location,
     pub message: String,
+    pub message_style: JsxPreprocessorMessageStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsxPreprocessorMessageStyle {
+    PrefixedLines,
+    FirstLineOnlyPrefix,
 }
 
 impl fmt::Display for JsxPreprocessorError {
@@ -133,6 +140,8 @@ pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
 const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
     "Only one JSX component call can exist on a component at one time";
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
+const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
+const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
 
 // ============================================================================
 // Public API
@@ -305,7 +314,15 @@ fn transform_structure_item_multi(
 
         match (component_attr_count, component_with_props_attr_count) {
             (0, 0) => {}
-            (_, 1) => {}
+            (_, 1) => {
+                set_fatal_error_with_style(
+                    config,
+                    item.pstr_loc,
+                    COMPONENT_WITH_PROPS_EXTERNAL_MSG,
+                    JsxPreprocessorMessageStyle::FirstLineOnlyPrefix,
+                );
+                return vec![item];
+            }
             (1, 0) => {
                 return transform_react_component_external(
                     (**vd).clone(),
@@ -1091,7 +1108,7 @@ fn transform_react_component_with_props_binding(
     binding: ValueBinding,
     rec_flag: RecFlag,
     _pstr_loc: &Location,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> (ValueBinding, Option<ValueBinding>) {
     // Get function name and location from pattern
@@ -1100,12 +1117,8 @@ fn transform_react_component_with_props_binding(
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
 
-    // Check if the expression uses React.forwardRef (not allowed with componentWithProps)
-    let (_, has_forward_ref, _) = spelunk_for_fun_expression(arena, binding.pvb_expr);
-    if has_forward_ref {
-        eprintln!(
-            "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead."
-        );
+    if let Some(loc) = component_with_props_forward_ref_error_loc(arena, binding.pvb_expr) {
+        set_fatal_error(config, loc, COMPONENT_WITH_PROPS_FORWARD_REF_MSG);
     }
 
     // Check if async
@@ -2408,10 +2421,25 @@ fn check_multiple_components(config: &mut JsxConfig, loc: Location) {
 }
 
 fn set_fatal_error(config: &mut JsxConfig, loc: Location, message: &str) {
+    set_fatal_error_with_style(
+        config,
+        loc,
+        message,
+        JsxPreprocessorMessageStyle::PrefixedLines,
+    );
+}
+
+fn set_fatal_error_with_style(
+    config: &mut JsxConfig,
+    loc: Location,
+    message: &str,
+    message_style: JsxPreprocessorMessageStyle,
+) {
     if config.fatal_error.is_none() {
         config.fatal_error = Some(JsxPreprocessorError {
             loc,
             message: message.to_string(),
+            message_style,
         });
     }
 }
@@ -2457,6 +2485,38 @@ fn is_forward_ref(arena: &ParseArena, expr: &Expression) -> bool {
         }
     }
     false
+}
+
+fn component_with_props_forward_ref_error_loc(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+        return None;
+    };
+    if !is_forward_ref(arena, arena.get_expr(apply.funct)) {
+        return None;
+    }
+    apply.args.iter().find_map(|(label, arg)| {
+        matches!(label, ArgLabel::Nolabel)
+            .then(|| component_with_props_forward_ref_fun_error_loc(arena, *arg))
+            .flatten()
+    })
+}
+
+fn component_with_props_forward_ref_fun_error_loc(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc else {
+        return None;
+    };
+    match &fun.arg_label {
+        ArgLabel::Labelled(_) | ArgLabel::Optional(_) => Some(expr.pexp_loc),
+        ArgLabel::Nolabel => component_with_props_forward_ref_fun_error_loc(arena, fun.rhs),
+    }
 }
 
 fn get_fn_name(arena: &ParseArena, pat: &Pattern) -> String {
