@@ -667,6 +667,10 @@ with a reason after checking raise sites.
     diagnostic as the source of truth
     - Covered by
       `tests/error_output_parity/compiler/fixtures/jsx_component_with_props_after_component.res`.
+  - `mk_record_from_props` rejects JSX spread props unless the spread appears
+    before named props, and also rejects multiple spreads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_spread_after_prop.res`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by
