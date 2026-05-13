@@ -1163,6 +1163,14 @@ with a reason after checking raise sites.
       `Cmt_format.Error(Not_a_typedtree _)`.
     - Fixture:
       `tests/error_output_parity/compiler/cases/gentype_stale_cmti.res`.
+  - `Cmi_format.Error` while `GenTypeMain.read_cmt` loads the selected
+    typedtree file
+    - Covered through `-bs-gentype` with a stale `.cmti` whose magic is not CMI
+      or CMT. The harness compares combined stdout/stderr for this case because
+      OCaml emits the stale-artifact note through `Log_.item` before the fatal
+      assertion.
+    - Virtual fixture prepared under
+      `.parity-cache/error-output/compiler/gentype_bad_magic.res`.
 - `compiler/frontend/ast_external_process.ml`
   - `Invalid payload` from `name_from_payload_or_prim`
     - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`

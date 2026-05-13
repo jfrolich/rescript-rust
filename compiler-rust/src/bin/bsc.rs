@@ -24,7 +24,7 @@ use rescript_compiler::parser::{module, sexp_locs, Parser};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Auto-detect the runtime path based on the executable's location.
@@ -648,6 +648,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     }
 
     if magic == CMI_MAGIC {
+        let _ = io::stdout().flush();
         return Err(UserDiagnostic::new(
             "Fatal error: exception Cmt_format.Error(_)\n".to_string(),
             2,
@@ -655,7 +656,27 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
         .into());
     }
 
-    Ok(())
+    print!(
+        "  Error loading {}\n\n  It looks like you might have stale compilation artifacts.\n  Try to clean and rebuild.\n\n",
+        gentype_display_path(cmt_file).display()
+    );
+    let _ = io::stdout().flush();
+    Err(UserDiagnostic::new(
+        "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        2,
+    )
+    .into())
+}
+
+fn gentype_display_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    match env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {
