@@ -663,6 +663,10 @@ with a reason after checking raise sites.
     lookups can mask the PPX error
     - Covered by
       `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop.res`.
+  - `make_label_decls` rejects duplicate `@react.component` prop names before
+    the generated props type can mask the PPX error
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop.res`.
 - `compiler/syntax/src/res_scanner.ml`
   - Fixed-width string escape diagnostics for short decimal, incomplete hex,
     incomplete unicode, decimal overflow, and surrogate unicode escapes

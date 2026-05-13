@@ -2936,10 +2936,7 @@ fn check_duplicated_labels(named_types: &[NamedType]) {
     let mut seen = std::collections::HashSet::new();
     for nt in named_types.iter().rev() {
         if !seen.insert(&nt.label) {
-            eprintln!(
-                "The prop `{}` is defined several times in this component. (at {:?})",
-                nt.label, nt.loc
-            );
+            return;
         }
     }
 }
