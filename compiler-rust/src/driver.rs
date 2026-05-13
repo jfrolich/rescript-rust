@@ -1598,11 +1598,16 @@ fn ppx_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     if let Some(loc) = err.loc() {
-        UserDiagnostic::new(
-            format_compiler_error_report(arena, source, filename, loc, err.message_text()),
-            2,
-        )
-        .into()
+        let message = err.message_text();
+        let report = if message.contains('\n') {
+            let mut raw_message = String::with_capacity(message.len() + 2);
+            raw_message.push_str("  ");
+            raw_message.push_str(message);
+            format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
+        } else {
+            format_compiler_error_report(arena, source, filename, loc, message)
+        };
+        UserDiagnostic::new(report, 2).into()
     } else {
         anyhow!("PPX rewrite failed: {err}")
     }

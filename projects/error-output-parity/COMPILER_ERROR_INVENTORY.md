@@ -483,6 +483,83 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res`.
 
+## `compiler/frontend/bs_syntaxerr.ml`
+
+- `Unsupported_predicates`
+  - Open: raise sites are in `compiler/frontend/ast_attributes.ml` while
+    processing method `@get`/`@set` payload predicates. A reduced normal
+    `.res` fixture still needs to be added.
+- `Conflict_bs_bs_this_bs_meth`
+  - No active raise site found in the current source; keep listed so the
+    variant is rechecked if frontend attribute handling changes.
+- `Duplicated_bs_deriving`
+  - Open: raised by duplicate `@deriving` attributes in
+    `compiler/frontend/ast_attributes.ml`; fixture still needed.
+- `Conflict_attributes`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_type_ffi_attrs.res`.
+- `Expect_int_literal`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_int_as_expect_int_literal.res`.
+- `Expect_string_literal`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_string_as_expect_string_literal.res`.
+- `Expect_int_or_string_or_json_literal`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_as_expect_int_string_json_literal.res`.
+- `Unhandled_poly_type`
+  - Open: raised by `Ast_core_type.list_of_arrow` when an external type
+    contains `Ptyp_poly` in the remaining arrow chain. A reduced source fixture
+    still needs to be confirmed.
+- `Invalid_underscore_type_in_external`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_invalid_underscore_external.res`.
+- `Invalid_bs_string_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_invalid_string_external_arg.res`.
+- `Invalid_bs_int_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_invalid_int_external_arg.res`.
+- `Invalid_bs_unwrap_type`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_invalid_unwrap_external_arg.res`.
+- `Invalid_bs_string_type` / `Invalid_bs_int_type` `@as` payload subcases
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_string_as_expect_string_literal.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_int_as_expect_int_literal.res`.
+- `Conflict_ffi_attribute`
+  - Open: several branches in `compiler/frontend/ast_external_process.ml`
+    report conflicting FFI attributes; representative fixtures still needed.
+- `Illegal_attribute`
+  - Covered for `@module` arity and empty `@scope` by
+    `tests/error_output_parity/compiler/fixtures/bs_external_illegal_module_many_strings.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_external_illegal_scope_empty.res`.
+- `Not_supported_directive_in_bs_return`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_return_unknown_directive.res`.
+- `Expect_opt_in_bs_return_to_opt`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_return_to_opt_non_option.res`.
+- `Misplaced_label_syntax`
+  - Open: raised by labeled arguments in positions rejected by
+    `compiler/frontend/ast_exp_apply.ml`; fixture still needed.
+- `Optional_in_uncurried_bs_attribute`
+  - Open: raised by optional arguments in `@this`/uncurried callback
+    generation; fixture still needed.
+- `Bs_this_simple_pattern`
+  - Open: raised by non-variable `@this` callback self patterns; fixture still
+    needed.
+- `Experimental_feature_not_enabled`
+  - Covered through the included super error fixture
+    `tests/build_tests/super_errors/fixtures/feature_letunwrap_not_enabled.res`.
+- `LetUnwrap_not_supported_in_position`
+  - Covered through the included super error fixtures
+    `tests/build_tests/super_errors/fixtures/let_unwrap_on_top_level.res`
+    and
+    `tests/build_tests/super_errors/fixtures/let_unwrap_on_not_supported_variant.res`.
+
 ## Ast_untagged_variants Coverage Notes
 
 - `InvalidVariantAsAnnotation`: covered by

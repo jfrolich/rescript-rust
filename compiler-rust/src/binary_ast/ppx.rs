@@ -573,6 +573,92 @@ fn validate_plain_obj_arg_type_errors(
     Ok(())
 }
 
+fn validate_external_attribute_payload_errors(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    for (attr_name, payload) in attrs {
+        match arena.get_string(attr_name.txt) {
+            "module" => {
+                if get_module_import_attributes(payload, arena).is_some() {
+                    continue;
+                }
+                let strings = get_payload_strings(payload, arena);
+                if strings.len() > 2 {
+                    return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
+                }
+            }
+            "scope" => {
+                if get_payload_strings(payload, arena).is_empty() {
+                    return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
+                }
+            }
+            "return" => {
+                let Some(wrapper) = get_return_wrapper_config(payload, arena) else {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "Not supported return directive",
+                    ));
+                };
+                match wrapper.as_str() {
+                    "null_to_opt" | "nullable" | "null_undefined_to_opt" | "identity" => {}
+                    _ => {
+                        return Err(PpxError::at_loc(
+                            attr_name.loc,
+                            "Not supported return directive",
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_return_wrapper_result_type(
+    return_wrapper: &ReturnWrapper,
+    result_type: &CoreType,
+    external_loc: LocIdx,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    if matches!(
+        return_wrapper,
+        ReturnWrapper::ReturnNullToOpt | ReturnWrapper::ReturnNullUndefinedToOpt
+    ) && !is_user_option_type(result_type, arena)
+    {
+        return Err(PpxError::at_loc(
+            external_loc,
+            "%@return directive *_to_opt expect return type to be \nsyntax wise `_ option` for safety",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_external_arg_type_errors(args: &[TypeArg], arena: &ParseArena) -> PpxResult<()> {
+    for arg in args {
+        validate_external_core_type_arg_errors(arena.get_core_type(arg.typ), arena)?;
+    }
+    Ok(())
+}
+
+fn validate_external_core_type_arg_errors(
+    typ: &CoreType,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+        validate_string_or_int_as_attrs(&typ.ptyp_attributes, arena)?;
+    }
+
+    match external_type_ffi_attr(typ, arena)? {
+        Some("string") => validate_bs_string_type(typ, arena),
+        Some("int") => validate_bs_int_type(typ, arena),
+        Some("unwrap") => validate_bs_unwrap_type(typ),
+        Some("ignore") | None => Ok(()),
+        Some(_) => Ok(()),
+    }
+}
+
 fn validate_external_attribute_errors(
     vd: &ValueDescription,
     arena: &mut ParseArena,
@@ -586,8 +672,12 @@ fn validate_external_attribute_errors(
     };
     let prim_name = arena.get_string(*prim_name).to_string();
     let vd_type = arena.get_core_type(vd.pval_type).clone();
+    let (args, result_type) = list_of_arrow(&vd_type, arena);
+
+    validate_external_attribute_payload_errors(&vd.pval_attributes, arena)?;
+    validate_external_arg_type_errors(&args, arena)?;
+
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
-    let (args, _) = list_of_arrow(&vd_type, arena);
     let desc = parse_external_attrs(
         &vd.pval_attributes,
         prim_name.as_str(),
@@ -595,6 +685,8 @@ fn validate_external_attribute_errors(
         vd.pval_loc,
         arena,
     );
+
+    validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
 
     // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
     // externals with a single unit argument before emitting FFI metadata.
@@ -661,6 +753,25 @@ fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static s
     None
 }
 
+fn external_type_ffi_attr(typ: &CoreType, arena: &ParseArena) -> PpxResult<Option<&'static str>> {
+    let mut found = None;
+    for (attr_name, _) in &typ.ptyp_attributes {
+        let name = arena.get_string(attr_name.txt);
+        let attr = match name {
+            "string" => "string",
+            "int" => "int",
+            "ignore" => "ignore",
+            "unwrap" => "unwrap",
+            _ => continue,
+        };
+        if found.is_some() {
+            return Err(PpxError::at_loc(attr_name.loc, "conflicting attributes "));
+        }
+        found = Some(attr);
+    }
+    Ok(found)
+}
+
 fn payload_str_items(payload: &Payload) -> Option<&[StructureItem]> {
     match payload {
         Payload::PStr(items) => Some(items),
@@ -724,6 +835,123 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
         }
     }
     None
+}
+
+fn validate_string_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+    for (attr_name, payload) in attrs {
+        if arena.get_string(attr_name.txt) == "as" && get_payload_string(payload, arena).is_none() {
+            return Err(PpxError::at_loc(attr_name.loc, "expect string literal "));
+        }
+    }
+    Ok(())
+}
+
+fn validate_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+    for (attr_name, payload) in attrs {
+        if arena.get_string(attr_name.txt) == "as" && get_payload_int(payload, arena).is_none() {
+            return Err(PpxError::at_loc(attr_name.loc, "expect int literal "));
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+    for (attr_name, payload) in attrs {
+        if arena.get_string(attr_name.txt) == "as"
+            && get_payload_int(payload, arena).is_none()
+            && get_payload_string_with_delim(payload, arena).is_none()
+        {
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "expect int, string literal or json literal {json|text here|json} ",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
+    let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+    };
+    let (row_fields, closed, labels) = &**variant_inner;
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
+    {
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+    }
+
+    enum StringRows {
+        Nothing,
+        Null,
+        NonNull,
+    }
+
+    let mut rows = StringRows::Nothing;
+    for row in row_fields {
+        match (&rows, row) {
+            (StringRows::Nothing | StringRows::Null, RowField::Rtag(_, attrs, true, types))
+                if types.is_empty() =>
+            {
+                validate_string_as_attrs(attrs, arena)?;
+                rows = StringRows::Null;
+            }
+            (StringRows::Nothing | StringRows::NonNull, RowField::Rtag(_, attrs, false, types))
+                if types.len() == 1 =>
+            {
+                validate_string_as_attrs(attrs, arena)?;
+                rows = StringRows::NonNull;
+            }
+            _ => {
+                return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bs_int_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
+    let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+    };
+    let (row_fields, closed, labels) = &**variant_inner;
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
+    {
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+    }
+
+    for row in row_fields {
+        let RowField::Rtag(_, attrs, true, types) = row else {
+            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+        };
+        if !types.is_empty() {
+            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+        }
+        validate_int_as_attrs(attrs, arena)?;
+    }
+
+    Ok(())
+}
+
+fn validate_bs_unwrap_type(typ: &CoreType) -> PpxResult<()> {
+    let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
+        return Err(PpxError::at_loc(
+            typ.ptyp_loc,
+            "Not a valid type for %@unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
+        ));
+    };
+    let (row_fields, closed, labels) = &**variant_inner;
+    if !matches!(closed, current::ClosedFlag::Closed)
+        || labels.is_some()
+        || row_fields.is_empty()
+        || !variant_can_unwrap(row_fields)
+    {
+        return Err(PpxError::at_loc(
+            typ.ptyp_loc,
+            "Not a valid type for %@unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
+        ));
+    }
+    Ok(())
 }
 
 /// Map polyvariant row fields to (tag_name, string_value) pairs for @string.
@@ -900,6 +1128,28 @@ fn is_unit_type(typ: &CoreType, arena: &ParseArena) -> bool {
             args.is_empty() && {
                 let longident = arena.get_longident(lid.txt);
                 matches!(longident, Longident::Lident(s) if arena.get_string(*s) == "unit")
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_user_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(inner) => {
+            let (ref lid, ref args) = **inner;
+            if args.len() != 1 {
+                return false;
+            }
+            match arena.get_longident(lid.txt) {
+                Longident::Lident(name) => arena.get_string(*name) == "option",
+                Longident::Ldot(parent, name) => {
+                    let Longident::Lident(parent_name) = parent.as_ref() else {
+                        return false;
+                    };
+                    arena.get_string(*parent_name) == "*predef*" && arena.get_string(*name) == "option"
+                }
+                _ => false,
             }
         }
         _ => false,
