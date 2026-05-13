@@ -642,6 +642,11 @@ with a reason after checking raise sites.
   - `Corrupted_interface`
     - Covered by
       `tests/error_output_parity/compiler/cases/cmi_corrupted.cmi`.
+- `compiler/frontend/ast_external_process.ml`
+  - `Invalid payload` from `name_from_payload_or_prim`
+    - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`
+      payload path by
+      `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`.
 
 ## Include Mismatch Surfaces
 

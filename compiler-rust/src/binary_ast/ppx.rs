@@ -670,6 +670,13 @@ fn validate_external_attribute_payload_errors(
 ) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
         match arena.get_string(attr_name.txt) {
+            "val" | "send" | "set" | "get" | "new" => {
+                if !payload_is_empty_str(payload)
+                    && !payload_is_single_string_literal(payload, arena)
+                {
+                    return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
+                }
+            }
             "module" => {
                 if get_module_import_attributes(payload, arena).is_some() {
                     continue;
@@ -913,6 +920,21 @@ fn payload_str_items(payload: &Payload) -> Option<&[StructureItem]> {
 
 fn payload_is_empty_str(payload: &Payload) -> bool {
     matches!(payload, Payload::PStr(items) if items.is_empty())
+}
+
+fn payload_is_single_string_literal(payload: &Payload, arena: &ParseArena) -> bool {
+    match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (expr, _) = &**eval_inner;
+                if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc {
+                    return matches!(&**c, Constant::String(_, _));
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Extract @as("string") from attributes.
@@ -1986,13 +2008,6 @@ fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<
                     ExpressionDesc::Pexp_constant(c) => {
                         if let current::Constant::String(s, _) = &**c {
                             return Some(s.to_string());
-                        }
-                    }
-                    // Handle @attr(ident) where ident is a simple identifier like nullable
-                    ExpressionDesc::Pexp_ident(lid) => {
-                        let longident = arena.get_longident(lid.txt);
-                        if let Longident::Lident(s) = longident {
-                            return Some(arena.get_string(*s).to_string());
                         }
                     }
                     _ => {}
