@@ -673,6 +673,12 @@ with a reason after checking raise sites.
     `%%raw` program JavaScript
     - Covered by
       `tests/error_output_parity/compiler/fixtures/raw_structure_invalid_js_warning.res`.
+  - `Ast_payload.raw_as_string_exp_exn` Flow parser warning for invalid regex
+    literals in `%raw` and `%re`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_expr_invalid_regex_warning.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/raw_re_invalid_regex_warning.res`.
   - `%ffi` non-string and non-function-string payload rejection
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_non_string.res`

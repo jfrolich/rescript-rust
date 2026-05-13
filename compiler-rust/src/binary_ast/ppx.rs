@@ -514,6 +514,33 @@ fn flow_like_raw_js_parse_message(
     }
 }
 
+fn is_js_regex_like_literal(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    trimmed.starts_with('/') && !trimmed.starts_with("//") && !trimmed.starts_with("/*")
+}
+
+fn flow_like_raw_js_expression_parse_warning(
+    code: &str,
+    oxc_message: &str,
+    start_offset: usize,
+    end_offset: usize,
+) -> (String, usize, usize) {
+    if is_js_regex_like_literal(code) && oxc_message == "Unterminated regular expression" {
+        let eof_offset = code.len();
+        return (
+            "Invalid regular expression: missing /".to_string(),
+            eof_offset,
+            eof_offset,
+        );
+    }
+
+    (
+        flow_like_raw_js_parse_message(code, oxc_message, start_offset),
+        start_offset,
+        end_offset,
+    )
+}
+
 fn first_non_whitespace_after_keyword(code: &str, keyword: &str) -> Option<(usize, char)> {
     let trimmed = code.trim_start();
     let leading = code.len() - trimmed.len();
@@ -617,7 +644,12 @@ fn raw_js_expression_parse_warning(
     let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
     let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
-    let message = flow_like_raw_js_parse_message(code, &first_error.to_string(), start_offset);
+    let (message, start_offset, end_offset) = flow_like_raw_js_expression_parse_warning(
+        code,
+        &first_error.to_string(),
+        start_offset,
+        end_offset,
+    );
     let loc = raw_js_warning_loc(
         code,
         payload_loc,
@@ -679,6 +711,23 @@ fn push_raw_js_expression_warning(
                     message: warning.message,
                 },
             });
+        }
+    }
+}
+
+fn push_raw_re_warning(payload: &Payload, arena: &mut ParseArena, warnings: &mut Vec<PpxWarning>) {
+    let payload_info = payload_single_string_literal_info(payload, arena)
+        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    if let Some((code, loc, offset)) = payload_info {
+        if is_js_regex_like_literal(&code) {
+            if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
+                warnings.push(PpxWarning {
+                    loc: warning.loc,
+                    warning: Warning::BsFfiWarning {
+                        message: warning.message,
+                    },
+                });
+            }
         }
     }
 }
@@ -790,8 +839,10 @@ fn collect_raw_js_warnings_from_expr(
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_extension(ext) => {
             let (ext_name, payload) = &**ext;
-            if arena.get_string(ext_name.txt) == "raw" {
-                push_raw_js_expression_warning(payload, arena, warnings);
+            match arena.get_string(ext_name.txt) {
+                "raw" => push_raw_js_expression_warning(payload, arena, warnings),
+                "re" => push_raw_re_warning(payload, arena, warnings),
+                _ => {}
             }
         }
         ExpressionDesc::Pexp_let(inner) => {
@@ -11563,10 +11614,12 @@ fn validate_expression_extension_payload_error(
                 ext_name.loc,
                 "%re extension can only be applied to a string",
             )),
-            Some((code, loc)) if !is_js_regex_literal(code) => Err(PpxError::at_loc(
-                loc,
-                "Syntax error: a valid JS regex literal expected",
-            )),
+            Some((code, loc)) if !is_js_regex_literal(code) && !is_js_regex_like_literal(code) => {
+                Err(PpxError::at_loc(
+                    loc,
+                    "Syntax error: a valid JS regex literal expected",
+                ))
+            }
             Some(_) => Ok(()),
         },
         "ffi" => match payload_single_string_literal_info(payload, arena) {
@@ -14432,7 +14485,9 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
                 }
                 "re" => {
                     match payload_single_string_literal_with_loc(payload, arena) {
-                        Some((code, _loc)) if is_js_regex_literal(code) => {
+                        Some((code, _loc))
+                            if is_js_regex_literal(code) || is_js_regex_like_literal(code) =>
+                        {
                             handle_re(expr, payload, arena, ext_name.loc)
                         }
                         Some(_) => expr.clone(),
