@@ -1561,6 +1561,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parmatch_unused_match.res`
       and
       `tests/error_output_parity/compiler/fixtures/parmatch_gadt_unused_catchall.res`.
+  - `Warnings.Unreachable_case`
+    - Covered for a GADT-indexed catch-all whose remaining constructor space is
+      impossible by
+      `tests/error_output_parity/compiler/fixtures/parmatch_unreachable_case.res`.
   - `Warnings.Unused_pat`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/parmatch_unused_subpattern.res`.

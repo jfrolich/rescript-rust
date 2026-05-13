@@ -481,9 +481,10 @@ and may change in future versions. (See manual section 8.5)"
                     name
                 )
             }
-            Warning::UnreachableCase => "this match case is unreachable.\n\
-                 Consider replacing it with a refutation case '<pat> -> .'"
-                .to_string(),
+            Warning::UnreachableCase => {
+                "this match case is unreachable.\nConsider replacing it with a refutation case '<pat> -> .'"
+                    .to_string()
+            }
             Warning::AmbiguousPattern { vars } => {
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])

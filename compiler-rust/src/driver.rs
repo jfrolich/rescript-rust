@@ -5359,6 +5359,7 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::AmbiguousName { .. } => idx == 0,
             crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
             crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
+            crate::diagnostics::Warning::UnreachableCase => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {
                 idx < 2 || line.starts_with("Hint:")
             }

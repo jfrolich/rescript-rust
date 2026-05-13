@@ -12081,6 +12081,181 @@ fn pattern_is_simple_catch_all(pat: &Pattern) -> bool {
     }
 }
 
+fn collect_top_constructor_names(pat: &Pattern, names: &mut HashSet<String>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, _) => {
+            names.insert(cstr.cstr_name.clone());
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => collect_top_constructor_names(inner, names),
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_top_constructor_names(left, names);
+            collect_top_constructor_names(right, names);
+        }
+        _ => {}
+    }
+}
+
+fn type_exprs_may_unify_without_alloc(
+    ctx: &TypeContext,
+    env: &Env,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> bool {
+    fn rec(
+        ctx: &TypeContext,
+        env: &Env,
+        seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+        left: TypeExprRef,
+        right: TypeExprRef,
+    ) -> bool {
+        let left = ctx.repr(crate::types::ctype::expand_head(ctx, env, left));
+        let right = ctx.repr(crate::types::ctype::expand_head(ctx, env, right));
+        if left == right || !seen.insert((left, right)) {
+            return true;
+        }
+
+        let left_desc = ctx.get_desc(left);
+        let right_desc = ctx.get_desc(right);
+        match (&*left_desc, &*right_desc) {
+            (TypeDesc::Tvar(_) | TypeDesc::Tunivar(_), _)
+            | (_, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) => true,
+            (
+                TypeDesc::Tconstr {
+                    path: left_path,
+                    args: left_args,
+                    ..
+                },
+                TypeDesc::Tconstr {
+                    path: right_path,
+                    args: right_args,
+                    ..
+                },
+            ) if left_path.same(right_path) && left_args.len() == right_args.len() => {
+                let left_args = left_args.clone();
+                let right_args = right_args.clone();
+                drop(left_desc);
+                drop(right_desc);
+                left_args
+                    .iter()
+                    .zip(right_args.iter())
+                    .all(|(left_arg, right_arg)| rec(ctx, env, seen, *left_arg, *right_arg))
+            }
+            (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items))
+                if left_items.len() == right_items.len() =>
+            {
+                let left_items = left_items.clone();
+                let right_items = right_items.clone();
+                drop(left_desc);
+                drop(right_desc);
+                left_items
+                    .iter()
+                    .zip(right_items.iter())
+                    .all(|(left_item, right_item)| rec(ctx, env, seen, *left_item, *right_item))
+            }
+            (
+                TypeDesc::Tarrow {
+                    arg: left_arg,
+                    ret: left_ret,
+                    ..
+                },
+                TypeDesc::Tarrow {
+                    arg: right_arg,
+                    ret: right_ret,
+                    ..
+                },
+            ) if left_arg.lbl.same_label(&right_arg.lbl) => {
+                let left_arg_ty = left_arg.typ;
+                let right_arg_ty = right_arg.typ;
+                let left_ret = *left_ret;
+                let right_ret = *right_ret;
+                drop(left_desc);
+                drop(right_desc);
+                rec(ctx, env, seen, left_arg_ty, right_arg_ty)
+                    && rec(ctx, env, seen, left_ret, right_ret)
+            }
+            (TypeDesc::Tpoly { body, .. }, _) => {
+                let body = *body;
+                drop(left_desc);
+                drop(right_desc);
+                rec(ctx, env, seen, body, right)
+            }
+            (_, TypeDesc::Tpoly { body, .. }) => {
+                let body = *body;
+                drop(left_desc);
+                drop(right_desc);
+                rec(ctx, env, seen, left, body)
+            }
+            _ => false,
+        }
+    }
+
+    rec(ctx, env, &mut HashSet::default(), left, right)
+}
+
+fn constructor_declaration_matches_scrutinee_type(
+    ctx: &TypeContext,
+    env: &Env,
+    constructor: &crate::types::decl::ConstructorDeclaration,
+    scrutinee_ty: TypeExprRef,
+) -> bool {
+    match constructor.cd_res {
+        None => true,
+        Some(res_ty) => type_exprs_may_unify_without_alloc(ctx, env, res_ty, scrutinee_ty),
+    }
+}
+
+fn report_unreachable_gadt_catch_all_if_needed(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    previous_unguarded_cases: &[crate::types::typedtree::Case],
+    case: &crate::types::typedtree::Case,
+) -> bool {
+    if !tctx.warning_config.is_active(&Warning::UnreachableCase)
+        || case.c_guard.is_some()
+        || !pattern_is_simple_catch_all(&case.c_lhs)
+    {
+        return false;
+    }
+
+    let constructors = match variant_constructors_for_type(tctx, env, case.c_lhs.pat_type) {
+        Some(constructors) => constructors,
+        None => return false,
+    };
+    let ctx = tctx.type_ctx;
+    let compatible_constructors = constructors
+        .iter()
+        .filter(|constructor| {
+            constructor_declaration_matches_scrutinee_type(
+                ctx,
+                env,
+                constructor,
+                case.c_lhs.pat_type,
+            )
+        })
+        .map(|constructor| constructor.cd_id.name().to_string())
+        .collect::<HashSet<_>>();
+    if compatible_constructors.is_empty()
+        || compatible_constructors.len() == constructors.len()
+    {
+        return false;
+    }
+
+    let mut covered_constructors = HashSet::default();
+    for previous in previous_unguarded_cases {
+        collect_top_constructor_names(&previous.c_lhs, &mut covered_constructors);
+    }
+
+    if compatible_constructors
+        .iter()
+        .all(|constructor| covered_constructors.contains(constructor))
+    {
+        tctx.report_warning(case.c_lhs.pat_loc, Warning::UnreachableCase);
+        true
+    } else {
+        false
+    }
+}
+
 fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) {
     if !covered_literals
         .iter()
@@ -12113,6 +12288,18 @@ fn report_unused_match_cases(
                 == crate::types::typedtree::Partial::Total
         {
             tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
+            if case.c_guard.is_none() {
+                previous_unguarded_cases.push(case.clone());
+            }
+            continue;
+        }
+
+        if report_unreachable_gadt_catch_all_if_needed(
+            tctx,
+            env,
+            &previous_unguarded_cases,
+            case,
+        ) {
             if case.c_guard.is_none() {
                 previous_unguarded_cases.push(case.clone());
             }
