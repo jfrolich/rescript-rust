@@ -817,13 +817,34 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_misplaced_expr.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_inlined_misplaced_expr.res`.
+  - `check_attribute_on_module` reports misplaced module attributes for
+    non-functor `inline` and non-apply-target `inlined`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_misplaced_expr.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_misplaced_expr.res`.
+  - `get_and_remove_inlined_attribute_on_module` reports invalid and duplicate
+    `inlined` payloads on module apply targets
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_invalid_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_duplicate.res`.
+  - `parse_inline_attribute` reports invalid module functor `inline` payloads,
+    and `find_attribute` reports duplicate module functor `inline` attributes
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_invalid_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_duplicate.res`.
   - `add_inline_attribute` reports duplicate `inline` when binding attributes
     are applied to a function expression that already has an inline attribute
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate_function_expr.res`.
-  - Simple `@inline let x = 1` probes are compiled through the ReScript
-    inline-constant path and did not surface the OCaml `inline1`/`inline2`
-    misplaced branches during this audit.
+  - `add_inline_attribute` reports `inline1`/`inline2` when binding attributes
+    cannot apply to the translated lambda
+    - Covered for a module-body binding by
+      `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_binding_misplaced.res`.
+      Simple `@inline let x = 1` probes are compiled through the ReScript
+      inline-constant path and did not surface these branches during this audit.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by

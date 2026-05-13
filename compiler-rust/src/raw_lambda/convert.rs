@@ -1678,6 +1678,37 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Mirrors `Translattribute.check_attribute_on_module` for module attributes.
+    fn check_module_attribute(&mut self, module_expr: &ModuleExpr) {
+        for (located_name, _) in module_expr.mod_attributes.iter() {
+            let name = self.arena.get_string(located_name.txt);
+            match name {
+                "inline" => {
+                    if !matches!(module_expr.mod_desc, ModuleExprDesc::Tmod_functor(..)) {
+                        self.report_warning(
+                            located_name.loc,
+                            Warning::MisplacedAttribute {
+                                name: name.to_string(),
+                            },
+                        );
+                    }
+                }
+                "inlined" => {
+                    if self.suppress_inlined_attribute_check > 0 {
+                        continue;
+                    }
+                    self.report_warning(
+                        located_name.loc,
+                        Warning::MisplacedAttribute {
+                            name: name.to_string(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Extract `@directive("...")` from function expression attributes,
     /// matching OCaml's `extract_directive_for_fn`.
     fn get_directive_attribute_from(
@@ -2139,7 +2170,20 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => RawLambda::Lprim(prim),
                 }
             }
-            other => other,
+            other => {
+                let name = match inline {
+                    InlineAttribute::Always => "inline1",
+                    InlineAttribute::Never => "inline2",
+                    InlineAttribute::Default => return other,
+                };
+                self.report_warning(
+                    loc,
+                    Warning::MisplacedAttribute {
+                        name: name.to_string(),
+                    },
+                );
+                other
+            }
         }
     }
 
@@ -4726,6 +4770,8 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
+        self.check_module_attribute(module_expr);
+
         if matches!(
             module_expr.mod_type,
             crate::types::decl::ModuleType::MtyAlias(_, _)
@@ -4813,16 +4859,20 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
                 let loc = self.loc(module_expr.mod_loc);
-                let apply = RawLambda::Lapply(crate::raw_lambda::RawApply {
-                    ap_func: Box::new(self.convert_module_expr_raw_with_coercion(
+                let inlined = self.get_inlined_attribute_from(&funct.mod_attributes);
+                let funct_lam = self.with_inlined_attribute_check_suppressed(|this| {
+                    this.convert_module_expr_raw_with_coercion(
                         funct,
                         &None,
                         &ModuleCoercion::Tcoerce_none,
-                    )),
+                    )
+                });
+                let apply = RawLambda::Lapply(crate::raw_lambda::RawApply {
+                    ap_func: Box::new(funct_lam),
                     ap_args: vec![self.convert_module_expr_raw_with_coercion(arg, &None, ccarg)],
                     ap_info: ApInfo {
                         loc: loc.clone(),
-                        inlined: InlineAttribute::Default,
+                        inlined,
                         status: ApplyStatus::Na,
                     },
                     ap_transformed_jsx: false,
