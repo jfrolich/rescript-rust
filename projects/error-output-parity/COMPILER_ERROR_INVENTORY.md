@@ -634,6 +634,33 @@ with a reason after checking raise sites.
   - `Circular_dependency`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
+- `compiler/ml/ast_payload.ml`
+  - `%re` JavaScript regex literal validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_re_non_regex.res`.
+- `compiler/frontend/ast_exp_handle_external.ml`
+  - `%debugger` payload rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_debugger_payload.res`.
+  - `%raw`, `%re`, and `%%raw` non-string payload rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_expr_non_string.res`,
+      `tests/error_output_parity/compiler/fixtures/raw_re_non_string.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/raw_structure_non_string.res`.
+  - `%ffi` non-string and non-function-string payload rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/ffi_non_string.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/ffi_non_function_string.res`.
+- `compiler/frontend/ast_exp_extension.ml`
+  - `%obj` non-record payload rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/obj_extension_non_record.res`.
+- `compiler/frontend/ast_util.ml`
+  - `%obj` qualified-label rejection
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/obj_extension_qualified_label.res`.
 - `compiler/frontend/ast_exp_apply.ml`
   - `property name (...) can not contain speical character #`
     - Covered by
