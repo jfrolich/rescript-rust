@@ -11703,9 +11703,9 @@ fn expression_is_lident(expr_idx: ExprIdx, expected: &str, arena: &ParseArena) -
     arena.get_string(*name_idx) == expected
 }
 
-fn hash_hash_property_access(expr: &Expression, arena: &ParseArena) -> bool {
+fn hash_hash_property_name(expr: &Expression, arena: &ParseArena) -> Option<(LocIdx, String)> {
     let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
-        return false;
+        return None;
     };
     let PexpApply { funct, args, .. } = &**inner;
     if args.len() != 2
@@ -11713,20 +11713,35 @@ fn hash_hash_property_access(expr: &Expression, arena: &ParseArena) -> bool {
         || !matches!(args[1].0, ArgLabel::Nolabel)
         || !expression_is_lident(*funct, "##", arena)
     {
-        return false;
+        return None;
     }
 
     let property = arena.get_expr(args[1].1);
     match &*property.pexp_desc {
-        ExpressionDesc::Pexp_ident(_) => true,
-        ExpressionDesc::Pexp_constant(c) => matches!(&**c, Constant::String(_, None)),
-        _ => false,
+        ExpressionDesc::Pexp_ident(lid) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+                return None;
+            };
+            Some((lid.loc, arena.get_string(*name_idx).to_string()))
+        }
+        ExpressionDesc::Pexp_constant(c) => match &**c {
+            Constant::String(name, None) => Some((property.pexp_loc, name.to_string())),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
+fn hash_hash_property_access(expr: &Expression, arena: &ParseArena) -> bool {
+    hash_hash_property_name(expr, arena).is_some()
+}
+
+fn hash_set_apply_args<'a>(
+    expr: &'a Expression,
+    arena: &ParseArena,
+) -> Option<&'a [(ArgLabel, ExprIdx)]> {
     let ExpressionDesc::Pexp_apply(inner) = &*expr.pexp_desc else {
-        return false;
+        return None;
     };
     let PexpApply { funct, args, .. } = &**inner;
     if args.len() != 2
@@ -11734,9 +11749,41 @@ fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
         || !matches!(args[1].0, ArgLabel::Nolabel)
         || !expression_is_lident(*funct, "#=", arena)
     {
-        return false;
+        return None;
     }
+    Some(args)
+}
 
+fn invalid_property_name_error(name: &str, loc: LocIdx) -> Option<PpxError> {
+    if name.contains('#') {
+        Some(PpxError::at_loc(
+            loc,
+            format!("property name ({name}) can not contain speical character #"),
+        ))
+    } else {
+        None
+    }
+}
+
+fn hash_set_property_name_error(expr: &Expression, arena: &ParseArena) -> Option<PpxError> {
+    let args = hash_set_apply_args(expr, arena)?;
+    let lhs = arena.get_expr(args[0].1);
+    match &*lhs.pexp_desc {
+        ExpressionDesc::Pexp_send(inner) => {
+            let (_obj, method) = &**inner;
+            invalid_property_name_error(&method.txt, method.loc)
+        }
+        _ => {
+            let (loc, name) = hash_hash_property_name(lhs, arena)?;
+            invalid_property_name_error(&name, loc)
+        }
+    }
+}
+
+fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
+    let Some(args) = hash_set_apply_args(expr, arena) else {
+        return false;
+    };
     let lhs = arena.get_expr(args[0].1);
     !matches!(&*lhs.pexp_desc, ExpressionDesc::Pexp_send(_))
         && !hash_hash_property_access(lhs, arena)
@@ -11767,6 +11814,9 @@ fn validate_expression_await_context(
         }
         ExpressionDesc::Pexp_apply(inner) => {
             // Match ast_exp_apply.ml: #= only assigns to send expressions or ## property reads.
+            if let Some(error) = hash_set_property_name_error(expr, arena) {
+                return Err(error);
+            }
             if invalid_hash_set_assignment(expr, arena) {
                 return Err(PpxError::at_loc(expr.pexp_loc, "invalid #= assignment"));
             }

@@ -635,9 +635,16 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
 - `compiler/frontend/ast_exp_apply.ml`
+  - `property name (...) can not contain speical character #`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_hash_property_assignment.res`.
   - `invalid #= assignment`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/invalid_hash_set_assignment.res`.
+  - Legacy direct `##`, `#=`, and `->` operator shape errors
+    - Checked against source-level probes. Normal `.res` source is rejected by
+      parser diagnostics before these frontend branches are observable through
+      the current ReScript syntax.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by
