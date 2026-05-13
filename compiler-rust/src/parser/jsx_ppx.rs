@@ -4734,9 +4734,13 @@ fn transform_jsx_unary(
             )
         }
         JsxTagName::Invalid(name) => {
-            eprintln!(
-                "JSX: element name is neither upper- or lowercase, got \"{}\"",
-                name
+            set_fatal_error(
+                config,
+                *loc,
+                &format!(
+                    "JSX: element name is neither upper- or lowercase, got \"{}\"",
+                    name
+                ),
             );
             ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Unary(unary)))
         }
@@ -4824,9 +4828,13 @@ fn transform_jsx_container(
             )
         }
         JsxTagName::Invalid(name) => {
-            eprintln!(
-                "JSX: element name is neither upper- or lowercase, got \"{}\"",
-                name
+            set_fatal_error(
+                config,
+                *loc,
+                &format!(
+                    "JSX: element name is neither upper- or lowercase, got \"{}\"",
+                    name
+                ),
             );
             ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Container(container)))
         }
