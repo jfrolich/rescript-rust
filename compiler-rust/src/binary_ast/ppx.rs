@@ -997,6 +997,10 @@ fn collect_raw_js_warnings_from_structure_item(
                 collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
             }
         }
+        StructureItemDesc::Pstr_type(inner) => {
+            let (_rec_flag, tdcls) = &**inner;
+            collect_deriving_not_applicable_warnings(tdcls, arena, warnings);
+        }
         StructureItemDesc::Pstr_module(mb) => {
             collect_raw_js_warnings_from_mod_expr_idx(mb.pmb_expr, arena, warnings);
         }
@@ -8650,6 +8654,315 @@ enum DeriveAction {
     Abstract { light: bool },
 }
 
+struct DeriveActionConfig {
+    name: String,
+    name_loc: LocIdx,
+    config: Option<ExprIdx>,
+}
+
+fn expr_lident_name(expr_idx: ExprIdx, arena: &ParseArena) -> Option<String> {
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_ident(lid_loc) = &*expr.pexp_desc else {
+        return None;
+    };
+    let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
+        return None;
+    };
+    Some(arena.get_string(*name_idx).to_string())
+}
+
+fn record_field_action_config(
+    field: &ExpressionRecordField,
+    arena: &ParseArena,
+) -> PpxResult<DeriveActionConfig> {
+    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+        return Err(PpxError::at_loc(field.lid.loc, "Qualified label is not allowed"));
+    };
+    let name = arena.get_string(*name_idx).to_string();
+    let config = if expr_lident_name(field.expr, arena).as_deref() == Some(name.as_str()) {
+        None
+    } else {
+        Some(field.expr)
+    };
+    Ok(DeriveActionConfig {
+        name,
+        name_loc: field.lid.loc,
+        config,
+    })
+}
+
+fn collect_deriving_expr_actions(
+    expr_idx: ExprIdx,
+    arena: &ParseArena,
+    actions: &mut Vec<DeriveActionConfig>,
+) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid_loc) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
+                return Ok(());
+            };
+            actions.push(DeriveActionConfig {
+                name: arena.get_string(*name_idx).to_string(),
+                name_loc: lid_loc.loc,
+                config: None,
+            });
+            Ok(())
+        }
+        ExpressionDesc::Pexp_tuple(exprs) => {
+            for expr_idx in exprs.iter() {
+                collect_deriving_expr_actions(*expr_idx, arena, actions)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, _base) = &**inner;
+            for field in fields {
+                actions.push(record_field_action_config(field, arena)?);
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_apply(inner) => {
+            let PexpApply { funct, args, .. } = &**inner;
+            let Some(name) = expr_lident_name(*funct, arena) else {
+                return Ok(());
+            };
+            let name_loc = arena.get_expr(*funct).pexp_loc;
+            actions.push(DeriveActionConfig {
+                name,
+                name_loc,
+                config: args.first().map(|(_, expr_idx)| *expr_idx),
+            });
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_js_converter_config(expr_idx: ExprIdx, arena: &ParseArena) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_ident(lid_loc) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ));
+            };
+            if arena.get_string(*name_idx) == "newType" {
+                Ok(())
+            } else {
+                Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ))
+            }
+        }
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, _base) = &**inner;
+            let Some(field) = fields.first() else {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ));
+            };
+            if fields.len() != 1 {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ));
+            }
+            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ));
+            };
+            if arena.get_string(*name_idx) != "newType" {
+                return Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                ));
+            }
+            let value = arena.get_expr(field.expr);
+            match &*value.pexp_desc {
+                ExpressionDesc::Pexp_ident(lid_loc) => {
+                    let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
+                        return Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "such configuration is not supported",
+                        ));
+                    };
+                    if arena.get_string(*name_idx) == "newType" {
+                        Ok(())
+                    } else {
+                        Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "such configuration is not supported",
+                        ))
+                    }
+                }
+                ExpressionDesc::Pexp_construct(ctor_lid, None) => {
+                    let Longident::Lident(name_idx) = arena.get_longident(ctor_lid.txt) else {
+                        return Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "such configuration is not supported",
+                        ));
+                    };
+                    match arena.get_string(*name_idx) {
+                        "true" | "false" => Ok(()),
+                        _ => Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "such configuration is not supported",
+                        )),
+                    }
+                }
+                _ => Err(PpxError::at_loc(
+                    expr.pexp_loc,
+                    "such configuration is not supported",
+                )),
+            }
+        }
+        _ => Err(PpxError::at_loc(
+            expr.pexp_loc,
+            "such configuration is not supported",
+        )),
+    }
+}
+
+fn validate_deriving_attr_payload(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
+    let Some(items) = payload_str_items(payload) else {
+        return Ok(());
+    };
+    let mut actions = Vec::new();
+    for item in items {
+        if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
+            let (expr_idx, _) = &**eval_inner;
+            collect_deriving_expr_actions(*expr_idx, arena, &mut actions)?;
+        }
+    }
+
+    if actions
+        .iter()
+        .any(|action| action.name == "abstract")
+        && actions.len() > 1
+    {
+        if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
+            return Err(PpxError::at_loc(
+                action.name_loc,
+                "deriving abstract does not work with any other deriving",
+            ));
+        }
+    }
+
+    for action in actions {
+        match action.name.as_str() {
+            "accessors" => {
+                if let Some(config) = action.config {
+                    return Err(PpxError::at_loc(
+                        arena.get_expr(config).pexp_loc,
+                        "such configuration is not supported",
+                    ));
+                }
+            }
+            "jsConverter" => {
+                if let Some(config) = action.config {
+                    validate_js_converter_config(config, arena)?;
+                }
+            }
+            "abstract" => {
+                if let Some(config) = action.config {
+                    if expr_lident_name(config, arena).as_deref() != Some("light") {
+                        return Err(PpxError::at_loc(
+                            action.name_loc,
+                            "invalid config for abstract",
+                        ));
+                    }
+                }
+            }
+            name => {
+                return Err(PpxError::at_loc(
+                    action.name_loc,
+                    format!("{name} is not supported"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn push_deriving_not_applicable_warnings(
+    loc: LocIdx,
+    deriving_name: &str,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    for _ in 0..2 {
+        warnings.push(PpxWarning {
+            loc,
+            warning: Warning::BsDeriveWarning {
+                message: format!("{deriving_name} not applicable to this type"),
+            },
+        });
+    }
+}
+
+fn accessors_not_applicable(tdcl: &TypeDeclaration) -> bool {
+    matches!(
+        tdcl.ptype_kind,
+        TypeKind::Ptype_abstract | TypeKind::Ptype_open
+    )
+}
+
+fn js_converter_not_applicable(tdcl: &TypeDeclaration, arena: &ParseArena) -> bool {
+    match tdcl.ptype_kind {
+        TypeKind::Ptype_record(_) => false,
+        TypeKind::Ptype_abstract => is_enum_polyvar(tdcl, arena).is_none(),
+        TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => true,
+    }
+}
+
+fn collect_deriving_not_applicable_warnings(
+    tdcls: &[TypeDeclaration],
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    if validate_deriving_accessors_for_tdcls(tdcls, arena).is_err() {
+        return;
+    }
+    let Some(last_tdcl) = tdcls.last() else {
+        return;
+    };
+    let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    for action in actions {
+        match action {
+            DeriveAction::Accessors => {
+                for tdcl in tdcls {
+                    if accessors_not_applicable(tdcl) {
+                        push_deriving_not_applicable_warnings(
+                            tdcl.ptype_loc,
+                            "accessors",
+                            warnings,
+                        );
+                    }
+                }
+            }
+            DeriveAction::JsConverter { .. } => {
+                for tdcl in tdcls {
+                    if js_converter_not_applicable(tdcl, arena) {
+                        push_deriving_not_applicable_warnings(
+                            tdcl.ptype_loc,
+                            "jsConverter",
+                            warnings,
+                        );
+                    }
+                }
+            }
+            DeriveAction::Abstract { .. } => {}
+        }
+    }
+}
+
 /// Parse @deriving attribute to extract derive actions
 fn parse_deriving_actions(
     attrs: &[Attribute],
@@ -10990,7 +11303,7 @@ fn validate_deriving_accessors_for_tdcls(
     };
     for tdcl in tdcls {
         let mut seen_deriving = false;
-        for (attr_name, _) in &tdcl.ptype_attributes {
+        for (attr_name, payload) in &tdcl.ptype_attributes {
             if arena.get_string(attr_name.txt) == "deriving" {
                 if seen_deriving {
                     return Err(PpxError::at_loc(
@@ -10999,6 +11312,7 @@ fn validate_deriving_accessors_for_tdcls(
                     ));
                 }
                 seen_deriving = true;
+                validate_deriving_attr_payload(payload, arena)?;
             }
         }
     }

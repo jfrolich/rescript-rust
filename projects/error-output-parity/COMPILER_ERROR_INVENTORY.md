@@ -655,6 +655,31 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_return_record_with_payload.res`.
+- `compiler/frontend/ast_derive*.ml`
+  - `Ast_payload.table_dispatch` unsupported `@deriving` action
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_unsupported.res`.
+  - `Ast_derive_projector.invalid_config`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_invalid_config.res`.
+  - `Ast_derive_js_mapper.handle_config` invalid config
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_invalid_config.res`.
+  - `Ast_derive_abstract.is_abstract` invalid config
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_abstract_invalid_config.res`.
+  - `Ast_derive_util.not_applicable` warnings for `accessors`
+    - Covered for abstract and open types by
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_open.res`.
+  - `Ast_derive_util.not_applicable` warnings for `jsConverter`
+    - Covered for regular variants, non-polyvariant abstract types, and open
+      types by
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_variant.res`,
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_abstract.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_open.res`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by
