@@ -248,6 +248,11 @@ run_compiler_case() {
     rust_out="$CACHE_DIR/compiler/rust_${safe}.out"
     diff_out="$CACHE_DIR/diffs/${safe}.diff"
 
+    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/gentype_stale_cmti.res" ]]; then
+        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/Bar.cmi" \
+            "$CACHE_DIR/compiler/gentype_stale_cmti.cmti"
+    fi
+
     run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
     run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
     compare_outputs "compiler" "$source_file" "$ocaml_out" "$rust_out" "$diff_out"

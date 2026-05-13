@@ -8,19 +8,19 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
-    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
-    typecheck_interface_file,
+    apply_external_signature_ppxs, apply_external_structure_ppxs, compile_file_to_js_with_options,
+    enable_cli_cleanup_skip, parser_error_to_anyhow, typecheck_interface_file, CompilerOptions,
+    UserDiagnostic,
 };
 use rescript_compiler::js_ir::ModuleFormat;
-use rescript_compiler::parser::{Parser, module, sexp_locs};
+use rescript_compiler::parser::{module, sexp_locs, Parser};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
@@ -106,6 +106,7 @@ struct Options {
     no_assert_false: bool,
     no_builtin_ppx: bool,
     external_ppxs: Vec<String>,
+    gentype: bool,
     make_runtime: bool,
     read_cmi: bool,
 }
@@ -231,6 +232,7 @@ fn run() -> Result<()> {
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
+                "-bs-gentype" => opts.gentype = true,
                 "-w" => {
                     if let Some(val) = args.next() {
                         opts.warning_specs.push(val);
@@ -524,7 +526,8 @@ fn write_outputs(
 ) -> Result<()> {
     if opts.has_dump_output() {
         let js = compile_file_to_js_with_options(source_path, compiler_opts)?;
-        return write_precompiled_outputs(source_path, &js, opts);
+        write_precompiled_outputs(source_path, &js, opts)?;
+        return maybe_process_gentype(source_path, opts);
     }
 
     if let Some(out) = &opts.output {
@@ -535,7 +538,7 @@ fn write_outputs(
             fs::create_dir_all(parent)?;
         }
         fs::write(out, js)?;
-        return Ok(());
+        return maybe_process_gentype(source_path, opts);
     }
 
     if !opts.package_outputs.is_empty() {
@@ -557,7 +560,7 @@ fn write_outputs(
                 fs::write(out_path, js)?;
             }
         }
-        return Ok(());
+        return maybe_process_gentype(source_path, opts);
     }
 
     let mut output_opts = compiler_opts.clone();
@@ -565,6 +568,93 @@ fn write_outputs(
     output_opts.output_module_format = None;
     let js = compile_file_to_js_with_options(source_path, &output_opts)?;
     print!("{js}");
+    maybe_process_gentype(source_path, opts)
+}
+
+fn path_without_extension(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    path.set_extension("");
+    path
+}
+
+fn gentype_output_prefix(source_path: &Path, opts: &Options) -> PathBuf {
+    match &opts.output {
+        Some(output) => path_without_extension(output),
+        None => path_without_extension(source_path),
+    }
+}
+
+fn uncapitalize_ascii_filename(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut chars = file_name.chars();
+    let first = chars.next()?;
+    let lowered = first.to_ascii_lowercase().to_string() + chars.as_str();
+    Some(path.with_file_name(lowered))
+}
+
+fn gentype_cmt_file_for_output_prefix(output_prefix: &Path) -> Option<PathBuf> {
+    // Mirrors compiler/gentype/Paths.ml:get_cmt_file for the output.cmt path
+    // passed by compiler/core/js_implementation.ml after code generation.
+    let path_cmt = output_prefix.with_extension("cmt");
+    if path_cmt.extension().and_then(|ext| ext.to_str()) != Some("cmt") {
+        return None;
+    }
+
+    let path_cmt_lower_case = uncapitalize_ascii_filename(&path_cmt)?;
+    let path_cmti = output_prefix.with_extension("cmti");
+    let path_cmti_lower_case = path_cmt_lower_case.with_extension("cmti");
+
+    for candidate in [
+        path_cmti_lower_case,
+        path_cmti,
+        path_cmt_lower_case,
+        path_cmt,
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn maybe_process_gentype(source_path: &Path, opts: &Options) -> Result<()> {
+    if !opts.gentype {
+        return Ok(());
+    }
+
+    let output_prefix = gentype_output_prefix(source_path, opts);
+    let Some(cmt_file) = gentype_cmt_file_for_output_prefix(&output_prefix) else {
+        return Ok(());
+    };
+
+    check_gentype_cmt_file(&cmt_file)
+}
+
+fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
+    // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
+    // selected file contains a compiled interface without typedtree data.
+    const CMT_MAGIC: &[u8; 12] = b"Caml1999T022";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I022";
+
+    let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
+    if data.len() < CMT_MAGIC.len() {
+        return Ok(());
+    }
+
+    let magic = &data[..CMT_MAGIC.len()];
+    if magic == CMT_MAGIC {
+        return Ok(());
+    }
+
+    if magic == CMI_MAGIC {
+        return Err(UserDiagnostic::new(
+            "Fatal error: exception Cmt_format.Error(_)\n".to_string(),
+            2,
+        )
+        .into());
+    }
+
     Ok(())
 }
 

@@ -1155,6 +1155,14 @@ with a reason after checking raise sites.
   - `Corrupted_interface`
     - Covered by
       `tests/error_output_parity/compiler/cases/cmi_corrupted.cmi`.
+- `compiler/ml/cmt_format.ml`
+  - `Not_a_typedtree`
+    - Covered through `-bs-gentype` with a stale `.cmti` containing only CMI
+      data. OCaml writes `output.cmt`, then `GenTypeMain.process_cmt_file`
+      chooses the stale `output.cmti`; `Cmt_format.read_cmt` raises
+      `Cmt_format.Error(Not_a_typedtree _)`.
+    - Fixture:
+      `tests/error_output_parity/compiler/cases/gentype_stale_cmti.res`.
 - `compiler/frontend/ast_external_process.ml`
   - `Invalid payload` from `name_from_payload_or_prim`
     - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`
