@@ -1950,16 +1950,17 @@ fn validate_non_obj_optional_arg_type_errors(
     Ok(())
 }
 
-fn validate_external_arg_type_errors(args: &[TypeArg], arena: &ParseArena) -> PpxResult<()> {
+fn validate_external_arg_type_errors(args: &[TypeArg], arena: &mut ParseArena) -> PpxResult<()> {
     for arg in args {
-        validate_external_core_type_arg_errors(arena.get_core_type(arg.typ), arena)?;
+        let typ = arena.get_core_type(arg.typ).clone();
+        validate_external_core_type_arg_errors(&typ, arena)?;
     }
     Ok(())
 }
 
 fn validate_external_core_type_arg_errors(
     typ: &CoreType,
-    arena: &ParseArena,
+    arena: &mut ParseArena,
 ) -> PpxResult<()> {
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         validate_string_or_int_as_attrs(&typ.ptyp_attributes, arena)?;
@@ -2441,16 +2442,38 @@ fn validate_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<(
     Ok(())
 }
 
-fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
-        if arena.get_string(attr_name.txt) == "as"
-            && get_payload_int(payload, arena).is_none()
-            && get_payload_string_with_delim(payload, arena).is_none()
-        {
+        if arena.get_string(attr_name.txt) != "as" {
+            continue;
+        }
+        if get_payload_int(payload, arena).is_some() {
+            continue;
+        }
+        let Some((payload, delim, loc, flow_offset)) =
+            get_payload_string_with_delim_info(payload, arena)
+        else {
             return Err(PpxError::at_loc(
                 attr_name.loc,
                 "expect int, string literal or json literal {json|text here|json} ",
             ));
+        };
+        if matches!(delim, Delim::DNoQuotes)
+            && !matches!(classify_js_exp(&payload), JsExpClassification::JsLiteral { .. })
+        {
+            let err = PpxError::at_loc(loc, "an object literal expected");
+            return if let Some(warning) =
+                raw_js_expression_parse_warning(&payload, loc, flow_offset, arena)
+            {
+                Err(err.with_warning(
+                    warning.loc,
+                    Warning::BsFfiWarning {
+                        message: warning.message,
+                    },
+                ))
+            } else {
+                Err(err)
+            };
         }
     }
     Ok(())
@@ -3616,11 +3639,19 @@ fn get_payload_string_with_delim(
     payload: &current::Payload,
     arena: &ParseArena,
 ) -> Option<(String, Delim)> {
+    get_payload_string_with_delim_info(payload, arena).map(|(s, delim, _loc, _offset)| (s, delim))
+}
+
+fn get_payload_string_with_delim_info(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> Option<(String, Delim, LocIdx, i32)> {
     match payload {
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
                 let (ref expr, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc {
+                let expr = arena.get_expr(*expr);
+                if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
                     if let current::Constant::String(s, raw_delim) = &**c {
                         // Apply parse_processed_delim logic:
                         // In OCaml, strings get rewritten: None → "*j", then
@@ -3635,7 +3666,11 @@ fn get_payload_string_with_delim(
                             Some("j") => Delim::DStarJ, // "j" delimiter → DStarJ
                             _ => return None,           // Unrecognized delimiter
                         };
-                        return Some((s.to_string(), delim));
+                        let flow_offset = match raw_delim {
+                            None => 1,
+                            Some(delim) => delim.len() as i32 + 2,
+                        };
+                        return Some((s.to_string(), delim, expr.pexp_loc, flow_offset));
                     }
                 }
             }

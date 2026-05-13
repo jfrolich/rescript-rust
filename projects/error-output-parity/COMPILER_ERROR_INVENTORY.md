@@ -1110,6 +1110,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_bind_name.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_name.res`.
+- `compiler/frontend/ast_attributes.ml`
+  - `iter_process_bs_string_or_int_as` rejects json-delimited `@as` payloads
+    that are not literal JavaScript expressions, after first reporting Flow
+    parse warnings for malformed JavaScript
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_as_json_non_literal.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_as_json_invalid_js.res`.
 
 ## Include Mismatch Surfaces
 
