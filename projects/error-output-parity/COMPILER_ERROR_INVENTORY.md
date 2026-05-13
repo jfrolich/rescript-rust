@@ -272,6 +272,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/coerce_record_missing_field.res`,
   and
   `tests/error_output_parity/compiler/fixtures/coerce_different_type_kinds.res`.
+  `Ctype.Generic {errorCode = "VCPMMVD"}` is marked unreachable: the only
+  OCaml construction site is inside the primitive-to-variant coercion branch
+  guarded by `can_try_coerce_variant_to_primitive_opt (...) |> Option.is_some`,
+  then immediately matching the same expression; the `None` arm cannot be
+  selected without mutation between the guard and match.
 - `Inlined_record_expected`: covered by
   `tests/error_output_parity/compiler/fixtures/inlined_record_expected.res`.
 - `Invalid_extension_constructor_payload`: covered by
