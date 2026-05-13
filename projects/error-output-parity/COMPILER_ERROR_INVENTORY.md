@@ -580,6 +580,12 @@ with a reason after checking raise sites.
 - `Expect_opt_in_bs_return_to_opt`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_return_to_opt_non_option.res`.
+  - FFI name validation preempts this return-result validation in
+    `Ast_external_process.handle_attributes`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_return_empty_global_name.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_module_return_empty_module_name.res`.
 - `Misplaced_label_syntax`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_misplaced_label_syntax.res`.

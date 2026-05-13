@@ -2001,8 +2001,6 @@ fn validate_external_attribute_errors(
         arena,
     );
 
-    validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
-
     if !desc.mk_obj && desc.splice {
         validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
     }
@@ -2158,6 +2156,7 @@ fn validate_external_attribute_errors(
         let result_is_unit = is_unit_type(&result_type, arena);
         let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
         validate_ffi_names(&ffi, vd.pval_loc)?;
+        validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
     }
 
     Ok(())
