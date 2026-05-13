@@ -3336,7 +3336,6 @@ fn parse_external_attrs(
                 .unwrap_or(basename);
             desc.external_module_name = Some(format!("./{stem}.gen"));
             desc.module_bind_name = None;
-            desc.module_as_val = false;
             desc.import_attributes = None;
             continue;
         }
@@ -3356,7 +3355,6 @@ fn parse_external_attrs(
                 {
                     desc.external_module_name = Some(bundle);
                     desc.module_bind_name = None;
-                    desc.module_as_val = false;
                     desc.import_attributes = Some(import_attributes);
                     continue;
                 }
@@ -3366,22 +3364,17 @@ fn parse_external_attrs(
                     0 => {
                         // @module with no payload - module_as_val, bundle = prim_name
                         desc.module_as_val = true;
-                        desc.external_module_name = None;
-                        desc.module_bind_name = None;
-                        desc.import_attributes = None;
                     }
                     1 => {
                         // @module("name") - sets external_module_name
                         desc.external_module_name = Some(strings[0].clone());
                         desc.module_bind_name = None;
-                        desc.module_as_val = false;
                         desc.import_attributes = None;
                     }
                     2 => {
                         // @module("bundle", "bind_name") - sets external_module_name with bind name
                         desc.external_module_name = Some(strings[0].clone());
                         desc.module_bind_name = Some(strings[1].clone());
-                        desc.module_as_val = false;
                         desc.import_attributes = None;
                     }
                     _ => {}

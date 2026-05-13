@@ -1176,6 +1176,10 @@ with a reason after checking raise sites.
   - `@module` with payload-bearing `@new`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_module_new_payload.res`.
+  - Duplicate/bare-plus-payload `@module` state is preserved until the
+    non-object conflict catch
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_duplicate_module_attr.res`.
   - Non-object optional argument validation in `handle_attributes`
     - Covered for payload `@string` optionals and all `@variadic` last-argument
       validations (optional, underscore, FFI-attributed, and non-array) by
