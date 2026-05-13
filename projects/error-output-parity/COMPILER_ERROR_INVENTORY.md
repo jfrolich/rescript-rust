@@ -550,8 +550,8 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_return_to_opt_non_option.res`.
 - `Misplaced_label_syntax`
-  - Open: raised by labeled arguments in positions rejected by
-    `compiler/frontend/ast_exp_apply.ml`; fixture still needed.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_misplaced_label_syntax.res`.
 - `Optional_in_uncurried_bs_attribute`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_this_optional_arg.res`.
