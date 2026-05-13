@@ -1180,6 +1180,10 @@ with a reason after checking raise sites.
     non-object conflict catch
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_duplicate_module_attr.res`.
+  - Bare `@module` value imports allow value-style `@val` without reporting a
+    `%@val` conflict
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_val_as_var.res`.
   - Non-object optional argument validation in `handle_attributes`
     - Covered for payload `@string` optionals and all `@variadic` last-argument
       validations (optional, underscore, FFI-attributed, and non-array) by

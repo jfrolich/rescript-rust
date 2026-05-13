@@ -2060,7 +2060,7 @@ fn validate_external_attribute_errors(
             ));
         }
 
-        if desc.val_name.is_some() && !external_desc_is_plain_val(&desc) {
+        if desc.val_name.is_some() && !desc.module_as_val && !external_desc_is_plain_val(&desc) {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
                 "Conflicting attributes: Attribute found that conflicts with %@val",
