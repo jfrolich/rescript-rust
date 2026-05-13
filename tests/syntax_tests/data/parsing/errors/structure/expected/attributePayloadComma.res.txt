@@ -1,6 +1,6 @@
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res:1:19
+  syntax_tests/data/parsing/errors/structure/attributePayloadComma.res:1:19
 
   1 │ @deriving(abstract, accessors)
   2 │ type t = {x: int}

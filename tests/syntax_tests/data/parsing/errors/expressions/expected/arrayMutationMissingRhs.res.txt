@@ -1,6 +1,6 @@
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/expressions/arrayMutationMissingRhs.res:2:8-3:0
+  syntax_tests/data/parsing/errors/expressions/arrayMutationMissingRhs.res:2:8-3:0
 
   1 │ let xs = [1]
   2 │ xs[0] =

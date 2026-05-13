@@ -1,6 +1,6 @@
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/expressions/unaryOperatorMissingOperand.res:1:10-2:0
+  syntax_tests/data/parsing/errors/expressions/unaryOperatorMissingOperand.res:1:10-2:0
 
   1 │ let x = !
   2 │ 

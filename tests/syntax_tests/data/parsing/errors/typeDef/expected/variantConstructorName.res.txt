@@ -1,6 +1,6 @@
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:1:14-18
+  syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:1:14-18
 
   1 │ type t = A | value
   2 │ 
@@ -10,7 +10,7 @@
 
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:3:14-18
+  syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:3:14-18
 
   1 │ type t = A | value
   2 │ 
