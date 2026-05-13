@@ -696,6 +696,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_component_external_string_attr.res`
       and
       `tests/error_output_parity/compiler/fixtures/jsx_component_signature_int_attr.resi`.
+  - `recursively_transform_named_args_for_make` rejects non-plain ref
+    argument patterns inside `React.forwardRef` components
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_forward_ref_bad_ref_arg.res`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by

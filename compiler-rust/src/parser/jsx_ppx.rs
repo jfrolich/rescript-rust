@@ -147,6 +147,8 @@ const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
     "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
 const STRING_INT_ATTR_UNSUPPORTED_MSG: &str =
     "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
+const COMPONENT_REF_PLAIN_ARGS_MSG: &str =
+    "React: react.component refs only support plain arguments and type annotations.";
 
 // ============================================================================
 // Public API
@@ -545,6 +547,8 @@ fn transform_react_component_binding(
         set_fatal_error(config, loc, COMPONENT_PROPS_NEED_LABELLED_MSG);
     } else if let Some(loc) = component_call_needs_function_error_loc(arena, binding.pvb_expr) {
         set_fatal_error(config, loc, COMPONENT_CALL_NEEDS_FUNCTION_MSG);
+    } else if let Some(loc) = component_ref_plain_args_error_loc(arena, binding.pvb_expr) {
+        set_fatal_error(config, loc, COMPONENT_REF_PLAIN_ARGS_MSG);
     }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
@@ -2603,6 +2607,70 @@ fn component_call_needs_function_error_loc(
             component_call_needs_function_error_loc(arena, *inner_idx)
         }
         _ => Some(expr.pexp_loc),
+    }
+}
+
+fn component_ref_plain_args_error_loc(arena: &ParseArena, expr_idx: ExprIdx) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_fun(_) => component_ref_plain_args_error_loc_in_fun(arena, expr_idx),
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let (_, body_idx) = &**inner;
+            component_ref_plain_args_error_loc(arena, *body_idx)
+        }
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_, _, body_idx) = &**inner;
+            component_ref_plain_args_error_loc(arena, *body_idx)
+        }
+        ExpressionDesc::Pexp_apply(apply)
+            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+        {
+            component_ref_plain_args_error_loc(arena, apply.args[0].1)
+        }
+        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
+            component_ref_plain_args_error_loc(arena, *inner_idx)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (inner_idx, _) = &**inner;
+            component_ref_plain_args_error_loc(arena, *inner_idx)
+        }
+        _ => None,
+    }
+}
+
+fn component_ref_plain_args_error_loc_in_fun(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_fun(fun) = &*expr.pexp_desc else {
+        return None;
+    };
+    match &fun.arg_label {
+        ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
+            component_ref_plain_args_error_loc_in_fun(arena, fun.rhs)
+        }
+        ArgLabel::Nolabel => {
+            let lhs = arena.get_pat(fun.lhs);
+            if pattern_is_unit_or_any(arena, lhs) || pattern_is_plain_name_or_constraint(lhs, arena)
+            {
+                None
+            } else {
+                Some(lhs.ppat_loc)
+            }
+        }
+    }
+}
+
+fn pattern_is_plain_name_or_constraint(pat: &Pattern, arena: &ParseArena) -> bool {
+    match &*pat.ppat_desc {
+        PatternDesc::Ppat_var(_) => true,
+        PatternDesc::Ppat_constraint(inner) => {
+            let (inner_pat_idx, _) = &**inner;
+            let inner_pat = arena.get_pat(*inner_pat_idx);
+            matches!(&*inner_pat.ppat_desc, PatternDesc::Ppat_var(_))
+        }
+        _ => false,
     }
 }
 
