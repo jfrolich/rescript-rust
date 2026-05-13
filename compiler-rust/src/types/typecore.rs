@@ -12090,7 +12090,7 @@ fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) 
     }
 }
 
-fn report_unused_literal_match_cases(
+fn report_unused_match_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &[crate::types::typedtree::Case],
@@ -12099,6 +12099,9 @@ fn report_unused_literal_match_cases(
         return;
     }
 
+    // OCaml typecore.ml runs this after check_partial/check_fragile and before
+    // Parmatch.check_ambiguous_bindings:
+    // Typecore.check_unused -> Parmatch.check_unused.
     let ctx = tctx.type_ctx;
     let mut previous_unguarded_cases = Vec::new();
     let mut covered_keys: HashSet<String> = HashSet::default();
@@ -14317,7 +14320,7 @@ fn type_match(
         report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         partial
     };
-    report_unused_literal_match_cases(tctx, val_case_env, &typed_val_cases);
+    report_unused_match_cases(tctx, val_case_env, &typed_val_cases);
     report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
         && !all_clauses_guarded
