@@ -439,8 +439,10 @@ with a reason after checking raise sites.
     recursive placeholders are all installed in the final declaration env before
     these checks run.
 - `Bad_fixed_type`
-  - Covered for fixed polymorphic variant rows without a row variable by
-    `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res`.
+  - Covered for fixed polymorphic variant rows without a row variable and
+    private manifests that are not object or variant types by
+    `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res` and
+    `tests/error_output_parity/compiler/fixtures/bad_fixed_type_not_object_or_variant.res`.
 - `Unbound_type_var_ext`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.
