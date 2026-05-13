@@ -142,6 +142,9 @@ const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
+const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
+const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
+    "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
 
 // ============================================================================
 // Public API
@@ -535,6 +538,12 @@ fn transform_react_component_binding(
     let fn_name = get_fn_name(arena, &binding_pat);
     let fn_name_loc = get_fn_name_loc(&binding_pat);
     let original_binding_loc = binding.pvb_loc.clone();
+
+    if let Some(loc) = component_props_need_labelled_error_loc(arena, binding.pvb_expr, false) {
+        set_fatal_error(config, loc, COMPONENT_PROPS_NEED_LABELLED_MSG);
+    } else if let Some(loc) = component_call_needs_function_error_loc(arena, binding.pvb_expr) {
+        set_fatal_error(config, loc, COMPONENT_CALL_NEEDS_FUNCTION_MSG);
+    }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &binding.pvb_attributes);
@@ -2517,6 +2526,86 @@ fn component_with_props_forward_ref_fun_error_loc(
         ArgLabel::Labelled(_) | ArgLabel::Optional(_) => Some(expr.pexp_loc),
         ArgLabel::Nolabel => component_with_props_forward_ref_fun_error_loc(arena, fun.rhs),
     }
+}
+
+fn component_props_need_labelled_error_loc(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+    has_application: bool,
+) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_fun(fun) => match &fun.arg_label {
+            ArgLabel::Labelled(_) | ArgLabel::Optional(_) => {
+                let rhs = arena.get_expr(fun.rhs);
+                if matches!(&*rhs.pexp_desc, ExpressionDesc::Pexp_fun(_)) {
+                    component_props_need_labelled_error_loc(arena, fun.rhs, has_application)
+                } else {
+                    None
+                }
+            }
+            ArgLabel::Nolabel => {
+                let lhs = arena.get_pat(fun.lhs);
+                if pattern_is_unit_or_any(arena, lhs) {
+                    None
+                } else if has_application {
+                    None
+                } else {
+                    Some(lhs.ppat_loc)
+                }
+            }
+        },
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_, _, body_idx) = &**inner;
+            component_props_need_labelled_error_loc(arena, *body_idx, has_application)
+        }
+        ExpressionDesc::Pexp_apply(apply)
+            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+        {
+            component_props_need_labelled_error_loc(arena, apply.args[0].1, true)
+        }
+        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
+            component_props_need_labelled_error_loc(arena, *inner_idx, has_application)
+        }
+        _ => None,
+    }
+}
+
+fn component_call_needs_function_error_loc(
+    arena: &ParseArena,
+    expr_idx: ExprIdx,
+) -> Option<Location> {
+    let expr = arena.get_expr(expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_fun(_) | ExpressionDesc::Pexp_newtype(_) => None,
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_, _, body_idx) = &**inner;
+            component_call_needs_function_error_loc(arena, *body_idx)
+        }
+        ExpressionDesc::Pexp_apply(apply)
+            if apply.args.len() == 1 && matches!(apply.args[0].0, ArgLabel::Nolabel) =>
+        {
+            component_call_needs_function_error_loc(arena, apply.args[0].1)
+        }
+        ExpressionDesc::Pexp_sequence(_, inner_idx) => {
+            component_call_needs_function_error_loc(arena, *inner_idx)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (inner_idx, _) = &**inner;
+            component_call_needs_function_error_loc(arena, *inner_idx)
+        }
+        _ => Some(expr.pexp_loc),
+    }
+}
+
+fn pattern_is_unit_or_any(arena: &ParseArena, pat: &Pattern) -> bool {
+    if matches!(&*pat.ppat_desc, PatternDesc::Ppat_any) {
+        return true;
+    }
+    if let PatternDesc::Ppat_construct(loc, _) = &*pat.ppat_desc {
+        return arena.is_lident(loc.txt, "()");
+    }
+    false
 }
 
 fn get_fn_name(arena: &ParseArena, pat: &Pattern) -> String {

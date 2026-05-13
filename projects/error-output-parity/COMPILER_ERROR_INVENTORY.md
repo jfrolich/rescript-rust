@@ -684,6 +684,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_external_duplicate_component_attr.res`
       and
       `tests/error_output_parity/compiler/fixtures/jsx_signature_duplicate_component_attr.resi`.
+  - `modified_binding` rejects unlabelled props on plain component functions,
+    and `modified_binding_old` rejects `@react.component` on non-functions
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_unlabelled_prop.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_component_non_function.res`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by
