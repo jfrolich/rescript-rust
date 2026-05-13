@@ -1086,7 +1086,9 @@ with a reason after checking raise sites.
   - `error_of_extension` maps empty `%%error` payloads to
     `Location.Already_displayed_error`
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_already_displayed.res`.
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_already_displayed.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_nested_already_displayed.res`.
   - `error_of_extension` rejects invalid `%%error` payloads
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_payload.res`.
