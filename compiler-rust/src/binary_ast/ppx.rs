@@ -10185,6 +10185,241 @@ fn validate_expression_await_context(
     Ok(())
 }
 
+fn validate_structure_this_errors(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_value(inner) => {
+                let (_rec_flag, bindings) = &**inner;
+                for binding in bindings {
+                    validate_expression_idx_this_errors(binding.pvb_expr, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_eval(inner) => {
+                let (expr, _) = &**inner;
+                validate_expression_idx_this_errors(*expr, arena)?;
+            }
+            StructureItemDesc::Pstr_module(mb) => {
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                validate_module_expr_this_errors(&mod_expr, arena)?;
+            }
+            StructureItemDesc::Pstr_recmodule(mbs) => {
+                for mb in mbs.iter() {
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    validate_module_expr_this_errors(&mod_expr, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                let mod_expr = arena.get_mod_expr(include_decl.pincl_mod).clone();
+                validate_module_expr_this_errors(&mod_expr, arena)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_module_expr_this_errors(
+    mod_expr: &ModuleExpr,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => validate_structure_this_errors(items, arena),
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_name, _param, body) = &**inner;
+            let body = arena.get_mod_expr(*body).clone();
+            validate_module_expr_this_errors(&body, arena)
+        }
+        ModuleExprDesc::Pmod_apply(left, right) => {
+            let left = arena.get_mod_expr(*left).clone();
+            validate_module_expr_this_errors(&left, arena)?;
+            let right = arena.get_mod_expr(*right).clone();
+            validate_module_expr_this_errors(&right, arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _mty) => {
+            let inner = arena.get_mod_expr(*inner).clone();
+            validate_module_expr_this_errors(&inner, arena)
+        }
+        ModuleExprDesc::Pmod_extension(extension) => match &extension.1 {
+            Payload::PStr(items) => validate_structure_this_errors(items, arena),
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+fn validate_expression_idx_this_errors(expr_idx: ExprIdx, arena: &mut ParseArena) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx).clone();
+    validate_expression_this_errors(&expr, arena)
+}
+
+fn validate_method_callback_this_errors(
+    expr: &Expression,
+    arg_label: &ArgLabel,
+    lhs: PatIdx,
+    rhs: ExprIdx,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let self_pat = arena.get_pat(lhs).clone();
+    if single_var_pattern_name_conservative(&self_pat, arena).is_none() {
+        return Err(PpxError::at_loc(
+            self_pat.ppat_loc,
+            "%@this expect its pattern variable to be simple form",
+        ));
+    }
+
+    if matches!(arg_label, ArgLabel::Optional(_)) {
+        return Err(PpxError::at_loc(
+            expr.pexp_loc,
+            "Uncurried function doesn't support optional arguments yet",
+        ));
+    }
+
+    let mut current_body = arena.get_expr(rhs).clone();
+    loop {
+        if has_this_attr(&current_body.pexp_attributes, arena) {
+            return validate_expression_this_errors(&current_body, arena);
+        }
+        match &*current_body.pexp_desc {
+            ExpressionDesc::Pexp_fun(inner) => {
+                if matches!(inner.arg_label, ArgLabel::Optional(_)) {
+                    return Err(PpxError::at_loc(
+                        expr.pexp_loc,
+                        "Uncurried function doesn't support optional arguments yet",
+                    ));
+                }
+                current_body = arena.get_expr(inner.rhs).clone();
+            }
+            _ => return validate_expression_this_errors(&current_body, arena),
+        }
+    }
+}
+
+fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) -> PpxResult<()> {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_fun(inner) if has_this_attr(&expr.pexp_attributes, arena) => {
+            validate_method_callback_this_errors(expr, &inner.arg_label, inner.lhs, inner.rhs, arena)
+        }
+        ExpressionDesc::Pexp_fun(inner) => {
+            if let Some(default) = inner.default {
+                validate_expression_idx_this_errors(default, arena)?;
+            }
+            validate_expression_idx_this_errors(inner.rhs, arena)
+        }
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            for binding in bindings {
+                validate_expression_idx_this_errors(binding.pvb_expr, arena)?;
+            }
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_apply(inner) => {
+            validate_expression_idx_this_errors(inner.funct, arena)?;
+            for (_label, arg) in &inner.args {
+                validate_expression_idx_this_errors(*arg, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            let (scrutinee, cases) = &**inner;
+            validate_expression_idx_this_errors(*scrutinee, arena)?;
+            for case in cases {
+                if let Some(guard) = case.pc_guard {
+                    validate_expression_idx_this_errors(guard, arena)?;
+                }
+                validate_expression_idx_this_errors(case.pc_rhs, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            for item in items.iter() {
+                validate_expression_idx_this_errors(*item, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_construct(_, Some(arg))
+        | ExpressionDesc::Pexp_field(arg, _)
+        | ExpressionDesc::Pexp_assert(arg)
+        | ExpressionDesc::Pexp_await(arg) => validate_expression_idx_this_errors(*arg, arena),
+        ExpressionDesc::Pexp_variant(inner) => {
+            if let Some(arg) = inner.1 {
+                validate_expression_idx_this_errors(arg, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, spread) = &**inner;
+            if let Some(spread) = spread {
+                validate_expression_idx_this_errors(*spread, arena)?;
+            }
+            for field in fields {
+                validate_expression_idx_this_errors(field.expr, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            let (target, _field, value) = &**inner;
+            validate_expression_idx_this_errors(*target, arena)?;
+            validate_expression_idx_this_errors(*value, arena)
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            let (cond, then_expr, else_expr) = &**inner;
+            validate_expression_idx_this_errors(*cond, arena)?;
+            validate_expression_idx_this_errors(*then_expr, arena)?;
+            if let Some(else_expr) = else_expr {
+                validate_expression_idx_this_errors(*else_expr, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
+            validate_expression_idx_this_errors(*left, arena)?;
+            validate_expression_idx_this_errors(*right, arena)
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            let (_pat, start, finish, _dir, body) = &**inner;
+            validate_expression_idx_this_errors(*start, arena)?;
+            validate_expression_idx_this_errors(*finish, arena)?;
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            let (_pat, collection, body) = &**inner;
+            validate_expression_idx_this_errors(*collection, arena)?;
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (inner_expr, _typ) = &**inner;
+            validate_expression_idx_this_errors(*inner_expr, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            let (inner_expr, _from, _to) = &**inner;
+            validate_expression_idx_this_errors(*inner_expr, arena)
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            let (_name, mod_expr, body) = &**inner;
+            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
+            validate_module_expr_this_errors(&mod_expr, arena)?;
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            let (_ext, body) = &**inner;
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            let (_override, _lid, body) = &**inner;
+            validate_expression_idx_this_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_extension(extension) => match &extension.1 {
+            Payload::PStr(items) => validate_structure_this_errors(items, arena),
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
 /// Handle @deriving(abstract) which transforms record types into abstract types with accessors
 ///
 /// For a type like:
@@ -11363,6 +11598,7 @@ pub fn rewrite_structure(
 ) -> PpxResult<Vec<StructureItem>> {
     validate_structure_deriving_errors(structure, arena)?;
     validate_structure_await_errors(structure, arena, true)?;
+    validate_structure_this_errors(structure, arena)?;
 
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();

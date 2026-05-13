@@ -508,9 +508,10 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_as_expect_int_string_json_literal.res`.
 - `Unhandled_poly_type`
-  - Open: raised by `Ast_core_type.list_of_arrow` when an external type
-    contains `Ptyp_poly` in the remaining arrow chain. A reduced source fixture
-    still needs to be confirmed.
+  - Checked: raised by `Ast_core_type.list_of_arrow` when an external type
+    contains `Ptyp_poly` in the arrow spine, but normal `.res` external syntax
+    is rejected by the OCaml parser before this frontend raise site is
+    observable.
 - `Invalid_underscore_type_in_external`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_invalid_underscore_external.res`.
@@ -551,11 +552,11 @@ with a reason after checking raise sites.
   - Open: raised by labeled arguments in positions rejected by
     `compiler/frontend/ast_exp_apply.ml`; fixture still needed.
 - `Optional_in_uncurried_bs_attribute`
-  - Open: raised by optional arguments in `@this`/uncurried callback
-    generation; fixture still needed.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_this_optional_arg.res`.
 - `Bs_this_simple_pattern`
-  - Open: raised by non-variable `@this` callback self patterns; fixture still
-    needed.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_this_simple_pattern.res`.
 - `Experimental_feature_not_enabled`
   - Covered through the included super error fixture
     `tests/build_tests/super_errors/fixtures/feature_letunwrap_not_enabled.res`.
