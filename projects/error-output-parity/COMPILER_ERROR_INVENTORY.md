@@ -647,6 +647,18 @@ with a reason after checking raise sites.
     - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`
       payload path by
       `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`.
+  - `Ast_payload.assert_strings` for `@module` and `@scope`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_ident_payload.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_scope_ident_payload.res`.
+  - `@module({from, with})` import-attributes payload validation
+    - Covered for missing `from`, missing `with`, and non-string import
+      attribute values by
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_from.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_with.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`.
 
 ## Include Mismatch Surfaces
 

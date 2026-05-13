@@ -678,16 +678,27 @@ fn validate_external_attribute_payload_errors(
                 }
             }
             "module" => {
-                if get_module_import_attributes(payload, arena).is_some() {
+                if validate_module_import_attributes_payload(payload, arena)? {
                     continue;
                 }
-                let strings = get_payload_strings(payload, arena);
+                let Some(strings) = payload_string_literals(payload, arena) else {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "expect string tuple list",
+                    ));
+                };
                 if strings.len() > 2 {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
                 }
             }
             "scope" => {
-                if get_payload_strings(payload, arena).is_empty() {
+                let Some(scopes) = payload_string_literals(payload, arena) else {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "expect string tuple list",
+                    ));
+                };
+                if scopes.is_empty() {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
                 }
             }
@@ -934,6 +945,41 @@ fn payload_is_single_string_literal(payload: &Payload, arena: &ParseArena) -> bo
             false
         }
         _ => false,
+    }
+}
+
+fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<String>> {
+    match payload {
+        Payload::PStr(items) if items.is_empty() => Some(Vec::new()),
+        Payload::PStr(items) if items.len() == 1 => {
+            let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+                return None;
+            };
+            let (expr, _) = &**eval_inner;
+            match &*arena.get_expr(*expr).pexp_desc {
+                ExpressionDesc::Pexp_constant(c) => match &**c {
+                    Constant::String(s, _) => Some(vec![s.to_string()]),
+                    _ => None,
+                },
+                ExpressionDesc::Pexp_tuple(exprs) => {
+                    let mut result = Vec::with_capacity(exprs.len());
+                    for expr in exprs.iter() {
+                        let ExpressionDesc::Pexp_constant(c) =
+                            &*arena.get_expr(*expr).pexp_desc
+                        else {
+                            return None;
+                        };
+                        let Constant::String(s, _) = &**c else {
+                            return None;
+                        };
+                        result.push(s.to_string());
+                    }
+                    Some(result)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -2136,44 +2182,93 @@ fn get_payload_string_with_delim(
 /// Extract multiple strings from attribute payload (mirrors OCaml's Ast_payload.assert_strings)
 /// Handles: @attr("str"), @attr(("str1", "str2", ...)), @attr (empty → [])
 fn get_payload_strings(payload: &current::Payload, arena: &ParseArena) -> Vec<String> {
-    match payload {
-        current::Payload::PStr(items) if items.is_empty() => vec![],
-        current::Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
-                let (ref expr, _) = **eval_inner;
-                match &*arena.get_expr(*expr).pexp_desc {
-                    ExpressionDesc::Pexp_constant(c) => {
-                        if let current::Constant::String(s, _) = &**c {
-                            return vec![s.to_string()];
-                        }
+    payload_string_literals(payload, arena).unwrap_or_default()
+}
+
+fn validate_module_import_attributes_payload(
+    payload: &current::Payload,
+    arena: &ParseArena,
+) -> PpxResult<bool> {
+    let current::Payload::PStr(items) = payload else {
+        return Ok(false);
+    };
+    if items.len() != 1 {
+        return Ok(false);
+    }
+    let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+        return Ok(false);
+    };
+    let (expr_idx, _) = &**eval_inner;
+    let expr = arena.get_expr(*expr_idx);
+    let ExpressionDesc::Pexp_record(record_inner) = &*expr.pexp_desc else {
+        return Ok(false);
+    };
+    let (fields, _) = &**record_inner;
+
+    let mut from_name = false;
+    let mut with_fields: Option<&[ExpressionRecordField]> = None;
+
+    for field in fields {
+        let Longident::Lident(field_name_idx) = arena.get_longident(field.lid.txt) else {
+            continue;
+        };
+        match arena.get_string(*field_name_idx) {
+            "from" => {
+                let field_expr = arena.get_expr(field.expr);
+                if let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc {
+                    if matches!(&**c, current::Constant::String(_, _)) {
+                        from_name = true;
                     }
-                    ExpressionDesc::Pexp_tuple(exprs) => {
-                        let mut result = Vec::new();
-                        for e in exprs.iter() {
-                            if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*e).pexp_desc
-                            {
-                                if let current::Constant::String(s, _) = &**c {
-                                    result.push(s.to_string());
-                                }
-                            }
-                        }
-                        if result.len() == exprs.len() {
-                            return result;
-                        }
-                    }
-                    ExpressionDesc::Pexp_ident(lid) => {
-                        let longident = arena.get_longident(lid.txt);
-                        if let Longident::Lident(s) = longident {
-                            return vec![arena.get_string(*s).to_string()];
-                        }
-                    }
-                    _ => {}
                 }
             }
-            vec![]
+            "with" => {
+                let field_expr = arena.get_expr(field.expr);
+                if let ExpressionDesc::Pexp_record(with_inner) = &*field_expr.pexp_desc {
+                    let (import_fields, _) = &**with_inner;
+                    with_fields = Some(import_fields.as_slice());
+                }
+            }
+            _ => {}
         }
-        _ => vec![],
     }
+
+    if !from_name {
+        return Err(PpxError::at_loc(
+            expr.pexp_loc,
+            "@module annotations with import attributes must have a \"from\" field. This \"from\" field should point to the JS module to import, just like the string payload to @module normally does.",
+        ));
+    }
+
+    let Some(with_fields) = with_fields else {
+        return Err(PpxError::at_loc(
+            expr.pexp_loc,
+            "@module annotations with import attributes must have a \"with\" field. This \"with\" field should hold a record of the import attributes you want applied to the import.",
+        ));
+    };
+
+    for field in with_fields {
+        let Longident::Lident(_) = arena.get_longident(field.lid.txt) else {
+            return Err(PpxError::at_loc(
+                field.lid.loc,
+                "Field must be a regular key.",
+            ));
+        };
+        let field_expr = arena.get_expr(field.expr);
+        let ExpressionDesc::Pexp_constant(c) = &*field_expr.pexp_desc else {
+            return Err(PpxError::at_loc(
+                field_expr.pexp_loc,
+                "Only string values are allowed here.",
+            ));
+        };
+        if !matches!(&**c, current::Constant::String(_, _)) {
+            return Err(PpxError::at_loc(
+                field_expr.pexp_loc,
+                "Only string values are allowed here.",
+            ));
+        }
+    }
+
+    Ok(true)
 }
 
 /// Extract `@module({from: "...", with: {...}})` payload.
