@@ -160,8 +160,14 @@ with a reason after checking raise sites.
   raise `Scoping_let_module`. The valid arity-one local module primitive probe
   in `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`
   covers the observable earlier escape reporter.
-- `Uncurried_arity_mismatch`: covered by
-  `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
+- `Uncurried_arity_mismatch`: covered for unlabelled count mismatch, missing
+  required labelled arguments, superfluous labelled arguments, and related
+  arity-suffixed function suggestions by
+  `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/uncurried_arity_missing_required_label.res`,
+  `tests/error_output_parity/compiler/fixtures/uncurried_arity_superfluous_label.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/uncurried_arity_suggestion.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
   `tests/error_output_parity/compiler/fixtures/field_not_optional_pattern.res`
   and
