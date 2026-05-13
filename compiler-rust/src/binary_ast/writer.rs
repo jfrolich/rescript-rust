@@ -45,6 +45,8 @@ use crate::parser::ast::{
 
 /// The separator character used in the binary AST format.
 const MAGIC_SEP_CHAR: u8 = b'\n';
+const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
+const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
 
 /// Write a binary AST file for a structure (implementation, .ast file).
 ///
@@ -100,6 +102,69 @@ pub fn write_signature_ast(
 
     // 3. Write the binary AST file (parsetree0 doesn't need arena for marshalling)
     write_ast_file(output_path, source_path, arena, &deps, &ast0)
+}
+
+/// Write the binary protocol input consumed by external `-ppx` rewriters.
+///
+/// This mirrors `compiler/core/cmd_ppx_apply.ml`: magic string, marshaled
+/// source path, then marshaled parsetree0 structure.
+pub fn write_external_ppx_structure_input(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Structure,
+) -> io::Result<()> {
+    let ast0 = map_structure(arena, ast);
+    write_external_ppx_input(
+        output_path,
+        source_path,
+        arena,
+        AST_IMPL_MAGIC_NUMBER,
+        &ast0,
+    )
+}
+
+/// Write the binary protocol input consumed by external `-ppx` rewriters.
+///
+/// This mirrors `compiler/core/cmd_ppx_apply.ml`: magic string, marshaled
+/// source path, then marshaled parsetree0 signature.
+pub fn write_external_ppx_signature_input(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut ParseArena,
+    ast: &Signature,
+) -> io::Result<()> {
+    let ast0 = map_signature(arena, ast);
+    write_external_ppx_input(
+        output_path,
+        source_path,
+        arena,
+        AST_INTF_MAGIC_NUMBER,
+        &ast0,
+    )
+}
+
+fn write_external_ppx_input<A: Marshal>(
+    output_path: &Path,
+    source_path: &str,
+    arena: &ParseArena,
+    magic: &[u8],
+    ast: &A,
+) -> io::Result<()> {
+    let file = File::create(output_path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(magic)?;
+
+    let mut source_writer = MarshalWriter::new();
+    source_path.marshal(&mut source_writer);
+    writer.write_all(&source_writer.finish())?;
+
+    let mut ast_writer = MarshalWriter::new();
+    ast_writer.set_arena(arena);
+    ast.marshal(&mut ast_writer);
+    writer.write_all(&ast_writer.finish())?;
+
+    writer.flush()
 }
 
 /// Write a binary AST file for a structure in the CURRENT parsetree format.

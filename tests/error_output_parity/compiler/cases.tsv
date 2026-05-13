@@ -20,4 +20,5 @@ tests/error_output_parity/compiler/cases/bs_ast_parse_error.res	-w +A -bs-jsx 4 
 tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi	-w +A -bs-jsx 4 -color never -bs-ast
 tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
 tests/error_output_parity/compiler/cases/no_builtin_normal_external.res	-w +A -bs-jsx 4 -color never -bs-no-builtin-ppx
+tests/error_output_parity/compiler/cases/external_ppx_wrong_magic.res	-w +A -bs-jsx 4 -color never -ppx tests/error_output_parity/compiler/cases/ppx_wrong_magic.sh
 tests/error_output_parity/compiler/cases/warn_error_unused_variable.res	-w +A -warn-error +A -bs-jsx 4 -color never

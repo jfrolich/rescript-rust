@@ -8,18 +8,19 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
+    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
     compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
-    typecheck_interface_file, CompilerOptions, UserDiagnostic,
+    typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
-use rescript_compiler::parser::{module, sexp_locs, Parser};
+use rescript_compiler::parser::{Parser, module, sexp_locs};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
@@ -104,6 +105,7 @@ struct Options {
     cross_module_inline: bool,
     no_assert_false: bool,
     no_builtin_ppx: bool,
+    external_ppxs: Vec<String>,
     make_runtime: bool,
     read_cmi: bool,
 }
@@ -239,7 +241,12 @@ fn run() -> Result<()> {
                         opts.warning_error_specs.push(val);
                     }
                 }
-                "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
+                "-ppx" => {
+                    if let Some(val) = args.next() {
+                        opts.external_ppxs.push(val);
+                    }
+                }
+                "-color" | "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -275,6 +282,7 @@ fn run() -> Result<()> {
             opts.output,
             opts.dump_parsetree_sexp_locs,
             opts.no_builtin_ppx,
+            &opts.external_ppxs,
         );
     }
 
@@ -327,6 +335,7 @@ fn run() -> Result<()> {
         cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
         no_builtin_ppx: opts.no_builtin_ppx,
+        external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
@@ -364,6 +373,7 @@ fn generate_ast(
     output: Option<PathBuf>,
     dump_parsetree_sexp_locs: bool,
     no_builtin_ppx: bool,
+    external_ppxs: &[String],
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -416,6 +426,7 @@ fn generate_ast(
         if parser.has_errors() {
             return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
+        apply_external_signature_ppxs(external_ppxs, &filename, parser.arena_mut(), &signature)?;
 
         if dump_parsetree_sexp_locs {
             let rewritten = if no_builtin_ppx {
@@ -444,6 +455,7 @@ fn generate_ast(
         if parser.has_errors() {
             return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
+        apply_external_structure_ppxs(external_ppxs, &filename, parser.arena_mut(), &structure)?;
 
         if dump_parsetree_sexp_locs {
             let rewritten = if no_builtin_ppx {

@@ -1070,6 +1070,17 @@ with a reason after checking raise sites.
     `Builtin_attributes.error_of_extension`
     - Covered by
       `tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res`.
+- `compiler/core/cmd_ppx_apply.ml`
+  - `Cmd_ast_exception.WrongMagic` when an external `-ppx` exits successfully
+    but writes an output file whose leading bytes do not match the expected
+    binary AST magic
+    - Covered by
+      `tests/error_output_parity/compiler/cases/external_ppx_wrong_magic.res`.
+  - `Cmd_ast_exception.CannotRun` when an external `-ppx` exits non-zero or
+    removes its output file
+    - Source-reachable, but not suitable for the byte-for-byte harness as-is:
+      OCaml includes `Filename.temp_file` paths in the printed command line,
+      and those paths are intentionally nondeterministic across compiler runs.
 - `compiler/frontend/bs_builtin_ppx.ml`
   - `%%private` empty structure payload rejection
     - Covered by

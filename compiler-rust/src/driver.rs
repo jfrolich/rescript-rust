@@ -7,13 +7,15 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
-use crate::binary_ast::ppx;
+use crate::binary_ast::{
+    ppx, write_external_ppx_signature_input, write_external_ppx_structure_input,
+};
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
@@ -57,6 +59,9 @@ const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
     "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
 const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
+static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
+const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
 
 #[derive(Debug)]
 pub struct UserDiagnostic {
@@ -1370,6 +1375,8 @@ pub struct CompilerOptions {
     pub no_assert_false: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
     pub no_builtin_ppx: bool,
+    /// External `-ppx` rewriters, in command-line order.
+    pub external_ppxs: Vec<String>,
     /// When true, do not implicitly open Pervasives and Stdlib.
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
@@ -1422,6 +1429,7 @@ impl Default for CompilerOptions {
             cross_module_inline: false,
             no_assert_false: false,
             no_builtin_ppx: false,
+            external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
             package_name: None,
@@ -1495,6 +1503,165 @@ fn warning_config_for_options_and_file_config(
         &file_config.warning_error_specs,
     );
     config
+}
+
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn temp_ppx_file(input_name: &str) -> Result<PathBuf> {
+    let basename = FsPath::new(input_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("input");
+    let pid = std::process::id();
+    for _ in 0..1000 {
+        let counter = EXTERNAL_PPX_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("ppx{pid:x}{counter:x}{basename}"));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to create {}", path.display()));
+            }
+        }
+    }
+    Err(anyhow!(
+        "Failed to create external preprocessor temporary file"
+    ))
+}
+
+fn format_external_ppx_cannot_run_report(filename: &str, command: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {filename}\n\n  Error while running external preprocessor\nCommand line: {command}\n\n\n"
+    )
+}
+
+fn format_external_ppx_wrong_magic_report(filename: &str, magic: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {filename}\n\n  External preprocessor does not produce a valid file\nCommand line: {magic}\n\n\n"
+    )
+}
+
+fn external_ppx_cannot_run(filename: &str, command: &str) -> anyhow::Error {
+    UserDiagnostic::new(format_external_ppx_cannot_run_report(filename, command), 2).into()
+}
+
+fn external_ppx_wrong_magic(filename: &str, magic: &str) -> anyhow::Error {
+    UserDiagnostic::new(format_external_ppx_wrong_magic_report(filename, magic), 2).into()
+}
+
+fn check_external_ppx_output_magic(
+    output_path: &std::path::Path,
+    magic: &[u8],
+    filename: &str,
+) -> Result<()> {
+    let bytes = std::fs::read(output_path).unwrap_or_default();
+    let buffer = if bytes.len() < magic.len() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&bytes[..magic.len()]).into_owned()
+    };
+    if buffer.as_bytes() != magic {
+        return Err(external_ppx_wrong_magic(filename, &buffer));
+    }
+    Ok(())
+}
+
+fn run_external_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    write_input: impl Fn(&std::path::Path, &str, &mut ParseArena) -> std::io::Result<()>,
+    magic: &[u8],
+) -> Result<()> {
+    if ppxs.is_empty() {
+        return Ok(());
+    }
+
+    let mut input_path = temp_ppx_file(filename)?;
+    write_input(&input_path, filename, arena)
+        .with_context(|| format!("Failed to write {}", input_path.display()))?;
+    let mut temp_files = vec![input_path.clone()];
+
+    for ppx in ppxs {
+        let output_path = temp_ppx_file(filename)?;
+        let command = format!(
+            "{} {} {}",
+            ppx,
+            shell_quote_path(&input_path),
+            shell_quote_path(&output_path)
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .status();
+        let ok = status.as_ref().is_ok_and(|status| status.success());
+        if !ok {
+            return Err(external_ppx_cannot_run(filename, &command));
+        }
+        if !output_path.exists() {
+            return Err(external_ppx_cannot_run(filename, &command));
+        }
+        check_external_ppx_output_magic(&output_path, magic, filename)?;
+        temp_files.push(output_path.clone());
+        input_path = output_path;
+    }
+
+    for path in temp_files {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+pub fn apply_external_structure_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    structure: &Structure,
+) -> Result<()> {
+    run_external_ppxs(
+        ppxs,
+        filename,
+        arena,
+        |path, filename, arena| {
+            write_external_ppx_structure_input(path, filename, arena, structure)
+        },
+        AST_IMPL_MAGIC_NUMBER,
+    )
+}
+
+pub fn apply_external_signature_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    signature: &Signature,
+) -> Result<()> {
+    run_external_ppxs(
+        ppxs,
+        filename,
+        arena,
+        |path, filename, arena| {
+            write_external_ppx_signature_input(path, filename, arena, signature)
+        },
+        AST_INTF_MAGIC_NUMBER,
+    )
 }
 
 pub fn jsx_version_for_structure(
@@ -10345,6 +10512,12 @@ pub fn compile_source_to_js_with_options(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
+    apply_external_structure_ppxs(
+        &options.external_ppxs,
+        filename,
+        parser.arena_mut(),
+        &structure,
+    )?;
     reject_invalid_polyvariant_int_literals_in_structure(
         &structure,
         parser.arena(),
@@ -11093,6 +11266,12 @@ pub fn typecheck_interface_source(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
+    apply_external_signature_ppxs(
+        &options.external_ppxs,
+        filename,
+        parser.arena_mut(),
+        &signature,
+    )?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
     let _ = emit_ppx_warnings(
