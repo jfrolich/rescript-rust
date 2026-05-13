@@ -857,6 +857,16 @@ with a reason after checking raise sites.
   - `Circular_dependency`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`.
+- `compiler/core/lam_compile_primitive.ml`
+  - `Warnings.Bs_polymorphic_comparison` for object comparison, ordering,
+    `min`, and `max`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_less_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_order_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_min_warning.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_max_warning.res`.
 - `compiler/ml/ast_payload.ml`
   - `%re` JavaScript regex literal validation
     - Covered by

@@ -3228,6 +3228,40 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn raw_lambda_is_nullish_constant(lam: &RawLambda) -> bool {
+        matches!(
+            lam,
+            RawLambda::Lconst(Constant::JsNull | Constant::JsUndefined { .. })
+                | RawLambda::Lprim(crate::raw_lambda::RawPrimInfo {
+                    primitive: Primitive::Pnull | Primitive::Pundefined,
+                    ..
+                })
+        )
+    }
+
+    fn report_polymorphic_comparison_warning(
+        &mut self,
+        loc: LocIdx,
+        primitive: &Primitive,
+        args: &[RawLambda],
+    ) {
+        match primitive {
+            Primitive::Pobjcomp(crate::lambda::Comparison::Eq)
+            | Primitive::Pobjcomp(crate::lambda::Comparison::Neq)
+                if matches!(args, [left, right] if Self::raw_lambda_is_nullish_constant(left) || Self::raw_lambda_is_nullish_constant(right)) =>
+            {
+                return;
+            }
+            Primitive::Pobjcomp(_)
+            | Primitive::Pobjorder
+            | Primitive::Pobjmin
+            | Primitive::Pobjmax => {
+                self.report_warning(loc, Warning::BsPolymorphicComparison);
+            }
+            _ => {}
+        }
+    }
+
     fn ffi_spec_for_primitive(
         &self,
         prim: &crate::types::PrimitiveDescription,
@@ -5828,6 +5862,7 @@ impl<'a> RawLambdaConverter<'a> {
                 partial,
                 transformed_jsx,
             } => self.convert_apply_raw(
+                expr.exp_loc,
                 self.loc(expr.exp_loc),
                 funct,
                 args,
@@ -10226,6 +10261,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn convert_apply_raw(
         &mut self,
+        loc_idx: LocIdx,
         loc: Location,
         funct: &Expression,
         args: &[ApplyArg],
@@ -10277,19 +10313,15 @@ impl<'a> RawLambdaConverter<'a> {
                         transformed_jsx,
                         loc.clone(),
                     );
-                    let base = RawLambda::prim(
-                        primitive.clone(),
-                        applied_exprs
-                            .iter()
-                            .map(|expr| {
-                                self.convert_expr_raw_with_dynamic_import(
-                                    expr,
-                                    matches!(primitive, Primitive::Pimport),
-                                )
-                            })
-                            .collect(),
-                        loc,
-                    );
+                    let primitive_is_import = matches!(primitive, Primitive::Pimport);
+                    let arg_lams = applied_exprs
+                        .iter()
+                        .map(|expr| {
+                            self.convert_expr_raw_with_dynamic_import(expr, primitive_is_import)
+                        })
+                        .collect::<Vec<_>>();
+                    self.report_polymorphic_comparison_warning(loc_idx, &primitive, &arg_lams);
+                    let base = RawLambda::prim(primitive.clone(), arg_lams, loc);
                     return if rest.is_empty() {
                         base
                     } else {
