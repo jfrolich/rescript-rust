@@ -19198,6 +19198,49 @@ fn letmodule_local_escape_type(
     found
 }
 
+fn letmodule_local_escape_expression_site(
+    ctx: &TypeContext,
+    expr: &Expression,
+    module_id: &Ident,
+) -> Option<(LocIdx, TypeExprRef)> {
+    let own_escape = || {
+        let escaped_ty =
+            letmodule_local_escape_type(ctx, expr.exp_type, module_id, &mut HashSet::new())?;
+        Some((expr.exp_loc, escaped_ty))
+    };
+
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_let(_, _, body)
+        | ExpressionDesc::Texp_letmodule(_, _, _, body)
+        | ExpressionDesc::Texp_letexception(_, body)
+        | ExpressionDesc::Texp_sequence(_, body) => {
+            letmodule_local_escape_expression_site(ctx, body, module_id).or_else(own_escape)
+        }
+        ExpressionDesc::Texp_function { body, .. } => body
+            .iter()
+            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
+            .or_else(own_escape),
+        ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => letmodule_local_escape_expression_site(
+            ctx, ifso, module_id,
+        )
+        .or_else(|| {
+            ifnot.as_deref()
+                .and_then(|expr| letmodule_local_escape_expression_site(ctx, expr, module_id))
+        })
+        .or_else(own_escape),
+        ExpressionDesc::Texp_match(_, cases, exn_cases, _) => cases
+            .iter()
+            .chain(exn_cases.iter())
+            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
+            .or_else(own_escape),
+        ExpressionDesc::Texp_try(_, cases) => cases
+            .iter()
+            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
+            .or_else(own_escape),
+        _ => own_escape(),
+    }
+}
+
 fn expression_result_loc(expr: &Expression) -> LocIdx {
     match &expr.exp_desc {
         ExpressionDesc::Texp_let(_, _, body)
@@ -19653,12 +19696,24 @@ fn type_letmodule(
             rewritten_ty,
             expected_ty,
         );
-        if let Some(escaped_ty) =
-            letmodule_local_escape_type(ctx, rewritten_ty, &mod_id, &mut HashSet::new())
+        if let Some((escape_loc, escaped_ty)) =
+            letmodule_local_escape_expression_site(ctx, &typed_body, &mod_id)
         {
+            let top_is_package = matches!(
+                &*ctx.get_desc(ctx.repr(rewritten_ty)),
+                TypeDesc::Tpackage { .. }
+            );
+            let (loc, trace) = if top_is_package {
+                (
+                    expression_result_loc(&typed_body),
+                    vec![(rewritten_ty, letmodule_ty), (escaped_ty, letmodule_ty)],
+                )
+            } else {
+                (escape_loc, vec![(escaped_ty, letmodule_ty)])
+            };
             return Err(TypeCoreError::ExprTypeClash {
-                loc: expression_result_loc(&typed_body),
-                trace: vec![(rewritten_ty, letmodule_ty), (escaped_ty, letmodule_ty)],
+                loc,
+                trace,
                 context: None,
             });
         }
