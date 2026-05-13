@@ -1064,6 +1064,32 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_record_doc_comment_field_position.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_multiple_inline_record_definitions.res`.
+  - Pattern parsing rejects array/list/record spread forms and string
+    interpolation inside template literal patterns
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_array_pattern_spread.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_list_pattern_spread.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_record_pattern_spread.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_string_interpolation_pattern.res`.
+  - Switch parsing rejects empty case lists, and if-let emits the experimental
+    parser diagnostic before type checking
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_pattern_matching_no_cases.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_if_let_experimental.res`.
+  - Function and function-type parameters reject defaulted/labelled arguments
+    missing the leading `~`
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_missing_tilde_function_parameter.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_missing_tilde_type_parameter.res`.
+  - Numeric polymorphic variants reject identifier suffixes, and old Reason
+    array syntax preserves the array-literal suggestion
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_numeric_polyvariant_suffix.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_old_array_syntax.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask
