@@ -547,6 +547,330 @@ fn raw_js_expression_parse_warning(
     Some(RawJsParseWarning { loc, message })
 }
 
+fn raw_js_program_parse_warning(
+    code: &str,
+    payload_loc: LocIdx,
+    first_line_offset: i32,
+    arena: &mut ParseArena,
+) -> Option<RawJsParseWarning> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parser_return = Parser::new(&allocator, code, SourceType::default()).parse();
+    let first_error = parser_return.errors.into_iter().next()?;
+    let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
+    let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
+    let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
+    let message = flow_like_raw_js_parse_message(code, &first_error.to_string(), start_offset);
+    let loc = raw_js_warning_loc(
+        code,
+        payload_loc,
+        start_offset,
+        end_offset,
+        first_line_offset,
+        arena,
+    );
+
+    Some(RawJsParseWarning { loc, message })
+}
+
+fn push_raw_js_expression_warning(
+    payload: &Payload,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let payload_info = payload_single_string_literal_info(payload, arena)
+        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    if let Some((code, loc, offset)) = payload_info {
+        if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
+            warnings.push(PpxWarning {
+                loc: warning.loc,
+                warning: Warning::BsFfiWarning {
+                    message: warning.message,
+                },
+            });
+        }
+    }
+}
+
+fn push_raw_js_program_warning(
+    payload: &Payload,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let payload_info = payload_single_string_literal_info(payload, arena)
+        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    if let Some((code, loc, offset)) = payload_info {
+        if let Some(warning) = raw_js_program_parse_warning(&code, loc, offset, arena) {
+            warnings.push(PpxWarning {
+                loc: warning.loc,
+                warning: Warning::BsFfiWarning {
+                    message: warning.message,
+                },
+            });
+        }
+    }
+}
+
+fn collect_raw_js_warnings_from_expr_idx(
+    expr_idx: ExprIdx,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let expr = arena.get_expr(expr_idx).clone();
+    collect_raw_js_warnings_from_expr(&expr, arena, warnings);
+}
+
+fn collect_raw_js_warnings_from_mod_expr_idx(
+    mod_expr_idx: ModExprIdx,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let mod_expr = arena.get_mod_expr(mod_expr_idx).clone();
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            collect_raw_js_warnings_from_structure(items, arena, warnings)
+        }
+        ModuleExprDesc::Pmod_functor(inner) => {
+            let (_name, _mty, body) = &**inner;
+            collect_raw_js_warnings_from_mod_expr_idx(*body, arena, warnings);
+        }
+        ModuleExprDesc::Pmod_apply(left, right) => {
+            collect_raw_js_warnings_from_mod_expr_idx(*left, arena, warnings);
+            collect_raw_js_warnings_from_mod_expr_idx(*right, arena, warnings);
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _mty) => {
+            collect_raw_js_warnings_from_mod_expr_idx(*inner, arena, warnings);
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => {
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        _ => {}
+    }
+}
+
+fn collect_raw_js_warnings_from_structure_item(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_eval(inner) => {
+            let (expr, _attrs) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        StructureItemDesc::Pstr_value(inner) => {
+            let (_rec, bindings) = &**inner;
+            for binding in bindings {
+                collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
+            }
+        }
+        StructureItemDesc::Pstr_module(mb) => {
+            collect_raw_js_warnings_from_mod_expr_idx(mb.pmb_expr, arena, warnings);
+        }
+        StructureItemDesc::Pstr_recmodule(bindings) => {
+            for binding in bindings.iter() {
+                collect_raw_js_warnings_from_mod_expr_idx(binding.pmb_expr, arena, warnings);
+            }
+        }
+        StructureItemDesc::Pstr_include(include_decl) => {
+            collect_raw_js_warnings_from_mod_expr_idx(include_decl.pincl_mod, arena, warnings);
+        }
+        StructureItemDesc::Pstr_extension(inner) => {
+            let (extension, _attrs) = &**inner;
+            let (ext_name, payload) = extension;
+            let name = arena.get_string(ext_name.txt);
+            if name == "raw" {
+                push_raw_js_program_warning(payload, arena, warnings);
+            } else if name == "private" {
+                if let Payload::PStr(items) = payload {
+                    collect_raw_js_warnings_from_structure(items, arena, warnings);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_raw_js_warnings_from_expr(
+    expr: &Expression,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_extension(ext) => {
+            let (ext_name, payload) = &**ext;
+            if arena.get_string(ext_name.txt) == "raw" {
+                push_raw_js_expression_warning(payload, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            for binding in bindings {
+                collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
+            }
+            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
+        }
+        ExpressionDesc::Pexp_fun(fun) => {
+            if let Some(default) = fun.default {
+                collect_raw_js_warnings_from_expr_idx(default, arena, warnings);
+            }
+            collect_raw_js_warnings_from_expr_idx(fun.rhs, arena, warnings);
+        }
+        ExpressionDesc::Pexp_apply(apply) => {
+            collect_raw_js_warnings_from_expr_idx(apply.funct, arena, warnings);
+            for (_label, arg) in &apply.args {
+                collect_raw_js_warnings_from_expr_idx(*arg, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            let (scrutinee, cases) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*scrutinee, arena, warnings);
+            for case in cases {
+                if let Some(guard) = case.pc_guard {
+                    collect_raw_js_warnings_from_expr_idx(guard, arena, warnings);
+                }
+                collect_raw_js_warnings_from_expr_idx(case.pc_rhs, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            for item in items.iter() {
+                collect_raw_js_warnings_from_expr_idx(*item, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_construct(_lid, payload) => {
+            if let Some(payload) = payload {
+                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_variant(inner) => {
+            let (_label, payload) = &**inner;
+            if let Some(payload) = payload {
+                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_record(fields_and_spread) => {
+            let (fields, spread) = &**fields_and_spread;
+            for field in fields {
+                collect_raw_js_warnings_from_expr_idx(field.expr, arena, warnings);
+            }
+            if let Some(spread) = spread {
+                collect_raw_js_warnings_from_expr_idx(*spread, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_field(expr, _)
+        | ExpressionDesc::Pexp_assert(expr)
+        | ExpressionDesc::Pexp_await(expr)
+        | ExpressionDesc::Pexp_comptime_compile_error(expr)
+        | ExpressionDesc::Pexp_comptime_build_variant(expr)
+        | ExpressionDesc::Pexp_comptime_variant_case(expr)
+        | ExpressionDesc::Pexp_comptime_build_record(expr)
+        | ExpressionDesc::Pexp_comptime_record_field(expr) => {
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_send(inner) => {
+            let (expr, _method) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let (_name, expr) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            let (_override, _lid, expr) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            let (record, _field, value) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*record, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*value, arena, warnings);
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            let (condition, consequent, alternate) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*condition, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*consequent, arena, warnings);
+            if let Some(alternate) = alternate {
+                collect_raw_js_warnings_from_expr_idx(*alternate, arena, warnings);
+            }
+        }
+        ExpressionDesc::Pexp_sequence(left, right) | ExpressionDesc::Pexp_while(left, right) => {
+            collect_raw_js_warnings_from_expr_idx(*left, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*right, arena, warnings);
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (value, field) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*value, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*field, arena, warnings);
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (_typ, fields) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*fields, arena, warnings);
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            let (_pat, from, to, _dir, body) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*from, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*to, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
+        }
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            let (_pat, collection, body) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*collection, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (expr, _typ) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            let (expr, _from_type, _to_type) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            let (_name, mod_expr, body) = &**inner;
+            collect_raw_js_warnings_from_mod_expr_idx(*mod_expr, arena, warnings);
+            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            let (_extension, body) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
+        }
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            collect_raw_js_warnings_from_mod_expr_idx(*mod_expr, arena, warnings);
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (_typ, name, payload) = &**inner;
+            collect_raw_js_warnings_from_expr_idx(*name, arena, warnings);
+            if let Some(payload) = payload {
+                collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_raw_js_warnings_from_structure(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    for item in structure {
+        collect_raw_js_warnings_from_structure_item(item, arena, warnings);
+    }
+}
+
+pub fn collect_raw_js_warnings(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    collect_raw_js_warnings_from_structure(structure, arena, &mut warnings);
+    warnings
+}
+
 fn is_js_regex_literal(s: &str) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::Expression;

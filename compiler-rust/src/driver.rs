@@ -1633,6 +1633,33 @@ fn ppx_error_to_anyhow(
     }
 }
 
+fn emit_ppx_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warnings: &[ppx::PpxWarning],
+) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    let mut stderr = std::io::stderr();
+    for warning in warnings {
+        let output = format_compiler_warning_report(
+            arena,
+            source,
+            filename,
+            &TypeCoreWarning {
+                loc: warning.loc,
+                warning: warning.warning.clone(),
+                is_error: false,
+            },
+        );
+        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    }
+    let _ = std::io::Write::flush(&mut stderr);
+}
+
 fn reject_invalid_polyvariant_int_literals_in_structure(
     structure: &Structure,
     arena: &ParseArena,
@@ -10252,6 +10279,9 @@ pub fn compile_source_to_js_with_options(
         structure
     };
 
+    let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+    emit_ppx_warnings(parser.arena(), source, filename, &ppx_warnings);
+
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
     let structure = ppx::expand_extensions(&structure, parser.arena_mut())
         .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
@@ -11290,6 +11320,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         } else {
             structure
         };
+
+        let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+        emit_ppx_warnings(parser.arena(), source, filename, &ppx_warnings);
 
         let structure = ppx::expand_extensions(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
