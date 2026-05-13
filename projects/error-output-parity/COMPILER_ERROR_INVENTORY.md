@@ -1079,6 +1079,10 @@ with a reason after checking raise sites.
     extension points
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_message.res`.
+  - `error_of_extension` accepts a second string payload item as
+    `if_highlight`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_error_if_highlight.res`.
   - `error_of_extension` maps empty `%%error` payloads to
     `Location.Already_displayed_error`
     - Covered by
