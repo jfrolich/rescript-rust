@@ -1004,6 +1004,10 @@ with a reason after checking raise sites.
       `tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype.res`
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/arrow_return_polytype_recovery.res`.
+  - `parse_jsx_prop` rejects uppercase JSX prop names before JSX PPX/type
+    checking
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_uppercase_prop.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask
