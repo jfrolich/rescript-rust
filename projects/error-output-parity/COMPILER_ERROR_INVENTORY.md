@@ -1556,6 +1556,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_obj_set_index_conflict.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_obj_val_conflict.res`.
+    - Checked: the later `Arg_cst _` branch that would report
+      `%@as is not supported with optional yet` is not reachable from normal
+      `.res` syntax. Optional `_` arguments are rejected first by
+      `get_opt_arg_type`, and non-underscore optional `@as` attributes fall
+      through `spec_of_ptyp` as unused attributes.
   - `@module` with payload-bearing `@new`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_module_new_payload.res`.
