@@ -7593,9 +7593,37 @@ fn freshened_signature_from_module_type<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     mty: &crate::types::decl::ModuleType,
-) -> Option<crate::types::decl::Signature> {
-    let sig = resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)?;
-    Some(
+    loc: LocIdx,
+) -> TypeModResult<crate::types::decl::Signature> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    let sig = if let Some(sig) =
+        resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)
+    {
+        sig
+    } else {
+        match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+            Some(DeclMty::MtySignature(sig)) => sig,
+            Some(DeclMty::MtyAlias(_, path)) => {
+                return Err(TypeModError::CannotScrapeAlias { loc, path });
+            }
+            Some(_) => {
+                return Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
+                    loc,
+                }));
+            }
+            None => {
+                if let Some(path) = cannot_scrape_alias_path_for_module_type(tctx, env, mty) {
+                    return Err(TypeModError::CannotScrapeAlias { loc, path });
+                }
+                return Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
+                    loc,
+                }));
+            }
+        }
+    };
+
+    Ok(
         crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
             "typemod_freshened_module_type",
             &sig,
@@ -11983,10 +12011,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                     arena.get_mod_type(incl.pincl_mod),
                                     None,
                                 )?;
-                                freshened_signature_from_module_type(tctx, &sig_env, &include_mty)
-                                    .ok_or_else(|| {
-                                    TypeModError::ModuleNotFound("included signature".to_string())
-                                })?
+                                freshened_signature_from_module_type(
+                                    tctx,
+                                    &sig_env,
+                                    &include_mty,
+                                    arena.get_mod_type(incl.pincl_mod).pmty_loc,
+                                )?
                             }
                         };
                         add_signature_items_to_env(&include_sig, &mut sig_env)?;
@@ -15423,11 +15453,12 @@ pub fn transl_signature<'a>(
             PSigDesc::Psig_include(incl) => {
                 let typed_mty =
                     transl_modtype(tctx, &sig_env, arena, arena.get_mod_type(incl.pincl_mod))?;
-                let include_sig =
-                    freshened_signature_from_module_type(tctx, &sig_env, &typed_mty.mty_type)
-                        .ok_or_else(|| {
-                            TypeModError::ModuleNotFound("included signature".to_string())
-                        })?;
+                let include_sig = freshened_signature_from_module_type(
+                    tctx,
+                    &sig_env,
+                    &typed_mty.mty_type,
+                    arena.get_mod_type(incl.pincl_mod).pmty_loc,
+                )?;
                 add_signature_items_to_env(&include_sig, &mut sig_env)?;
                 TSigDesc::Tsig_include(IncludeDescription {
                     incl_mod: typed_mty,
