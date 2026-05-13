@@ -2908,18 +2908,23 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 let bracket_loc = p.mk_loc_idx(lbracket_start_idx, rbracket_end_idx);
 
                 if p.token == Token::Equal {
-                    let equal_start_idx = p.start_pos_idx();
-                    p.next();
-                    let equal_end_idx = p.prev_end_pos_idx();
-                    let value = parse_expr(p);
-
-                    // Check if index is a string constant for object property assignment
                     let is_string_index =
                         if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
                             matches!(&**c, Constant::String(..))
                         } else {
                             false
                         };
+                    if !is_string_index {
+                        p.leave_breadcrumb(Grammar::ExprArrayMutation);
+                    }
+                    let equal_start_idx = p.start_pos_idx();
+                    p.next();
+                    let equal_end_idx = p.prev_end_pos_idx();
+                    let value = parse_expr(p);
+                    if !is_string_index {
+                        p.eat_breadcrumb();
+                    }
+
                     if is_string_index {
                         let (s, _) = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
                             if let Constant::String(s, tag) = &**c {
