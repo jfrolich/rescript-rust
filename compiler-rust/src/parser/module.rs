@@ -4772,7 +4772,8 @@ fn parse_value_description(
     let typ = p.arena_mut().push_core_type(typ_ct);
     p.in_external = was_in_external;
 
-    // Parse optional primitive
+    // Parse primitive. Externals require `= "..."`; signature `let`
+    // declarations share this helper and leave the primitive empty.
     let prim = if p.token == Token::Equal {
         let equal_start = p.start_pos.clone();
         let equal_end = p.end_pos.clone();
@@ -4796,6 +4797,9 @@ fn parse_value_description(
             }
         }
     } else {
+        if !use_poly_type {
+            p.expect(Token::Equal);
+        }
         vec![]
     };
 

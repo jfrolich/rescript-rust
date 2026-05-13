@@ -645,6 +645,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/cases/bs_ast_parse_error.res`
       and
       `tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi`.
+- `compiler/syntax/src/res_core.ml`
+  - `parse_external_def` requires the `=` before an external primitive name
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res`
+      and through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/external_missing_primitive.res`.
 - `compiler/syntax/src/res_scanner.ml`
   - Fixed-width string escape diagnostics for short decimal, incomplete hex,
     incomplete unicode, decimal overflow, and surrogate unicode escapes
