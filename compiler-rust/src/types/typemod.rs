@@ -6416,7 +6416,8 @@ struct TopLevelTypeUseCheck {
     rec_flag: RecFlag,
 }
 
-struct OpenShadowValueUseCheck {
+struct OpenShadowIdentifierUseCheck {
+    kind: &'static str,
     name: String,
     path: Path,
     loc: LocIdx,
@@ -6558,19 +6559,22 @@ fn collect_top_level_type_use_checks(
     }));
 }
 
-fn collect_open_shadow_value_use_checks(
+fn collect_open_shadow_identifier_use_checks(
     env_before_open: &Env,
     env_after_open: &Env,
     loc: LocIdx,
     item_index: usize,
-    out: &mut Vec<OpenShadowValueUseCheck>,
+    out: &mut Vec<OpenShadowIdentifierUseCheck>,
 ) {
     let mut seen = HashSet::new();
-    for (previous_id, previous_desc) in env_before_open.iter_values() {
-        let name = previous_id.name();
+    for (candidate_id, _) in env_before_open.iter_values() {
+        let name = candidate_id.name();
         if !seen.insert(name.to_string()) {
             continue;
         }
+        let Ok(_) = env_before_open.find_value_with_origin(name) else {
+            continue;
+        };
         let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_value_with_origin(name)
         else {
             continue;
@@ -6578,23 +6582,104 @@ fn collect_open_shadow_value_use_checks(
         if is_local {
             continue;
         }
-        let previous_path = previous_desc
-            .val_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(previous_id.clone()));
         let opened_path = opened_desc
             .val_path
             .clone()
             .unwrap_or_else(|| Path::pident(opened_id.clone()));
-        if !previous_path.same(&opened_path) {
-            out.push(OpenShadowValueUseCheck {
-                name: name.to_string(),
-                path: opened_path,
-                loc,
-                item_index,
-                emitted: false,
-            });
+        out.push(OpenShadowIdentifierUseCheck {
+            kind: "value",
+            name: name.to_string(),
+            path: opened_path,
+            loc,
+            item_index,
+            emitted: false,
+        });
+    }
+
+    seen.clear();
+    for (candidate_id, _) in env_before_open.iter_types() {
+        let name = candidate_id.name();
+        if !seen.insert(name.to_string()) {
+            continue;
         }
+        let Ok(_) = env_before_open.find_type_with_origin(name) else {
+            continue;
+        };
+        let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_type_with_origin(name)
+        else {
+            continue;
+        };
+        if is_local {
+            continue;
+        }
+        let opened_path = opened_desc
+            .type_path
+            .clone()
+            .unwrap_or_else(|| Path::pident(opened_id.clone()));
+        out.push(OpenShadowIdentifierUseCheck {
+            kind: "type",
+            name: name.to_string(),
+            path: opened_path,
+            loc,
+            item_index,
+            emitted: false,
+        });
+    }
+
+    seen.clear();
+    for (candidate_id, _) in env_before_open.iter_modules() {
+        let name = candidate_id.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Ok(_) = env_before_open.find_module_with_origin(name) else {
+            continue;
+        };
+        let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_module_with_origin(name)
+        else {
+            continue;
+        };
+        if is_local {
+            continue;
+        }
+        let opened_path = opened_desc
+            .md_path
+            .clone()
+            .unwrap_or_else(|| Path::pident(opened_id.clone()));
+        out.push(OpenShadowIdentifierUseCheck {
+            kind: "module",
+            name: name.to_string(),
+            path: opened_path,
+            loc,
+            item_index,
+            emitted: false,
+        });
+    }
+
+    seen.clear();
+    for (candidate_id, _) in env_before_open.iter_modtypes() {
+        let name = candidate_id.name();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Ok(_) = env_before_open.find_modtype_with_origin(name) else {
+            continue;
+        };
+        let Ok((opened_id, _, is_local)) = env_after_open.find_modtype_with_origin(name) else {
+            continue;
+        };
+        if is_local {
+            continue;
+        }
+        let opened_path = Path::pident(opened_id.clone());
+        out.push(OpenShadowIdentifierUseCheck {
+            kind: "module type",
+            name: name.to_string(),
+            path: opened_path,
+            loc,
+            item_index,
+            emitted: false,
+        });
     }
 }
 
@@ -6688,11 +6773,11 @@ fn collect_open_shadow_label_constructor_use_checks(
     }
 }
 
-fn report_open_shadow_value_warnings_for_item(
+fn report_open_shadow_identifier_warnings_for_item(
     tctx: &mut TypeCheckContext<'_>,
     item_index: usize,
     item: &StructureItem,
-    checks: &mut [OpenShadowValueUseCheck],
+    checks: &mut [OpenShadowIdentifierUseCheck],
     mut warning_insert_index: usize,
 ) {
     let ctx = tctx.type_ctx;
@@ -6700,13 +6785,47 @@ fn report_open_shadow_value_warnings_for_item(
         if check.emitted || check.item_index >= item_index {
             continue;
         }
-        if structure_item_uses_path(ctx, item, &|path| path.same(&check.path)) {
+        if structure_item_uses_path(ctx, item, &|path| {
+            path.same(&check.path)
+                || (check.kind == "module" && path_is_strict_prefix(path, &check.path))
+        }) {
             check.emitted = true;
             if tctx.report_warning_at(
                 warning_insert_index,
                 check.loc,
                 Warning::OpenShadowIdentifier {
-                    kind: "value".to_string(),
+                    kind: check.kind.to_string(),
+                    name: check.name.clone(),
+                },
+            ) {
+                warning_insert_index += 1;
+            }
+        }
+    }
+}
+
+fn report_open_shadow_identifier_warnings_for_signature_item(
+    tctx: &mut TypeCheckContext<'_>,
+    item_index: usize,
+    item: &crate::types::typedtree::TypedSignatureItem,
+    checks: &mut [OpenShadowIdentifierUseCheck],
+    mut warning_insert_index: usize,
+) {
+    let ctx = tctx.type_ctx;
+    for check in checks.iter_mut() {
+        if check.emitted || check.item_index >= item_index {
+            continue;
+        }
+        if signature_item_uses_path(ctx, item, &|path| {
+            path.same(&check.path)
+                || (check.kind == "module" && path_is_strict_prefix(path, &check.path))
+        }) {
+            check.emitted = true;
+            if tctx.report_warning_at(
+                warning_insert_index,
+                check.loc,
+                Warning::OpenShadowIdentifier {
+                    kind: check.kind.to_string(),
                     name: check.name.clone(),
                 },
             ) {
@@ -16521,12 +16640,16 @@ pub fn transl_signature<'a>(
     // for subsequent items (matching OCaml's transl_signature behavior).
     let mut sig_env = env.clone();
     let mut names = Names::default();
+    let mut open_shadow_identifier_checks = Vec::new();
 
     for item in items {
         check_signature_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         let loc = item.psig_loc;
+        let env_before_item = sig_env.clone_preserve_id();
+        let warnings_before_item = tctx.warnings.len();
+        let item_index = typed_items.len();
         let desc = match &*item.psig_desc {
             PSigDesc::Psig_value(vd) => {
                 let name_str = arena.get_string(vd.pval_name.txt).to_string();
@@ -16770,11 +16893,28 @@ pub fn transl_signature<'a>(
             )),
         };
 
-        typed_items.push(TypedSignatureItem {
+        let typed_item = TypedSignatureItem {
             sig_desc: desc,
             sig_env: EnvRef(0),
             sig_loc: loc,
-        });
+        };
+        if matches!(typed_item.sig_desc, TSigDesc::Tsig_open(_)) {
+            collect_open_shadow_identifier_use_checks(
+                &env_before_item,
+                &sig_env,
+                typed_item.sig_loc,
+                item_index,
+                &mut open_shadow_identifier_checks,
+            );
+        }
+        report_open_shadow_identifier_warnings_for_signature_item(
+            tctx,
+            item_index,
+            &typed_item,
+            &mut open_shadow_identifier_checks,
+            warnings_before_item,
+        );
+        typed_items.push(typed_item);
     }
 
     Ok(crate::types::typedtree::TypedSignature {
@@ -16891,7 +17031,7 @@ pub fn type_structure<'a>(
     let mut current_env = env.clone_preserve_id();
     let mut names = Names::default();
     let mut unused_value_checks = Vec::new();
-    let mut open_shadow_value_checks = Vec::new();
+    let mut open_shadow_identifier_checks = Vec::new();
     let mut open_shadow_label_constructor_checks = Vec::new();
 
     for item in items {
@@ -16904,12 +17044,12 @@ pub fn type_structure<'a>(
         let item_index = typed_items.len();
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if matches!(typed_item.str_desc, StructureItemDesc::Tstr_open(_)) {
-            collect_open_shadow_value_use_checks(
+            collect_open_shadow_identifier_use_checks(
                 &current_env,
                 &new_env,
                 typed_item.str_loc,
                 item_index,
-                &mut open_shadow_value_checks,
+                &mut open_shadow_identifier_checks,
             );
             collect_open_shadow_label_constructor_use_checks(
                 tctx.type_ctx,
@@ -16920,11 +17060,11 @@ pub fn type_structure<'a>(
                 &mut open_shadow_label_constructor_checks,
             );
         }
-        report_open_shadow_value_warnings_for_item(
+        report_open_shadow_identifier_warnings_for_item(
             tctx,
             item_index,
             &typed_item,
-            &mut open_shadow_value_checks,
+            &mut open_shadow_identifier_checks,
             warnings_before_item,
         );
         report_open_shadow_label_constructor_warnings_for_item(

@@ -841,10 +841,21 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
       and
       `tests/error_output_parity/compiler/fixtures/unused_module_hidden_by_module_constraint.res`.
-  - `Warnings.Open_shadow_identifier` value shadowing from an `open`, reported
-    only when the opened value is later used
+  - `Warnings.Open_shadow_identifier` value, type, module, and module-type
+    shadowing from an `open`, reported only when the opened item is later used
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_identifier.res`.
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_identifier.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_type.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_module.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_modtype.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_same_value_reopen.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_same_type_reopen.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_same_module_reopen.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_signature_type.resi`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_signature_module.resi`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_signature_modtype.resi`,
+      and
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_same_modtype_reopen.res`.
   - `Warnings.Open_shadow_label_constructor` constructor and label shadowing from
     an `open`, reported only when the opened constructor or label is later used
     - Covered by

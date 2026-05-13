@@ -1270,6 +1270,18 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
+    /// Find a module type by name, returning the identifier, declaration, and
+    /// whether the binding is local (from `add_modtype`) vs opened.
+    pub fn find_modtype_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ModtypeDeclaration, bool)> {
+        self.modtypes
+            .find_by_name_with_origin(name)
+            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
     /// Iterate over visible module type bindings.
     pub fn iter_modtypes(&self) -> impl Iterator<Item = (&Ident, &ModtypeDeclaration)> {
         self.modtypes.iter().map(|(id, mtd)| (id, mtd.as_ref()))
