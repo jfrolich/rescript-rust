@@ -14,8 +14,8 @@ use rescript_compiler::binary_ast::{
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    compile_file_to_js_with_options, enable_cli_cleanup_skip, typecheck_interface_file,
-    CompilerOptions, UserDiagnostic,
+    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
+    typecheck_interface_file, CompilerOptions, UserDiagnostic,
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::parser::{module, sexp_locs, Parser};
@@ -398,16 +398,13 @@ fn generate_ast(
         fs::create_dir_all(parent)?;
     }
 
-    let mut parser = Parser::new(filename, &source);
+    let mut parser = Parser::new(&filename, &source);
 
     if is_interface {
         // Parse signature (interface file)
         let signature = module::parse_signature(&mut parser);
         if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
+            return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
 
         if dump_parsetree_sexp_locs {
@@ -424,10 +421,7 @@ fn generate_ast(
         // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
         if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
+            return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
 
         if dump_parsetree_sexp_locs {

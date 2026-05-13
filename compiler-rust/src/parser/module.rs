@@ -4750,9 +4750,7 @@ fn parse_value_description(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected value name".to_string(),
-            ));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             let err_idx = p.arena_mut().intern("error");
             mknoloc(err_idx)
         }

@@ -622,6 +622,13 @@ with a reason after checking raise sites.
   - `Variable_in_scope`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/variable_in_scope.res`.
+- `bsc -bs-ast` parser entrypoint
+  - Structure and signature parse diagnostics are rendered through the compiler
+    binary, not only through `res_parser`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/bs_ast_parse_error.res`
+      and
+      `tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
     module expression, structure, and signature extension points

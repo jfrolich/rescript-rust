@@ -1918,7 +1918,11 @@ fn is_valid_hash_number_label(value: &str) -> bool {
     }
 }
 
-fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
+pub fn parser_error_to_anyhow(
+    parser: &Parser<'_>,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
     if parser.diagnostics().iter().any(|diagnostic| {
         matches!(
             diagnostic.category,
