@@ -828,6 +828,20 @@ fn validate_external_attribute_errors(
         ));
     }
 
+    if external_desc_is_plain_set_index(&desc) && arity != 3 {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Ill defined attribute @set_index (arity of 3)",
+        ));
+    }
+
+    if external_desc_is_plain_get_index(&desc) && arity != 2 {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            format!("Ill defined attribute @get_index (arity expected 2 : while {arity})"),
+        ));
+    }
+
     if !desc.mk_obj {
         if let Some(reason) = module_as_val_conflict_reason(&desc) {
             return Err(PpxError::at_loc(vd.pval_loc, reason));

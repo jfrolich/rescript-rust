@@ -664,6 +664,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_get_index_named_primitive.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_set_index_named_primitive.res`.
+  - `@get_index`/`@set_index` arity validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_index_wrong_arity.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_index_wrong_arity.res`.
 
 ## Include Mismatch Surfaces
 
