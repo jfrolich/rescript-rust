@@ -78,7 +78,7 @@ fn parse_newline_or_semicolon_signature(p: &mut Parser<'_>) {
                 p.prev_end_pos.clone(),
                 p.end_pos.clone(),
                 DiagnosticCategory::message(
-                    "consecutive statements on a line must be separated by ';' or a newline",
+                    "consecutive specifications on a line must be separated by ';' or a newline",
                 ),
             );
         }

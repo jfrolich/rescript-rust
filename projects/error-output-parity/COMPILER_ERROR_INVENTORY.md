@@ -1090,6 +1090,34 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_numeric_polyvariant_suffix.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_old_array_syntax.res`.
+  - Record/dict field recovery rejects `=` where `:` is required in expression,
+    pattern, type, and dict contexts
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_record_expr_field_equal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_record_pattern_field_equal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_record_type_field_equal.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_dict_field_missing_colon.res`.
+  - Keyword field recovery is covered for expression, pattern, and type record
+    fields
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_keyword_field_expr.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_keyword_field_pattern.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_keyword_field_type.res`.
+  - Separator recovery is covered for consecutive expressions, structure
+    items, and signature items
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_consecutive_expressions.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_consecutive_structure_items.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_consecutive_signature_items.resi`.
+  - Pattern tuples reject singleton tuple syntax, and malformed module names
+    keep the follow-on infix equality suggestion
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_tuple_single_pattern.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_module_name_number_equal.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask

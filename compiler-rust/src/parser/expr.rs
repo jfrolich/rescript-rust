@@ -3777,7 +3777,20 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                     let key_start_idx = p.start_pos_idx();
                     p.next();
                     let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
-                    p.expect(Token::Colon);
+                    match p.token {
+                        Token::Colon => p.next(),
+                        Token::Equal => {
+                            p.err_at(
+                                p.start_pos,
+                                p.end_pos,
+                                DiagnosticCategory::message(
+                                    "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
+                                ),
+                            );
+                            p.next();
+                        }
+                        _ => p.expect(Token::Colon),
+                    }
                     let value = parse_expr(p);
                     let value_end_idx = p.loc_end_idx(value.pexp_loc);
                     let key_expr = Expression {
