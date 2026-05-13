@@ -149,6 +149,8 @@ const STRING_INT_ATTR_UNSUPPORTED_MSG: &str =
     "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
 const COMPONENT_REF_PLAIN_ARGS_MSG: &str =
     "React: react.component refs only support plain arguments and type annotations.";
+const JSX_SPREAD_AFTER_PROP_MSG: &str =
+    "JSX: use {...p} {x: v} not {x: v} {...p} \n   multiple spreads {...p} {...p} not allowed.";
 
 // ============================================================================
 // Public API
@@ -1674,7 +1676,7 @@ fn strip_pattern_constraint(arena: &ParseArena, pat: &Pattern) -> Pattern {
 fn build_props_pattern_and_body(
     expr: &Expression,
     args: &[ExtractedArg],
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> (Vec<PatternRecordField>, Expression) {
     let mut patterns = vec![];
@@ -3658,18 +3660,22 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
 
 fn transform_structure_item_desc(
     desc: StructureItemDesc,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> StructureItemDesc {
     match desc {
         StructureItemDesc::Pstr_value(inner) => StructureItemDesc::Pstr_value(inner),
-        StructureItemDesc::Pstr_eval(inner) => StructureItemDesc::Pstr_eval(inner),
+        StructureItemDesc::Pstr_eval(inner) => {
+            let (expr_idx, attrs) = *inner;
+            let expr = arena.get_expr(expr_idx).clone();
+            let transformed = transform_expression(expr, config, arena);
+            StructureItemDesc::Pstr_eval(Box::new((arena.push_expr(transformed), attrs)))
+        }
         StructureItemDesc::Pstr_module(mb) => {
-            let mut config_clone = config.clone();
             StructureItemDesc::Pstr_module(Box::new(transform_module_binding(
                 *mb,
-                &mut config_clone,
+                config,
                 arena,
                 warnings,
             )))
@@ -3677,22 +3683,13 @@ fn transform_structure_item_desc(
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let mut result = vec![];
             for mb in *mbs {
-                let mut config_clone = config.clone();
-                result.push(transform_module_binding(
-                    mb,
-                    &mut config_clone,
-                    arena,
-                    warnings,
-                ));
+                result.push(transform_module_binding(mb, config, arena, warnings));
             }
             StructureItemDesc::Pstr_recmodule(Box::new(result))
         }
         StructureItemDesc::Pstr_modtype(mt) => {
-            let mut config_clone = config.clone();
             StructureItemDesc::Pstr_modtype(Box::new(transform_module_type_declaration(
-                *mt,
-                &mut config_clone,
-                arena,
+                *mt, config, arena,
             )))
         }
         other => other,
@@ -3882,7 +3879,7 @@ fn transform_module_expr(
 
 fn transform_value_binding(
     binding: ValueBinding,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> ValueBinding {
     let pvb_expr = transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
@@ -3900,7 +3897,7 @@ fn transform_value_binding(
 
 fn transform_expression(
     expr: Expression,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> Expression {
     let new_desc = match *expr.pexp_desc {
@@ -4157,11 +4154,10 @@ fn transform_expression(
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (name, module_idx, body_idx) = *inner;
-            let mut config_clone = config.clone();
             let mut ignored_warnings = vec![];
             let module_expr = arena.get_mod_expr(module_idx).clone();
             let transformed_module =
-                transform_module_expr(module_expr, &mut config_clone, arena, &mut ignored_warnings);
+                transform_module_expr(module_expr, config, arena, &mut ignored_warnings);
             let body_expr = arena.get_expr(body_idx).clone();
             let transformed_body = transform_expression(body_expr, config, arena);
             ExpressionDesc::Pexp_letmodule(Box::new((
@@ -4191,11 +4187,10 @@ fn transform_expression(
             ExpressionDesc::Pexp_newtype(Box::new((name, arena.push_expr(transformed_body))))
         }
         ExpressionDesc::Pexp_pack(mexpr) => {
-            let mut config_clone = config.clone();
             let mut ignored_warnings = vec![];
             let mexpr_val = arena.get_mod_expr(mexpr).clone();
             let transformed =
-                transform_module_expr(mexpr_val, &mut config_clone, arena, &mut ignored_warnings);
+                transform_module_expr(mexpr_val, config, arena, &mut ignored_warnings);
             ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
         }
         ExpressionDesc::Pexp_open(inner) => {
@@ -4219,7 +4214,7 @@ fn transform_expression(
     }
 }
 
-fn transform_case(case: Case, config: &JsxConfig, arena: &mut ParseArena) -> Case {
+fn transform_case(case: Case, config: &mut JsxConfig, arena: &mut ParseArena) -> Case {
     let transformed_guard = case.pc_guard.map(|e| {
         let e_expr = arena.get_expr(e).clone();
         let transformed = transform_expression(e_expr, config, arena);
@@ -4244,7 +4239,7 @@ fn transform_case(case: Case, config: &JsxConfig, arena: &mut ParseArena) -> Cas
 
 fn transform_jsx_element(
     jsx: JsxElement,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     loc: &Location,
     attrs: &Attributes,
     arena: &mut ParseArena,
@@ -4262,7 +4257,7 @@ fn transform_jsx_element(
 
 /// Main JSX transformation function - matches OCaml's mk_react_jsx
 fn mk_react_jsx(
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     loc: &Location,
     _attrs: &Attributes,
     component_description: ComponentDescription,
@@ -4364,7 +4359,7 @@ fn mk_react_jsx(
 
 /// Append children prop to props list - matches OCaml's append_children_prop
 fn append_children_prop(
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     component_description: ComponentDescription,
     mut props: Vec<JsxProp>,
     children: Vec<ExprIdx>,
@@ -4516,7 +4511,7 @@ fn loc_from_prop(prop: &JsxProp, arena: &mut ParseArena) -> Location {
 fn mk_record_from_props(
     jsx_expr_loc: &Location,
     props: &[JsxProp],
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> Expression {
     // Calculate location from ALL props (including key) - OCaml does this before filtering
@@ -4598,9 +4593,7 @@ fn mk_record_from_props(
                     })
                 }
                 JsxProp::Spreading { loc, .. } => {
-                    // Spread after first position is an error
-                    // For now, just skip (OCaml raises an error here)
-                    eprintln!("JSX: use {{...p}} {{x: v}} not {{x: v}} {{...p}}. Multiple spreads not allowed at {:?}", loc);
+                    set_fatal_error(config, *loc, JSX_SPREAD_AFTER_PROP_MSG);
                     None
                 }
             }
@@ -4630,7 +4623,7 @@ fn mk_record_from_props(
 
 fn transform_jsx_fragment(
     fragment: JsxFragment,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     loc: &Location,
     attrs: &Attributes,
     arena: &mut ParseArena,
@@ -4662,7 +4655,7 @@ fn transform_jsx_fragment(
 
 fn transform_jsx_unary(
     unary: JsxUnaryElement,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     loc: &Location,
     attrs: &Attributes,
     arena: &mut ParseArena,
@@ -4752,7 +4745,7 @@ fn transform_jsx_unary(
 
 fn transform_jsx_container(
     container: JsxContainerElement,
-    config: &JsxConfig,
+    config: &mut JsxConfig,
     loc: &Location,
     attrs: &Attributes,
     arena: &mut ParseArena,

@@ -28,9 +28,9 @@ use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, JsxElement,
-    JsxProp, ModuleExpr, ModuleExprDesc, ModuleTypeDesc, PatternDesc, Payload,
-    Signature, SignatureItemDesc, Structure, StructureItemDesc,
+    ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
+    ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
+    StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
@@ -61,8 +61,6 @@ const REACT_COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a c
 const REACT_COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
 const REACT_COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str =
     "` is defined several times in this component.";
-const JSX_SPREAD_AFTER_PROP_MSG: &str =
-    "JSX: use {...p} {x: v} not {x: v} {...p} \n   multiple spreads {...p} {...p} not allowed.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -1222,27 +1220,6 @@ fn reject_invalid_react_component_destructure_in_structure(
     Ok(())
 }
 
-fn reject_invalid_jsx_spread_props_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if let Some(loc) = jsx_spread_error_loc_in_structure(structure, arena) {
-        return Err(UserDiagnostic::new(
-            format_compiler_error_report_from_location(
-                source,
-                filename,
-                &loc,
-                JSX_SPREAD_AFTER_PROP_MSG,
-            ),
-            2,
-        )
-        .into());
-    }
-    Ok(())
-}
-
 fn reject_invalid_react_component_key_prop_in_structure(
     structure: &Structure,
     arena: &ParseArena,
@@ -1281,297 +1258,6 @@ fn reject_invalid_react_component_duplicate_prop_in_structure(
         .into());
     }
     Ok(())
-}
-
-fn jsx_spread_error_loc_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<Location> {
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_eval(eval) => {
-                if let Some(loc) = jsx_spread_error_loc_in_expr(eval.0, arena) {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                for binding in &value.1 {
-                    if let Some(loc) = jsx_spread_error_loc_in_expr(binding.pvb_expr, arena) {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(loc) =
-                    jsx_spread_error_loc_in_module_expr(module_binding.pmb_expr, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(loc) =
-                        jsx_spread_error_loc_in_module_expr(module_binding.pmb_expr, arena)
-                    {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_modtype(module_type_decl) => {
-                if let Some(module_type_idx) = module_type_decl.pmtd_type
-                    && let Some(loc) =
-                        jsx_spread_error_loc_in_module_type(module_type_idx, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(loc) = jsx_spread_error_loc_in_module_expr(include_decl.pincl_mod, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn jsx_spread_error_loc_in_signature(
-    signature: &Signature,
-    arena: &ParseArena,
-) -> Option<Location> {
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_module(module_decl) => {
-                if let Some(loc) = jsx_spread_error_loc_in_module_type(module_decl.pmd_type, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            SignatureItemDesc::Psig_recmodule(module_decls) => {
-                for module_decl in module_decls.iter() {
-                    if let Some(loc) =
-                        jsx_spread_error_loc_in_module_type(module_decl.pmd_type, arena)
-                    {
-                        return Some(loc);
-                    }
-                }
-            }
-            SignatureItemDesc::Psig_modtype(module_type_decl) => {
-                if let Some(module_type_idx) = module_type_decl.pmtd_type
-                    && let Some(loc) =
-                        jsx_spread_error_loc_in_module_type(module_type_idx, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            SignatureItemDesc::Psig_include(include_decl) => {
-                if let Some(loc) = jsx_spread_error_loc_in_module_type(include_decl.pincl_mod, arena)
-                {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn jsx_spread_error_loc_in_module_expr(
-    module_expr: ModExprIdx,
-    arena: &ParseArena,
-) -> Option<Location> {
-    match &*arena.get_mod_expr(module_expr).pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => jsx_spread_error_loc_in_structure(structure, arena),
-        ModuleExprDesc::Pmod_functor(functor) => {
-            jsx_spread_error_loc_in_module_expr(functor.2, arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => jsx_spread_error_loc_in_module_expr(*lhs, arena)
-            .or_else(|| jsx_spread_error_loc_in_module_expr(*rhs, arena)),
-        ModuleExprDesc::Pmod_constraint(inner, module_type_idx) => {
-            jsx_spread_error_loc_in_module_expr(*inner, arena)
-                .or_else(|| jsx_spread_error_loc_in_module_type(*module_type_idx, arena))
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => jsx_spread_error_loc_in_expr(*expr, arena),
-        _ => None,
-    }
-}
-
-fn jsx_spread_error_loc_in_module_type(
-    module_type: crate::parse_arena::ModTypeIdx,
-    arena: &ParseArena,
-) -> Option<Location> {
-    match &*arena.get_mod_type(module_type).pmty_desc {
-        ModuleTypeDesc::Pmty_signature(signature) => {
-            jsx_spread_error_loc_in_signature(signature, arena)
-        }
-        ModuleTypeDesc::Pmty_functor(functor) => functor
-            .1
-            .and_then(|arg| jsx_spread_error_loc_in_module_type(arg, arena))
-            .or_else(|| jsx_spread_error_loc_in_module_type(functor.2, arena)),
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (module_type_idx, _) = &**inner;
-            jsx_spread_error_loc_in_module_type(*module_type_idx, arena)
-        }
-        ModuleTypeDesc::Pmty_typeof(module_expr) => {
-            jsx_spread_error_loc_in_module_expr(*module_expr, arena)
-        }
-        _ => None,
-    }
-}
-
-fn jsx_spread_error_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<Location> {
-    let expr = arena.get_expr(expr);
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_jsx_element(jsx) => jsx_spread_error_loc_in_jsx_element(jsx, arena),
-        ExpressionDesc::Pexp_let(inner) => inner
-            .1
-            .iter()
-            .find_map(|binding| jsx_spread_error_loc_in_expr(binding.pvb_expr, arena))
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_fun(fun) => fun
-            .default
-            .and_then(|expr| jsx_spread_error_loc_in_expr(expr, arena))
-            .or_else(|| jsx_spread_error_loc_in_expr(fun.rhs, arena)),
-        ExpressionDesc::Pexp_apply(apply) => jsx_spread_error_loc_in_expr(apply.funct, arena)
-            .or_else(|| {
-                apply
-                    .args
-                    .iter()
-                    .find_map(|(_, arg)| jsx_spread_error_loc_in_expr(*arg, arena))
-            }),
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            jsx_spread_error_loc_in_expr(inner.0, arena).or_else(|| {
-                inner.1.iter().find_map(|case| {
-                    case.pc_guard
-                        .and_then(|guard| jsx_spread_error_loc_in_expr(guard, arena))
-                        .or_else(|| jsx_spread_error_loc_in_expr(case.pc_rhs, arena))
-                })
-            })
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
-            .iter()
-            .find_map(|item| jsx_spread_error_loc_in_expr(*item, arena)),
-        ExpressionDesc::Pexp_construct(_, payload) => {
-            payload.and_then(|expr| jsx_spread_error_loc_in_expr(expr, arena))
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            inner.1.and_then(|expr| jsx_spread_error_loc_in_expr(expr, arena))
-        }
-        ExpressionDesc::Pexp_record(record) => record
-            .0
-            .iter()
-            .find_map(|field| jsx_spread_error_loc_in_expr(field.expr, arena))
-            .or_else(|| {
-                record
-                    .1
-                    .and_then(|base| jsx_spread_error_loc_in_expr(base, arena))
-            }),
-        ExpressionDesc::Pexp_field(owner, _)
-        | ExpressionDesc::Pexp_assert(owner)
-        | ExpressionDesc::Pexp_await(owner)
-        | ExpressionDesc::Pexp_comptime_compile_error(owner)
-        | ExpressionDesc::Pexp_comptime_build_variant(owner)
-        | ExpressionDesc::Pexp_comptime_variant_case(owner)
-        | ExpressionDesc::Pexp_comptime_build_record(owner)
-        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
-            jsx_spread_error_loc_in_expr(*owner, arena)
-        }
-        ExpressionDesc::Pexp_send(inner) => jsx_spread_error_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_setfield(inner) => jsx_spread_error_loc_in_expr(inner.0, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => jsx_spread_error_loc_in_expr(inner.0, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.1, arena))
-            .or_else(|| {
-                inner
-                    .2
-                    .and_then(|else_expr| jsx_spread_error_loc_in_expr(else_expr, arena))
-            }),
-        ExpressionDesc::Pexp_sequence(lhs, rhs) => jsx_spread_error_loc_in_expr(*lhs, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(*rhs, arena)),
-        ExpressionDesc::Pexp_while(cond, body) => jsx_spread_error_loc_in_expr(*cond, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(*body, arena)),
-        ExpressionDesc::Pexp_for(inner) => jsx_spread_error_loc_in_expr(inner.1, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.2, arena))
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.4, arena)),
-        ExpressionDesc::Pexp_for_of(inner)
-        | ExpressionDesc::Pexp_for_await_of(inner)
-        | ExpressionDesc::Pexp_inline_for(inner) => jsx_spread_error_loc_in_expr(inner.1, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_constraint(inner) => jsx_spread_error_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_coerce(inner) => jsx_spread_error_loc_in_expr(inner.0, arena),
-        ExpressionDesc::Pexp_letmodule(inner) => jsx_spread_error_loc_in_module_expr(inner.1, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.2, arena)),
-        ExpressionDesc::Pexp_letexception(inner) => jsx_spread_error_loc_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_newtype(inner) => jsx_spread_error_loc_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_pack(module_expr) => {
-            jsx_spread_error_loc_in_module_expr(*module_expr, arena)
-        }
-        ExpressionDesc::Pexp_open(inner) => jsx_spread_error_loc_in_expr(inner.2, arena),
-        ExpressionDesc::Pexp_comptime_field(inner) => jsx_spread_error_loc_in_expr(inner.0, arena)
-            .or_else(|| jsx_spread_error_loc_in_expr(inner.1, arena)),
-        ExpressionDesc::Pexp_comptime_record(inner) => jsx_spread_error_loc_in_expr(inner.1, arena),
-        ExpressionDesc::Pexp_comptime_variant(inner) => {
-            jsx_spread_error_loc_in_expr(inner.1, arena).or_else(|| {
-                inner
-                    .2
-                    .and_then(|payload| jsx_spread_error_loc_in_expr(payload, arena))
-            })
-        }
-        _ => None,
-    }
-}
-
-fn jsx_spread_error_loc_in_jsx_element(
-    jsx: &JsxElement,
-    arena: &ParseArena,
-) -> Option<Location> {
-    match jsx {
-        JsxElement::Fragment(fragment) => fragment
-            .children
-            .iter()
-            .find_map(|child| jsx_spread_error_loc_in_expr(*child, arena)),
-        JsxElement::Unary(unary) => jsx_spread_error_loc_in_props(&unary.props, arena),
-        JsxElement::Container(container) => jsx_spread_error_loc_in_props(&container.props, arena)
-            .or_else(|| {
-                container
-                    .children
-                    .iter()
-                    .find_map(|child| jsx_spread_error_loc_in_expr(*child, arena))
-            }),
-    }
-}
-
-fn jsx_spread_error_loc_in_props(props: &[JsxProp], arena: &ParseArena) -> Option<Location> {
-    let mut prop_index = 0;
-    for prop in props.iter().filter(|prop| !jsx_prop_is_key(prop, arena)) {
-        match prop {
-            JsxProp::Spreading { expr, .. } if prop_index == 0 => {
-                if let Some(loc) = jsx_spread_error_loc_in_expr(*expr, arena) {
-                    return Some(loc);
-                }
-            }
-            JsxProp::Spreading { loc, .. } => return Some(arena.to_location(*loc)),
-            JsxProp::Value { value, .. } => {
-                if let Some(loc) = jsx_spread_error_loc_in_expr(*value, arena) {
-                    return Some(loc);
-                }
-            }
-            JsxProp::Punning { .. } => {}
-        }
-        prop_index += 1;
-    }
-    None
-}
-
-fn jsx_prop_is_key(prop: &JsxProp, arena: &ParseArena) -> bool {
-    match prop {
-        JsxProp::Punning { name, .. } | JsxProp::Value { name, .. } => {
-            arena.get_string(name.txt) == "key"
-        }
-        JsxProp::Spreading { .. } => false,
-    }
 }
 
 fn react_component_destructure_in_structure(structure: &Structure, arena: &ParseArena) -> bool {
@@ -10906,7 +10592,6 @@ pub fn compile_source_to_js_with_options(
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
-        reject_invalid_jsx_spread_props_in_structure(&structure, parser.arena(), source, filename)?;
         reject_invalid_react_component_destructure_in_structure(
             &structure,
             parser.arena(),
@@ -11981,12 +11666,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            reject_invalid_jsx_spread_props_in_structure(
-                &structure,
-                parser.arena(),
-                source,
-                filename,
-            )?;
             reject_invalid_react_component_destructure_in_structure(
                 &structure,
                 parser.arena(),
@@ -13580,7 +13259,6 @@ pub fn compile_source_in_process(
     )?;
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
-        reject_invalid_jsx_spread_props_in_structure(&structure, parser.arena(), source, filename)?;
         reject_invalid_react_component_destructure_in_structure(
             &structure,
             parser.arena(),
