@@ -982,6 +982,9 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/module_record_pattern_qualified.res`.
 - `compiler/frontend/bs_ast_invariant.ml`
+  - GADT constructor result syntax without `type rec`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/gadt_requires_type_rec.res`.
   - `%identity` primitive arity validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type.res`
