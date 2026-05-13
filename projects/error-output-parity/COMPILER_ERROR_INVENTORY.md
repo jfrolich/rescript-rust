@@ -125,9 +125,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch.res` and the
   multiple-alternative branch in
   `tests/error_output_parity/compiler/fixtures/name_type_mismatch_multiple.res`.
-- `Undefined_method`: covered by
-  `tests/error_output_parity/compiler/fixtures/undefined_method.res` and the
-  spellcheck hint branch in
+- `Undefined_method`: covered for object receivers with alternatives,
+  non-object receivers without alternatives, and the spellcheck hint branch by
+  `tests/error_output_parity/compiler/fixtures/undefined_method.res`,
+  `tests/error_output_parity/compiler/fixtures/undefined_method_no_alternatives.res`,
+  and
   `tests/error_output_parity/compiler/fixtures/undefined_method_spellcheck.res`.
 - `Private_type`: covered by
   `tests/error_output_parity/compiler/fixtures/private_type.res`.
