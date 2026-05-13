@@ -88,4 +88,9 @@ error,86,tests/syntax_tests/data/parsing/errors/other/invalidHashHash.res,tests/
 error,87,tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res,tests/syntax_tests/data/parsing/errors/structure/expected/externalMissingPrimitive.res.txt
 error,88,tests/syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res,tests/syntax_tests/data/parsing/errors/typeDef/expected/variantConstructorName.res.txt
 error,89,tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res,tests/syntax_tests/data/parsing/errors/structure/expected/attributePayloadComma.res.txt
+error,90,tests/syntax_tests/data/parsing/errors/other/switchCaseUnexpectedEqual.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseUnexpectedEqual.res.txt
+error,91,tests/syntax_tests/data/parsing/errors/other/switchCaseUnexpectedEqualOperator.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseUnexpectedEqualOperator.res.txt
+error,92,tests/syntax_tests/data/parsing/errors/other/switchCaseUnexpectedEqualIf.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseUnexpectedEqualIf.res.txt
+error,93,tests/syntax_tests/data/parsing/errors/other/switchCaseEmptyBeforeBrace.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseEmptyBeforeBrace.res.txt
+error,94,tests/syntax_tests/data/parsing/errors/other/switchCaseEofRhs.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseEofRhs.res.txt
 warning,22,tests/syntax_tests/data/ppx/react/warnings/optionalReactElement.res,tests/syntax_tests/data/ppx/react/warnings/expected/optionalReactElement.res.txt

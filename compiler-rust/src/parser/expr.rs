@@ -2366,9 +2366,14 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             recover::default_expr(p.arena_mut())
         }
         Token::Eof => {
-            p.err(DiagnosticCategory::Message(
-                "Unexpected end of file".to_string(),
-            ));
+            p.err_at(
+                p.prev_end_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::unexpected(
+                    p.token.clone().into_owned(),
+                    p.breadcrumbs().to_vec(),
+                ),
+            );
             recover::default_expr(p.arena_mut())
         }
         _ => {
@@ -6070,28 +6075,31 @@ fn parse_switch_case_block(p: &mut Parser<'_>) -> Expression {
     // This is critical for error messages: ExprBlock + Bar → "Looks like there might be
     // an expression missing here" (for empty switch case bodies like | Empty => | Next => ...)
     p.leave_breadcrumb(Grammar::ExprBlock);
-    // Use the recursive parser that properly nests let/module/open/exception
-    let result = parse_switch_case_body(p).unwrap_or_else(|| {
-        // OCaml: parse_expr_block -> parse_expr_block_item -> parse_expr ->
-        // parse_atomic_expr encounters | or } and emits an error through the
-        // breadcrumb-aware diagnostic system before returning exprhole.
-        // Match OCaml's error position: prev_end_pos..end_pos (like parse_atomic_expr default)
-        // Push ExprOperand so breadcrumb-aware diagnostics see [.., ExprBlock, ExprOperand]
-        // which triggers "Looks like there might be an expression missing here" for Bar.
-        if p.token != Token::Rbrace && p.token != Token::Eof {
-            p.leave_breadcrumb(Grammar::ExprOperand);
-            p.err_at(
-                p.prev_end_pos.clone(),
-                p.end_pos.clone(),
-                DiagnosticCategory::unexpected(
-                    p.token.clone().into_owned(),
-                    p.breadcrumbs().to_vec(),
-                ),
-            );
-            p.eat_breadcrumb();
+    // Use the recursive parser that properly nests let/module/open/exception.
+    // OCaml calls parse_expr_block_item unconditionally for the first RHS item;
+    // if the token is not a block-expression start, parse_expr/parse_atomic_expr
+    // emits the unexpected-token diagnostic and performs generic recovery.
+    let result = match parse_switch_case_body(p) {
+        Some(expr) => expr,
+        None => {
+            let expr = parse_expr_with_context(p, ExprContext::SwitchCaseRhs);
+            parse_newline_or_semicolon_expr_block(p);
+            if let Some(rest) = parse_switch_case_body(p) {
+                let loc = p.mk_loc_spanning(expr.pexp_loc, rest.pexp_loc);
+                Expression {
+                    pexp_desc: {
+                        let e1_idx = p.arena_mut().push_expr(expr);
+                        let e2_idx = p.arena_mut().push_expr(rest);
+                        Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx))
+                    },
+                    pexp_loc: loc,
+                    pexp_attributes: Attributes::new(),
+                }
+            } else {
+                expr
+            }
         }
-        recover::default_expr(p.arena_mut())
-    });
+    };
     p.eat_breadcrumb();
     result
 }
@@ -6105,6 +6113,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
     p.expect(Token::Lbrace);
 
     let mut cases = vec![];
+    p.leave_breadcrumb(Grammar::PatternMatching);
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // OCaml uses begin_region/end_region around each case
         // This allows errors from different cases to all be reported
@@ -6147,6 +6156,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
             break;
         }
     }
+    p.eat_breadcrumb();
 
     // OCaml: emit error if switch has no cases
     // OCaml uses end_pos (end of current token) as the error end, not start_pos

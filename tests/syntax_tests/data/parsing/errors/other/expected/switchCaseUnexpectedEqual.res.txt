@@ -1,0 +1,12 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/other/switchCaseUnexpectedEqual.res:2:7-8
+
+  1 │ let x = switch a {
+  2 │ | A => =
+  3 │   b
+  4 │ | B => c
+
+  I'm not sure what to parse here when looking at "=".
+
+let x = match a with | A -> b | B -> c
