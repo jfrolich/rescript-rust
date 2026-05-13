@@ -100,10 +100,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/orpat_vars.res` and the
   spellcheck hint branch in
   `tests/error_output_parity/compiler/fixtures/orpat_vars_spellcheck.res`.
-- `Label_multiply_defined`: covered by
-  `tests/error_output_parity/compiler/fixtures/label_multiply_defined.res`.
-- `Labels_missing`: covered by
-  `tests/error_output_parity/compiler/fixtures/labels_missing.res`.
+- `Label_multiply_defined`: covered for plain records and JSX component calls by
+  `tests/error_output_parity/compiler/fixtures/label_multiply_defined.res` and
+  `tests/error_output_parity/compiler/fixtures/jsx_duplicate_prop_call.res`.
+- `Labels_missing`: covered for plain records and JSX component calls by
+  `tests/error_output_parity/compiler/fixtures/labels_missing.res` and
+  `tests/error_output_parity/compiler/fixtures/jsx_missing_required_prop_call.res`.
 - `Label_not_mutable`: covered by
   `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`.
 - `Wrong_name`: covered by
