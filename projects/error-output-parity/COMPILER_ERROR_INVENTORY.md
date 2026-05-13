@@ -704,9 +704,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`.
   - `Ast_payload.assert_strings` for `@module` and `@scope`
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/bs_external_module_ident_payload.res`
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_ident_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_scope_ident_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_tuple_non_string.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/bs_external_scope_ident_payload.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_external_scope_tuple_non_string.res`.
   - `@module({from, with})` import-attributes payload validation
     - Covered for missing `from`, missing `with`, non-string import
       attribute values, and non-regular import attribute keys by

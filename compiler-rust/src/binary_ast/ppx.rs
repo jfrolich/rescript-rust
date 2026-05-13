@@ -792,22 +792,30 @@ fn validate_external_attribute_payload_errors(
                 if validate_module_import_attributes_payload(payload, arena)? {
                     continue;
                 }
-                let Some(strings) = payload_string_literals(payload, arena) else {
-                    return Err(PpxError::at_loc(
-                        attr_name.loc,
-                        "expect string tuple list",
-                    ));
+                let strings = match payload_string_literals_or_error_loc(
+                    payload,
+                    arena,
+                    attr_name.loc,
+                ) {
+                    Ok(strings) => strings,
+                    Err(loc) => {
+                        return Err(PpxError::at_loc(loc, "expect string tuple list"));
+                    }
                 };
                 if strings.len() > 2 {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
                 }
             }
             "scope" => {
-                let Some(scopes) = payload_string_literals(payload, arena) else {
-                    return Err(PpxError::at_loc(
-                        attr_name.loc,
-                        "expect string tuple list",
-                    ));
+                let scopes = match payload_string_literals_or_error_loc(
+                    payload,
+                    arena,
+                    attr_name.loc,
+                ) {
+                    Ok(scopes) => scopes,
+                    Err(loc) => {
+                        return Err(PpxError::at_loc(loc, "expect string tuple list"));
+                    }
                 };
                 if scopes.is_empty() {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
@@ -1307,6 +1315,45 @@ fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<
             }
         }
         _ => None,
+    }
+}
+
+fn payload_string_literals_or_error_loc(
+    payload: &Payload,
+    arena: &ParseArena,
+    default_loc: LocIdx,
+) -> Result<Vec<String>, LocIdx> {
+    match payload {
+        Payload::PStr(items) if items.is_empty() => Ok(Vec::new()),
+        Payload::PStr(items) if items.len() == 1 => {
+            let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc else {
+                return Err(default_loc);
+            };
+            let (expr, _) = &**eval_inner;
+            match &*arena.get_expr(*expr).pexp_desc {
+                ExpressionDesc::Pexp_constant(c) => match &**c {
+                    Constant::String(s, _) => Ok(vec![s.to_string()]),
+                    _ => Err(default_loc),
+                },
+                ExpressionDesc::Pexp_tuple(exprs) => {
+                    let mut result = Vec::with_capacity(exprs.len());
+                    for expr in exprs.iter() {
+                        let ExpressionDesc::Pexp_constant(c) =
+                            &*arena.get_expr(*expr).pexp_desc
+                        else {
+                            return Err(items[0].pstr_loc);
+                        };
+                        let Constant::String(s, _) = &**c else {
+                            return Err(items[0].pstr_loc);
+                        };
+                        result.push(s.to_string());
+                    }
+                    Ok(result)
+                }
+                _ => Err(default_loc),
+            }
+        }
+        _ => Err(default_loc),
     }
 }
 
