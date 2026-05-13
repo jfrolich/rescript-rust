@@ -540,6 +540,34 @@ fn external_desc_is_plain_obj(desc: &ExternalDesc) -> bool {
         && desc.return_wrapper == ReturnWrapper::ReturnUnset
 }
 
+fn external_desc_is_plain_get_index(desc: &ExternalDesc) -> bool {
+    desc.get_index
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.splice
+}
+
+fn external_desc_is_plain_set_index(desc: &ExternalDesc) -> bool {
+    desc.set_index
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.get_index
+        && !desc.splice
+}
+
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
     arena: &ParseArena,
@@ -687,6 +715,20 @@ fn validate_external_attribute_errors(
     );
 
     validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
+
+    if desc.set_index && !external_desc_is_plain_set_index(&desc) {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Conflicting attributes: Attribute found that conflicts with %@set_index",
+        ));
+    }
+
+    if desc.get_index && !external_desc_is_plain_get_index(&desc) {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Conflicting attributes: Attribute found that conflicts with %@get_index",
+        ));
+    }
 
     // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
     // externals with a single unit argument before emitting FFI metadata.
@@ -9413,6 +9455,21 @@ fn validate_deriving_accessors_for_tdcls(
     let Some(last_tdcl) = tdcls.last() else {
         return Ok(());
     };
+    for tdcl in tdcls {
+        let mut seen_deriving = false;
+        for (attr_name, _) in &tdcl.ptype_attributes {
+            if arena.get_string(attr_name.txt) == "deriving" {
+                if seen_deriving {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "duplicate @deriving attribute",
+                    ));
+                }
+                seen_deriving = true;
+            }
+        }
+    }
+
     let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
     if !actions
         .iter()

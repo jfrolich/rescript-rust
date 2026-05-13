@@ -493,8 +493,8 @@ with a reason after checking raise sites.
   - No active raise site found in the current source; keep listed so the
     variant is rechecked if frontend attribute handling changes.
 - `Duplicated_bs_deriving`
-  - Open: raised by duplicate `@deriving` attributes in
-    `compiler/frontend/ast_attributes.ml`; fixture still needed.
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_duplicate_deriving.res`.
 - `Conflict_attributes`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_conflict_type_ffi_attrs.res`.
@@ -529,8 +529,13 @@ with a reason after checking raise sites.
     and
     `tests/error_output_parity/compiler/fixtures/bs_int_as_expect_int_literal.res`.
 - `Conflict_ffi_attribute`
-  - Open: several branches in `compiler/frontend/ast_external_process.ml`
-    report conflicting FFI attributes; representative fixtures still needed.
+  - Covered for `@get_index` and `@set_index` conflicts by
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_get_index_module.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_set_index_module.res`.
+    Additional conflict-message branches in
+    `compiler/frontend/ast_external_process.ml` still need representative
+    fixtures.
 - `Illegal_attribute`
   - Covered for `@module` arity and empty `@scope` by
     `tests/error_output_parity/compiler/fixtures/bs_external_illegal_module_many_strings.res`
