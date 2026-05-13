@@ -651,6 +651,11 @@ with a reason after checking raise sites.
       `tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res`
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/external_missing_primitive.res`.
+- `compiler/syntax/src/jsx_v4.ml`
+  - `get_fn_name` rejects destructuring bindings annotated as JSX components
+    before generated React type lookups can mask the PPX error
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_destructure.res`.
 - `compiler/syntax/src/res_scanner.ml`
   - Fixed-width string escape diagnostics for short decimal, incomplete hex,
     incomplete unicode, decimal overflow, and surrogate unicode escapes

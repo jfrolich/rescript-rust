@@ -54,6 +54,7 @@ const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
     "`let?` is only supported in let bindings targeting the `result` or `option` type.";
 const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
     "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
+const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 const REACT_COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
 const REACT_COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
@@ -1235,6 +1236,111 @@ fn reject_invalid_react_component_with_props_in_structure(
     }
 
     Ok(())
+}
+
+fn reject_invalid_react_component_destructure_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+    filename: &str,
+) -> Result<()> {
+    if react_component_destructure_in_structure(structure, arena) {
+        return Err(UserDiagnostic::new(
+            format_react_component_destructure_report(filename),
+            2,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn react_component_destructure_in_structure(structure: &Structure, arena: &ParseArena) -> bool {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_value(value) => {
+                for binding in &value.1 {
+                    if (has_react_component_attr(&binding.pvb_attributes, arena)
+                        || has_react_component_with_props_attr(&binding.pvb_attributes, arena))
+                        && !react_component_pattern_is_plain_name(binding.pvb_pat, arena)
+                    {
+                        return true;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if react_component_destructure_in_module_expr(
+                    arena.get_mod_expr(module_binding.pmb_expr),
+                    arena,
+                ) {
+                    return true;
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if react_component_destructure_in_module_expr(
+                        arena.get_mod_expr(module_binding.pmb_expr),
+                        arena,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if react_component_destructure_in_module_expr(
+                    arena.get_mod_expr(include_decl.pincl_mod),
+                    arena,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn react_component_destructure_in_module_expr(
+    module_expr: &ModuleExpr,
+    arena: &ParseArena,
+) -> bool {
+    match &*module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => {
+            react_component_destructure_in_structure(structure, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(functor.2), arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(*lhs), arena)
+                || react_component_destructure_in_module_expr(arena.get_mod_expr(*rhs), arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(*inner), arena)
+        }
+        _ => false,
+    }
+}
+
+fn react_component_pattern_is_plain_name(
+    pat_idx: crate::parse_arena::PatIdx,
+    arena: &ParseArena,
+) -> bool {
+    let pat = arena.get_pat(pat_idx);
+    match &*pat.ppat_desc {
+        PatternDesc::Ppat_var(_) => true,
+        PatternDesc::Ppat_constraint(inner) => {
+            let (inner_pat, _) = &**inner;
+            react_component_pattern_is_plain_name(*inner_pat, arena)
+        }
+        _ => false,
+    }
+}
+
+fn format_react_component_destructure_report(filename: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {}\n\n  {REACT_COMPONENT_DESTRUCTURE_MSG}\n\n",
+        module_name_from_source_filename(filename)
+    )
 }
 
 fn react_component_with_props_diagnostic_in_structure(
@@ -10292,6 +10398,11 @@ pub fn compile_source_to_js_with_options(
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
+        reject_invalid_react_component_destructure_in_structure(
+            &structure,
+            parser.arena(),
+            filename,
+        )?;
         reject_invalid_react_component_with_props_in_structure(
             &structure,
             parser.arena(),
@@ -11353,6 +11464,11 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
         let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
+            reject_invalid_react_component_destructure_in_structure(
+                &structure,
+                parser.arena(),
+                filename,
+            )?;
             reject_invalid_react_component_with_props_in_structure(
                 &structure,
                 parser.arena(),
@@ -12933,6 +13049,11 @@ pub fn compile_source_in_process(
     )?;
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
+        reject_invalid_react_component_destructure_in_structure(
+            &structure,
+            parser.arena(),
+            filename,
+        )?;
         reject_invalid_react_component_with_props_in_structure(
             &structure,
             parser.arena(),
