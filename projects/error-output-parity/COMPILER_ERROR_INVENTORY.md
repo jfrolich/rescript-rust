@@ -429,8 +429,18 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/rebind_private.res`.
 - `Bad_variance`
-  - Covered for direct annotated parameter variance mismatch by
-    `tests/error_output_parity/compiler/fixtures/bad_variance.res`.
+  - Covered for direct annotated parameter variance mismatch, including
+    `1st`, `2nd`, `3rd`, and default ordinal suffix wording, by
+    `tests/error_output_parity/compiler/fixtures/bad_variance.res`,
+    `tests/error_output_parity/compiler/fixtures/bad_variance_second_parameter.res`,
+    `tests/error_output_parity/compiler/fixtures/bad_variance_third_parameter.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/bad_variance_fourth_parameter.res`.
+  - The OCaml propagation report codes `-1`, `-2`, and `-3` require a type
+    declaration parameter that is not a plain type variable. Normal ReScript
+    type parameters parse only as `Ptyp_var` or `Ptyp_any`, and generated JSX
+    type declarations use the same forms, so no `.res`/`.resi` source trigger
+    has been found for those branches.
 - `Unavailable_type_constructor`
   - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
     raise sites are second-pass checks over already translated `Tconstr` nodes
