@@ -11019,6 +11019,7 @@ pub fn compile_source_to_js_with_options(
     if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
+    let delayed_type_warning_start = tctx.warnings.len();
 
     let source_file_for_interface = options.source_filename.as_deref().unwrap_or(filename);
     let has_resi = source_file_for_interface.ends_with(".res")
@@ -11137,11 +11138,11 @@ pub fn compile_source_to_js_with_options(
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let raw_warnings = raw_converter.take_warnings();
-    emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
-    if type_warnings_have_errors(&raw_warnings) {
-        return Err(UserDiagnostic::new(String::new(), 2).into());
-    }
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
+        emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+        if type_warnings_have_errors(&raw_warnings) {
+            return Err(UserDiagnostic::new(String::new(), 2).into());
+        }
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -11152,6 +11153,16 @@ pub fn compile_source_to_js_with_options(
             2,
         )
         .into());
+    }
+    tctx.flush_value_usage_checks();
+    let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
+    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
+    if type_warnings_have_errors(delayed_warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+    if type_warnings_have_errors(&raw_warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
     }
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();

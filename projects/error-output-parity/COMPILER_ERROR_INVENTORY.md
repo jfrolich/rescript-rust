@@ -276,6 +276,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_warning_nonreturning_statement.res`.
 - Typecore warning 23 (`Useless_record_with`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_useless_record_with.res`.
+- Typecore warning 26 (`Unused_var`) and warning 27 (`Unused_var_strict`) are
+  covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_function_param.res`,
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_variable.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_variable_strict.res`.
 - Typecore warning 28 (`Wildcard_arg_to_constant_constr`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_wildcard_constant_constructor.res`.
 - Typecore warning 35 (`Unused_for_index`) is covered for `for`, `for of`, and

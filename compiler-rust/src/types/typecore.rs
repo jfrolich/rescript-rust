@@ -1100,6 +1100,11 @@ pub struct TypeCheckContext<'a> {
     pub diagnostics: Vec<TypeCoreDiagnostic>,
     /// Collected warnings.
     pub warnings: Vec<TypeCoreWarning>,
+    /// Value usage checks registered when bindings enter the environment.
+    ///
+    /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
+    /// used, and the warning is emitted only when delayed checks are forced.
+    value_usage_checks: Vec<ValueUsageCheck>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1177,6 +1182,16 @@ pub struct TypeCoreWarning {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ValueUsageCheck {
+    name: String,
+    val_loc: Location,
+    warning_loc: LocIdx,
+    warning: Warning,
+    is_error: bool,
+    used: bool,
+}
+
 impl<'a> TypeCheckContext<'a> {
     /// Create a new type check context.
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
@@ -1188,6 +1203,7 @@ impl<'a> TypeCheckContext<'a> {
             newtype_level: None,
             diagnostics: Vec::new(),
             warnings: Vec::new(),
+            value_usage_checks: Vec::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -1253,6 +1269,59 @@ impl<'a> TypeCheckContext<'a> {
             is_error,
         });
         true
+    }
+
+    pub fn value_usage_check_checkpoint(&self) -> usize {
+        self.value_usage_checks.len()
+    }
+
+    pub fn truncate_value_usage_checks(&mut self, checkpoint: usize) {
+        self.value_usage_checks.truncate(checkpoint);
+    }
+
+    pub fn add_value_usage_check(
+        &mut self,
+        name: &str,
+        val_loc: Location,
+        warning_loc: LocIdx,
+        warning: Warning,
+    ) {
+        if val_loc.loc_ghost
+            || !should_warn_unused_name(name)
+            || !self.warning_config.is_active(&warning)
+        {
+            return;
+        }
+
+        let is_error = self.warning_config.is_error(&warning);
+        self.value_usage_checks.push(ValueUsageCheck {
+            name: name.to_string(),
+            val_loc,
+            warning_loc,
+            warning,
+            is_error,
+            used: false,
+        });
+    }
+
+    pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
+        for check in &mut self.value_usage_checks {
+            if check.name == name && check.val_loc == val_loc {
+                check.used = true;
+            }
+        }
+    }
+
+    pub fn flush_value_usage_checks(&mut self) {
+        for check in std::mem::take(&mut self.value_usage_checks) {
+            if !check.used {
+                self.warnings.push(TypeCoreWarning {
+                    loc: check.warning_loc,
+                    warning: check.warning,
+                    is_error: check.is_error,
+                });
+            }
+        }
     }
 
     /// Apply a `@warning`/`@@warning` payload.
@@ -7279,6 +7348,8 @@ fn type_expect_with_recarg<'a>(
                 }
                 Err(err) => return Err(err),
             };
+            let used_name = tctx.arena.get_string(longident.last_idx()).to_string();
+            tctx.mark_value_used(&used_name, desc.val_loc);
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -13622,6 +13693,31 @@ fn collect_variant_path_alternatives_in_pattern(
     }
 }
 
+fn add_pattern_variable_value(tctx: &mut TypeCheckContext<'_>, env: &mut Env, pv: &PatternVariable) {
+    let desc = ValueDescription {
+        val_type: pv.ty,
+        val_kind: crate::types::ValueKind::ValReg,
+        val_loc: pv.loc,
+        val_attributes: vec![],
+        val_path: None,
+    };
+    env.add_value(pv.id.clone(), desc);
+
+    if !pv.is_module {
+        let name = pv.id.name();
+        let warning = if pv.is_as_variable {
+            Warning::UnusedVariable {
+                name: name.to_string(),
+            }
+        } else {
+            Warning::UnusedVariableStrict {
+                name: name.to_string(),
+            }
+        };
+        tctx.add_value_usage_check(name, pv.loc, pv.loc_idx, warning);
+    }
+}
+
 fn type_match_cases_batch_non_gadt<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -13687,17 +13783,7 @@ fn type_match_cases_batch_non_gadt<'a>(
             };
             let mut unpacks: Vec<PatternVariable> = Vec::new();
             for pv in &state.pattern_variables {
-                // Match OCaml add_pattern_variables: bind the exact pattern type
-                // into the case body environment.
-                let binding_ty = pv.ty;
-                let desc = ValueDescription {
-                    val_type: binding_ty,
-                    val_kind: crate::types::ValueKind::ValReg,
-                    val_loc: pv.loc.clone(),
-                    val_attributes: vec![],
-                    val_path: None,
-                };
-                case_env.add_value(pv.id.clone(), desc);
+                add_pattern_variable_value(tctx, &mut case_env, pv);
                 if pv.is_module {
                     // Match OCaml order in wrap_unpacks (`x :: module_variables`).
                     unpacks.insert(0, pv.clone());
@@ -13852,7 +13938,6 @@ fn type_match_cases_batch_non_gadt<'a>(
                 exp_type: case_exp_ty,
                 ..typed_body
             };
-
             typed_cases.push(crate::types::typedtree::Case {
                 c_lhs: pending.typed_pat,
                 c_guard: typed_guard,
@@ -13989,6 +14074,7 @@ fn type_match(
         val_case_env
     };
 
+    let value_usage_checkpoint = tctx.value_usage_check_checkpoint();
     let typed_val_cases_result = if has_generalized_value_patterns {
         type_match_cases_sequential(
             tctx,
@@ -14013,17 +14099,23 @@ fn type_match(
         ) {
             Ok(cases) => Ok(cases),
             // Preserve existing recovery behavior for non-GADT patterns.
-            Err(TypeCoreError::PatternTypeClash { .. }) => type_match_cases_sequential(
-                tctx,
-                env,
-                &val_caselist,
-                ty_arg,
-                generic_scrutinee_ty,
-                ty_res,
-                erase_either,
-                body_context.clone(),
-            ),
-            Err(err) => Err(err),
+            Err(TypeCoreError::PatternTypeClash { .. }) => {
+                tctx.truncate_value_usage_checks(value_usage_checkpoint);
+                type_match_cases_sequential(
+                    tctx,
+                    env,
+                    &val_caselist,
+                    ty_arg,
+                    generic_scrutinee_ty,
+                    ty_res,
+                    erase_either,
+                    body_context.clone(),
+                )
+            }
+            Err(err) => {
+                tctx.truncate_value_usage_checks(value_usage_checkpoint);
+                Err(err)
+            }
         }
     };
     let mut typed_val_cases = match typed_val_cases_result {
@@ -15029,17 +15121,7 @@ fn type_case_pattern_impl<'a>(
     // Extend environment with pattern bindings
     let mut unpacks: Vec<PatternVariable> = Vec::new();
     for pv in &state.pattern_variables {
-        // Match OCaml add_pattern_variables: bind the exact pattern type
-        // into the case body environment.
-        let binding_ty = pv.ty;
-        let desc = ValueDescription {
-            val_type: binding_ty,
-            val_kind: crate::types::ValueKind::ValReg,
-            val_loc: pv.loc.clone(),
-            val_attributes: vec![],
-            val_path: None,
-        };
-        case_env.add_value(pv.id.clone(), desc);
+        add_pattern_variable_value(tctx, &mut case_env, pv);
         if pv.is_module {
             // OCaml records unpack vars in reverse insertion order
             // (`module_variables := x :: module_variables`).
@@ -15101,7 +15183,6 @@ fn type_pending_case_body(
         exp_type: case_exp_ty,
         ..typed_body
     };
-
     Ok(crate::types::typedtree::Case {
         c_lhs: pending.typed_pat,
         c_guard: typed_guard,
@@ -15398,15 +15479,7 @@ fn type_function(
         };
         let mut unpacks: Vec<PatternVariable> = Vec::new();
         for pv in &state.pattern_variables {
-            let binding_ty = pv.ty;
-            let desc = ValueDescription {
-                val_type: binding_ty,
-                val_kind: crate::types::ValueKind::ValReg,
-                val_loc: pv.loc.clone(),
-                val_attributes: vec![],
-                val_path: None,
-            };
-            body_env.add_value(pv.id.clone(), desc);
+            add_pattern_variable_value(tctx, &mut body_env, pv);
 
             if pv.is_module {
                 // OCaml records unpack vars in reverse insertion order
@@ -15606,36 +15679,31 @@ fn type_for(
         env.clone()
     };
     for pv in &state.pattern_variables {
+        let val_loc = tctx.arena.to_location(loc);
         let desc = ValueDescription {
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
             // Match OCaml `type_for`: for-index value descriptions use the
             // enclosing `for` expression location.
-            val_loc: tctx.arena.to_location(loc),
+            val_loc,
             val_attributes: vec![],
             val_path: None,
         };
         body_env.add_value(pv.id.clone(), desc);
+        let name = pv.id.name();
+        tctx.add_value_usage_check(
+            name,
+            val_loc,
+            loc,
+            Warning::UnusedForIndex {
+                name: name.to_string(),
+            },
+        );
     }
 
     // OCaml uses type_statement for for-loop bodies and instance_def(type_unit)
     // for the loop expression result.
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
-    if let crate::parser::ast::PatternDesc::Ppat_var(_) = &*pat.ppat_desc {
-        if state.pattern_variables.len() == 1 {
-            let loop_var = &state.pattern_variables[0];
-            if should_warn_unused_name(loop_var.id.name())
-                && !typed_expression_uses_ident(&typed_body, &loop_var.id)
-            {
-                tctx.report_warning(
-                    loc,
-                    Warning::UnusedForIndex {
-                        name: loop_var.id.name().to_string(),
-                    },
-                );
-            }
-        }
-    }
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
     // Keep original argument order to preserve Tlink direction.
@@ -15772,32 +15840,27 @@ fn type_for_of(
         env.clone()
     };
     for pv in &state.pattern_variables {
+        let val_loc = tctx.arena.to_location(loc);
         let desc = ValueDescription {
             val_type: pv.ty,
             val_kind: crate::types::ValueKind::ValReg,
-            val_loc: tctx.arena.to_location(loc),
+            val_loc,
             val_attributes: vec![],
             val_path: None,
         };
         body_env.add_value(pv.id.clone(), desc);
+        let name = pv.id.name();
+        tctx.add_value_usage_check(
+            name,
+            val_loc,
+            loc,
+            Warning::UnusedForIndex {
+                name: name.to_string(),
+            },
+        );
     }
 
     let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, &body_env, body))?;
-    if let crate::parser::ast::PatternDesc::Ppat_var(_) = &*pat.ppat_desc {
-        if state.pattern_variables.len() == 1 {
-            let loop_var = &state.pattern_variables[0];
-            if should_warn_unused_name(loop_var.id.name())
-                && !typed_expression_uses_ident(&typed_body, &loop_var.id)
-            {
-                tctx.report_warning(
-                    loc,
-                    Warning::UnusedForIndex {
-                        name: loop_var.id.name().to_string(),
-                    },
-                );
-            }
-        }
-    }
 
     // Result type is unit, matching OCaml `instance_def Predef.type_unit`.
     let result_unit_ty = env.type_unit(ctx);
