@@ -727,6 +727,13 @@ with a reason after checking raise sites.
 - `Expect_int_or_string_or_json_literal`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/bs_as_expect_int_string_json_literal.res`.
+- Duplicate `@as` handling in `iter_process_bs_string_as`,
+  `iter_process_bs_int_as`, and `iter_process_bs_string_or_int_as`
+  - Covered by
+    `tests/error_output_parity/compiler/fixtures/bs_string_as_duplicate.res`,
+    `tests/error_output_parity/compiler/fixtures/bs_int_as_duplicate.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_as_duplicate.res`.
 - `Unhandled_poly_type`
   - Checked: raised by `Ast_core_type.list_of_arrow` when an external type
     contains `Ptyp_poly` in the arrow spine, but normal `.res` external syntax
@@ -1549,8 +1556,8 @@ with a reason after checking raise sites.
   - `process_obj` argument-shape and unsupported argument-attribute validation
     - Covered for non-empty primitive names, unlabeled non-`unit`, payload
       `@string`, `@unwrap`
-      labeled/optional arguments, unused optional `@as` attributes, and the
-      final `@obj` conflict catch by
+      labeled/optional arguments, unused optional and non-underscore type
+      `@as` attributes, and the final `@obj` conflict catch by
       `tests/error_output_parity/compiler/fixtures/bs_obj_nonempty_external_name.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_unlabelled_non_unit.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_label_string_payload.res`,
@@ -1558,6 +1565,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_string_payload.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_unwrap.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_optional_as_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_obj_label_duplicate_as.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_get_index_conflict.res`,
       `tests/error_output_parity/compiler/fixtures/bs_obj_set_index_conflict.res`,
       and

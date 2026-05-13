@@ -1332,16 +1332,21 @@ fn collect_obj_optional_as_warnings(
     let vd_type = arena.get_core_type(vd.pval_type);
     let (args, _) = list_of_arrow(vd_type, arena);
     for arg in args {
-        if !matches!(arg.lbl, ArgLabel::Optional(_)) {
+        let arg_type = arena.get_core_type(arg.typ);
+        let warn_type_as = match arg.lbl {
+            ArgLabel::Optional(_) => true,
+            ArgLabel::Labelled(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
+            ArgLabel::Nolabel => false,
+        };
+        if !warn_type_as {
             continue;
         }
-        let arg_type = arena.get_core_type(arg.typ);
-        for (attr_name, _) in arg_type.ptyp_attributes.iter() {
-            if arena.get_string(attr_name.txt) == "as" {
-                // OCaml leaves @as unused for optional @obj arguments, then
-                // warns once during FFI processing and once during the
-                // remaining unused-attribute sweep.
-                for _ in 0..2 {
+        // OCaml leaves these @as payloads unused for @obj arguments, then
+        // warns once during FFI processing and once during the remaining
+        // unused-attribute sweep.
+        for _ in 0..2 {
+            for (attr_name, _) in arg_type.ptyp_attributes.iter() {
+                if arena.get_string(attr_name.txt) == "as" {
                     warnings.push(PpxWarning {
                         loc: attr_name.loc,
                         warning: Warning::BsUnusedAttribute {
@@ -2753,31 +2758,50 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
 }
 
 fn validate_string_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+    let mut seen_as = false;
     for (attr_name, payload) in attrs {
-        if arena.get_string(attr_name.txt) == "as" && get_payload_string(payload, arena).is_none() {
+        if arena.get_string(attr_name.txt) != "as" {
+            continue;
+        }
+        if seen_as {
+            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+        }
+        if get_payload_string(payload, arena).is_none() {
             return Err(PpxError::at_loc(attr_name.loc, "expect string literal "));
         }
+        seen_as = true;
     }
     Ok(())
 }
 
 fn validate_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<()> {
+    let mut seen_as = false;
     for (attr_name, payload) in attrs {
-        if arena.get_string(attr_name.txt) == "as"
-            && get_payload_int_result(payload, arena)?.is_none()
-        {
+        if arena.get_string(attr_name.txt) != "as" {
+            continue;
+        }
+        if seen_as {
+            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+        }
+        if get_payload_int_result(payload, arena)?.is_none() {
             return Err(PpxError::at_loc(attr_name.loc, "expect int literal "));
         }
+        seen_as = true;
     }
     Ok(())
 }
 
 fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) -> PpxResult<()> {
+    let mut seen_as = false;
     for (attr_name, payload) in attrs {
         if arena.get_string(attr_name.txt) != "as" {
             continue;
         }
+        if seen_as {
+            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+        }
         if get_payload_int_result(payload, arena)?.is_some() {
+            seen_as = true;
             continue;
         }
         let Some((payload, delim, loc, flow_offset)) =
@@ -2805,6 +2829,7 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
                 Err(err)
             };
         }
+        seen_as = true;
     }
     Ok(())
 }
