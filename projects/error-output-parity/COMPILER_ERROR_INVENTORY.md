@@ -1211,6 +1211,9 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/polymorphic_comparison_max_warning.res`.
 - `compiler/ml/ast_payload.ml`
+  - `as_core_type` / `"except a core type"` is source-unreachable from normal
+    `.res`/`.resi` compilation in the current source. `rg as_core_type`
+    finds no call sites outside its definition in `ast_payload.ml`.
   - `is_single_int` lets `int_of_string` overflow escape for oversized
     integer payloads
     - Covered by
