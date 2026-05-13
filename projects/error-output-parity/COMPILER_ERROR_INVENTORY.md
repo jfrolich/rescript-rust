@@ -670,6 +670,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/ffi_non_string.res`
       and
       `tests/error_output_parity/compiler/fixtures/ffi_non_function_string.res`.
+  - `Ast_payload.raw_as_string_exp_exn` Flow parser warning before `%ffi`
+    rejects a non-function JavaScript payload
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/ffi_invalid_js_warning.res`.
 - `compiler/frontend/ast_exp_extension.ml`
   - `%obj` non-record payload rejection
     - Covered by

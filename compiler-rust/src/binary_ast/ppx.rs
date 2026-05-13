@@ -440,6 +440,113 @@ fn is_js_function(s: &str) -> bool {
     matches!(classify_js_exp(s), JsExpClassification::JsFunction { .. })
 }
 
+struct RawJsParseWarning {
+    loc: LocIdx,
+    message: String,
+}
+
+fn byte_offset_to_flow_position(code: &str, offset: usize) -> (i32, i32) {
+    let capped_offset = offset.min(code.len());
+    let mut line = 1;
+    let mut line_start = 0;
+    for (idx, byte) in code.as_bytes().iter().enumerate().take(capped_offset) {
+        if *byte == b'\n' {
+            line += 1;
+            line_start = idx + 1;
+        }
+    }
+    (line, capped_offset.saturating_sub(line_start) as i32)
+}
+
+// Mirrors compiler/ml/bs_flow_ast_utils.ml:offset_pos. Flow locations are
+// relative to the JavaScript payload, then shifted onto the ReScript string loc.
+fn flow_offset_position(
+    base: crate::location::Position,
+    line: i32,
+    column: i32,
+    first_line_offset: i32,
+) -> crate::location::Position {
+    if line == 1 {
+        crate::location::Position {
+            cnum: base.cnum + column + first_line_offset,
+            ..base
+        }
+    } else {
+        crate::location::Position {
+            line: base.line + line - 1,
+            cnum: base.bol + column,
+            ..base
+        }
+    }
+}
+
+// Mirrors Ast_payload.raw_as_string_exp_exn's first Flow parser warning for
+// expression payloads. OXC supplies the parse failure; this keeps OCaml's
+// warning location shift and the common EOF wording used by Parse_error.PP.
+fn raw_js_warning_loc(
+    code: &str,
+    payload_loc: LocIdx,
+    start_offset: usize,
+    end_offset: usize,
+    first_line_offset: i32,
+    arena: &mut ParseArena,
+) -> LocIdx {
+    let base = *arena.loc_start(payload_loc);
+    let loc_ghost = arena.loc_ghost(payload_loc);
+    let (start_line, start_column) = byte_offset_to_flow_position(code, start_offset);
+    let (end_line, end_column) = byte_offset_to_flow_position(code, end_offset);
+    let start = flow_offset_position(base, start_line, start_column, first_line_offset);
+    let end = flow_offset_position(base, end_line, end_column, first_line_offset);
+    let start_idx = arena.push_position(start);
+    let end_idx = arena.push_position(end);
+    arena.push_loc(start_idx, end_idx, loc_ghost)
+}
+
+fn flow_like_raw_js_parse_message(
+    code: &str,
+    oxc_message: &str,
+    start_offset: usize,
+) -> String {
+    if oxc_message == "Unexpected token" && start_offset >= code.trim_end().len() {
+        "Unexpected end of input".to_string()
+    } else {
+        oxc_message.to_string()
+    }
+}
+
+fn raw_js_expression_parse_warning(
+    code: &str,
+    payload_loc: LocIdx,
+    first_line_offset: i32,
+    arena: &mut ParseArena,
+) -> Option<RawJsParseWarning> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parser_result = Parser::new(&allocator, code, SourceType::default()).parse_expression();
+    let mut errors = match parser_result {
+        Ok(_) => return None,
+        Err(errors) => errors.into_iter(),
+    };
+    let first_error = errors.next()?;
+    let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
+    let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
+    let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
+    let message = flow_like_raw_js_parse_message(code, &first_error.to_string(), start_offset);
+    let loc = raw_js_warning_loc(
+        code,
+        payload_loc,
+        start_offset,
+        end_offset,
+        first_line_offset,
+        arena,
+    );
+
+    Some(RawJsParseWarning { loc, message })
+}
+
 fn is_js_regex_literal(s: &str) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::Expression;
@@ -1277,14 +1384,25 @@ fn payload_single_string_literal_with_loc<'a>(
     payload: &'a Payload,
     arena: &'a ParseArena,
 ) -> Option<(&'a str, LocIdx)> {
+    payload_single_string_literal_info(payload, arena).map(|(s, loc, _offset)| (s, loc))
+}
+
+fn payload_single_string_literal_info<'a>(
+    payload: &'a Payload,
+    arena: &'a ParseArena,
+) -> Option<(&'a str, LocIdx, i32)> {
     match payload {
         Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
                 let (expr, _) = &**eval_inner;
                 let expr = arena.get_expr(*expr);
                 if let ExpressionDesc::Pexp_constant(c) = &*expr.pexp_desc {
-                    if let Constant::String(s, _) = &**c {
-                        return Some((s.as_ref(), expr.pexp_loc));
+                    if let Constant::String(s, delim) = &**c {
+                        let flow_offset = match delim {
+                            None => 1,
+                            Some(delim) => delim.len() as i32 + 2,
+                        };
+                        return Some((s.as_ref(), expr.pexp_loc, flow_offset));
                     }
                 }
             }
@@ -11039,9 +11157,34 @@ fn validate_expression_extension_payload_error(
             )),
             Some(_) => Ok(()),
         },
-        "ffi" => match payload_single_string_literal(payload, arena) {
-            Some(code) if is_js_function(code) => Ok(()),
-            _ => Err(PpxError::at_loc(
+        "ffi" => match payload_single_string_literal_info(payload, arena) {
+            Some((code, payload_loc, first_line_offset)) => {
+                let code = code.to_string();
+                if is_js_function(&code) {
+                    Ok(())
+                } else {
+                    let err = PpxError::at_loc(
+                        ext_name.loc,
+                        "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
+                    );
+                    if let Some(warning) = raw_js_expression_parse_warning(
+                        &code,
+                        payload_loc,
+                        first_line_offset,
+                        arena,
+                    ) {
+                        Err(err.with_warning(
+                            warning.loc,
+                            Warning::BsFfiWarning {
+                                message: warning.message,
+                            },
+                        ))
+                    } else {
+                        Err(err)
+                    }
+                }
+            }
+            None => Err(PpxError::at_loc(
                 ext_name.loc,
                 "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
             )),
