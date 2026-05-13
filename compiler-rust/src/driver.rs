@@ -11274,7 +11274,7 @@ pub fn typecheck_interface_source(
     )?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
-    let _ = emit_ppx_warnings(
+    let mut ppx_warnings_have_errors = emit_ppx_warnings(
         parser.arena(),
         source,
         filename,
@@ -11285,7 +11285,7 @@ pub fn typecheck_interface_source(
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_signature(&signature, parser.arena());
     let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
-    let _ = emit_ppx_warnings_with_config(
+    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
         parser.arena(),
         source,
         filename,
@@ -11300,6 +11300,16 @@ pub fn typecheck_interface_source(
         source,
         filename,
     )?;
+    if !options.no_builtin_ppx {
+        let ppx_warnings = ppx::collect_signature_warnings(&signature, parser.arena());
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &ppx_warnings,
+        );
+    }
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -11363,7 +11373,7 @@ pub fn typecheck_interface_source(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-    if type_warnings_have_errors(&tctx.warnings) {
+    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 

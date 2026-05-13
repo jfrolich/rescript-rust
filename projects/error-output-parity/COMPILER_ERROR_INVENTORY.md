@@ -1143,6 +1143,14 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/module_record_pattern_qualified.res`.
 - `compiler/frontend/bs_ast_invariant.ml`
+  - `Bs_unused_attribute` warning 101 for unused built-in ReScript
+    attributes on values
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_unused_string_value_arg.res`
+      and the signature value case
+      `tests/error_output_parity/compiler/fixtures/bs_unused_string_signature_value.resi`,
+      and the JSX post-transform value-prop case
+      `tests/error_output_parity/compiler/fixtures/jsx_component_value_string_attr.res`.
   - GADT constructor result syntax without `type rec`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/gadt_requires_type_rec.res`.

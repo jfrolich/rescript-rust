@@ -992,13 +992,14 @@ fn collect_raw_js_warnings_from_structure_item(
             collect_external_string_redundant_warnings(vd, arena, warnings);
         }
         StructureItemDesc::Pstr_eval(inner) => {
-            let (expr, _attrs) = &**inner;
+            let (expr, attrs) = &**inner;
+            collect_unused_bs_attributes(attrs, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
         }
         StructureItemDesc::Pstr_value(inner) => {
             let (_rec, bindings) = &**inner;
             for binding in bindings {
-                collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
+                collect_raw_js_warnings_from_value_binding(binding, arena, warnings);
             }
         }
         StructureItemDesc::Pstr_type(inner) => {
@@ -1017,7 +1018,8 @@ fn collect_raw_js_warnings_from_structure_item(
             collect_raw_js_warnings_from_mod_expr_idx(include_decl.pincl_mod, arena, warnings);
         }
         StructureItemDesc::Pstr_extension(inner) => {
-            let (extension, _attrs) = &**inner;
+            let (extension, attrs) = &**inner;
+            collect_unused_bs_attributes(attrs, arena, warnings);
             let (ext_name, payload) = extension;
             let name = arena.get_string(ext_name.txt);
             if name == "raw" {
@@ -1126,6 +1128,189 @@ fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == name)
 }
 
+fn is_bs_unused_attribute_candidate(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "config" | "ignore" | "int" | "optional" | "string" | "unwrap"
+    )
+}
+
+fn collect_unused_bs_attributes_from_slice(
+    attrs: &[Attribute],
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    for (attr_name, _) in attrs {
+        let name = arena.get_string(attr_name.txt);
+        if is_bs_unused_attribute_candidate(name) && !arena.loc_ghost(attr_name.loc) {
+            warnings.push(PpxWarning {
+                loc: attr_name.loc,
+                warning: Warning::BsUnusedAttribute {
+                    name: name.to_string(),
+                },
+            });
+        }
+    }
+}
+
+fn collect_unused_bs_attributes(
+    attrs: &Attributes,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    collect_unused_bs_attributes_from_slice(attrs.as_slice(), arena, warnings);
+}
+
+fn collect_unused_bs_attributes_from_core_type_idx(
+    typ_idx: CoreTypeIdx,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let typ = arena.get_core_type(typ_idx);
+    collect_unused_bs_attributes_from_core_type(typ, arena, warnings);
+}
+
+fn collect_unused_bs_attributes_from_core_type(
+    typ: &CoreType,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    collect_unused_bs_attributes(&typ.ptyp_attributes, arena, warnings);
+
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (arg, result, _) = &**inner;
+            collect_unused_bs_attributes(&arg.attrs, arena, warnings);
+            collect_unused_bs_attributes_from_core_type_idx(arg.typ, arena, warnings);
+            collect_unused_bs_attributes_from_core_type_idx(*result, arena, warnings);
+        }
+        CoreTypeDesc::Ptyp_tuple(types) => {
+            for typ_idx in types.iter() {
+                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+            }
+        }
+        CoreTypeDesc::Ptyp_constr(inner) => {
+            let (_, args) = &**inner;
+            for typ_idx in args.iter() {
+                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+            }
+        }
+        CoreTypeDesc::Ptyp_object(inner) => {
+            let (fields, _) = &**inner;
+            for field in fields.iter() {
+                match field {
+                    ObjectField::Otag(_, attrs, typ_idx) => {
+                        collect_unused_bs_attributes(attrs, arena, warnings);
+                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+                    }
+                    ObjectField::Oinherit(typ_idx) => {
+                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+                    }
+                }
+            }
+        }
+        CoreTypeDesc::Ptyp_alias(inner) => {
+            let (typ_idx, _) = &**inner;
+            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+        }
+        CoreTypeDesc::Ptyp_variant(inner) => {
+            let (rows, _, _) = &**inner;
+            for row in rows.iter() {
+                match row {
+                    RowField::Rtag(_, attrs, _, types) => {
+                        collect_unused_bs_attributes(attrs, arena, warnings);
+                        for typ_idx in types.iter() {
+                            collect_unused_bs_attributes_from_core_type_idx(
+                                *typ_idx, arena, warnings,
+                            );
+                        }
+                    }
+                    RowField::Rinherit(typ_idx) => {
+                        collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+                    }
+                }
+            }
+        }
+        CoreTypeDesc::Ptyp_poly(inner) => {
+            let (_, typ_idx) = &**inner;
+            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+        }
+        CoreTypeDesc::Ptyp_package(pkg) => {
+            let (_, constraints) = &**pkg;
+            for (_, typ_idx) in constraints.iter() {
+                collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+            }
+        }
+        CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) | CoreTypeDesc::Ptyp_extension(_) => {}
+    }
+}
+
+fn collect_unused_bs_attributes_from_pat_idx(
+    pat_idx: PatIdx,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let pat = arena.get_pat(pat_idx);
+    collect_unused_bs_attributes(&pat.ppat_attributes, arena, warnings);
+
+    match &*pat.ppat_desc {
+        PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
+            collect_unused_bs_attributes_from_pat_idx(*inner, arena, warnings);
+        }
+        PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
+            for item in items.iter() {
+                collect_unused_bs_attributes_from_pat_idx(*item, arena, warnings);
+            }
+        }
+        PatternDesc::Ppat_construct(_, payload) => {
+            if let Some(payload) = payload {
+                collect_unused_bs_attributes_from_pat_idx(*payload, arena, warnings);
+            }
+        }
+        PatternDesc::Ppat_variant(inner) => {
+            let (_, payload) = &**inner;
+            if let Some(payload) = payload {
+                collect_unused_bs_attributes_from_pat_idx(*payload, arena, warnings);
+            }
+        }
+        PatternDesc::Ppat_record(inner) => {
+            let (fields, _) = &**inner;
+            for field in fields.iter() {
+                collect_unused_bs_attributes_from_pat_idx(field.pat, arena, warnings);
+            }
+        }
+        PatternDesc::Ppat_or(left, right) => {
+            collect_unused_bs_attributes_from_pat_idx(*left, arena, warnings);
+            collect_unused_bs_attributes_from_pat_idx(*right, arena, warnings);
+        }
+        PatternDesc::Ppat_constraint(inner) => {
+            let (inner_pat, typ_idx) = &**inner;
+            collect_unused_bs_attributes_from_pat_idx(*inner_pat, arena, warnings);
+            collect_unused_bs_attributes_from_core_type_idx(*typ_idx, arena, warnings);
+        }
+        PatternDesc::Ppat_open(_, inner) => {
+            collect_unused_bs_attributes_from_pat_idx(*inner, arena, warnings);
+        }
+        PatternDesc::Ppat_any
+        | PatternDesc::Ppat_var(_)
+        | PatternDesc::Ppat_constant(_)
+        | PatternDesc::Ppat_interval(_)
+        | PatternDesc::Ppat_type(_)
+        | PatternDesc::Ppat_unpack(_)
+        | PatternDesc::Ppat_extension(_) => {}
+    }
+}
+
+fn collect_raw_js_warnings_from_value_binding(
+    binding: &ValueBinding,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    collect_unused_bs_attributes(&binding.pvb_attributes, arena, warnings);
+    collect_unused_bs_attributes_from_pat_idx(binding.pvb_pat, arena, warnings);
+    collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
+}
+
 fn collect_obj_optional_as_warnings(
     vd: &ValueDescription,
     arena: &ParseArena,
@@ -1162,7 +1347,7 @@ fn collect_obj_optional_as_warnings(
 
 fn collect_external_string_redundant_warnings(
     vd: &ValueDescription,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
     if !is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
@@ -1230,6 +1415,8 @@ fn collect_raw_js_warnings_from_expr(
     arena: &mut ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
+    collect_unused_bs_attributes(&expr.pexp_attributes, arena, warnings);
+
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_extension(ext) => {
             let (ext_name, payload) = &**ext;
@@ -1243,11 +1430,12 @@ fn collect_raw_js_warnings_from_expr(
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
             for binding in bindings {
-                collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
+                collect_raw_js_warnings_from_value_binding(binding, arena, warnings);
             }
             collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
         }
         ExpressionDesc::Pexp_fun(fun) => {
+            collect_unused_bs_attributes_from_pat_idx(fun.lhs, arena, warnings);
             if let Some(default) = fun.default {
                 collect_raw_js_warnings_from_expr_idx(default, arena, warnings);
             }
@@ -1263,6 +1451,7 @@ fn collect_raw_js_warnings_from_expr(
             let (scrutinee, cases) = &**inner;
             collect_raw_js_warnings_from_expr_idx(*scrutinee, arena, warnings);
             for case in cases {
+                collect_unused_bs_attributes_from_pat_idx(case.pc_lhs, arena, warnings);
                 if let Some(guard) = case.pc_guard {
                     collect_raw_js_warnings_from_expr_idx(guard, arena, warnings);
                 }
@@ -1339,11 +1528,13 @@ fn collect_raw_js_warnings_from_expr(
             collect_raw_js_warnings_from_expr_idx(*field, arena, warnings);
         }
         ExpressionDesc::Pexp_comptime_record(inner) => {
-            let (_typ, fields) = &**inner;
+            let (typ, fields) = &**inner;
+            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*fields, arena, warnings);
         }
         ExpressionDesc::Pexp_for(inner) => {
             let (_pat, from, to, _dir, body) = &**inner;
+            collect_unused_bs_attributes_from_pat_idx(*_pat, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*from, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*to, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
@@ -1352,16 +1543,22 @@ fn collect_raw_js_warnings_from_expr(
         | ExpressionDesc::Pexp_for_await_of(inner)
         | ExpressionDesc::Pexp_inline_for(inner) => {
             let (_pat, collection, body) = &**inner;
+            collect_unused_bs_attributes_from_pat_idx(*_pat, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*collection, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*body, arena, warnings);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
-            let (expr, _typ) = &**inner;
+            let (expr, typ) = &**inner;
             collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
         }
         ExpressionDesc::Pexp_coerce(inner) => {
-            let (expr, _from_type, _to_type) = &**inner;
+            let (expr, from_type, to_type) = &**inner;
             collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
+            if let Some(from_type) = from_type {
+                collect_unused_bs_attributes_from_core_type_idx(*from_type, arena, warnings);
+            }
+            collect_unused_bs_attributes_from_core_type_idx(*to_type, arena, warnings);
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_name, mod_expr, body) = &**inner;
@@ -1376,11 +1573,16 @@ fn collect_raw_js_warnings_from_expr(
             collect_raw_js_warnings_from_mod_expr_idx(*mod_expr, arena, warnings);
         }
         ExpressionDesc::Pexp_comptime_variant(inner) => {
-            let (_typ, name, payload) = &**inner;
+            let (typ, name, payload) = &**inner;
+            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
             collect_raw_js_warnings_from_expr_idx(*name, arena, warnings);
             if let Some(payload) = payload {
                 collect_raw_js_warnings_from_expr_idx(*payload, arena, warnings);
             }
+        }
+        ExpressionDesc::Pexp_comptime_typeinfo(typ)
+        | ExpressionDesc::Pexp_comptime_typename(typ) => {
+            collect_unused_bs_attributes_from_core_type_idx(*typ, arena, warnings);
         }
         _ => {}
     }
@@ -1402,6 +1604,114 @@ pub fn collect_raw_js_warnings(
 ) -> Vec<PpxWarning> {
     let mut warnings = Vec::new();
     collect_raw_js_warnings_from_structure(structure, arena, &mut warnings);
+    warnings
+}
+
+fn collect_signature_warnings_from_value_description(
+    vd: &ValueDescription,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    collect_obj_optional_as_warnings(vd, arena, warnings);
+    collect_external_string_redundant_warnings(vd, arena, warnings);
+
+    if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
+        return;
+    }
+
+    collect_unused_bs_attributes(&vd.pval_attributes, arena, warnings);
+    collect_unused_bs_attributes_from_core_type_idx(vd.pval_type, arena, warnings);
+}
+
+fn collect_signature_warnings_from_mod_type_idx(
+    mod_type_idx: ModTypeIdx,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let mod_type = arena.get_mod_type(mod_type_idx);
+    collect_unused_bs_attributes(&mod_type.pmty_attributes, arena, warnings);
+
+    match &*mod_type.pmty_desc {
+        ModuleTypeDesc::Pmty_signature(items) => {
+            collect_signature_warnings_from_items(items, arena, warnings);
+        }
+        ModuleTypeDesc::Pmty_functor(inner) => {
+            let (_, param_type, result_type) = &**inner;
+            if let Some(param_type) = param_type {
+                collect_signature_warnings_from_mod_type_idx(*param_type, arena, warnings);
+            }
+            collect_signature_warnings_from_mod_type_idx(*result_type, arena, warnings);
+        }
+        ModuleTypeDesc::Pmty_with(inner) => {
+            let (mod_type, _constraints) = &**inner;
+            collect_signature_warnings_from_mod_type_idx(*mod_type, arena, warnings);
+        }
+        ModuleTypeDesc::Pmty_ident(_)
+        | ModuleTypeDesc::Pmty_typeof(_)
+        | ModuleTypeDesc::Pmty_extension(_)
+        | ModuleTypeDesc::Pmty_alias(_) => {}
+    }
+}
+
+fn collect_signature_warnings_from_item(
+    item: &SignatureItem,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    match &*item.psig_desc {
+        SignatureItemDesc::Psig_value(vd) => {
+            collect_signature_warnings_from_value_description(vd, arena, warnings);
+        }
+        SignatureItemDesc::Psig_module(md) => {
+            collect_unused_bs_attributes(&md.pmd_attributes, arena, warnings);
+            collect_signature_warnings_from_mod_type_idx(md.pmd_type, arena, warnings);
+        }
+        SignatureItemDesc::Psig_recmodule(items) => {
+            for md in items.iter() {
+                collect_unused_bs_attributes(&md.pmd_attributes, arena, warnings);
+                collect_signature_warnings_from_mod_type_idx(md.pmd_type, arena, warnings);
+            }
+        }
+        SignatureItemDesc::Psig_modtype(mtd) => {
+            collect_unused_bs_attributes(&mtd.pmtd_attributes, arena, warnings);
+            if let Some(mod_type) = mtd.pmtd_type {
+                collect_signature_warnings_from_mod_type_idx(mod_type, arena, warnings);
+            }
+        }
+        SignatureItemDesc::Psig_include(include_desc) => {
+            collect_unused_bs_attributes(&include_desc.pincl_attributes, arena, warnings);
+            collect_signature_warnings_from_mod_type_idx(include_desc.pincl_mod, arena, warnings);
+        }
+        SignatureItemDesc::Psig_attribute(attr) => {
+            collect_unused_bs_attributes_from_slice(std::slice::from_ref(attr), arena, warnings);
+        }
+        SignatureItemDesc::Psig_extension(inner) => {
+            let (_, attrs) = &**inner;
+            collect_unused_bs_attributes(attrs, arena, warnings);
+        }
+        SignatureItemDesc::Psig_type(_)
+        | SignatureItemDesc::Psig_typext(_)
+        | SignatureItemDesc::Psig_exception(_)
+        | SignatureItemDesc::Psig_open(_) => {}
+    }
+}
+
+fn collect_signature_warnings_from_items(
+    items: &[SignatureItem],
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    for item in items {
+        collect_signature_warnings_from_item(item, arena, warnings);
+    }
+}
+
+pub fn collect_signature_warnings(
+    signature: &[SignatureItem],
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    collect_signature_warnings_from_items(signature, arena, &mut warnings);
     warnings
 }
 
