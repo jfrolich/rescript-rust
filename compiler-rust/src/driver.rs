@@ -4960,6 +4960,7 @@ fn format_compiler_warning_report(
     for (idx, line) in message.lines().enumerate() {
         let indent_line = match warning.warning {
             crate::diagnostics::Warning::NonClosedRecordPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::AttributePayload { .. } => idx == 0,
             crate::diagnostics::Warning::BsUnusedAttribute { .. } => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {
                 idx < 2 || line.starts_with("Hint:")
@@ -10266,9 +10267,13 @@ pub fn compile_source_to_js_with_options(
         source,
         filename,
     )?;
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let mut ppx_warnings_have_errors =
+        emit_ppx_warnings(parser.arena(), source, filename, options, &frontend_warnings);
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let mut ppx_warnings_have_errors =
+    ppx_warnings_have_errors |=
         emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -10965,6 +10970,9 @@ pub fn typecheck_interface_source(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &frontend_warnings);
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
@@ -11279,6 +11287,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let frontend_warnings =
+            ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+        let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &frontend_warnings);
         let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
             .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
         let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
@@ -12915,6 +12926,9 @@ pub fn compile_source_in_process(
             parser.diagnostics().len()
         ));
     }
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &frontend_warnings);
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
@@ -13610,6 +13624,9 @@ pub fn typecheck_interface_in_process(
             parser.diagnostics().len()
         ));
     }
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &frontend_warnings);
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);

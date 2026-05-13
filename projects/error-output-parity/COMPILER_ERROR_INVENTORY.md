@@ -791,6 +791,13 @@ with a reason after checking raise sites.
   - `error_of_extension` rejects invalid `%%error` payloads
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_payload.res`.
+  - `warning_attribute` reports preprocessor warnings from `@@ppwarning`
+    and illegal `@@warning` payloads/lists
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_ppwarning.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_warning_non_string.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/builtin_warning_bad_list.res`.
 - `compiler/ml/translcore.ml`
   - `Unknown_builtin_primitive`
     - Covered by

@@ -16,7 +16,7 @@
 
 use std::{borrow::Cow, fmt};
 
-use crate::diagnostics::Warning;
+use crate::diagnostics::{Warning, WarningConfig};
 use crate::intern::StrIdx;
 use crate::parse_arena::{
     CoreTypeIdx, ExprIdx, LidentIdx, LocIdx, Located, ModExprIdx, ModTypeIdx, ParseArena, PatIdx,
@@ -1030,6 +1030,99 @@ fn collect_raw_js_warnings_from_structure_item(
         }
         _ => {}
     }
+}
+
+fn normalized_warning_spec(spec: &str, errflag: bool) -> Cow<'_, str> {
+    if errflag && !matches!(spec.chars().next(), Some('@' | '+' | '-')) {
+        Cow::Owned(format!("@{spec}"))
+    } else {
+        Cow::Borrowed(spec)
+    }
+}
+
+fn warning_spec_parse_ok(spec: &str, errflag: bool) -> bool {
+    let mut config = WarningConfig::new();
+    let normalized = normalized_warning_spec(spec, errflag);
+    config.parse(normalized.as_ref()).is_ok()
+}
+
+fn collect_builtin_warning_attribute(
+    attr: &Attribute,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let (name, payload) = attr;
+    let attr_name = arena.get_string(name.txt);
+    match attr_name {
+        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
+            let errflag = matches!(attr_name, "warnerror" | "ocaml.warnerror");
+            if let Some(spec) = payload_single_string_literal(payload, arena) {
+                if !warning_spec_parse_ok(spec, errflag) {
+                    warnings.push(PpxWarning {
+                        loc: name.loc,
+                        warning: Warning::AttributePayload {
+                            attr: attr_name.to_string(),
+                            message: "Ill-formed list of warnings".to_string(),
+                        },
+                    });
+                }
+            } else {
+                warnings.push(PpxWarning {
+                    loc: name.loc,
+                    warning: Warning::AttributePayload {
+                        attr: attr_name.to_string(),
+                        message: "A single string literal is expected".to_string(),
+                    },
+                });
+            }
+        }
+        "ppwarning" | "ocaml.ppwarning" => {
+            if let Some((message, loc)) = payload_single_string_literal_with_loc(payload, arena) {
+                warnings.push(PpxWarning {
+                    loc,
+                    warning: Warning::Preprocessor {
+                        message: message.to_string(),
+                    },
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Mirrors `Bs_ast_invariant.iter_warnings_on_stru`: only leading floating
+/// structure attributes are checked before frontend rewriting.
+pub fn collect_leading_builtin_warning_attributes(
+    structure: &[StructureItem],
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_attribute(attr) => {
+                collect_builtin_warning_attribute(attr, arena, &mut warnings);
+            }
+            _ => break,
+        }
+    }
+    warnings
+}
+
+/// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` for interface files.
+pub fn collect_leading_builtin_warning_signature_attributes(
+    signature: &[SignatureItem],
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_attribute(attr) => {
+                collect_builtin_warning_attribute(attr, arena, &mut warnings);
+            }
+            _ => break,
+        }
+    }
+    warnings
 }
 
 fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {

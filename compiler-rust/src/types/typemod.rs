@@ -9,7 +9,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-use crate::diagnostics::Warning;
+use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::Ident;
 use crate::intern::StrIdx;
 use crate::location::Location;
@@ -343,7 +343,10 @@ fn parser_attrs_to_decl_attrs(
         .collect()
 }
 
-fn parser_warning_attribute_payload(arena: &ParseArena, payload: &ParsedPayload) -> Option<String> {
+fn parser_warning_attribute_payload<'a>(
+    arena: &'a ParseArena,
+    payload: &'a ParsedPayload,
+) -> Option<(&'a str, LocIdx)> {
     let ParsedPayload::PStr(items) = payload else {
         return None;
     };
@@ -361,7 +364,15 @@ fn parser_warning_attribute_payload(arena: &ParseArena, payload: &ParsedPayload)
     let crate::parser::ast::Constant::String(spec, _) = c.as_ref() else {
         return None;
     };
-    Some(spec.to_string())
+    Some((spec.as_ref(), expr.pexp_loc))
+}
+
+fn normalized_warning_spec(spec: &str, errflag: bool) -> std::borrow::Cow<'_, str> {
+    if errflag && !matches!(spec.chars().next(), Some('@' | '+' | '-')) {
+        std::borrow::Cow::Owned(format!("@{spec}"))
+    } else {
+        std::borrow::Cow::Borrowed(spec)
+    }
 }
 
 fn apply_warning_attribute(
@@ -371,12 +382,49 @@ fn apply_warning_attribute(
 ) {
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
-    let Some(spec) = parser_warning_attribute_payload(arena, payload) else {
-        return;
-    };
     match attr_name {
-        "warning" | "ocaml.warning" => tctx.apply_warning_spec(&spec),
-        "warnerror" | "ocaml.warnerror" => tctx.apply_warning_error_spec(&spec),
+        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
+            let errflag = matches!(attr_name, "warnerror" | "ocaml.warnerror");
+            let Some((spec, _loc)) = parser_warning_attribute_payload(arena, payload) else {
+                tctx.report_warning(
+                    name.loc,
+                    Warning::AttributePayload {
+                        attr: attr_name.to_string(),
+                        message: "A single string literal is expected".to_string(),
+                    },
+                );
+                return;
+            };
+
+            let mut config = WarningConfig::new();
+            let normalized = normalized_warning_spec(spec, errflag);
+            if config.parse(normalized.as_ref()).is_err() {
+                tctx.report_warning(
+                    name.loc,
+                    Warning::AttributePayload {
+                        attr: attr_name.to_string(),
+                        message: "Ill-formed list of warnings".to_string(),
+                    },
+                );
+                return;
+            }
+
+            if errflag {
+                tctx.apply_warning_error_spec(spec);
+            } else {
+                tctx.apply_warning_spec(spec);
+            }
+        }
+        "ppwarning" | "ocaml.ppwarning" => {
+            if let Some((message, loc)) = parser_warning_attribute_payload(arena, payload) {
+                tctx.report_warning(
+                    loc,
+                    Warning::Preprocessor {
+                        message: message.to_string(),
+                    },
+                );
+            }
+        }
         _ => {}
     }
 }
@@ -15430,7 +15478,10 @@ pub fn transl_signature<'a>(
                     open_loc: od.popen_loc,
                 })
             }
-            PSigDesc::Psig_attribute(attr) => TSigDesc::Tsig_attribute((**attr).clone()),
+            PSigDesc::Psig_attribute(attr) => {
+                apply_warning_attribute(tctx, arena, attr);
+                TSigDesc::Tsig_attribute((**attr).clone())
+            }
             PSigDesc::Psig_extension(inner) => {
                 let (extension, _attrs) = &**inner;
                 return Err(TypeModError::CoreError(
