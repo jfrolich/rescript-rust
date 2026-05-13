@@ -10999,6 +10999,8 @@ pub fn typecheck_interface_source(
     let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
+            let suppress_info_style = !tctx.warnings.is_empty();
+            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -11006,7 +11008,14 @@ pub fn typecheck_interface_source(
             {
                 return Err(persistent_env_error_to_anyhow(error, filename));
             }
-            return Err(anyhow!("Type checking failed: {e:?}"));
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                suppress_info_style,
+            ));
         }
     };
     if let Some(error) = tctx
@@ -11015,6 +11024,10 @@ pub fn typecheck_interface_source(
         .and_then(|persistent_env| persistent_env.last_error())
     {
         return Err(persistent_env_error_to_anyhow(error, filename));
+    }
+    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    if type_warnings_have_errors(&tctx.warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 
     // Print typed tree if requested

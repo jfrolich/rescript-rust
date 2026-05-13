@@ -624,14 +624,15 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/variable_in_scope.res`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
-    module expression, and structure extension points
+    module expression, structure, and signature extension points
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_expr_uninterpreted.res`,
       `tests/error_output_parity/compiler/fixtures/builtin_extension_type_uninterpreted.res`,
       `tests/error_output_parity/compiler/fixtures/builtin_extension_pattern_uninterpreted.res`,
       `tests/error_output_parity/compiler/fixtures/builtin_extension_module_uninterpreted.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_structure_uninterpreted.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/builtin_extension_structure_uninterpreted.res`.
+      `tests/error_output_parity/compiler/fixtures/builtin_extension_signature_uninterpreted.resi`.
   - `error_of_extension` reports string payloads for explicit `%%error`
     extension points
     - Covered by
