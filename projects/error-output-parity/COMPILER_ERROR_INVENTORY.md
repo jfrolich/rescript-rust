@@ -1098,14 +1098,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_let_module.res`
       and the packed-module expression traversal case in
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_packed_module.res`.
-  - Built-in constructor redefinition (`false`, `true`, `()`) was checked
-    against the adjacent `constructor_declaration` raise site. Normal `.res`
-    source for `false`/`true` is rejected earlier by
-    `parse_type_constructor_declaration` as a constructor-name parser
-    diagnostic; `()` parses as a unit type payload, not as a constructor
-    declaration. Keep the frontend branch listed until an AST-generated
-    source-level route is found or the branch is proven unreachable for
-    ReScript syntax.
+  - Built-in constructor redefinition (`false`, `true`, `()`) is
+    source-unreachable from normal ReScript. `parse_type_constructor_declaration`
+    only creates ordinary constructor declarations from `Uident` tokens;
+    `false`/`true` are rejected earlier as invalid constructor names, while
+    `()` parses as a unit type payload rather than a constructor declaration.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by
