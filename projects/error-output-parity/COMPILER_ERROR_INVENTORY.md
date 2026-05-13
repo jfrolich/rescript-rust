@@ -1046,6 +1046,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_escape.res`,
       and
       `tests/error_output_parity/compiler/fixtures/template_pattern_utf8_codepoint_escape.res`.
+  - `Unterminated_backslash` is source-unreachable from normal `.res`/`.resi`
+    compilation. A trailing backslash before a closing template backtick escapes
+    the backtick in `compiler/syntax/src/res_scanner.ml:scan_template_literal_token`,
+    so the parser emits the unclosed-template diagnostic before
+    `Ast_utf8_string.transform` can see a string ending in `\`.
 - `compiler/frontend/ast_utf8_string_interp.ml`
   - Internal interpolation segment errors such as `Unterminated_variable`,
     `Unmatched_paren`, and `Invalid_syntax_of_var` are source-unreachable from
