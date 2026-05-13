@@ -434,10 +434,38 @@ pub fn classify_js_stmt(s: &str) -> JsStmtClassification {
     }
 }
 
+fn classify_js_function_arity(s: &str) -> Option<usize> {
+    match classify_js_exp(s) {
+        JsExpClassification::JsFunction { arity, .. } => Some(arity),
+        _ => None,
+    }
+}
+
+fn classify_recovered_arrow_function_arity(code: &str) -> Option<usize> {
+    let trimmed = code.trim();
+    let arrow_pos = trimmed.find("=>")?;
+    let after_arrow = trimmed.get(arrow_pos + 2..)?.trim();
+    let completed = if after_arrow.is_empty() {
+        format!("{trimmed} undefined")
+    } else if after_arrow == "{" {
+        format!("{trimmed}}}")
+    } else {
+        return None;
+    };
+
+    match classify_js_exp(&completed) {
+        JsExpClassification::JsFunction { arity, arrow: true } => Some(arity),
+        _ => None,
+    }
+}
+
 /// Detect if a JavaScript string contains a function expression.
-/// This is a convenience wrapper around `classify_js_exp`.
+/// This mirrors `Ast_payload.raw_as_string_exp_exn`, which classifies the Flow
+/// AST even when parsing produced warnings.
 fn is_js_function(s: &str) -> bool {
-    matches!(classify_js_exp(s), JsExpClassification::JsFunction { .. })
+    classify_js_function_arity(s).is_some()
+        || starts_with_keyword(s, "function")
+        || classify_recovered_arrow_function_arity(s).is_some()
 }
 
 struct RawJsParseWarning {
@@ -530,6 +558,98 @@ fn starts_with_keyword(code: &str, keyword: &str) -> bool {
         .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
+fn js_identifier_end(code: &str, start: usize) -> usize {
+    let mut end = start;
+    for (offset, ch) in code[start..].char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            end = start + offset + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn flow_like_function_expression_parse_warning(
+    code: &str,
+) -> Option<(String, usize, usize)> {
+    let trimmed = code.trim_start();
+    let leading = code.len() - trimmed.len();
+    let after_function = trimmed.strip_prefix("function")?;
+    if after_function
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
+        return None;
+    }
+
+    let function_end = leading + "function".len();
+    let rest = code.get(function_end..)?;
+    let rest_trimmed = rest.trim_start();
+    let token_offset = function_end + rest.len() - rest_trimmed.len();
+
+    match rest_trimmed.chars().next() {
+        None => Some((
+            "Unexpected end of input, expected an identifier".to_string(),
+            code.len(),
+            code.len(),
+        )),
+        Some('{') => Some((
+            "Unexpected token `{`, expected an identifier".to_string(),
+            token_offset,
+            token_offset,
+        )),
+        Some('(') => {
+            let close_offset = code[token_offset..].find(')').map(|idx| token_offset + idx)?;
+            let after_close = code.get(close_offset + 1..)?;
+            if after_close.trim().is_empty() {
+                Some((
+                    "Unexpected end of input, expected the token `{`".to_string(),
+                    code.len(),
+                    code.len(),
+                ))
+            } else {
+                None
+            }
+        }
+        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' => {
+            let ident_end = js_identifier_end(code, token_offset);
+            let after_ident = code.get(ident_end..)?;
+            let after_ident_trimmed = after_ident.trim_start();
+            let next_offset = ident_end + after_ident.len() - after_ident_trimmed.len();
+            match after_ident_trimmed.chars().next() {
+                None => Some((
+                    "Unexpected end of input, expected the token `(`".to_string(),
+                    code.len(),
+                    code.len(),
+                )),
+                Some('{') => Some((
+                    "Unexpected token `{`, expected the token `(`".to_string(),
+                    next_offset,
+                    next_offset,
+                )),
+                Some('(') => {
+                    let close_offset =
+                        code[next_offset..].find(')').map(|idx| next_offset + idx)?;
+                    let after_close = code.get(close_offset + 1..)?;
+                    if after_close.trim().is_empty() {
+                        Some((
+                            "Unexpected end of input, expected the token `{`".to_string(),
+                            code.len(),
+                            code.len(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn flow_like_raw_js_expression_parse_warning(
     code: &str,
     oxc_message: &str,
@@ -545,12 +665,8 @@ fn flow_like_raw_js_expression_parse_warning(
         );
     }
 
-    if let Some((token_offset, '{')) = first_non_whitespace_after_keyword(code, "function") {
-        return (
-            "Unexpected token `{`, expected an identifier".to_string(),
-            token_offset,
-            token_offset,
-        );
+    if let Some(warning) = flow_like_function_expression_parse_warning(code) {
+        return warning;
     }
 
     if oxc_message == "Unexpected token" {
@@ -788,6 +904,27 @@ fn push_raw_re_warning(payload: &Payload, arena: &mut ParseArena, warnings: &mut
     }
 }
 
+fn push_ffi_function_warning(
+    payload: &Payload,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let payload_info = payload_single_string_literal_info(payload, arena)
+        .map(|(code, loc, offset)| (code.to_string(), loc, offset));
+    if let Some((code, loc, offset)) = payload_info {
+        if is_js_function(&code) {
+            if let Some(warning) = raw_js_expression_parse_warning(&code, loc, offset, arena) {
+                warnings.push(PpxWarning {
+                    loc: warning.loc,
+                    warning: Warning::BsFfiWarning {
+                        message: warning.message,
+                    },
+                });
+            }
+        }
+    }
+}
+
 fn push_raw_js_program_warning(
     payload: &Payload,
     arena: &mut ParseArena,
@@ -898,6 +1035,7 @@ fn collect_raw_js_warnings_from_expr(
             match arena.get_string(ext_name.txt) {
                 "raw" => push_raw_js_expression_warning(payload, arena, warnings),
                 "re" => push_raw_re_warning(payload, arena, warnings),
+                "ffi" => push_ffi_function_warning(payload, arena, warnings),
                 _ => {}
             }
         }
@@ -4980,26 +5118,17 @@ fn handle_raw(
 /// Detect JS function arity from source code.
 /// Matches OCaml's Classify_function.classify_exp behavior.
 fn detect_js_function_arity(code: &str) -> Option<usize> {
-    let trimmed = code.trim();
-    // Arrow function: (x, y) => ... or x => ...
-    if let Some(arrow_pos) = trimmed.find("=>") {
-        let before_arrow = trimmed[..arrow_pos].trim();
-        if before_arrow.starts_with('(') {
-            // (params) => ...
-            if let Some(close) = before_arrow.rfind(')') {
-                let params_str = &before_arrow[1..close].trim();
-                if params_str.is_empty() {
-                    return Some(0);
-                }
-                return Some(params_str.split(',').count());
-            }
-        } else {
-            // single param: x => ...
-            return Some(1);
-        }
+    if let Some(arity) = classify_js_function_arity(code) {
+        return Some(arity);
     }
-    // Function declaration: function name(...) { ... }
-    if trimmed.starts_with("function") {
+    if let Some(arity) = classify_recovered_arrow_function_arity(code) {
+        return Some(arity);
+    }
+
+    let trimmed = code.trim();
+    // Recovered function expression: Flow still returns a Function AST for
+    // warning-only cases such as `function` or `function foo`.
+    if starts_with_keyword(trimmed, "function") {
         if let Some(open) = trimmed.find('(') {
             if let Some(close) = trimmed[open..].find(')') {
                 let params_str = trimmed[open + 1..open + close].trim();
@@ -5009,6 +5138,7 @@ fn detect_js_function_arity(code: &str) -> Option<usize> {
                 return Some(params_str.split(',').count());
             }
         }
+        return Some(0);
     }
     None
 }

@@ -704,6 +704,20 @@ with a reason after checking raise sites.
     rejects a non-function JavaScript payload
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_invalid_js_warning.res`.
+  - `Ast_payload.raw_as_string_exp_exn` warning-only Flow recovery for `%ffi`
+    function and non-async arrow payloads, matching
+    `Classify_function.classify_exp` over the recovered AST
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/ffi_function_identifier_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/ffi_function_name_paren_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/ffi_function_body_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/ffi_function_unclosed_body_warning.res`,
+      `tests/error_output_parity/compiler/fixtures/ffi_arrow_expression_warning.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/ffi_arrow_block_warning.res`.
+  - `%ffi` async arrow payloads remain rejected even when Flow emits a warning
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/ffi_async_arrow_warning_error.res`.
 - `compiler/frontend/ast_exp_extension.ml`
   - `%obj` non-record payload rejection
     - Covered by
